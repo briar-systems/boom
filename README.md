@@ -1,6 +1,6 @@
 # boom
 
-A game engine written in [mach](https://github.com/briar-systems/mach) — 2D-first, 3D-capable.
+A game engine written in [mach](https://github.com/briar-systems/mach): 2D-first, 3D-capable.
 
 boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.com/briar-systems/mach-glfw) (windowing/input), [mach-gl](https://github.com/briar-systems/mach-gl) / [mach-vk](https://github.com/briar-systems/mach-vk) (graphics), [mach-audio](https://github.com/briar-systems/mach-audio), [mach-image](https://github.com/briar-systems/mach-image), [mach-font](https://github.com/briar-systems/mach-font), [mach-gltf](https://github.com/briar-systems/mach-gltf), [mach-phys](https://github.com/briar-systems/mach-phys), and [blit](https://github.com/briar-systems/blit) (UI).
 
@@ -45,7 +45,7 @@ fun main(argc: i64, argv: **u8) i64 {
         f_init:     nil::fun(*boom.context.Context),
         f_tick:     tick,
         f_draw:     draw,
-        f_shutdown: nil::fun(*boom.context.Context),
+        f_dnit: nil::fun(*boom.context.Context),
     };
     boom.engine.run(?ctx, ?app);
 

@@ -1,4 +1,4 @@
-# boom.timestep: fixed-timestep accumulator.
+# fixed-timestep accumulator
 #
 # decouples the update rate from the render rate. each frame the elapsed
 # frame time is added to an accumulator (clamped to guard against the
@@ -17,7 +17,7 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 
-# Timestep: fixed-update accumulator state.
+# fixed-update accumulator state
 # ---
 # fixed:       duration of one fixed update step; must be positive
 # max_frame:   upper clamp on a single frame's contribution
@@ -28,7 +28,7 @@ pub rec Timestep {
     accumulator: Duration;
 }
 
-# timestep_new: create an accumulator with an empty backlog.
+# create an accumulator with an empty backlog
 # ---
 # fixed:     duration of one fixed update step; must be positive
 # max_frame: largest frame time fed in one add, clamping runaway backlogs
@@ -41,7 +41,7 @@ pub fun timestep_new(fixed: Duration, max_frame: Duration) Timestep {
     };
 }
 
-# timestep_add: fold a frame's elapsed time into the accumulator.
+# fold a frame's elapsed time into the accumulator
 #
 # the frame is clamped to the range [0, max_frame] first: a long stall
 # (a breakpoint, a lost vsync) cannot enqueue an unbounded run of
@@ -56,7 +56,7 @@ pub fun timestep_add(ts: *Timestep, frame: Duration) {
     ts.accumulator = ts.accumulator + f;
 }
 
-# timestep_step: drain one fixed step if the backlog covers it.
+# drain one fixed step if the backlog covers it
 #
 # returns true and removes one fixed step from the accumulator when a
 # whole step is available, false otherwise. drive it as a loop condition
@@ -72,7 +72,7 @@ pub fun timestep_step(ts: *Timestep) bool {
     ret false;
 }
 
-# timestep_alpha: the leftover backlog as a fraction of one fixed step.
+# the leftover backlog as a fraction of one fixed step
 #
 # a value in [0, 1) after the step loop has drained: the renderer blends
 # the previous and current update states by this factor to hide the gap

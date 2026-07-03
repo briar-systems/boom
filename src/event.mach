@@ -1,4 +1,4 @@
-# boom.event: input event queue.
+# input event queue
 #
 # a fixed-capacity ring buffer of input events. the window layer pushes
 # events as they arrive from the platform; the game drains them once per
@@ -10,28 +10,28 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 
-# capacity of an EventQueue's backing ring, in events.
+# capacity of an EventQueue's backing ring, in events
 pub val CAPACITY: usize = 256;
 
-# EventKind: the category of an input event.
+# the category of an input event
 pub def EventKind: u8;
 
-# no event; the zero value of an EventKind.
+# no event; the zero value of an EventKind
 pub val NONE: EventKind = 0;
-# a keyboard key changed state; see the key payload fields.
+# a keyboard key changed state; see the key payload fields
 pub val KEY: EventKind = 1;
-# a mouse button changed state.
+# a mouse button changed state
 pub val MOUSE_BUTTON: EventKind = 2;
-# the cursor moved.
+# the cursor moved
 pub val MOUSE_MOVE: EventKind = 3;
-# the scroll wheel moved.
+# the scroll wheel moved
 pub val SCROLL: EventKind = 4;
-# the framebuffer was resized.
+# the framebuffer was resized
 pub val RESIZE: EventKind = 5;
-# the window was asked to close.
+# the window was asked to close
 pub val CLOSE: EventKind = 6;
 
-# Event: one input event with a kind-tagged integer payload.
+# one input event with a kind-tagged integer payload
 #
 # the four payload slots carry kind-specific data (for a KEY event: the
 # key code, action, and modifier bits); consumers read the slots that
@@ -50,7 +50,7 @@ pub rec Event {
     d:    i64;
 }
 
-# EventQueue: a fixed-capacity ring buffer of events.
+# a fixed-capacity ring buffer of events
 # ---
 # events: backing storage
 # head:   index of the oldest queued event
@@ -61,7 +61,7 @@ pub rec EventQueue {
     len:    usize;
 }
 
-# queue_new: create an empty event queue.
+# create an empty event queue
 # ---
 # ret: an EventQueue holding no events
 pub fun queue_new() EventQueue {
@@ -71,7 +71,7 @@ pub fun queue_new() EventQueue {
     ret q;
 }
 
-# queue_len: the number of events currently queued.
+# the number of events currently queued
 # ---
 # q:   queue to query
 # ret: count of unread events
@@ -79,7 +79,7 @@ pub fun queue_len(q: *EventQueue) usize {
     ret q.len;
 }
 
-# queue_is_empty: whether the queue holds no events.
+# whether the queue holds no events
 # ---
 # q:   queue to query
 # ret: true if empty
@@ -87,7 +87,7 @@ pub fun queue_is_empty(q: *EventQueue) bool {
     ret q.len == 0;
 }
 
-# queue_is_full: whether the queue cannot accept another event.
+# whether the queue cannot accept another event
 # ---
 # q:   queue to query
 # ret: true if at capacity
@@ -95,7 +95,7 @@ pub fun queue_is_full(q: *EventQueue) bool {
     ret q.len >= CAPACITY;
 }
 
-# queue_push: append an event to the back of the queue.
+# append an event to the back of the queue
 #
 # refuses the event and returns false when the queue is full, leaving
 # the queued events untouched.
@@ -111,7 +111,7 @@ pub fun queue_push(q: *EventQueue, e: Event) bool {
     ret true;
 }
 
-# queue_pop: remove and return the oldest event.
+# remove and return the oldest event
 #
 # writes the dequeued event through out and returns true; returns false
 # and leaves out untouched when the queue is empty.
@@ -127,7 +127,7 @@ pub fun queue_pop(q: *EventQueue, out: *Event) bool {
     ret true;
 }
 
-# queue_clear: discard every queued event.
+# discard every queued event
 # ---
 # q: queue to empty
 pub fun queue_clear(q: *EventQueue) {

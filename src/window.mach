@@ -1,4 +1,4 @@
-# boom.window: platform window, GL context, and input source.
+# platform window, GL context, and input source
 #
 # wraps a GLFW window carrying an OpenGL core-profile context and routes
 # keyboard input into an event queue. the window's GLFW user pointer
@@ -17,11 +17,11 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
 
-# GL context version requested for the window.
+# GL context version requested for the window
 val GL_MAJOR: i32 = 3;
 val GL_MINOR: i32 = 3;
 
-# Window: a platform window and its OpenGL context.
+# a platform window and its OpenGL context
 # ---
 # handle: the underlying GLFW window, nil-handled when creation failed
 # width:  requested client-area width in screen coordinates
@@ -48,7 +48,7 @@ fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
     }
 }
 
-# window_open: create a window with an OpenGL core-profile context.
+# create a window with an OpenGL core-profile context
 #
 # initializes GLFW, requests an OpenGL 3.3 core context, makes it
 # current, enables vsync, loads the GL command table through the
@@ -83,7 +83,7 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
     ret Window{handle: win, width: width, height: height};
 }
 
-# window_is_valid: whether the window was created successfully.
+# whether the window was created successfully
 # ---
 # w:   window to test
 # ret: true if the window holds a live handle
@@ -91,7 +91,7 @@ pub fun window_is_valid(w: *Window) bool {
     ret glfw.window_is_valid(w.handle);
 }
 
-# window_set_event_sink: route this window's input into a queue.
+# route this window's input into a queue
 #
 # stores the queue as the window's user pointer; the key handler pushes
 # events there. pass a queue that outlives the window.
@@ -102,7 +102,7 @@ pub fun window_set_event_sink(w: *Window, q: *EventQueue) {
     glfw.set_window_user_pointer(w.handle, q::ptr);
 }
 
-# window_should_close: whether the window has been asked to close.
+# whether the window has been asked to close
 # ---
 # w:   window to query
 # ret: true once the close flag is set (by the user or by pressing ESC)
@@ -110,19 +110,19 @@ pub fun window_should_close(w: *Window) bool {
     ret glfw.window_should_close(w.handle);
 }
 
-# window_poll: process pending platform events, firing input callbacks.
+# process pending platform events, firing input callbacks
 pub fun window_poll() {
     glfw.poll_events();
 }
 
-# window_swap: present the back buffer.
+# present the back buffer
 # ---
 # w: window to present
 pub fun window_swap(w: *Window) {
     glfw.swap_buffers(w.handle);
 }
 
-# window_close: destroy the window and shut down GLFW.
+# destroy the window and shut down GLFW
 # ---
 # w: window to close
 pub fun window_close(w: *Window) {
