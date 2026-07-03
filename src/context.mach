@@ -1,3 +1,99 @@
-pub rec Context {
+# boom.context: the running engine state and its subsystem lifecycle.
+#
+# the Context owns the window, the frame clock, the fixed-timestep
+# accumulator, and the input queue, and exposes the per-frame values a
+# game reads (alpha, running). context_init brings the subsystems up and
+# context_shutdown tears them down; the frame loop that drives an App
+# against this state lives in boom.engine.
 
+use boom.window.Window;
+use boom.window.window_open;
+use boom.window.window_close;
+use boom.window.window_is_valid;
+use boom.window.window_set_event_sink;
+use boom.clock.Clock;
+use boom.clock.clock_new;
+use boom.timestep.Timestep;
+use boom.timestep.timestep_new;
+use boom.event.EventQueue;
+use boom.event.queue_new;
+use std.chrono.duration.Duration;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+
+# Config: the parameters context_init brings the engine up with.
+# ---
+# width:     window client-area width
+# height:    window client-area height
+# title:     window title, UTF-8
+# fixed_dt:  duration of one fixed update step; must be positive
+# max_frame: largest frame time folded into the accumulator at once
+pub rec Config {
+    width:     i32;
+    height:    i32;
+    title:     str;
+    fixed_dt:  Duration;
+    max_frame: Duration;
+}
+
+# Context: the live state of a running engine.
+# ---
+# window:  platform window and GL context
+# clock:   per-frame timing
+# step:    fixed-timestep accumulator
+# events:  input event queue, fed by the window
+# alpha:   render interpolation factor in [0, 1), set each frame
+# running: cleared to stop the loop
+pub rec Context {
+    window:  Window;
+    clock:   Clock;
+    step:    Timestep;
+    events:  EventQueue;
+    alpha:   f64;
+    running: bool;
+}
+
+# context_init: bring the engine subsystems up.
+#
+# opens the window and GL context, attaches the input queue as its event
+# sink, starts the clock, and arms the fixed-timestep accumulator.
+# returns false if the window could not be opened, in which case the
+# subsystems are already torn down and context_shutdown must not be
+# called.
+# ---
+# ctx: context to initialize
+# cfg: window and timestep parameters
+# ret: true on success, false if the window could not be opened
+pub fun context_init(ctx: *Context, cfg: Config) bool {
+    ctx.events = queue_new();
+    ctx.window = window_open(cfg.width, cfg.height, cfg.title);
+    if (!window_is_valid(?ctx.window)) {
+        ret false;
+    }
+    window_set_event_sink(?ctx.window, ?ctx.events);
+    ctx.clock   = clock_new();
+    ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
+    ctx.alpha   = 0.0;
+    ctx.running = true;
+    ret true;
+}
+
+# context_stop: request the run loop to exit after the current frame.
+# ---
+# ctx: context to stop
+pub fun context_stop(ctx: *Context) {
+    ctx.running = false;
+}
+
+# context_shutdown: tear the engine subsystems down.
+#
+# closes the window and shuts down the platform layer. call once, after
+# a successful context_init.
+# ---
+# ctx: context to shut down
+pub fun context_shutdown(ctx: *Context) {
+    window_close(?ctx.window);
+    ctx.running = false;
 }
