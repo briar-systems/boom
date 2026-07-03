@@ -13,10 +13,10 @@ use boom.context.Context;
 # f_init:     called once after the context is ready, before the loop
 # f_tick:     fixed-timestep update; may run zero or more times per frame
 # f_draw:     render, called once per frame; read ctx.alpha to interpolate
-# f_shutdown: called once after the loop exits, before teardown
+# f_dnit: called once after the loop exits, before teardown
 pub rec App {
     f_init:     fun(*Context);
     f_tick:     fun(*Context);
     f_draw:     fun(*Context);
-    f_shutdown: fun(*Context);
+    f_dnit: fun(*Context);
 }

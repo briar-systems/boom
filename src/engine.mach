@@ -32,7 +32,7 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
 # calls f_init once, then loops until the context is stopped or the
 # window is closed: each frame polls input, advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
-# ctx.alpha, renders via f_draw, and presents. calls f_shutdown once on
+# ctx.alpha, renders via f_draw, and presents. calls f_dnit once on
 # exit. absent hooks are skipped.
 # ---
 # ctx: initialized engine context to run
@@ -54,5 +54,5 @@ pub fun run(ctx: *Context, app: *App) {
         window_swap(?ctx.window);
     }
 
-    invoke(app.f_shutdown, ctx);
+    invoke(app.f_dnit, ctx);
 }

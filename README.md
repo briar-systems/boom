@@ -45,7 +45,7 @@ fun main(argc: i64, argv: **u8) i64 {
         f_init:     nil::fun(*boom.context.Context),
         f_tick:     tick,
         f_draw:     draw,
-        f_shutdown: nil::fun(*boom.context.Context),
+        f_dnit: nil::fun(*boom.context.Context),
     };
     boom.engine.run(?ctx, ?app);
 
