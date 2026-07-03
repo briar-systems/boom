@@ -1,4 +1,4 @@
-# boom.log: leveled, timestamped engine logging.
+# leveled, timestamped engine logging
 #
 # each line is rendered as "[<elapsed>] [<LEVEL>] <message>", where
 # <elapsed> is the compact time since the logger started (e.g. "1.5s").
@@ -20,25 +20,25 @@ use std.chrono.duration.Duration;
 use std.chrono.duration.format_duration;
 use os: std.system.os;
 
-# Level: log severity, ordered from most to least verbose.
+# log severity, ordered from most to least verbose
 pub def Level: u8;
 
-# fine-grained diagnostic detail.
+# fine-grained diagnostic detail
 pub val DEBUG: Level = 0;
-# normal operational messages.
+# normal operational messages
 pub val INFO:  Level = 1;
-# recoverable problems worth attention.
+# recoverable problems worth attention
 pub val WARN:  Level = 2;
-# failures that break expected behavior.
+# failures that break expected behavior
 pub val ERROR: Level = 3;
-# sentinel above every level; set as the minimum to silence all output.
+# sentinel above every level; set as the minimum to silence all output
 pub val OFF:   Level = 4;
 
 var min_level: i64 = 1;
 var started:   i64 = 0;
 var start:     Time;
 
-# level_tag: the fixed-width-ish text tag for a level.
+# the fixed-width-ish text tag for a level
 # ---
 # level: level to name
 # ret:   an uppercase ASCII tag, or "?" for an unknown level
@@ -66,7 +66,7 @@ fun put_str(buf: *u8, off: usize, cap: usize, s: str) usize {
     ret o;
 }
 
-# format_line: render one log line into a caller buffer.
+# render one log line into a caller buffer
 #
 # writes "[<elapsed>] [<LEVEL>] <message>\n", null-terminates it, and
 # returns its length excluding the terminator. a nil message renders an
@@ -99,7 +99,7 @@ pub fun format_line(buf: *u8, cap: usize, elapsed: Duration, level: Level, msg: 
     ret off;
 }
 
-# set_level: set the minimum level that will be emitted.
+# set the minimum level that will be emitted
 #
 # messages below level are dropped. pass OFF to silence all output.
 # ---
@@ -108,7 +108,7 @@ pub fun set_level(level: Level) {
     min_level = level::i64;
 }
 
-# enabled: whether a message at level would be emitted.
+# whether a message at level would be emitted
 #
 # use to guard the construction of an expensive message.
 # ---
@@ -135,28 +135,28 @@ fun emit(level: Level, msg: str) {
     }
 }
 
-# debug: log a message at DEBUG level.
+# log a message at DEBUG level
 # ---
 # msg: message to log
 pub fun debug(msg: str) {
     emit(DEBUG, msg);
 }
 
-# info: log a message at INFO level.
+# log a message at INFO level
 # ---
 # msg: message to log
 pub fun info(msg: str) {
     emit(INFO, msg);
 }
 
-# warn: log a message at WARN level.
+# log a message at WARN level
 # ---
 # msg: message to log
 pub fun warn(msg: str) {
     emit(WARN, msg);
 }
 
-# error: log a message at ERROR level.
+# log a message at ERROR level
 # ---
 # msg: message to log
 pub fun error(msg: str) {

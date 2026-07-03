@@ -1,4 +1,4 @@
-# boom.engine: the main loop that drives an App against a Context.
+# the main loop that drives an App against a Context
 #
 # run ties the pieces together: it calls the App's lifecycle hooks around
 # a frame loop that polls input, advances the clock, drains the fixed-
@@ -27,7 +27,7 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
     }
 }
 
-# run: drive the app's lifecycle over an initialized context.
+# drive the app's lifecycle over an initialized context
 #
 # calls f_init once, then loops until the context is stopped or the
 # window is closed: each frame polls input, advances the clock, runs the
