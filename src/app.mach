@@ -1,0 +1,6 @@
+use boom.context.Context;
+
+pub rec App {
+    f_tick: fun (*Context);
+    f_draw: fun (*Context);
+}
