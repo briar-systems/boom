@@ -1,0 +1,146 @@
+# boom.timestep: fixed-timestep accumulator.
+#
+# decouples the update rate from the render rate. each frame the elapsed
+# frame time is added to an accumulator (clamped to guard against the
+# spiral of death), then whole fixed steps are drained from it while any
+# remain. the leftover fraction becomes an interpolation factor the
+# renderer uses to smooth motion between updates.
+#
+# usage per frame:
+#   timestep_add(?ts, frame_delta);
+#   for (timestep_step(?ts)) { update(ts.fixed); }
+#   val alpha: f64 = timestep_alpha(?ts);
+#   render(alpha);
+
+use std.chrono.duration.Duration;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+
+# Timestep: fixed-update accumulator state.
+# ---
+# fixed:       duration of one fixed update step; must be positive
+# max_frame:   upper clamp on a single frame's contribution
+# accumulator: unspent time carried between frames
+pub rec Timestep {
+    fixed:       Duration;
+    max_frame:   Duration;
+    accumulator: Duration;
+}
+
+# timestep_new: create an accumulator with an empty backlog.
+# ---
+# fixed:     duration of one fixed update step; must be positive
+# max_frame: largest frame time fed in one add, clamping runaway backlogs
+# ret:       a Timestep with a zero accumulator
+pub fun timestep_new(fixed: Duration, max_frame: Duration) Timestep {
+    ret Timestep{
+        fixed:       fixed,
+        max_frame:   max_frame,
+        accumulator: 0,
+    };
+}
+
+# timestep_add: fold a frame's elapsed time into the accumulator.
+#
+# the frame is clamped to the range [0, max_frame] first: a long stall
+# (a breakpoint, a lost vsync) cannot enqueue an unbounded run of
+# catch-up updates, and time never runs backward.
+# ---
+# ts:    accumulator to feed
+# frame: elapsed time since the previous frame
+pub fun timestep_add(ts: *Timestep, frame: Duration) {
+    var f: Duration = frame;
+    if (f > ts.max_frame) { f = ts.max_frame; }
+    if (f < 0) { f = 0; }
+    ts.accumulator = ts.accumulator + f;
+}
+
+# timestep_step: drain one fixed step if the backlog covers it.
+#
+# returns true and removes one fixed step from the accumulator when a
+# whole step is available, false otherwise. drive it as a loop condition
+# to run every pending update.
+# ---
+# ts:  accumulator to drain
+# ret: true if a fixed step was consumed
+pub fun timestep_step(ts: *Timestep) bool {
+    if (ts.accumulator >= ts.fixed) {
+        ts.accumulator = ts.accumulator - ts.fixed;
+        ret true;
+    }
+    ret false;
+}
+
+# timestep_alpha: the leftover backlog as a fraction of one fixed step.
+#
+# a value in [0, 1) after the step loop has drained: the renderer blends
+# the previous and current update states by this factor to hide the gap
+# between the fixed rate and the frame rate.
+# ---
+# ts:  accumulator to query
+# ret: accumulator / fixed as an f64
+pub fun timestep_alpha(ts: *Timestep) f64 {
+    ret ts.accumulator::f64 / ts.fixed::f64;
+}
+
+test "timestep: new accumulator starts empty" {
+    val ts: Timestep = timestep_new(16000000, 250000000);
+    if (ts.accumulator != 0) { ret 1; }
+    if (ts.fixed != 16000000) { ret 2; }
+    ret 0;
+}
+
+test "timestep: sub-step frame drains no steps" {
+    var ts: Timestep = timestep_new(16000000, 250000000);
+    timestep_add(?ts, 10000000);
+    if (timestep_step(?ts)) { ret 1; }
+    if (ts.accumulator != 10000000) { ret 2; }
+    ret 0;
+}
+
+test "timestep: exactly one step drains once" {
+    var ts: Timestep = timestep_new(16000000, 250000000);
+    timestep_add(?ts, 16000000);
+    if (!timestep_step(?ts)) { ret 1; }
+    if (timestep_step(?ts)) { ret 2; }
+    if (ts.accumulator != 0) { ret 3; }
+    ret 0;
+}
+
+test "timestep: backlog drains multiple steps and keeps remainder" {
+    var ts: Timestep = timestep_new(10000000, 250000000);
+    timestep_add(?ts, 35000000);
+    var steps: i64 = 0;
+    for (timestep_step(?ts)) { steps = steps + 1; }
+    if (steps != 3) { ret 1; }
+    if (ts.accumulator != 5000000) { ret 2; }
+    ret 0;
+}
+
+test "timestep: add clamps a long frame to max_frame" {
+    var ts: Timestep = timestep_new(10000000, 50000000);
+    # a 10s stall must not enqueue 1000 updates
+    timestep_add(?ts, 10000000000);
+    var steps: i64 = 0;
+    for (timestep_step(?ts)) { steps = steps + 1; }
+    if (steps != 5) { ret 1; }
+    ret 0;
+}
+
+test "timestep: negative frame contributes nothing" {
+    var ts: Timestep = timestep_new(10000000, 50000000);
+    timestep_add(?ts, 0 - 5000000);
+    if (ts.accumulator != 0) { ret 1; }
+    ret 0;
+}
+
+test "timestep: alpha is the fractional remainder" {
+    var ts: Timestep = timestep_new(10000000, 250000000);
+    timestep_add(?ts, 15000000);
+    timestep_step(?ts);
+    # 5ms left of a 10ms step -> 0.5
+    val a: f64 = timestep_alpha(?ts);
+    if (a < 0.499 || a > 0.501) { ret 1; }
+    ret 0;
+}

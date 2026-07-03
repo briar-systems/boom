@@ -26,10 +26,18 @@ jobs:
           install -m 0755 /tmp/machdl/mach /usr/local/bin/mach
           mach info
 
+      # mach-glfw's [os.linux].libs cascades "glfw" into every boom link,
+      # so the test dispatcher links libglfw even though no test calls it.
+      # the stock package satisfies the link input; the tests never invoke GLFW.
+      - name: Install GLFW
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libglfw3-dev
+
       - name: Sync dependencies
         run: mach dep pull
 
-      # bin project: hello-world stage, links nothing yet
       - name: Build
         run: mach build .
 
