@@ -6,3 +6,4 @@ fwd boom.clock;
 fwd boom.timestep;
 fwd boom.event;
 fwd boom.log;
+fwd boom.window;
