@@ -27,9 +27,9 @@ abi = "sysv64"
 entry = "main.mach"
 
 # boom is consumed by path from this in-repo example; a standalone game
-# would declare it by git ref instead. boom's surface exposes glfw and gl
-# ids, so the mach-glfw and mach-gl stanzas below are required and must
-# match boom's own refs (see the boom README).
+# would declare it by git ref instead. boom's surface exposes glfw, gl,
+# image, and gltf ids, so the stanzas below are required and must match
+# boom's own refs (see the boom README).
 [deps.boom]
 path = "../.."
 
@@ -43,4 +43,12 @@ ref = "branch/main"
 
 [deps.mach-gl]
 git = "https://github.com/briar-systems/mach-gl"
+ref = "branch/dev"
+
+[deps.mach-image]
+git = "https://github.com/briar-systems/mach-image"
+ref = "branch/dev"
+
+[deps.mach-gltf]
+git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/dev"

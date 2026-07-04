@@ -1,11 +1,13 @@
-# a spinning lit cube, the boom.graphics end-to-end example
+# a spinning, textured, lit cube: the boom.graphics end-to-end example
 #
-# a standalone consumer of boom: it opens a window through the engine,
-# compiles a GLSL shader, uploads an embedded cube mesh, and draws it with
-# a transform and camera every frame, all through boom handles and without
-# importing mach-gl, mach-glfw, or mach-image directly. this is the shape
-# a real game takes. the interim math is imported on its own (as gm) so
-# swapping it for mach-math later is a one-line change.
+# a standalone consumer of boom. it opens a window through the engine,
+# compiles a GLSL shader, loads a cube mesh from a glTF file and a texture
+# from a QOI image, and draws the model with a material, transform, and
+# camera every frame, all through boom handles and without importing
+# mach-gl, mach-glfw, mach-image, or mach-gltf directly. run it from this
+# directory so the relative asset paths resolve. the interim math is
+# imported on its own (as gm) so swapping it for mach-math later is a
+# one-line change.
 
 use std.runtime;
 use std.print;
@@ -21,83 +23,34 @@ use gfx: boom.graphics;
 use gm:  boom.graphics.math;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
 use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
-use std.types.result.Result;
 use std.types.string.str;
 
 # the game's own state, carried through ctx.user
 # ---
 # shader:    the cube's compiled program
-# mesh:      the cube geometry
+# mesh:      the cube geometry, loaded from cube.glb
+# texture:   the surface texture, loaded from checker.qoi
+# material:  the shader plus the texture binding
 # camera:    the viewpoint
 # transform: the cube's placement, spun each tick
 # ready:     whether init succeeded; draw is skipped if not
 rec Game {
     shader:    gfx.Shader;
     mesh:      gfx.Mesh;
+    texture:   gfx.Texture;
+    material:  gfx.Material;
     camera:    gfx.Camera;
     transform: gfx.Transform;
     ready:     u8;
 }
 
-val VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nout vec3 v_normal;\nvoid main() {\n    v_normal = mat3(u_model) * a_normal;\n    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);\n}\n";
+val VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    v_normal = mat3(u_model) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);\n}\n";
 
-val FRAGMENT_SRC: str = "#version 330 core\nin vec3 v_normal;\nuniform vec4 u_base_color;\nout vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light = normalize(vec3(0.4, 1.0, 0.6));\n    float d = max(dot(n, light), 0.0);\n    frag_color = vec4(u_base_color.rgb * (0.25 + 0.75 * d), u_base_color.a);\n}\n";
-
-# fill the 24 vertices and 36 indices of a unit cube centered at the origin
-# ---
-# verts:   destination for 24 vertices
-# indices: destination for 36 indices
-fun build_cube(verts: *gfx.Vertex, indices: *u32) {
-    val h: f32 = 0.5;
-
-    val faces: [6]gm.Vec3 = [6]gm.Vec3{
-        gm.Vec3{x: 0.0, y: 0.0, z: 1.0},
-        gm.Vec3{x: 0.0, y: 0.0, z: 0.0 - 1.0},
-        gm.Vec3{x: 1.0, y: 0.0, z: 0.0},
-        gm.Vec3{x: 0.0 - 1.0, y: 0.0, z: 0.0},
-        gm.Vec3{x: 0.0, y: 1.0, z: 0.0},
-        gm.Vec3{x: 0.0, y: 0.0 - 1.0, z: 0.0},
-    };
-
-    # four corner positions per face, CCW seen from outside
-    val corners: [24]gm.Vec3 = [24]gm.Vec3{
-        gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: h}, gm.Vec3{x: h, y: 0.0 - h, z: h}, gm.Vec3{x: h, y: h, z: h}, gm.Vec3{x: 0.0 - h, y: h, z: h},
-        gm.Vec3{x: h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: 0.0 - h, y: h, z: 0.0 - h}, gm.Vec3{x: h, y: h, z: 0.0 - h},
-        gm.Vec3{x: h, y: 0.0 - h, z: h}, gm.Vec3{x: h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: h, y: h, z: 0.0 - h}, gm.Vec3{x: h, y: h, z: h},
-        gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: h}, gm.Vec3{x: 0.0 - h, y: h, z: h}, gm.Vec3{x: 0.0 - h, y: h, z: 0.0 - h},
-        gm.Vec3{x: 0.0 - h, y: h, z: h}, gm.Vec3{x: h, y: h, z: h}, gm.Vec3{x: h, y: h, z: 0.0 - h}, gm.Vec3{x: 0.0 - h, y: h, z: 0.0 - h},
-        gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: h, y: 0.0 - h, z: 0.0 - h}, gm.Vec3{x: h, y: 0.0 - h, z: h}, gm.Vec3{x: 0.0 - h, y: 0.0 - h, z: h},
-    };
-
-    val uvs: [4]gm.Vec2 = [4]gm.Vec2{
-        gm.Vec2{x: 0.0, y: 0.0},
-        gm.Vec2{x: 1.0, y: 0.0},
-        gm.Vec2{x: 1.0, y: 1.0},
-        gm.Vec2{x: 0.0, y: 1.0},
-    };
-
-    var face: i32 = 0;
-    for (face < 6) {
-        var c: i32 = 0;
-        for (c < 4) {
-            val vi: i32 = face * 4 + c;
-            verts[vi] = gfx.Vertex{position: corners[vi], normal: faces[face], uv: uvs[c]};
-            c = c + 1;
-        }
-        val base: i32 = face * 4;
-        val ii: i32 = face * 6;
-        indices[ii + 0] = (base + 0)::u32;
-        indices[ii + 1] = (base + 1)::u32;
-        indices[ii + 2] = (base + 2)::u32;
-        indices[ii + 3] = (base + 0)::u32;
-        indices[ii + 4] = (base + 2)::u32;
-        indices[ii + 5] = (base + 3)::u32;
-        face = face + 1;
-    }
-}
+val FRAGMENT_SRC: str = "#version 330 core\nin vec3 v_normal;\nin vec2 v_uv;\nuniform vec4 u_base_color;\nuniform sampler2D u_texture0;\nout vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light = normalize(vec3(0.4, 1.0, 0.6));\n    float d = max(dot(n, light), 0.0);\n    vec4 tex = texture(u_texture0, v_uv);\n    frag_color = vec4(tex.rgb * u_base_color.rgb * (0.25 + 0.75 * d), tex.a * u_base_color.a);\n}\n";
 
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
@@ -106,17 +59,32 @@ fun on_init(ctx: *Context) {
     gfx.graphics_init();
     gfx.viewport(ctx.window.width, ctx.window.height);
 
-    val compiled: Result[gfx.Shader, str] = gfx.shader(VERTEX_SRC, FRAGMENT_SRC);
-    if (is_err[gfx.Shader, str](compiled)) {
-        print.eprintlnf("shader error: {}", unwrap_err[gfx.Shader, str](compiled));
+    val compiled: Result[gfx.Shader, gfx.Error] = gfx.shader(VERTEX_SRC, FRAGMENT_SRC);
+    if (is_err[gfx.Shader, gfx.Error](compiled)) {
+        var e: gfx.Error = unwrap_err[gfx.Shader, gfx.Error](compiled);
+        print.eprintlnf("shader error: {}", gfx.error_msg(?e));
         ret;
     }
-    g.shader = unwrap_ok[gfx.Shader, str](compiled);
+    g.shader = unwrap_ok[gfx.Shader, gfx.Error](compiled);
 
-    var verts:   [24]gfx.Vertex;
-    var indices: [36]u32;
-    build_cube(?verts[0], ?indices[0]);
-    g.mesh = gfx.mesh(?verts[0], 24, ?indices[0], 36);
+    val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load("assets/cube.glb");
+    if (is_err[gfx.Mesh, gfx.Error](loaded)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](loaded);
+        print.eprintlnf("mesh load error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](loaded);
+
+    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load("assets/checker.qoi");
+    if (is_err[gfx.Texture, gfx.Error](tex)) {
+        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tex);
+        print.eprintlnf("texture load error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.texture = unwrap_ok[gfx.Texture, gfx.Error](tex);
+
+    g.material = gfx.material(?g.shader);
+    gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
 
     val aspect: f32 = ctx.window.width::f32 / ctx.window.height::f32;
     g.camera = gfx.camera_perspective(
@@ -150,8 +118,7 @@ fun on_draw(ctx: *Context) {
     if (g.ready == 0) {
         ret;
     }
-    gfx.shader_set_vec4(?g.shader, "u_base_color", gm.vec4(1.0, 0.55, 0.15, 1.0));
-    gfx.draw(?g.mesh, ?g.shader, ?g.transform, ?g.camera);
+    gfx.draw_material(?g.mesh, ?g.material, ?g.transform, ?g.camera);
 }
 
 #[symbol("main")]
@@ -168,7 +135,7 @@ fun main(argc: i64, argv: **u8) i64 {
     val cfg: Config = Config{
         width:     960,
         height:    540,
-        title:     "boom.graphics: spinning cube",
+        title:     "boom.graphics: textured cube",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
     };

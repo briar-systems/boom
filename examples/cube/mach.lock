@@ -15,6 +15,16 @@ url = "https://github.com/briar-systems/mach-gl"
 ref = "branch/dev"
 commit = "8016cb931c5ddd036de196f576ce9d4b93bc5ba6"
 
+[deps.mach-image]
+url = "https://github.com/briar-systems/mach-image"
+ref = "branch/dev"
+commit = "7ce0b138a20d773e4c94e4fb2d0ab9049ed4836a"
+
+[deps.mach-gltf]
+url = "https://github.com/briar-systems/mach-gltf"
+ref = "branch/dev"
+commit = "d4666611d02adda328c9a7a06f1f62bb3df7dd38"
+
 [deps.mach-vk]
 url = "https://github.com/briar-systems/mach-vk"
 ref = "branch/main"
@@ -25,20 +35,10 @@ url = "https://github.com/briar-systems/mach-audio"
 ref = "branch/dev"
 commit = "c8492ac0e1bc27fc67709d3bfddac3a44ac76142"
 
-[deps.mach-image]
-url = "https://github.com/briar-systems/mach-image"
-ref = "branch/dev"
-commit = "7ce0b138a20d773e4c94e4fb2d0ab9049ed4836a"
-
 [deps.mach-font]
 url = "https://github.com/briar-systems/mach-font"
 ref = "branch/dev"
 commit = "5ea69d29a18b4b9b77bd77923929801277bcb883"
-
-[deps.mach-gltf]
-url = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/dev"
-commit = "d4666611d02adda328c9a7a06f1f62bb3df7dd38"
 
 [deps.mach-phys]
 url = "https://github.com/briar-systems/mach-phys"
