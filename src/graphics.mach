@@ -2,11 +2,15 @@
 #
 # a game authors shaders and draws 3D assets through boom handles alone,
 # never importing the backend libraries: Shader, Texture, Mesh, and
-# Material wrap mach-gl (and, as they grow, mach-image and mach-gltf)
-# state that stays hidden here, so swapping the GL backend for a Vulkan or
-# SPIR-V one later touches no game code. the API is immediate-mode: the
-# game owns its world and update, and calls draw each frame. consumers
-# import this as `use boom.graphics;`.
+# Material wrap mach-gl, mach-image, and mach-gltf state that stays hidden
+# here, so swapping the GL backend for a Vulkan or SPIR-V one later touches
+# no game code. texture_load decodes QOI and TGA images and mesh_load
+# extracts glTF (.glb) geometry, both without exposing the backend types.
+# the API is immediate-mode: the game owns its world and update, and calls
+# draw each frame. consumers import this as `use boom.graphics;`.
+#
+# failures return Result[T, Error]; Error carries its message inline
+# (boom.graphics.error), so no failure needs a heap allocation or a global.
 #
 # the render path expects a live OpenGL context, which boom.window
 # provides; graphics itself depends only on the GL bindings and its own
@@ -21,6 +25,9 @@
 
 fwd boom.graphics.math;
 
+fwd boom.graphics.error.Error;
+fwd boom.graphics.error.error_msg;
+
 fwd boom.graphics.shader.Shader;
 fwd boom.graphics.shader.shader;
 fwd boom.graphics.shader.shader_use;
@@ -34,12 +41,16 @@ fwd boom.graphics.shader.shader_delete;
 
 fwd boom.graphics.texture.Texture;
 fwd boom.graphics.texture.texture;
+fwd boom.graphics.texture.texture_from_bytes;
+fwd boom.graphics.texture.texture_load;
 fwd boom.graphics.texture.texture_bind;
 fwd boom.graphics.texture.texture_delete;
 
 fwd boom.graphics.mesh.Vertex;
 fwd boom.graphics.mesh.Mesh;
 fwd boom.graphics.mesh.mesh;
+fwd boom.graphics.mesh.mesh_from_glb;
+fwd boom.graphics.mesh.mesh_load;
 fwd boom.graphics.mesh.mesh_delete;
 
 fwd boom.graphics.material.MAX_TEXTURES;
