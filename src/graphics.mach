@@ -1,0 +1,22 @@
+# the boom render facade
+#
+# a game authors shaders and draws 3D assets through boom handles alone,
+# never importing the backend libraries: Shader, Texture, Mesh, and
+# Material wrap mach-gl (and, as they grow, mach-image and mach-gltf)
+# state that stays hidden here, so swapping the GL backend for a Vulkan or
+# SPIR-V one later touches no game code. the API is immediate-mode: the
+# game owns its world and update, and calls draw each frame. consumers
+# import this as `use boom.graphics;`.
+#
+# the render path expects a live OpenGL context, which boom.window
+# provides; graphics itself depends only on the GL bindings and its own
+# scalar-interim math (boom.graphics.math), so it is robust to the rest of
+# boom being restructured.
+#
+# shader convention: the vertex shader declares attribute locations
+# 0 = a_position (vec3), 1 = a_normal (vec3), 2 = a_uv (vec2), and the
+# uniforms u_model, u_view, u_projection (mat4) that draw sets each call;
+# draw_material additionally sets u_base_color (vec4) and binds a
+# material's textures to their sampler uniforms.
+
+fwd boom.graphics.math;

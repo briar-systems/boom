@@ -1,0 +1,90 @@
+# scalar-interim quaternion type for orientations
+#
+# unit quaternions represent rotations for the render path. engine-
+# internal, to be replaced by mach-math; see boom.graphics.math.scalar.
+
+use boom.graphics.math.scalar.sinf;
+use boom.graphics.math.scalar.cosf;
+use boom.graphics.math.scalar.sqrtf;
+use boom.graphics.math.vec.Vec3;
+use boom.graphics.math.vec.vec3_normalize;
+
+# a quaternion (x, y, z, w) with w the scalar part
+# ---
+# x: first imaginary component
+# y: second imaginary component
+# z: third imaginary component
+# w: real component
+pub rec Quat {
+    x: f32;
+    y: f32;
+    z: f32;
+    w: f32;
+}
+
+# the identity rotation
+# ---
+# ret: the quaternion (0, 0, 0, 1)
+pub fun quat_identity() Quat {
+    ret Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
+}
+
+# a rotation of angle radians about an axis
+#
+# the axis is normalized internally; a zero axis yields the identity.
+# ---
+# axis:  rotation axis, need not be unit length
+# angle: rotation angle in radians
+# ret:   the unit quaternion for the rotation
+pub fun quat_from_axis_angle(axis: Vec3, angle: f32) Quat {
+    val n: Vec3 = vec3_normalize(axis);
+    val half: f32 = angle * 0.5;
+    val s: f32 = sinf(half);
+    ret Quat{x: n.x * s, y: n.y * s, z: n.z * s, w: cosf(half)};
+}
+
+# hamilton product of two quaternions
+#
+# composes rotations: the result applies b then a.
+# ---
+# a:   left quaternion
+# b:   right quaternion
+# ret: a * b
+pub fun quat_mul(a: Quat, b: Quat) Quat {
+    ret Quat{
+        x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+
+# unit-length copy of a quaternion
+#
+# returns the identity when the quaternion has zero length.
+# ---
+# q:   quaternion
+# ret: q scaled to unit length, or the identity
+pub fun quat_normalize(q: Quat) Quat {
+    val len: f32 = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (len == 0.0) {
+        ret quat_identity();
+    }
+    val inv: f32 = 1.0 / len;
+    ret Quat{x: q.x * inv, y: q.y * inv, z: q.z * inv, w: q.w * inv};
+}
+
+test "quat: identity is the multiplicative unit" {
+    val q: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 1.0, z: 0.0}, 1.0);
+    val r: Quat = quat_mul(q, quat_identity());
+    if (r.x != q.x || r.y != q.y || r.z != q.z || r.w != q.w) { ret 1; }
+    ret 0;
+}
+
+test "quat: axis-angle produces a unit quaternion" {
+    val q: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 0.0, z: 2.0}, 1.5);
+    val len: f32 = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    val d: f32 = len - 1.0;
+    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
+    ret 0;
+}

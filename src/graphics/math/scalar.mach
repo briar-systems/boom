@@ -1,0 +1,179 @@
+# scalar-interim floating-point helpers for the render path
+#
+# the shared mach-math is deferred until the compiler grows SIMD vector
+# types, so boom.graphics carries its own small scalar math. these are
+# plain f64 approximations (Newton's method for the root, range-reduced
+# Taylor series for the trig functions) accurate to about 1e-5 over their
+# reduced domains, which is ample for building view, projection, and
+# model transforms. this module is engine-internal and will be replaced
+# by mach-math; it is not a workaround, just the minimum arithmetic the
+# renderer needs today.
+
+use std.types.bool.bool;
+
+# the ratio of a circle's circumference to its diameter
+pub val PI: f64 = 3.14159265358979323846;
+
+# half of PI
+pub val HALF_PI: f64 = 1.57079632679489661923;
+
+# twice PI, one full turn in radians
+pub val TWO_PI: f64 = 6.28318530717958647692;
+
+# convert degrees to radians
+# ---
+# deg: angle in degrees
+# ret: the same angle in radians
+pub fun radians(deg: f32) f32 {
+    ret (deg::f64 * PI / 180.0)::f32;
+}
+
+# round to the nearest integral value, ties away from zero
+# ---
+# x:   value to round
+# ret: nearest integral value as f64
+fun round64(x: f64) f64 {
+    if (x >= 0.0) {
+        ret (x + 0.5)::i64::f64;
+    }
+    ret (x - 0.5)::i64::f64;
+}
+
+# square root by Newton's method
+#
+# returns 0 for non-positive input, which keeps vector length and
+# normalization total for degenerate vectors rather than trapping.
+# ---
+# x:   radicand
+# ret: the non-negative square root, or 0 if x <= 0
+pub fun sqrt64(x: f64) f64 {
+    if (x <= 0.0) {
+        ret 0.0;
+    }
+    var guess: f64 = x;
+    var i: i64 = 0;
+    for (i < 40) {
+        guess = 0.5 * (guess + x / guess);
+        i = i + 1;
+    }
+    ret guess;
+}
+
+# sine, range-reduced Taylor series
+# ---
+# x:   angle in radians
+# ret: sine of x
+pub fun sin64(x: f64) f64 {
+    var r: f64 = x - round64(x / TWO_PI) * TWO_PI;
+    if (r > HALF_PI) {
+        r = PI - r;
+    }
+    or (r < 0.0 - HALF_PI) {
+        r = 0.0 - PI - r;
+    }
+    val x2: f64 = r * r;
+    ret r * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))));
+}
+
+# cosine, expressed as a shifted sine
+# ---
+# x:   angle in radians
+# ret: cosine of x
+pub fun cos64(x: f64) f64 {
+    ret sin64(x + HALF_PI);
+}
+
+# tangent, the ratio of sine to cosine
+# ---
+# x:   angle in radians
+# ret: tangent of x
+pub fun tan64(x: f64) f64 {
+    ret sin64(x) / cos64(x);
+}
+
+# f32 square root
+# ---
+# x:   radicand
+# ret: the non-negative square root as f32
+pub fun sqrtf(x: f32) f32 {
+    ret sqrt64(x::f64)::f32;
+}
+
+# f32 sine
+# ---
+# x:   angle in radians
+# ret: sine of x as f32
+pub fun sinf(x: f32) f32 {
+    ret sin64(x::f64)::f32;
+}
+
+# f32 cosine
+# ---
+# x:   angle in radians
+# ret: cosine of x as f32
+pub fun cosf(x: f32) f32 {
+    ret cos64(x::f64)::f32;
+}
+
+# f32 tangent
+# ---
+# x:   angle in radians
+# ret: tangent of x as f32
+pub fun tanf(x: f32) f32 {
+    ret tan64(x::f64)::f32;
+}
+
+# whether two f64 values differ by no more than eps
+# ---
+# a:   first value
+# b:   second value
+# eps: tolerance
+# ret: true when |a - b| <= eps
+fun close(a: f64, b: f64, eps: f64) bool {
+    var d: f64 = a - b;
+    if (d < 0.0) {
+        d = 0.0 - d;
+    }
+    ret d <= eps;
+}
+
+test "scalar: sqrt of a perfect square" {
+    if (!close(sqrt64(16.0), 4.0, 0.00001)) { ret 1; }
+    if (!close(sqrt64(2.0), 1.41421356, 0.00001)) { ret 2; }
+    if (sqrt64(0.0) != 0.0) { ret 3; }
+    if (sqrt64(0.0 - 4.0) != 0.0) { ret 4; }
+    ret 0;
+}
+
+test "scalar: sine at cardinal angles" {
+    if (!close(sin64(0.0), 0.0, 0.00001)) { ret 1; }
+    if (!close(sin64(HALF_PI), 1.0, 0.00001)) { ret 2; }
+    if (!close(sin64(PI), 0.0, 0.00001)) { ret 3; }
+    if (!close(sin64(0.0 - HALF_PI), 0.0 - 1.0, 0.00001)) { ret 4; }
+    ret 0;
+}
+
+test "scalar: cosine at cardinal angles" {
+    if (!close(cos64(0.0), 1.0, 0.00001)) { ret 1; }
+    if (!close(cos64(HALF_PI), 0.0, 0.00001)) { ret 2; }
+    if (!close(cos64(PI), 0.0 - 1.0, 0.00001)) { ret 3; }
+    ret 0;
+}
+
+test "scalar: sine survives range reduction" {
+    if (!close(sin64(TWO_PI + HALF_PI), 1.0, 0.00001)) { ret 1; }
+    if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001)) { ret 2; }
+    ret 0;
+}
+
+test "scalar: tangent of an eighth turn" {
+    if (!close(tan64(PI / 4.0), 1.0, 0.00001)) { ret 1; }
+    ret 0;
+}
+
+test "scalar: radians converts degrees" {
+    val r: f32 = radians(180.0);
+    val d: f64 = r::f64 - PI;
+    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
+    ret 0;
+}
