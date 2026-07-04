@@ -1,23 +1,39 @@
 # the Mesh handle: GPU vertex and index buffers ready to draw
 #
-# a game supplies interleaved vertices, or a .glb file or bytes, and
-# receives an opaque Mesh; the backing mach-gl buffers and the mach-gltf
-# loader both stay hidden. mesh_load extracts the first primitive of the
-# first mesh (POSITION, NORMAL, TEXCOORD_0, and the index buffer) from a
-# glTF 2.0 binary container; missing NORMAL or TEXCOORD_0 default, and
-# non-indexed or multi-primitive geometry is left for a later pass.
+# a game supplies raw interleaved vertex bytes plus a VertexFormat, or a
+# .glb file or bytes, and receives an opaque Mesh; the backing mach-gl
+# buffers and the mach-gltf loader both stay hidden. a mesh is no longer
+# tied to one vertex layout: mesh() binds whatever attributes its format
+# declares, and mesh_load builds the format from whatever attributes the
+# first primitive of the first mesh provides.
 #
-# the interleaved layout is fixed and matches the shader attribute
-# convention: location 0 = position (vec3), 1 = normal (vec3),
-# 2 = uv (vec2).
+# mesh_load reads POSITION (required) and any of NORMAL, TEXCOORD_0,
+# COLOR_0, and TANGENT that the primitive carries as float accessors, and
+# requires an index buffer. JOINTS_0 and WEIGHTS_0 are describable and
+# bindable through the format (see boom.graphics.vertex) so the skinning
+# runtime can populate them in a later phase; the loader does not read
+# them yet.
 
 use gl.gl;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
-use boom.graphics.math.vec.Vec2;
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.vec2;
-use boom.graphics.math.vec.vec3;
+use boom.graphics.vertex.Semantic;
+use boom.graphics.vertex.SEMANTIC_POSITION;
+use boom.graphics.vertex.SEMANTIC_NORMAL;
+use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
+use boom.graphics.vertex.SEMANTIC_COLOR_0;
+use boom.graphics.vertex.SEMANTIC_TANGENT;
+use boom.graphics.vertex.Component;
+use boom.graphics.vertex.COMP_F32;
+use boom.graphics.vertex.COMP_U8;
+use boom.graphics.vertex.COMP_U16;
+use boom.graphics.vertex.COMP_U32;
+use boom.graphics.vertex.COMP_I8;
+use boom.graphics.vertex.COMP_I16;
+use boom.graphics.vertex.VertexAttribute;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.vertex_format;
+use boom.graphics.vertex.vertex_format_add;
 use gp: gltf.parse;
 use ga: gltf.accessor;
 use gd: gltf.doc;
@@ -42,41 +58,47 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.string.view_eq_str;
 
-# one interleaved vertex
-# ---
-# position: model-space position
-# normal:   surface normal
-# uv:       texture coordinate
-pub rec Vertex {
-    position: Vec3;
-    normal:   Vec3;
-    uv:       Vec2;
-}
-
 # an opaque handle to a drawable mesh
 # ---
 # vao:         the backing vertex-array object id, hidden from the game
 # vbo:         the backing vertex buffer id
 # ebo:         the backing index buffer id
 # index_count: number of indices, the count drawn
+# format:      the vertex layout the buffers were uploaded with
 pub rec Mesh {
     vao:         u32;
     vbo:         u32;
     ebo:         u32;
     index_count: i32;
+    format:      VertexFormat;
 }
 
 # CPU-side geometry extracted from a glTF primitive, owned by an allocator
 # ---
-# vertices:     interleaved vertices
+# vertices:     raw interleaved vertex bytes, vertex_count * format.stride
 # vertex_count: number of vertices
+# format:       the layout describing the interleaved bytes
 # indices:      u32 triangle indices
 # index_count:  number of indices
 pub rec MeshData {
-    vertices:     *Vertex;
+    vertices:     *u8;
     vertex_count: i32;
+    format:       VertexFormat;
     indices:      *u32;
     index_count:  i32;
+}
+
+# the GL component type enum for a vertex component
+# ---
+# c:   component storage type
+# ret: the matching GL type enum
+fun comp_gl_type(c: Component) u32 {
+    if (c == COMP_F32) { ret gl.FLOAT; }
+    if (c == COMP_U8)  { ret gl.UNSIGNED_BYTE; }
+    if (c == COMP_U16) { ret gl.UNSIGNED_SHORT; }
+    if (c == COMP_U32) { ret gl.UNSIGNED_INT; }
+    if (c == COMP_I8)  { ret gl.BYTE; }
+    ret gl.SHORT;
 }
 
 # reinterpret a byte offset as a buffer pointer for attribute setup
@@ -87,20 +109,35 @@ fun offset_ptr(n: usize) ptr {
     ret n:~ptr;
 }
 
-# upload vertices and indices to the GPU
+# write a little-endian f32 into a byte buffer at off
+fun write_f32(dst: *u8, off: usize, v: f32) {
+    var p: *f32 = (?dst[off]):~*f32;
+    @p = v;
+}
+
+# read a little-endian f32 from a byte buffer at off
+fun read_f32_at(src: *u8, off: usize) f32 {
+    var p: *f32 = (?src[off]):~*f32;
+    ret @p;
+}
+
+# upload interleaved vertices and indices to the GPU
 #
-# copies the interleaved vertex data and the u32 triangle indices into GL
-# buffers and configures the standard attribute layout. the CPU data need
-# not outlive the call.
+# copies vertex_count * format.stride bytes and the u32 triangle indices
+# into GL buffers, then binds each of the format's attributes to its
+# location, using an integer attribute pointer for integer-bound
+# attributes and a float pointer otherwise. the CPU data need not
+# outlive the call.
 # ---
-# vertices:     interleaved vertex array
+# vertices:     raw interleaved vertex bytes
 # vertex_count: number of vertices
+# format:       the vertex layout
 # indices:      triangle index list, three per triangle
 # index_count:  number of indices
 # ret:          the drawable Mesh handle
-pub fun mesh(vertices: *Vertex, vertex_count: i32, indices: *u32, index_count: i32) Mesh {
-    val stride: i32 = $size_of(Vertex)::i32;
-    val vsize:  i64 = vertex_count::i64 * $size_of(Vertex)::i64;
+pub fun mesh(vertices: ptr, vertex_count: i32, format: *VertexFormat, indices: *u32, index_count: i32) Mesh {
+    val stride: i32 = format.stride::i32;
+    val vsize:  i64 = vertex_count::i64 * format.stride::i64;
     val isize:  i64 = index_count::i64 * 4;
 
     var vao: u32 = 0;
@@ -111,22 +148,42 @@ pub fun mesh(vertices: *Vertex, vertex_count: i32, indices: *u32, index_count: i
 
     gl.gen_buffers(1, ?vbo);
     gl.bind_buffer(gl.ARRAY_BUFFER, vbo);
-    gl.buffer_data(gl.ARRAY_BUFFER, vsize, vertices::ptr, gl.STATIC_DRAW);
+    gl.buffer_data(gl.ARRAY_BUFFER, vsize, vertices, gl.STATIC_DRAW);
 
     gl.gen_buffers(1, ?ebo);
     gl.bind_buffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
     gl.buffer_data(gl.ELEMENT_ARRAY_BUFFER, isize, indices::ptr, gl.STATIC_DRAW);
 
-    gl.enable_vertex_attrib_array(0);
-    gl.vertex_attrib_pointer(0, 3, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, position)));
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_pointer(1, 3, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, normal)));
-    gl.enable_vertex_attrib_array(2);
-    gl.vertex_attrib_pointer(2, 2, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, uv)));
+    var i: u32 = 0;
+    for (i < format.count) {
+        val a:  *VertexAttribute = ?format.attributes[i];
+        val gt: u32 = comp_gl_type(a.component);
+        gl.enable_vertex_attrib_array(a.location);
+        if (a.integer != 0) {
+            gl.vertex_attrib_ipointer(a.location, a.count::i32, gt, stride, offset_ptr(a.offset::usize));
+        }
+        or {
+            val nm: bool = a.normalized != 0;
+            gl.vertex_attrib_pointer(a.location, a.count::i32, gt, nm, stride, offset_ptr(a.offset::usize));
+        }
+        i = i + 1;
+    }
 
     gl.bind_vertex_array(0);
 
-    ret Mesh{vao: vao, vbo: vbo, ebo: ebo, index_count: index_count};
+    ret Mesh{vao: vao, vbo: vbo, ebo: ebo, index_count: index_count, format: @format};
+}
+
+# issue an indexed triangle draw for a mesh
+#
+# binds the mesh's vertex array, draws its indices as triangles, and
+# unbinds. the caller binds the shader and sets uniforms first.
+# ---
+# m: mesh to draw
+pub fun mesh_draw(m: *Mesh) {
+    gl.bind_vertex_array(m.vao);
+    gl.draw_elements(gl.TRIANGLES, m.index_count, gl.UNSIGNED_INT, nil);
+    gl.bind_vertex_array(0);
 }
 
 # find the accessor index bound to a named attribute, or gd.NONE
@@ -239,12 +296,51 @@ fun read_indices(d: *gd.Document, bin: *u8, blen: usize, ai: usize, a: *allo.All
     ret ok[bool, Error](true);
 }
 
+# read an optional float attribute into the format and its source table
+#
+# an absent attribute is a no-op success. a present one is read as f32,
+# appended to fmt with its accessor's component count, and its array
+# stored in srcs at the matching attribute index. a present attribute
+# whose element count differs from POSITION is an error.
+# ---
+# prim:     primitive to read from
+# d:        the owning document
+# bin:      the binary buffer bytes
+# blen:     length of bin in bytes
+# a:        allocator for the read array
+# name:     the glTF attribute name, e.g. "NORMAL"
+# semantic: the semantic to record in the format
+# location: the shader attribute location to bind
+# fmt:      format being assembled, extended when present
+# srcs:     per-attribute source arrays, parallel to fmt.attributes
+# vcount:   the POSITION vertex count, the required element count
+# ret:      true on success, or a read/mismatch error
+fun add_optional(prim: *gd.Primitive, d: *gd.Document, bin: *u8, blen: usize, a: *allo.Allocator, name: str, semantic: Semantic, location: u32, fmt: *VertexFormat, srcs: **f32, vcount: usize) Result[bool, Error] {
+    val ai: i64 = find_attr(prim, name);
+    if (ai == gd.NONE) {
+        ret ok[bool, Error](true);
+    }
+    var dp:  *f32 = nil;
+    var cnt: usize = 0;
+    var cmp: usize = 0;
+    val r: Result[bool, Error] = read_floats(d, bin, blen, ai::usize, a, ?dp, ?cnt, ?cmp);
+    if (is_err[bool, Error](r)) { ret r; }
+    if (cnt != vcount) {
+        ret err[bool, Error](error("attribute element count does not match POSITION"));
+    }
+    vertex_format_add(fmt, semantic, location, COMP_F32, cmp::u32, 0, 0);
+    srcs[fmt.count - 1] = dp;
+    ret ok[bool, Error](true);
+}
+
 # extract the first primitive of the first mesh from a .glb into MeshData
 #
-# reads POSITION (required), NORMAL and TEXCOORD_0 (optional, defaulted),
-# and the index buffer. all allocations come from a; a single arena that
-# the caller frees afterward reclaims them in one shot. no GL calls are
-# made, so this is the testable core of the loader.
+# reads POSITION (required) and any present NORMAL, TEXCOORD_0, COLOR_0,
+# and TANGENT float attributes, building a VertexFormat that mirrors the
+# primitive and interleaving the attributes into one packed buffer. all
+# allocations come from a; a single arena the caller frees afterward
+# reclaims them in one shot. no GL calls are made, so this is the
+# testable core of the loader.
 # ---
 # data: the .glb bytes
 # len:  length of data in bytes
@@ -280,68 +376,60 @@ fun extract_glb(data: *u8, len: usize, a: *allo.Allocator, out: *MeshData) Resul
     if (prim.indices == gd.NONE) {
         ret err[bool, Error](error("glb primitive is non-indexed, which is not supported"));
     }
-    val nrm_ai: i64 = find_attr(prim, "NORMAL");
-    val uv_ai:  i64 = find_attr(prim, "TEXCOORD_0");
 
-    var pos: *f32 = nil;
-    var pcount: usize = 0;
+    var fmt:  VertexFormat = vertex_format();
+    var srcs: [8]*f32;
+
+    var pos:    *f32 = nil;
+    var vcount: usize = 0;
     var pcomps: usize = 0;
-    val prf: Result[bool, Error] = read_floats(?loaded.document, loaded.bin, loaded.bin_len, pos_ai::usize, a, ?pos, ?pcount, ?pcomps);
+    val prf: Result[bool, Error] = read_floats(?loaded.document, loaded.bin, loaded.bin_len, pos_ai::usize, a, ?pos, ?vcount, ?pcomps);
     if (is_err[bool, Error](prf)) { ret prf; }
+    vertex_format_add(?fmt, SEMANTIC_POSITION, 0, COMP_F32, pcomps::u32, 0, 0);
+    srcs[fmt.count - 1] = pos;
 
-    var nrm: *f32 = nil;
-    var ncount: usize = 0;
-    var ncomps: usize = 0;
-    var have_nrm: u8 = 0;
-    if (nrm_ai != gd.NONE) {
-        val nrf: Result[bool, Error] = read_floats(?loaded.document, loaded.bin, loaded.bin_len, nrm_ai::usize, a, ?nrm, ?ncount, ?ncomps);
-        if (is_err[bool, Error](nrf)) { ret nrf; }
-        have_nrm = 1;
-    }
+    val nr: Result[bool, Error] = add_optional(prim, ?loaded.document, loaded.bin, loaded.bin_len, a, "NORMAL",     SEMANTIC_NORMAL,     1, ?fmt, ?srcs[0], vcount);
+    if (is_err[bool, Error](nr)) { ret nr; }
+    val tr: Result[bool, Error] = add_optional(prim, ?loaded.document, loaded.bin, loaded.bin_len, a, "TEXCOORD_0", SEMANTIC_TEXCOORD_0, 2, ?fmt, ?srcs[0], vcount);
+    if (is_err[bool, Error](tr)) { ret tr; }
+    val cr: Result[bool, Error] = add_optional(prim, ?loaded.document, loaded.bin, loaded.bin_len, a, "COLOR_0",    SEMANTIC_COLOR_0,    3, ?fmt, ?srcs[0], vcount);
+    if (is_err[bool, Error](cr)) { ret cr; }
+    val gr: Result[bool, Error] = add_optional(prim, ?loaded.document, loaded.bin, loaded.bin_len, a, "TANGENT",    SEMANTIC_TANGENT,    4, ?fmt, ?srcs[0], vcount);
+    if (is_err[bool, Error](gr)) { ret gr; }
 
-    var uv: *f32 = nil;
-    var ucount: usize = 0;
-    var ucomps: usize = 0;
-    var have_uv: u8 = 0;
-    if (uv_ai != gd.NONE) {
-        val urf: Result[bool, Error] = read_floats(?loaded.document, loaded.bin, loaded.bin_len, uv_ai::usize, a, ?uv, ?ucount, ?ucomps);
-        if (is_err[bool, Error](urf)) { ret urf; }
-        have_uv = 1;
-    }
-
-    var idx: *u32 = nil;
+    var idx:    *u32 = nil;
     var icount: usize = 0;
     val irf: Result[bool, Error] = read_indices(?loaded.document, loaded.bin, loaded.bin_len, prim.indices::usize, a, ?idx, ?icount);
     if (is_err[bool, Error](irf)) { ret irf; }
 
-    val vr: Result[*Vertex, str] = allo.allocate[Vertex](a, pcount);
-    if (is_err[*Vertex, str](vr)) {
-        ret err[bool, Error](error(unwrap_err[*Vertex, str](vr)));
+    val vbytes: usize = vcount * fmt.stride::usize;
+    val vr: Result[*u8, str] = allo.allocate[u8](a, vbytes);
+    if (is_err[*u8, str](vr)) {
+        ret err[bool, Error](error(unwrap_err[*u8, str](vr)));
     }
-    val verts: *Vertex = unwrap_ok[*Vertex, str](vr);
+    val dst: *u8 = unwrap_ok[*u8, str](vr);
 
     var v: usize = 0;
-    for (v < pcount) {
-        var vert: Vertex;
-        vert.position = vec3(pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]);
-        if (have_nrm != 0 && v < ncount) {
-            vert.normal = vec3(nrm[v * 3], nrm[v * 3 + 1], nrm[v * 3 + 2]);
+    for (v < vcount) {
+        var i: u32 = 0;
+        for (i < fmt.count) {
+            val at:    *VertexAttribute = ?fmt.attributes[i];
+            val src:   *f32 = srcs[i];
+            val comps: usize = at.count::usize;
+            val base:  usize = v * fmt.stride::usize + at.offset::usize;
+            var c: usize = 0;
+            for (c < comps) {
+                write_f32(dst, base + c * 4, src[v * comps + c]);
+                c = c + 1;
+            }
+            i = i + 1;
         }
-        or {
-            vert.normal = vec3(0.0, 1.0, 0.0);
-        }
-        if (have_uv != 0 && v < ucount) {
-            vert.uv = vec2(uv[v * 2], uv[v * 2 + 1]);
-        }
-        or {
-            vert.uv = vec2(0.0, 0.0);
-        }
-        verts[v] = vert;
         v = v + 1;
     }
 
-    out.vertices     = verts;
-    out.vertex_count = pcount::i32;
+    out.vertices     = dst;
+    out.vertex_count = vcount::i32;
+    out.format       = fmt;
     out.indices      = idx;
     out.index_count  = icount::i32;
     ret ok[bool, Error](true);
@@ -372,7 +460,7 @@ pub fun mesh_from_glb(data: *u8, len: usize) Result[Mesh, Error] {
         ret err[Mesh, Error](unwrap_err[bool, Error](r));
     }
 
-    val m: Mesh = mesh(md.vertices, md.vertex_count, md.indices, md.index_count);
+    val m: Mesh = mesh(md.vertices::ptr, md.vertex_count, ?md.format, md.indices, md.index_count);
     arena.dnit(?ar);
     ret ok[Mesh, Error](m);
 }
@@ -407,14 +495,6 @@ pub fun mesh_delete(m: *Mesh) {
     m.vbo = 0;
     m.ebo = 0;
     m.index_count = 0;
-}
-
-test "mesh: interleaved layout matches the attribute convention" {
-    if ($offset_of(Vertex, position) != 0) { ret 1; }
-    if ($offset_of(Vertex, normal) != 12) { ret 2; }
-    if ($offset_of(Vertex, uv) != 24) { ret 3; }
-    if ($size_of(Vertex) != 32) { ret 4; }
-    ret 0;
 }
 
 # write a little-endian u32 into a byte buffer at off
@@ -484,7 +564,7 @@ fun fixture_triangle_glb(out: *u8) usize {
     ret total;
 }
 
-test "mesh: extract reads glTF triangle geometry" {
+test "mesh: extract builds a POSITION-only format and interleaves it" {
     var glb: [512]u8;
     val n: usize = fixture_triangle_glb(?glb[0]);
 
@@ -500,9 +580,11 @@ test "mesh: extract reads glTF triangle geometry" {
     if (is_err[bool, Error](r)) { arena.dnit(?ar); ret 1; }
     if (md.vertex_count != 3) { arena.dnit(?ar); ret 2; }
     if (md.index_count != 3) { arena.dnit(?ar); ret 3; }
-    if (md.vertices[1].position.x != 1.0) { arena.dnit(?ar); ret 4; }
-    if (md.vertices[2].position.y != 1.0) { arena.dnit(?ar); ret 5; }
-    if (md.indices[0] != 0 || md.indices[1] != 1 || md.indices[2] != 2) { arena.dnit(?ar); ret 6; }
+    if (md.format.count != 1) { arena.dnit(?ar); ret 4; }
+    if (md.format.stride != 12) { arena.dnit(?ar); ret 5; }
+    if (read_f32_at(md.vertices, 12) != 1.0) { arena.dnit(?ar); ret 6; }
+    if (read_f32_at(md.vertices, 28) != 1.0) { arena.dnit(?ar); ret 7; }
+    if (md.indices[0] != 0 || md.indices[1] != 1 || md.indices[2] != 2) { arena.dnit(?ar); ret 8; }
     arena.dnit(?ar);
     ret 0;
 }
