@@ -46,7 +46,7 @@ ref = "branch/main"
 
 [deps.mach-gl]
 git = "https://github.com/briar-systems/mach-gl"
-ref = "branch/main"
+ref = "branch/dev"
 
 [deps.mach-vk]
 git = "https://github.com/briar-systems/mach-vk"
@@ -54,19 +54,19 @@ ref = "branch/main"
 
 [deps.mach-audio]
 git = "https://github.com/briar-systems/mach-audio"
-ref = "branch/main"
+ref = "branch/dev"
 
 [deps.mach-image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "branch/main"
+ref = "branch/dev"
 
 [deps.mach-font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "branch/main"
+ref = "branch/dev"
 
 [deps.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/main"
+ref = "branch/dev"
 
 [deps.mach-phys]
 git = "https://github.com/briar-systems/mach-phys"
