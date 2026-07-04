@@ -9,7 +9,9 @@ boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.
 Early development. The engine core is in place: a context-owned lifecycle
 (`init` → `run` → `shutdown`), a fixed-timestep loop with render interpolation,
 a GLFW window with an OpenGL context, and timing, input-event, and logging
-utilities.
+utilities. A first-pass `boom.graphics` render facade adds opaque shader,
+texture, mesh, and material handles over the GL backend with an immediate-mode
+draw path.
 
 ## Overview
 
@@ -56,6 +58,44 @@ fun main(argc: i64, argv: **u8) i64 {
 
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.
+
+## Graphics
+
+`boom.graphics` is a render facade over the ecosystem libraries: a game authors
+shaders and draws 3D assets through opaque boom handles (`Shader`, `Texture`,
+`Mesh`, `Material`) and never imports `mach-gl`, `mach-gltf`, or `mach-image`.
+The API is immediate-mode and imposes no scene structure; the game owns its
+world and calls `draw` each frame against a `Camera` and `Transform` it
+controls. The uniform interface is keyed by name so a future Vulkan/SPIR-V
+backend can replace the GL one without touching game code.
+
+```mach
+use gfx: boom.graphics;
+use gm:  boom.graphics.math;
+
+# shader() returns Result[gfx.Shader, str]; the error is the compile/link log
+val compiled: Result[gfx.Shader, str] = gfx.shader(vertex_glsl, fragment_glsl);
+val sh:       gfx.Shader               = unwrap_ok[gfx.Shader, str](compiled);
+val cube:     gfx.Mesh                 = gfx.mesh(?verts[0], 24, ?indices[0], 36);
+
+gfx.clear(gm.vec4(0.08, 0.09, 0.12, 1.0));
+gfx.draw(?cube, ?sh, ?transform, ?camera);
+```
+
+A vertex shader follows the fixed attribute convention (location 0 = position,
+1 = normal, 2 = uv) and declares the `u_model`, `u_view`, `u_projection`
+uniforms that `draw` sets each call. `examples/cube` is a complete, runnable
+consumer.
+
+The interim scalar math (`boom.graphics.math`: `Vec3`, `Mat4`, `Quat`, ...)
+stands in for the shared `mach-math`, which is deferred until the compiler has
+SIMD vector types; it is imported on its own so that swap is a one-line change.
+
+Loading a texture from an encoded image file or a mesh from a glTF asset is not
+yet available: `mach-image` currently detects formats but does not decode
+pixels, and `mach-gltf` validates the `.glb` container but does not yet extract
+geometry. Those entry points land once the libraries grow the capability, with
+no change to the handles.
 
 ## Consuming boom
 
