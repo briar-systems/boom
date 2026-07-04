@@ -35,8 +35,11 @@ use boom.graphics.texture.Texture;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_use;
 use boom.graphics.shader.shader_set_mat4;
+use boom.graphics.shader.shader_set_mat4_array;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
+use boom.graphics.skeleton.Pose;
+use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.material.Material;
 use boom.graphics.material.material_bind;
 use boom.graphics.camera.Camera;
@@ -314,6 +317,32 @@ pub fun pass_draw(p: *Pass, m: *Mesh, shdr: *Shader, t: *Transform) {
     shader_set_mat4(s, "u_model", ?model);
     shader_set_mat4(s, "u_view", ?p.view);
     shader_set_mat4(s, "u_projection", ?p.projection);
+    mesh_draw(m);
+}
+
+# submit a skinned mesh draw with a pose, a shader, and a model transform
+#
+# binds the effective shader (the pass override, or the given one),
+# uploads u_model from the transform and u_view and u_projection from the
+# pass, then uploads the pose's skinning matrices as the u_joints palette
+# and draws. the shader must follow the skinning convention
+# (boom.graphics.skeleton.SKINNED_VERTEX_SRC): attribute locations 5
+# a_joints and 6 a_weights, and a u_joints mat4 array. set any other
+# uniforms on the shader first.
+# ---
+# p:    the open pass
+# m:    the skinned mesh to draw
+# pose: the current pose supplying the skinning palette
+# shdr: the shader to draw with, unless the pass overrides it
+# t:    the model transform placing the whole model in the world
+pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, shdr: *Shader, t: *Transform) {
+    val s: *Shader = effective_shader(p, shdr);
+    var model: Mat4 = transform_matrix(t);
+    shader_use(s);
+    shader_set_mat4(s, "u_model", ?model);
+    shader_set_mat4(s, "u_view", ?p.view);
+    shader_set_mat4(s, "u_projection", ?p.projection);
+    shader_set_mat4_array(s, "u_joints", pose_matrices(pose), pose.count::i32);
     mesh_draw(m);
 }
 

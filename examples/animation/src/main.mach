@@ -1,0 +1,177 @@
+# the boom skeletal-animation example: load an animated glTF and play it
+#
+# a standalone consumer of boom that shows the ergonomic animation surface:
+# model_load returns a Model (a skinned mesh, its skeleton, and named clips)
+# with mach-gltf fully hidden, model_player binds a player to a named clip,
+# and each frame advances the player and draws it with pass_draw_skinned.
+# the asset is a two-bone bar (assets/bar.glb) whose "bend" clip rocks the
+# top half back and forth; the whole model turns slowly so the bend reads
+# in 3D. run it from this directory so the relative asset path resolves.
+#
+# the game authors no glTF and no skinning matrices: it uses boom's
+# ready-made skinning vertex shader (gfx.SKINNED_VERTEX_SRC) and a plain
+# lit fragment shader, and never imports mach-gl, mach-glfw, or mach-gltf.
+
+use std.runtime;
+use std.print;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use gfx: boom.graphics;
+use gm:  boom.math;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.string.str;
+
+# the game's own state, carried through ctx.user
+# ---
+# renderer:  the renderer that draws the animated model
+# shader:    the skinning program, boom's skinning vertex shader plus a lit fragment
+# model:     the loaded model: skinned mesh, skeleton, and the "bend" clip
+# player:    playback of the "bend" clip, advanced each tick
+# camera:    the 3D viewpoint
+# transform: the model's placement, turned slowly each tick
+# ready:     whether init succeeded; draw is skipped if not
+rec Game {
+    renderer:  gfx.Renderer;
+    shader:    gfx.Shader;
+    model:     gfx.Model;
+    player:    gfx.AnimationPlayer;
+    camera:    gfx.Camera;
+    transform: gm.Transform;
+    ready:     u8;
+}
+
+# a plain directional-light fragment shader over the skinned normal
+val FRAGMENT_SRC: str = "#version 330 core\nin vec3 v_normal;\nin vec2 v_uv;\nout vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light = normalize(vec3(0.4, 1.0, 0.6));\n    float d = max(dot(n, light), 0.0);\n    vec3 base = vec3(0.70, 0.75, 0.92);\n    frag_color = vec4(base * (0.25 + 0.75 * d), 1.0);\n}\n";
+
+# the fixed update step in seconds, matching the 60 Hz config below
+val DT: f32 = 0.0166667;
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = 0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, w, h);
+    if (is_err[bool, gfx.Error](ri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
+        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
+
+    val compiled: Result[gfx.Shader, gfx.Error] = gfx.shader(gfx.SKINNED_VERTEX_SRC, FRAGMENT_SRC);
+    if (is_err[gfx.Shader, gfx.Error](compiled)) {
+        var e: gfx.Error = unwrap_err[gfx.Shader, gfx.Error](compiled);
+        print.eprintlnf("shader error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.shader = unwrap_ok[gfx.Shader, gfx.Error](compiled);
+
+    val loaded: Result[gfx.Model, gfx.Error] = gfx.model_load("assets/bar.glb");
+    if (is_err[gfx.Model, gfx.Error](loaded)) {
+        var e: gfx.Error = unwrap_err[gfx.Model, gfx.Error](loaded);
+        print.eprintlnf("model load error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.model = unwrap_ok[gfx.Model, gfx.Error](loaded);
+
+    val pl: Result[gfx.AnimationPlayer, gfx.Error] = gfx.model_player(?g.model, "bend");
+    if (is_err[gfx.AnimationPlayer, gfx.Error](pl)) {
+        var e: gfx.Error = unwrap_err[gfx.AnimationPlayer, gfx.Error](pl);
+        print.eprintlnf("model player error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.player = unwrap_ok[gfx.AnimationPlayer, gfx.Error](pl);
+
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(2.6, 1.8, 3.6),
+        gm.vec3(0.0, 1.0, 0.0),
+        gm.radians(55.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.transform = gm.transform_identity();
+    g.ready = 1;
+}
+
+# accumulated turn angle in radians, advanced each fixed tick
+var turn: f32 = 0.0;
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    gfx.animation_player_advance(?g.player, DT);
+    turn = turn + 0.01;
+    g.transform.rotation = gm.quat_from_axis_angle(gm.vec3(0.0, 1.0, 0.0), turn);
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+
+    gfx.renderer_begin_frame(?g.renderer);
+    var scene: gfx.PassDesc = gfx.pass_scene(?g.camera);
+    var pass:  gfx.Pass = gfx.pass_begin(?g.renderer, ?scene);
+    gfx.pass_draw_skinned(?pass, ?g.model.mesh, ?g.player.pose, ?g.shader, ?g.transform);
+    gfx.pass_end(?pass);
+    gfx.renderer_end_frame(?g.renderer);
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    gfx.model_delete(?g.model);
+    gfx.shader_delete(?g.shader);
+    gfx.renderer_dnit(?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "boom skeletal animation: a two-bone bend",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("failed to open window");
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    run(?ctx, ?app);
+    context_shutdown(?ctx);
+    ret 0;
+}

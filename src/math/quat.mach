@@ -5,6 +5,7 @@
 
 use boom.math.scalar.sinf;
 use boom.math.scalar.cosf;
+use boom.math.scalar.acosf;
 use boom.math.scalar.sqrtf;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3_normalize;
@@ -74,6 +75,60 @@ pub fun quat_normalize(q: Quat) Quat {
     ret Quat{x: q.x * inv, y: q.y * inv, z: q.z * inv, w: q.w * inv};
 }
 
+# dot product of two quaternions
+#
+# the cosine of half the angle between the rotations for unit inputs.
+# ---
+# a:   left quaternion
+# b:   right quaternion
+# ret: a . b
+pub fun quat_dot(a: Quat, b: Quat) f32 {
+    ret a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+}
+
+# spherical linear interpolation between two unit quaternions
+#
+# follows the shortest arc, negating b when the inputs face opposite
+# hemispheres, and falls back to a normalized linear blend when the two
+# rotations are nearly parallel and the sine denominator would vanish.
+# ---
+# a:   rotation at t = 0, unit length
+# b:   rotation at t = 1, unit length
+# t:   interpolation factor, 0 to 1
+# ret: the interpolated unit quaternion
+pub fun quat_slerp(a: Quat, b: Quat, t: f32) Quat {
+    var cosom: f32 = quat_dot(a, b);
+    var bx: f32 = b.x;
+    var by: f32 = b.y;
+    var bz: f32 = b.z;
+    var bw: f32 = b.w;
+    if (cosom < 0.0) {
+        cosom = 0.0 - cosom;
+        bx = 0.0 - bx;
+        by = 0.0 - by;
+        bz = 0.0 - bz;
+        bw = 0.0 - bw;
+    }
+    if (cosom > 0.9995) {
+        ret quat_normalize(Quat{
+            x: a.x + (bx - a.x) * t,
+            y: a.y + (by - a.y) * t,
+            z: a.z + (bz - a.z) * t,
+            w: a.w + (bw - a.w) * t,
+        });
+    }
+    val omega: f32 = acosf(cosom);
+    val sinom: f32 = sinf(omega);
+    val s0: f32 = sinf((1.0 - t) * omega) / sinom;
+    val s1: f32 = sinf(t * omega) / sinom;
+    ret Quat{
+        x: a.x * s0 + bx * s1,
+        y: a.y * s0 + by * s1,
+        z: a.z * s0 + bz * s1,
+        w: a.w * s0 + bw * s1,
+    };
+}
+
 test "quat: identity is the multiplicative unit" {
     val q: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 1.0, z: 0.0}, 1.0);
     val r: Quat = quat_mul(q, quat_identity());
@@ -86,5 +141,34 @@ test "quat: axis-angle produces a unit quaternion" {
     val len: f32 = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
     val d: f32 = len - 1.0;
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
+    ret 0;
+}
+
+test "quat: slerp returns the endpoints at t = 0 and t = 1" {
+    val a: Quat = quat_identity();
+    val b: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 0.0, z: 1.0}, 1.5707963);
+    val r0: Quat = quat_slerp(a, b, 0.0);
+    if (r0.w - a.w > 0.0001 || r0.w - a.w < 0.0 - 0.0001) { ret 1; }
+    val r1: Quat = quat_slerp(a, b, 1.0);
+    if (r1.z - b.z > 0.0001 || r1.z - b.z < 0.0 - 0.0001) { ret 2; }
+    if (r1.w - b.w > 0.0001 || r1.w - b.w < 0.0 - 0.0001) { ret 3; }
+    ret 0;
+}
+
+test "quat: slerp midpoint bisects a quarter turn" {
+    val a: Quat = quat_identity();
+    val b: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 0.0, z: 1.0}, 1.5707963);
+    val mid: Quat = quat_slerp(a, b, 0.5);
+    val expect: Quat = quat_from_axis_angle(Vec3{x: 0.0, y: 0.0, z: 1.0}, 0.78539815);
+    if (mid.z - expect.z > 0.001 || mid.z - expect.z < 0.0 - 0.001) { ret 1; }
+    if (mid.w - expect.w > 0.001 || mid.w - expect.w < 0.0 - 0.001) { ret 2; }
+    ret 0;
+}
+
+test "quat: slerp takes the shortest arc across the hemisphere" {
+    val a: Quat = quat_identity();
+    val b: Quat = Quat{x: 0.0, y: 0.0, z: 0.0, w: 0.0 - 1.0};
+    val mid: Quat = quat_slerp(a, b, 0.5);
+    if (mid.w < 0.999) { ret 1; }
     ret 0;
 }

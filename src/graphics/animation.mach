@@ -1,0 +1,343 @@
+# animation clips and the player that samples them onto a skeleton
+#
+# an Animation is boom's own view of a glTF animation: a set of channels,
+# each a stream of keyframes driving one joint's translation, rotation, or
+# scale. it holds no mach-gltf types; boom.graphics.model builds one from a
+# loaded document and owns the keyframe storage the channels point into.
+#
+# an AnimationPlayer is the per-instance playback state: a skeleton, an
+# active clip, a clock, and the Pose it recomputes each advance. sampling
+# is pure boom.math (linear for translation and scale, slerp for rotation,
+# or a held value for step keyframes), so it is unit-tested with no GL.
+#
+# first-pass limits, documented rather than gold-plated: one active clip at
+# a time, no blend tree, and linear or step interpolation only (glTF
+# cubic-spline keyframes are read as linear). blending, additive layers,
+# and IK are future work.
+
+use boom.graphics.skeleton.Skeleton;
+use boom.graphics.skeleton.Pose;
+use boom.graphics.skeleton.skeleton_pose;
+use boom.graphics.skeleton.skeleton_rest_pose;
+use boom.math.vec.Vec3;
+use boom.math.quat.Quat;
+use boom.math.quat.quat_slerp;
+use boom.math.transform.Transform;
+use std.types.size.usize;
+use std.types.string.str;
+
+# the local property an animation channel drives
+pub def ChannelPath: u8;
+
+# the joint's local translation
+pub val CHANNEL_TRANSLATION: ChannelPath = 0;
+# the joint's local rotation
+pub val CHANNEL_ROTATION:    ChannelPath = 1;
+# the joint's local scale
+pub val CHANNEL_SCALE:       ChannelPath = 2;
+
+# how a channel interpolates between its keyframes
+pub def Interp: u8;
+
+# blend linearly between keyframes (slerp for rotation)
+pub val INTERP_LINEAR: Interp = 0;
+# hold the earlier keyframe until the next one is reached
+pub val INTERP_STEP:   Interp = 1;
+
+# a keyframe stream driving one joint property
+#
+# times is ascending in seconds; values is count keyframes of stride
+# floats each (3 for translation and scale, 4 for a rotation quaternion).
+# both point into storage the owning Model holds for its lifetime.
+# ---
+# joint:  target joint index within the skeleton
+# path:   the local property the channel drives
+# interp: interpolation mode between keyframes
+# times:  keyframe times in seconds, count entries, ascending
+# values: keyframe outputs, count * stride floats
+# count:  number of keyframes
+# stride: floats per keyframe, 3 for translation and scale, 4 for rotation
+pub rec Channel {
+    joint:  usize;
+    path:   ChannelPath;
+    interp: Interp;
+    times:  *f32;
+    values: *f32;
+    count:  usize;
+    stride: usize;
+}
+
+# a named animation clip: channels sharing a timeline
+# ---
+# name:     clip name, boom-owned and null-terminated, for lookup by name
+# channels: the clip's channels, owned by the Model
+# count:    number of channels
+# duration: the clip length in seconds, the latest keyframe time
+pub rec Animation {
+    name:     str;
+    channels: *Channel;
+    count:    usize;
+    duration: f32;
+}
+
+# per-instance playback of one clip on one skeleton
+#
+# advance recomputes pose from the clip at the current time; a nil clip
+# holds the skeleton's rest pose. multiple players may share one skeleton,
+# each with its own clock and pose.
+# ---
+# skeleton: the skeleton to pose, borrowed from a Model
+# clip:     the active clip, borrowed from a Model, or nil for the rest pose
+# time:     seconds into the clip
+# speed:    playback rate multiplier, 1.0 for real time
+# looping:  1 to wrap time at the clip duration, 0 to clamp at the ends
+# pose:     the skinning palette recomputed each advance
+pub rec AnimationPlayer {
+    skeleton: *Skeleton;
+    clip:     *Animation;
+    time:     f32;
+    speed:    f32;
+    looping:  u8;
+    pose:     Pose;
+}
+
+# the latest keyframe time across a clip's channels, its duration
+# ---
+# clip: the clip to measure
+# ret:  the duration in seconds, 0 for a clip with no keyframes
+pub fun animation_duration(clip: *Animation) f32 {
+    var d: f32 = 0.0;
+    var c: usize = 0;
+    for (c < clip.count) {
+        val ch: *Channel = ?clip.channels[c];
+        if (ch.count > 0) {
+            val last: f32 = ch.times[ch.count - 1];
+            if (last > d) { d = last; }
+        }
+        c = c + 1;
+    }
+    ret d;
+}
+
+# locate the keyframe span containing t and the blend factor within it
+#
+# clamps to the first or last keyframe outside the timeline, returning a
+# zero factor there so the endpoint value is held.
+# ---
+# ch:     the channel to search
+# t:      the sample time in seconds
+# factor: receives the 0..1 blend factor from keyframe k toward k+1
+# ret:    the lower keyframe index k
+fun channel_span(ch: *Channel, t: f32, factor: *f32) usize {
+    @factor = 0.0;
+    if (ch.count <= 1) { ret 0; }
+    if (t <= ch.times[0]) { ret 0; }
+    val last: usize = ch.count - 1;
+    if (t >= ch.times[last]) { ret last; }
+    var k: usize = 0;
+    for (k + 1 < ch.count) {
+        if (t < ch.times[k + 1]) { brk; }
+        k = k + 1;
+    }
+    val t0: f32 = ch.times[k];
+    val t1: f32 = ch.times[k + 1];
+    val span: f32 = t1 - t0;
+    if (span > 0.0) { @factor = (t - t0) / span; }
+    ret k;
+}
+
+# sample a translation or scale channel at time t
+fun channel_vec3(ch: *Channel, t: f32) Vec3 {
+    var a: f32 = 0.0;
+    val k: usize = channel_span(ch, t, ?a);
+    val b0: usize = k * ch.stride;
+    val v0: Vec3 = Vec3{x: ch.values[b0], y: ch.values[b0 + 1], z: ch.values[b0 + 2]};
+    if (ch.interp == INTERP_STEP || a == 0.0 || k + 1 >= ch.count) { ret v0; }
+    val b1: usize = (k + 1) * ch.stride;
+    ret Vec3{
+        x: v0.x + (ch.values[b1] - v0.x) * a,
+        y: v0.y + (ch.values[b1 + 1] - v0.y) * a,
+        z: v0.z + (ch.values[b1 + 2] - v0.z) * a,
+    };
+}
+
+# sample a rotation channel at time t, slerping between keyframes
+fun channel_quat(ch: *Channel, t: f32) Quat {
+    var a: f32 = 0.0;
+    val k: usize = channel_span(ch, t, ?a);
+    val b0: usize = k * ch.stride;
+    val q0: Quat = Quat{x: ch.values[b0], y: ch.values[b0 + 1], z: ch.values[b0 + 2], w: ch.values[b0 + 3]};
+    if (ch.interp == INTERP_STEP || a == 0.0 || k + 1 >= ch.count) { ret q0; }
+    val b1: usize = (k + 1) * ch.stride;
+    val q1: Quat = Quat{x: ch.values[b1], y: ch.values[b1 + 1], z: ch.values[b1 + 2], w: ch.values[b1 + 3]};
+    ret quat_slerp(q0, q1, a);
+}
+
+# sample a clip at time t into per-joint local transforms
+#
+# seeds every joint from the skeleton's rest pose, then overwrites the
+# properties the clip's channels drive. a channel targeting a joint index
+# beyond the skeleton is skipped.
+# ---
+# clip:   the clip to sample
+# sk:     the skeleton providing the rest pose and joint count
+# t:      the sample time in seconds
+# locals: receives one local transform per joint, at least sk.count entries
+pub fun animation_sample(clip: *Animation, sk: *Skeleton, t: f32, locals: *Transform) {
+    var j: usize = 0;
+    for (j < sk.count) {
+        locals[j] = sk.rest[j];
+        j = j + 1;
+    }
+    var c: usize = 0;
+    for (c < clip.count) {
+        val ch: *Channel = ?clip.channels[c];
+        if (ch.joint < sk.count) {
+            if (ch.path == CHANNEL_TRANSLATION) {
+                locals[ch.joint].position = channel_vec3(ch, t);
+            }
+            or (ch.path == CHANNEL_SCALE) {
+                locals[ch.joint].scale = channel_vec3(ch, t);
+            }
+            or (ch.path == CHANNEL_ROTATION) {
+                locals[ch.joint].rotation = channel_quat(ch, t);
+            }
+        }
+        c = c + 1;
+    }
+}
+
+# a player bound to a skeleton and clip, at time zero, looping at real speed
+#
+# pass a nil clip to hold the rest pose. boom.graphics.model.model_player
+# is the ergonomic entry that looks a clip up by name.
+# ---
+# sk:   the skeleton to pose, borrowed
+# clip: the clip to play, borrowed, or nil for the rest pose
+# ret:  the player, its pose already set to the first frame
+pub fun animation_player(sk: *Skeleton, clip: *Animation) AnimationPlayer {
+    var pl: AnimationPlayer;
+    pl.skeleton = sk;
+    pl.clip     = clip;
+    pl.time     = 0.0;
+    pl.speed    = 1.0;
+    pl.looping  = 1;
+    animation_player_advance(?pl, 0.0);
+    ret pl;
+}
+
+# advance the player by dt seconds and recompute its pose
+#
+# scales dt by the player's speed, wraps or clamps the clock against the
+# clip duration, samples the clip, and composes the skinning palette. a
+# player with no clip is left in the skeleton's rest pose.
+# ---
+# pl: the player to advance
+# dt: elapsed time in seconds since the last advance
+pub fun animation_player_advance(pl: *AnimationPlayer, dt: f32) {
+    if (pl.clip == nil) {
+        skeleton_rest_pose(pl.skeleton, ?pl.pose);
+        ret;
+    }
+    pl.time = pl.time + dt * pl.speed;
+    val dur: f32 = pl.clip.duration;
+    if (pl.looping != 0 && dur > 0.0) {
+        for (pl.time >= dur) { pl.time = pl.time - dur; }
+        for (pl.time < 0.0) { pl.time = pl.time + dur; }
+    }
+    or {
+        if (pl.time < 0.0) { pl.time = 0.0; }
+        if (pl.time > dur) { pl.time = dur; }
+    }
+    var locals: [128]Transform;
+    animation_sample(pl.clip, pl.skeleton, pl.time, ?locals[0]);
+    skeleton_pose(pl.skeleton, ?locals[0], ?pl.pose);
+}
+
+# reset a player to a clip at time zero, preserving speed and loop mode
+# ---
+# pl:   the player to retarget
+# clip: the clip to play, borrowed, or nil for the rest pose
+pub fun animation_player_set_clip(pl: *AnimationPlayer, clip: *Animation) {
+    pl.clip = clip;
+    pl.time = 0.0;
+    animation_player_advance(pl, 0.0);
+}
+
+test "animation: rotation channel slerps between its keyframes" {
+    var times: [2]f32;
+    times[0] = 0.0;
+    times[1] = 2.0;
+    var values: [8]f32;
+    # keyframe 0: identity, keyframe 1: 90 degrees about z
+    values[0] = 0.0; values[1] = 0.0; values[2] = 0.0;         values[3] = 1.0;
+    values[4] = 0.0; values[5] = 0.0; values[6] = 0.70710678;  values[7] = 0.70710678;
+
+    var ch: Channel;
+    ch.joint  = 0;
+    ch.path   = CHANNEL_ROTATION;
+    ch.interp = INTERP_LINEAR;
+    ch.times  = ?times[0];
+    ch.values = ?values[0];
+    ch.count  = 2;
+    ch.stride = 4;
+
+    val q0: Quat = channel_quat(?ch, 0.0);
+    if (q0.w - 1.0 > 0.001 || q0.w - 1.0 < 0.0 - 0.001) { ret 1; }
+    # halfway lands on a 45 degree turn about z: sin(22.5), cos(22.5)
+    val mid: Quat = channel_quat(?ch, 1.0);
+    if (mid.z - 0.38268343 > 0.002 || mid.z - 0.38268343 < 0.0 - 0.002) { ret 2; }
+    val q1: Quat = channel_quat(?ch, 2.0);
+    if (q1.z - 0.70710678 > 0.001 || q1.z - 0.70710678 < 0.0 - 0.001) { ret 3; }
+    ret 0;
+}
+
+test "animation: translation channel interpolates and clamps at the ends" {
+    var times: [2]f32;
+    times[0] = 0.0;
+    times[1] = 1.0;
+    var values: [6]f32;
+    values[0] = 0.0; values[1] = 0.0;  values[2] = 0.0;
+    values[3] = 4.0; values[4] = 0.0;  values[5] = 0.0;
+
+    var ch: Channel;
+    ch.joint  = 0;
+    ch.path   = CHANNEL_TRANSLATION;
+    ch.interp = INTERP_LINEAR;
+    ch.times  = ?times[0];
+    ch.values = ?values[0];
+    ch.count  = 2;
+    ch.stride = 3;
+
+    val a: Vec3 = channel_vec3(?ch, 0.25);
+    if (a.x != 1.0) { ret 1; }
+    val b: Vec3 = channel_vec3(?ch, 0.0 - 5.0);
+    if (b.x != 0.0) { ret 2; }
+    val c: Vec3 = channel_vec3(?ch, 9.0);
+    if (c.x != 4.0) { ret 3; }
+    ret 0;
+}
+
+test "animation: step interpolation holds the earlier keyframe" {
+    var times: [2]f32;
+    times[0] = 0.0;
+    times[1] = 1.0;
+    var values: [6]f32;
+    values[0] = 0.0; values[1] = 0.0; values[2] = 0.0;
+    values[3] = 8.0; values[4] = 0.0; values[5] = 0.0;
+
+    var ch: Channel;
+    ch.joint  = 0;
+    ch.path   = CHANNEL_TRANSLATION;
+    ch.interp = INTERP_STEP;
+    ch.times  = ?times[0];
+    ch.values = ?values[0];
+    ch.count  = 2;
+    ch.stride = 3;
+
+    val a: Vec3 = channel_vec3(?ch, 0.75);
+    if (a.x != 0.0) { ret 1; }
+    val b: Vec3 = channel_vec3(?ch, 1.0);
+    if (b.x != 8.0) { ret 2; }
+    ret 0;
+}

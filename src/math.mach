@@ -22,6 +22,7 @@ fwd scalar.sqrtf;
 fwd scalar.sinf;
 fwd scalar.cosf;
 fwd scalar.tanf;
+fwd scalar.acosf;
 
 fwd vec.Vec2;
 fwd vec.Vec3;
@@ -53,6 +54,8 @@ fwd quat.quat_identity;
 fwd quat.quat_from_axis_angle;
 fwd quat.quat_mul;
 fwd quat.quat_normalize;
+fwd quat.quat_dot;
+fwd quat.quat_slerp;
 
 fwd transform.Transform;
 fwd transform.transform_identity;
