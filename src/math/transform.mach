@@ -1,17 +1,19 @@
 # a position, orientation, and scale, and the model matrix it produces
 #
-# a Transform is the game-facing way to place a mesh in the world. draw
-# takes one and uploads the composed model matrix as u_model.
+# a Transform is the game-facing way to place a mesh in the world. a 3D
+# pass takes one per draw and uploads the composed model matrix as
+# u_model. it lives in boom.math because placement is shared vocabulary:
+# physics integrates one, graphics renders through it.
 
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.vec3;
-use boom.graphics.math.quat.Quat;
-use boom.graphics.math.quat.quat_identity;
-use boom.graphics.math.mat.Mat4;
-use boom.graphics.math.mat.mat4_mul;
-use boom.graphics.math.mat.mat4_translation;
-use boom.graphics.math.mat.mat4_scale;
-use boom.graphics.math.mat.mat4_from_quat;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.quat.Quat;
+use boom.math.quat.quat_identity;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_translation;
+use boom.math.mat.mat4_scale;
+use boom.math.mat.mat4_from_quat;
 
 # a rigid placement with scale
 # ---

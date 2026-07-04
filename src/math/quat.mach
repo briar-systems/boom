@@ -1,13 +1,13 @@
 # scalar-interim quaternion type for orientations
 #
 # unit quaternions represent rotations for the render path. engine-
-# internal, to be replaced by mach-math; see boom.graphics.math.scalar.
+# internal, to be replaced by mach-math; see boom.math.scalar.
 
-use boom.graphics.math.scalar.sinf;
-use boom.graphics.math.scalar.cosf;
-use boom.graphics.math.scalar.sqrtf;
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.vec3_normalize;
+use boom.math.scalar.sinf;
+use boom.math.scalar.cosf;
+use boom.math.scalar.sqrtf;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3_normalize;
 
 # a quaternion (x, y, z, w) with w the scalar part
 # ---

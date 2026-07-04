@@ -2,9 +2,9 @@
 #
 # Vec2/Vec3/Vec4 with the handful of operations the renderer and camera
 # need. engine-internal, to be replaced by mach-math once the compiler
-# has SIMD vector types; see boom.graphics.math.scalar.
+# has SIMD vector types; see boom.math.scalar.
 
-use boom.graphics.math.scalar.sqrtf;
+use boom.math.scalar.sqrtf;
 
 # a 2-component vector, used for texture coordinates
 # ---
