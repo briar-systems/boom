@@ -1,0 +1,217 @@
+# the Shader handle: a compiled, linked GPU program
+#
+# a game authors GLSL against the standard convention (see the module
+# docstring on boom.graphics) and receives an opaque Shader; the backing
+# mach-gl program id stays hidden so a future SPIR-V/Vulkan backend can
+# replace this file without changing game code. uniforms are set by name,
+# which keeps the interface backend-agnostic: the GL backend resolves a
+# name to a location, a Vulkan backend would resolve it to a binding.
+
+use gl.gl;
+use boom.graphics.math.mat.Mat4;
+use boom.graphics.math.mat.mat4_ptr;
+use boom.graphics.math.vec.Vec3;
+use boom.graphics.math.vec.Vec4;
+use boom.graphics.texture.Texture;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.char.char;
+use std.types.string.str;
+
+# the largest compile or link log this module reports back
+val LOG_CAP: i32 = 1024;
+
+# scratch storage for the last compile/link failure message
+#
+# a Shader failure returns a str pointing here. the engine is single-
+# threaded and the caller is expected to read or print the message before
+# the next shader() call, which overwrites it; this trades a heap
+# allocation for a fixed buffer in the one error path.
+var log_buffer: [1024]char;
+
+# an opaque handle to a linked shader program
+# ---
+# program: the backing mach-gl program id, hidden from the game
+pub rec Shader {
+    program: u32;
+}
+
+# compile one shader stage, returning its id or a failure log
+# ---
+# stage:  a GL shader stage enum (gl.VERTEX_SHADER or gl.FRAGMENT_SHADER)
+# source: the GLSL source, null-terminated
+# ret:    the compiled shader id, or the compile log on failure
+fun compile_stage(stage: u32, source: str) Result[u32, str] {
+    val id: u32 = gl.create_shader(stage);
+    var src: *u8 = source:~*u8;
+    var strings: **u8 = ?src;
+    gl.shader_source(id, 1, strings, nil);
+    gl.compile_shader(id);
+
+    var status: i32 = 0;
+    gl.get_shaderiv(id, gl.COMPILE_STATUS, ?status);
+    if (status == 0) {
+        gl.get_shader_info_log(id, LOG_CAP, nil, ?log_buffer[0]);
+        gl.delete_shader(id);
+        ret err[u32, str](?log_buffer[0]);
+    }
+    ret ok[u32, str](id);
+}
+
+# compile and link a vertex and fragment shader into a program
+#
+# on any compile or link failure the returned error is the driver's log;
+# it is valid until the next shader() call. the game never sees the GL
+# program id, only the Shader handle.
+# ---
+# vertex_glsl:   GLSL vertex shader source, null-terminated
+# fragment_glsl: GLSL fragment shader source, null-terminated
+# ret:           the linked Shader, or the compile/link log on failure
+pub fun shader(vertex_glsl: str, fragment_glsl: str) Result[Shader, str] {
+    val vs: Result[u32, str] = compile_stage(gl.VERTEX_SHADER, vertex_glsl);
+    if (is_err[u32, str](vs)) {
+        ret err[Shader, str](unwrap_err[u32, str](vs));
+    }
+    val vs_id: u32 = unwrap_ok[u32, str](vs);
+
+    val fs: Result[u32, str] = compile_stage(gl.FRAGMENT_SHADER, fragment_glsl);
+    if (is_err[u32, str](fs)) {
+        gl.delete_shader(vs_id);
+        ret err[Shader, str](unwrap_err[u32, str](fs));
+    }
+    val fs_id: u32 = unwrap_ok[u32, str](fs);
+
+    val program: u32 = gl.create_program();
+    gl.attach_shader(program, vs_id);
+    gl.attach_shader(program, fs_id);
+    gl.link_program(program);
+    gl.delete_shader(vs_id);
+    gl.delete_shader(fs_id);
+
+    var status: i32 = 0;
+    gl.get_programiv(program, gl.LINK_STATUS, ?status);
+    if (status == 0) {
+        gl.get_program_info_log(program, LOG_CAP, nil, ?log_buffer[0]);
+        gl.delete_program(program);
+        ret err[Shader, str](?log_buffer[0]);
+    }
+    ret ok[Shader, str](Shader{program: program});
+}
+
+# make a shader the active program for subsequent draws and uniform sets
+# ---
+# s: shader to bind
+pub fun shader_use(s: *Shader) {
+    gl.use_program(s.program);
+}
+
+# set a mat4 uniform by name
+#
+# binds the shader and uploads the matrix column-major. a name absent
+# from the linked program is ignored, the normal GL behavior for a
+# uniform the compiler stripped.
+# ---
+# s:    shader owning the uniform
+# name: uniform name as declared in GLSL
+# m:    matrix to upload
+pub fun shader_set_mat4(s: *Shader, name: str, m: *Mat4) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform_matrix4fv(loc, 1, false, mat4_ptr(m));
+}
+
+# set a vec3 uniform by name
+# ---
+# s:    shader owning the uniform
+# name: uniform name as declared in GLSL
+# v:    value to upload
+pub fun shader_set_vec3(s: *Shader, name: str, v: Vec3) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform3f(loc, v.x, v.y, v.z);
+}
+
+# set a vec4 uniform by name
+# ---
+# s:    shader owning the uniform
+# name: uniform name as declared in GLSL
+# v:    value to upload
+pub fun shader_set_vec4(s: *Shader, name: str, v: Vec4) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform4f(loc, v.x, v.y, v.z, v.w);
+}
+
+# set a float uniform by name
+# ---
+# s:    shader owning the uniform
+# name: uniform name as declared in GLSL
+# x:    value to upload
+pub fun shader_set_f32(s: *Shader, name: str, x: f32) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform1f(loc, x);
+}
+
+# set an integer uniform by name
+# ---
+# s:    shader owning the uniform
+# name: uniform name as declared in GLSL
+# i:    value to upload
+pub fun shader_set_i32(s: *Shader, name: str, i: i32) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform1i(loc, i);
+}
+
+# bind a texture to a unit and point a sampler uniform at it
+# ---
+# s:    shader owning the sampler
+# name: sampler uniform name as declared in GLSL
+# tex:  texture to bind
+# unit: texture unit index to bind into
+pub fun shader_set_texture(s: *Shader, name: str, tex: *Texture, unit: i32) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.active_texture(gl.TEXTURE0 + unit::u32);
+    gl.bind_texture(gl.TEXTURE_2D, tex.id);
+    gl.uniform1i(loc, unit);
+}
+
+# release the GPU program backing a shader
+# ---
+# s: shader to delete; the handle must not be used afterward
+pub fun shader_delete(s: *Shader) {
+    gl.delete_program(s.program);
+    s.program = 0;
+}
+
+test "shader: a fresh handle carries no program" {
+    var s: Shader;
+    if (s.program != 0) { ret 1; }
+    ret 0;
+}

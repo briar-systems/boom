@@ -1,0 +1,71 @@
+# the Texture handle: a GPU image sampled by shaders
+#
+# a game supplies raw RGBA8 pixels and receives an opaque Texture; the
+# backing mach-gl texture id stays hidden. loading a texture from an
+# encoded image file (texture_load) is deferred: mach-image currently
+# detects formats but does not yet decode pixels, so that entry point
+# lands once the decoder exists, with no change to this handle.
+
+use gl.gl;
+
+# an opaque handle to a GPU texture
+# ---
+# id:     the backing mach-gl texture id, hidden from the game
+# width:  texture width in texels
+# height: texture height in texels
+pub rec Texture {
+    id:     u32;
+    width:  i32;
+    height: i32;
+}
+
+# upload an RGBA8 image to the GPU
+#
+# expects width * height * 4 bytes in row-major order, tightly packed.
+# the texture is created with linear filtering, mipmaps, and repeat
+# wrapping.
+# ---
+# pixels: RGBA8 pixel data, 4 bytes per texel
+# width:  image width in texels
+# height: image height in texels
+# ret:    the uploaded Texture handle
+pub fun texture(pixels: *u8, width: i32, height: i32) Texture {
+    var id: u32 = 0;
+    gl.gen_textures(1, ?id);
+    gl.bind_texture(gl.TEXTURE_2D, id);
+    gl.pixel_storei(gl.UNPACK_ALIGNMENT, 1);
+
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR::i32);
+
+    gl.tex_image2d(gl.TEXTURE_2D, 0, gl.RGBA::i32, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels::ptr);
+    gl.generate_mipmap(gl.TEXTURE_2D);
+    gl.bind_texture(gl.TEXTURE_2D, 0);
+
+    ret Texture{id: id, width: width, height: height};
+}
+
+# bind a texture to a texture unit
+# ---
+# t:    texture to bind
+# unit: texture unit index
+pub fun texture_bind(t: *Texture, unit: i32) {
+    gl.active_texture(gl.TEXTURE0 + unit::u32);
+    gl.bind_texture(gl.TEXTURE_2D, t.id);
+}
+
+# release the GPU texture backing a handle
+# ---
+# t: texture to delete; the handle must not be used afterward
+pub fun texture_delete(t: *Texture) {
+    gl.delete_textures(1, ?t.id);
+    t.id = 0;
+}
+
+test "texture: a fresh handle carries no id" {
+    var t: Texture;
+    if (t.id != 0) { ret 1; }
+    ret 0;
+}

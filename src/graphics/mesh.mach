@@ -1,0 +1,113 @@
+# the Mesh handle: GPU vertex and index buffers ready to draw
+#
+# a game supplies interleaved vertices and a triangle index list and
+# receives an opaque Mesh; the backing mach-gl vertex-array and buffer
+# ids stay hidden. loading a mesh from a glTF file (mesh_load) is
+# deferred: mach-gltf currently validates the .glb container header but
+# does not yet parse accessors, so geometry extraction lands once that
+# exists, with no change to this handle.
+#
+# the interleaved layout is fixed and matches the shader attribute
+# convention: location 0 = position (vec3), 1 = normal (vec3),
+# 2 = uv (vec2).
+
+use gl.gl;
+use boom.graphics.math.vec.Vec2;
+use boom.graphics.math.vec.Vec3;
+use std.types.bool.false;
+use std.types.size.usize;
+
+# one interleaved vertex
+# ---
+# position: model-space position
+# normal:   surface normal
+# uv:       texture coordinate
+pub rec Vertex {
+    position: Vec3;
+    normal:   Vec3;
+    uv:       Vec2;
+}
+
+# an opaque handle to a drawable mesh
+# ---
+# vao:         the backing vertex-array object id, hidden from the game
+# vbo:         the backing vertex buffer id
+# ebo:         the backing index buffer id
+# index_count: number of indices, the count drawn
+pub rec Mesh {
+    vao:         u32;
+    vbo:         u32;
+    ebo:         u32;
+    index_count: i32;
+}
+
+# reinterpret a byte offset as a buffer pointer for attribute setup
+# ---
+# n:   byte offset into the bound vertex buffer
+# ret: the offset as a pointer, as glVertexAttribPointer expects
+fun offset_ptr(n: usize) ptr {
+    ret n:~ptr;
+}
+
+# upload vertices and indices to the GPU
+#
+# copies the interleaved vertex data and the u32 triangle indices into GL
+# buffers and configures the standard attribute layout. the CPU data need
+# not outlive the call.
+# ---
+# vertices:     interleaved vertex array
+# vertex_count: number of vertices
+# indices:      triangle index list, three per triangle
+# index_count:  number of indices
+# ret:          the drawable Mesh handle
+pub fun mesh(vertices: *Vertex, vertex_count: i32, indices: *u32, index_count: i32) Mesh {
+    val stride: i32 = $size_of(Vertex)::i32;
+    val vsize:  i64 = vertex_count::i64 * $size_of(Vertex)::i64;
+    val isize:  i64 = index_count::i64 * 4;
+
+    var vao: u32 = 0;
+    var vbo: u32 = 0;
+    var ebo: u32 = 0;
+    gl.gen_vertex_arrays(1, ?vao);
+    gl.bind_vertex_array(vao);
+
+    gl.gen_buffers(1, ?vbo);
+    gl.bind_buffer(gl.ARRAY_BUFFER, vbo);
+    gl.buffer_data(gl.ARRAY_BUFFER, vsize, vertices::ptr, gl.STATIC_DRAW);
+
+    gl.gen_buffers(1, ?ebo);
+    gl.bind_buffer(gl.ELEMENT_ARRAY_BUFFER, ebo);
+    gl.buffer_data(gl.ELEMENT_ARRAY_BUFFER, isize, indices::ptr, gl.STATIC_DRAW);
+
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer(0, 3, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, position)));
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer(1, 3, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, normal)));
+    gl.enable_vertex_attrib_array(2);
+    gl.vertex_attrib_pointer(2, 2, gl.FLOAT, false, stride, offset_ptr($offset_of(Vertex, uv)));
+
+    gl.bind_vertex_array(0);
+
+    ret Mesh{vao: vao, vbo: vbo, ebo: ebo, index_count: index_count};
+}
+
+# release the GPU buffers backing a mesh
+# ---
+# m: mesh to delete; the handle must not be used afterward
+pub fun mesh_delete(m: *Mesh) {
+    gl.delete_vertex_arrays(1, ?m.vao);
+    gl.delete_buffers(1, ?m.vbo);
+    gl.delete_buffers(1, ?m.ebo);
+    m.vao = 0;
+    m.vbo = 0;
+    m.ebo = 0;
+    m.index_count = 0;
+}
+
+test "mesh: interleaved layout matches the attribute convention" {
+    if ($offset_of(Vertex, position) != 0) { ret 1; }
+    if ($offset_of(Vertex, normal) != 12) { ret 2; }
+    if ($offset_of(Vertex, uv) != 24) { ret 3; }
+    if ($size_of(Vertex) != 32) { ret 4; }
+    ret 0;
+}
