@@ -15,6 +15,7 @@ use boom.context.Context;
 use boom.app.App;
 use boom.window.window_should_close;
 use boom.window.window_poll;
+use boom.window.window_swap;
 use boom.clock.clock_tick;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
@@ -31,10 +32,11 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
 # calls f_init once, then loops until the context is stopped or the
 # window is closed: each frame polls input, advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
-# ctx.alpha, and renders via f_draw. calls f_dnit once on exit. absent
-# hooks are skipped. presentation is the Renderer's job (see
-# boom.graphics.renderer.renderer_end_frame), so f_draw drives the frame
-# from begin to present.
+# ctx.alpha, renders via f_draw, and presents once. calls f_dnit once on
+# exit. absent hooks are skipped. the loop owns presentation: f_draw may
+# drive any number of renderers (each finalizing with
+# boom.graphics.renderer.renderer_end_frame) into the frame, and the loop
+# swaps the window once afterward.
 # ---
 # ctx: initialized engine context to run
 # app: lifecycle hooks to drive
@@ -52,6 +54,7 @@ pub fun run(ctx: *Context, app: *App) {
 
         ctx.alpha = timestep_alpha(?ctx.step);
         invoke(app.f_draw, ctx);
+        window_swap(?ctx.window);
     }
 
     invoke(app.f_dnit, ctx);

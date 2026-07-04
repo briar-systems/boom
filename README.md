@@ -71,9 +71,9 @@ backend can replace the GL one without touching game code.
 
 ### Renderer and passes
 
-The `Renderer` is the core abstraction. A game creates one, then each frame
-calls `renderer_begin_frame`, runs one or more **passes**, and
-`renderer_end_frame` to present. A **pass** has a target (the window or an
+The `Renderer` is the core abstraction. A game creates one (or several), then
+each frame calls `renderer_begin_frame`, runs one or more **passes**, and
+`renderer_end_frame` to finalize. A **pass** has a target (the window or an
 offscreen `RenderTarget`), a projection (a perspective `Camera` for 3D or a
 pixel-space orthographic projection for 2D), clear and render state, and an
 optional per-pass shader. 2D and 3D go through the same machinery: `pass_scene`
@@ -82,6 +82,12 @@ builds a 3D pass and takes mesh draws (`pass_draw`, `pass_draw_material`);
 Set `PassDesc.target` to render into a texture and `PassDesc.shader` to drive
 the pass with a custom program, which is how offscreen and post-process effects
 are expressed.
+
+A Renderer holds no module-global state, so instances are independent and
+compose: a scene renderer can draw into an offscreen target that a UI renderer
+then samples as a texture, both feeding the same window. Presentation is not the
+Renderer's job. The engine loop swaps the window once per frame after `f_draw`,
+so any number of renderers finalize into one frame before a single present.
 
 Operations that can fail return `Result[T, Error]`, where `Error`
 (`boom.graphics.error`) carries its message inline in a fixed buffer, so a
@@ -97,7 +103,7 @@ val skin: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](gfx.texture_load("skin
 var mat:  gfx.Material = gfx.material(?sh);
 gfx.material_add_texture(?mat, "u_texture0", ?skin);
 
-# each frame: a 3D scene pass, then a 2D overlay pass, then present
+# in f_draw: a 3D scene pass, then a 2D overlay pass; the loop presents
 gfx.renderer_begin_frame(?renderer);
 
 var scene: gfx.PassDesc = gfx.pass_scene(?camera);
@@ -110,15 +116,15 @@ var p2:  gfx.Pass = gfx.pass_begin(?renderer, ?hud);
 gfx.pass_draw_sprite(?p2, ?skin, gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
 gfx.pass_end(?p2);
 
-gfx.renderer_end_frame(?renderer);
+gfx.renderer_end_frame(?renderer);   # finalize only; the engine loop presents
 ```
 
 A 3D mesh shader follows the attribute convention (location 0 = position,
 1 = normal, 2 = uv) and declares the `u_model`, `u_view`, `u_projection`
 uniforms that pass draws set each call. `examples/cube` is a complete, runnable
-consumer: it renders a glTF cube into an offscreen target, blits it to the
-window through a custom vignette shader, and draws a 2D HUD sprite, all in three
-passes.
+consumer that proves renderers compose: a scene renderer draws a glTF cube into
+an offscreen target, and a UI renderer blits it to the window through a custom
+vignette shader and draws a 2D HUD sprite, all before one present.
 
 ### Vertex format
 

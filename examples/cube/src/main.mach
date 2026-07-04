@@ -1,21 +1,22 @@
-# the boom.graphics v2 end-to-end example: 3D, offscreen, and 2D passes
+# the boom.graphics v2 end-to-end example: two renderers, one present
 #
 # a standalone consumer of boom that proves the Renderer and Pass API
-# drives 2D and 3D through the same machinery. each frame runs three
-# passes:
+# drives 2D and 3D through the same machinery, and that several renderers
+# coexist and composite into one frame. two renderers run each frame:
 #
-#   1. a 3D scene pass renders a spinning, textured, lit cube (loaded from
-#      a .glb, textured from a QOI image) into an offscreen render target.
-#   2. a post-process pass blits that target to the window through a
-#      custom shader (a vignette), showing custom shaders and sampling a
-#      render target as a 2D sprite.
-#   3. a 2D overlay pass draws a small HUD sprite with the default sprite
-#      shader.
+#   - a scene renderer draws a spinning, textured, lit cube (loaded from a
+#     .glb, textured from a QOI image) into an offscreen render target.
+#   - a UI renderer composites to the window: a post-process pass blits
+#     the scene target through a custom vignette shader (a renderer
+#     sampling another's output as a texture), then an overlay pass draws
+#     a HUD sprite with the default sprite shader.
 #
-# everything goes through boom handles: the game never imports mach-gl,
-# mach-glfw, mach-image, or mach-gltf. run it from this directory so the
-# relative asset paths resolve. geometry math comes from boom.math (as
-# gm), so swapping it for mach-math later is a localized change.
+# neither renderer presents; the engine loop swaps the window once after
+# f_draw, so the two renderers feed a single present. everything goes
+# through boom handles: the game never imports mach-gl, mach-glfw,
+# mach-image, or mach-gltf. run it from this directory so the relative
+# asset paths resolve. geometry math comes from boom.math (as gm), so
+# swapping it for mach-math later is a localized change.
 
 use std.runtime;
 use std.print;
@@ -40,27 +41,29 @@ use std.types.string.str;
 
 # the game's own state, carried through ctx.user
 # ---
-# renderer:  the render device, created once
-# shader:    the cube's 3D program
-# mesh:      the cube geometry, loaded from cube.glb
-# texture:   the surface texture, loaded from checker.qoi
-# material:  the 3D shader plus the texture binding
-# camera:    the 3D viewpoint
-# transform: the cube's placement, spun each tick
-# scene:     the offscreen target the 3D pass renders into
-# post:      the post-process shader the blit pass drives
-# ready:     whether init succeeded; draw is skipped if not
+# scene_renderer: the renderer that draws the 3D scene into the target
+# ui_renderer:    the renderer that composites the scene and HUD to the window
+# shader:         the cube's 3D program
+# mesh:           the cube geometry, loaded from cube.glb
+# texture:        the surface texture, loaded from checker.qoi
+# material:       the 3D shader plus the texture binding
+# camera:         the 3D viewpoint
+# transform:      the cube's placement, spun each tick
+# scene:          the offscreen target the scene renderer draws into
+# post:           the post-process shader the blit pass drives
+# ready:          whether init succeeded; draw is skipped if not
 rec Game {
-    renderer:  gfx.Renderer;
-    shader:    gfx.Shader;
-    mesh:      gfx.Mesh;
-    texture:   gfx.Texture;
-    material:  gfx.Material;
-    camera:    gfx.Camera;
-    transform: gm.Transform;
-    scene:     gfx.RenderTarget;
-    post:      gfx.Shader;
-    ready:     u8;
+    scene_renderer: gfx.Renderer;
+    ui_renderer:    gfx.Renderer;
+    shader:         gfx.Shader;
+    mesh:           gfx.Mesh;
+    texture:        gfx.Texture;
+    material:       gfx.Material;
+    camera:         gfx.Camera;
+    transform:      gm.Transform;
+    scene:          gfx.RenderTarget;
+    post:           gfx.Shader;
+    ready:          u8;
 }
 
 val VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    v_normal = mat3(u_model) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);\n}\n";
@@ -82,10 +85,17 @@ fun on_init(ctx: *Context) {
     val w: i32 = ctx.window.width;
     val h: i32 = ctx.window.height;
 
-    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window, w, h);
-    if (is_err[bool, gfx.Error](ri)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
-        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+    val sri: Result[bool, gfx.Error] = gfx.renderer_init(?g.scene_renderer, w, h);
+    if (is_err[bool, gfx.Error](sri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](sri);
+        print.eprintlnf("scene renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
+
+    val uri: Result[bool, gfx.Error] = gfx.renderer_init(?g.ui_renderer, w, h);
+    if (is_err[bool, gfx.Error](uri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](uri);
+        print.eprintlnf("ui renderer init error: {}", gfx.error_msg(?e));
         ret;
     }
 
@@ -167,26 +177,30 @@ fun on_draw(ctx: *Context) {
     val w: f32 = ctx.window.width::f32;
     val h: f32 = ctx.window.height::f32;
 
-    gfx.renderer_begin_frame(?g.renderer);
-
+    # scene renderer: draw the 3D cube into the offscreen target
+    gfx.renderer_begin_frame(?g.scene_renderer);
     var scene_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
     scene_desc.target = ?g.scene;
-    var scene_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?scene_desc);
+    var scene_pass: gfx.Pass = gfx.pass_begin(?g.scene_renderer, ?scene_desc);
     gfx.pass_draw_material(?scene_pass, ?g.mesh, ?g.material, ?g.transform);
     gfx.pass_end(?scene_pass);
+    gfx.renderer_end_frame(?g.scene_renderer);
 
+    # ui renderer: composite the scene target and a HUD sprite to the window
+    gfx.renderer_begin_frame(?g.ui_renderer);
     var post_desc: gfx.PassDesc = gfx.pass_overlay();
     post_desc.shader = ?g.post;
-    var post_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?post_desc);
+    var post_pass: gfx.Pass = gfx.pass_begin(?g.ui_renderer, ?post_desc);
     gfx.pass_draw_sprite(?post_pass, gfx.render_target_texture(?g.scene), gfx.rect(0.0, 0.0, w, h), gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?post_pass);
 
     var hud_desc: gfx.PassDesc = gfx.pass_overlay();
-    var hud_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?hud_desc);
+    var hud_pass: gfx.Pass = gfx.pass_begin(?g.ui_renderer, ?hud_desc);
     gfx.pass_draw_sprite(?hud_pass, ?g.texture, gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?hud_pass);
+    gfx.renderer_end_frame(?g.ui_renderer);
 
-    gfx.renderer_end_frame(?g.renderer);
+    # the engine loop presents once after f_draw
 }
 
 fun on_dnit(ctx: *Context) {
@@ -199,7 +213,8 @@ fun on_dnit(ctx: *Context) {
     gfx.texture_delete(?g.texture);
     gfx.shader_delete(?g.shader);
     gfx.shader_delete(?g.post);
-    gfx.renderer_dnit(?g.renderer);
+    gfx.renderer_dnit(?g.scene_renderer);
+    gfx.renderer_dnit(?g.ui_renderer);
 }
 
 #[symbol("main")]

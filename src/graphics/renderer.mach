@@ -1,12 +1,19 @@
 # the Renderer and its passes: boom's core render abstraction
 #
-# the Renderer owns the GL context's frame lifecycle and the shared sprite
-# resources; a game creates one and drives every frame through it:
+# a Renderer bundles the frame lifecycle and the shared sprite resources;
+# a game creates one (or several) and drives each frame through it:
 # renderer_begin_frame, then one or more passes, then renderer_end_frame
-# to present. a Pass is a unit of drawing with a target (the window or an
-# offscreen RenderTarget), a projection (perspective for 3D, orthographic
-# for 2D), clear and render state, and an optional per-pass shader. the
-# same Renderer and Pass machinery drives both 2D and 3D:
+# to finalize. presentation is not the Renderer's job: the engine loop
+# swaps the window once per frame after the app has drawn, so several
+# renderers can composite into one frame before a single present. a
+# Renderer holds no module-global state, so instances are independent:
+# a scene renderer can draw into an offscreen RenderTarget that a UI
+# renderer then samples as a texture, both feeding the same window.
+#
+# a Pass is a unit of drawing with a target (the window or an offscreen
+# RenderTarget), a projection (perspective for 3D, orthographic for 2D),
+# clear and render state, and an optional per-pass shader. the same
+# Renderer and Pass machinery drives both 2D and 3D:
 #
 #   - pass_scene builds a 3D pass from a camera; pass_draw and
 #     pass_draw_material submit mesh draws with a model transform.
@@ -23,8 +30,6 @@
 # boom.graphics.sprite.
 
 use gl.gl;
-use boom.window.Window;
-use boom.window.window_swap;
 use boom.graphics.error.Error;
 use boom.graphics.texture.Texture;
 use boom.graphics.shader.Shader;
@@ -60,36 +65,33 @@ use std.types.result.unwrap_err;
 use std.types.bool.bool;
 use std.types.bool.true;
 
-# the render device: owns the frame lifecycle and shared sprite resources
+# the render device: the frame lifecycle and shared sprite resources
 # ---
-# window: the window whose GL context this renders into and presents to
 # sprite: the shared sprite quad and default sprite shader
-# width:  the default framebuffer width in pixels
-# height: the default framebuffer height in pixels
+# width:  the target width in pixels used for a window-bound pass viewport
+# height: the target height in pixels used for a window-bound pass viewport
 pub rec Renderer {
-    window: *Window;
     sprite: SpriteResources;
     width:  i32;
     height: i32;
 }
 
-# initialize the renderer against a window's live GL context
+# initialize a renderer against the current GL context
 #
 # builds the shared sprite resources; the GL context must already be
-# current (boom.window makes it current when it opens the window). call
-# once after the window is open.
+# current (boom.window makes it current when it opens the window). safe to
+# call for several independent renderers; each owns its own resources. the
+# width and height size the viewport for passes that target the window.
 # ---
 # r:      renderer to initialize
-# window: the window to render into and present to
-# width:  the framebuffer width in pixels
-# height: the framebuffer height in pixels
+# width:  the window framebuffer width in pixels
+# height: the window framebuffer height in pixels
 # ret:    true on success, or a shader compile error from the sprite setup
-pub fun renderer_init(r: *Renderer, window: *Window, width: i32, height: i32) Result[bool, Error] {
+pub fun renderer_init(r: *Renderer, width: i32, height: i32) Result[bool, Error] {
     val sr: Result[SpriteResources, Error] = sprite_resources();
     if (is_err[SpriteResources, Error](sr)) {
         ret err[bool, Error](unwrap_err[SpriteResources, Error](sr));
     }
-    r.window = window;
     r.sprite = unwrap_ok[SpriteResources, Error](sr);
     r.width  = width;
     r.height = height;
@@ -106,24 +108,28 @@ pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
     r.height = height;
 }
 
-# begin a frame, selecting the default framebuffer
+# begin this renderer's contribution to the frame
 #
 # binds the window framebuffer and sets the full viewport, a clean
-# starting point before the frame's passes.
+# starting point before the renderer's passes.
 # ---
-# r: renderer to begin a frame on
+# r: renderer to begin on
 pub fun renderer_begin_frame(r: *Renderer) {
     gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
     gl.viewport(0, 0, r.width, r.height);
 }
 
-# end the frame and present it
+# finalize this renderer's GL work for the frame
 #
-# swaps the window's buffers, showing the frame just drawn.
+# unbinds any offscreen target back to the window framebuffer and flushes
+# the command stream. it does not present: the engine loop swaps the
+# window once per frame after the app has drawn, so several renderers can
+# finalize into one frame before a single present.
 # ---
-# r: renderer to present
+# r: renderer to finalize
 pub fun renderer_end_frame(r: *Renderer) {
-    window_swap(r.window);
+    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
+    gl.flush();
 }
 
 # release the renderer's shared resources
