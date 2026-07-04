@@ -9,9 +9,11 @@ boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.
 Early development. The engine core is in place: a context-owned lifecycle
 (`init` → `run` → `shutdown`), a fixed-timestep loop with render interpolation,
 a GLFW window with an OpenGL context, and timing, input-event, and logging
-utilities. A first-pass `boom.graphics` render facade adds opaque shader,
-texture, mesh, and material handles over the GL backend with an immediate-mode
-draw path.
+utilities. `boom.graphics` is a v2 render architecture built around a
+`Renderer` and render passes: opaque shader, texture, mesh, material, and
+render-target handles over the GL backend, with 2D and 3D driven through the
+same pass machinery and an extensible vertex format underpinning meshes.
+Skeletal animation is the next graphics phase (see [Graphics](#graphics)).
 
 ## Overview
 
@@ -62,12 +64,24 @@ loop skips it.
 ## Graphics
 
 `boom.graphics` is a render facade over the ecosystem libraries: a game authors
-shaders and draws 3D assets through opaque boom handles (`Shader`, `Texture`,
-`Mesh`, `Material`) and never imports `mach-gl`, `mach-gltf`, or `mach-image`.
-The API is immediate-mode and imposes no scene structure; the game owns its
-world and calls `draw` each frame against a `Camera` and `Transform` it
-controls. The uniform interface is keyed by name so a future Vulkan/SPIR-V
+shaders and draws through opaque boom handles (`Shader`, `Texture`, `Mesh`,
+`Material`, `RenderTarget`) and never imports `mach-gl`, `mach-gltf`, or
+`mach-image`. The uniform interface is keyed by name so a future Vulkan/SPIR-V
 backend can replace the GL one without touching game code.
+
+### Renderer and passes
+
+The `Renderer` is the core abstraction. A game creates one, then each frame
+calls `renderer_begin_frame`, runs one or more **passes**, and
+`renderer_end_frame` to present. A **pass** has a target (the window or an
+offscreen `RenderTarget`), a projection (a perspective `Camera` for 3D or a
+pixel-space orthographic projection for 2D), clear and render state, and an
+optional per-pass shader. 2D and 3D go through the same machinery: `pass_scene`
+builds a 3D pass and takes mesh draws (`pass_draw`, `pass_draw_material`);
+`pass_overlay` builds a 2D pass and takes sprite draws (`pass_draw_sprite`).
+Set `PassDesc.target` to render into a texture and `PassDesc.shader` to drive
+the pass with a custom program, which is how offscreen and post-process effects
+are expressed.
 
 Operations that can fail return `Result[T, Error]`, where `Error`
 (`boom.graphics.error`) carries its message inline in a fixed buffer, so a
@@ -75,33 +89,63 @@ failure needs neither a heap allocation nor a global.
 
 ```mach
 use gfx: boom.graphics;
-use gm:  boom.graphics.math;
+use gm:  boom.math;
 
-# shader() returns Result[gfx.Shader, gfx.Error]; the error is the compile log
-val compiled: Result[gfx.Shader, gfx.Error] = gfx.shader(vertex_glsl, fragment_glsl);
-val sh:       gfx.Shader = unwrap_ok[gfx.Shader, gfx.Error](compiled);
-
-# meshes and textures come from data or from files (glTF / QOI / TGA)
+# a mesh and texture from files (glTF / QOI / TGA), a shader, a material
 val cube: gfx.Mesh    = unwrap_ok[gfx.Mesh, gfx.Error](gfx.mesh_load("cube.glb"));
 val skin: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](gfx.texture_load("skin.qoi"));
+var mat:  gfx.Material = gfx.material(?sh);
+gfx.material_add_texture(?mat, "u_texture0", ?skin);
 
-gfx.clear(gm.vec4(0.08, 0.09, 0.12, 1.0));
-gfx.draw(?cube, ?sh, ?transform, ?camera);
+# each frame: a 3D scene pass, then a 2D overlay pass, then present
+gfx.renderer_begin_frame(?renderer);
+
+var scene: gfx.PassDesc = gfx.pass_scene(?camera);
+var p3:    gfx.Pass = gfx.pass_begin(?renderer, ?scene);
+gfx.pass_draw_material(?p3, ?cube, ?mat, ?transform);
+gfx.pass_end(?p3);
+
+var hud: gfx.PassDesc = gfx.pass_overlay();
+var p2:  gfx.Pass = gfx.pass_begin(?renderer, ?hud);
+gfx.pass_draw_sprite(?p2, ?skin, gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
+gfx.pass_end(?p2);
+
+gfx.renderer_end_frame(?renderer);
 ```
 
-A vertex shader follows the fixed attribute convention (location 0 = position,
+A 3D mesh shader follows the attribute convention (location 0 = position,
 1 = normal, 2 = uv) and declares the `u_model`, `u_view`, `u_projection`
-uniforms that `draw` sets each call. `examples/cube` is a complete, runnable
-consumer that loads a glTF cube and a QOI texture.
+uniforms that pass draws set each call. `examples/cube` is a complete, runnable
+consumer: it renders a glTF cube into an offscreen target, blits it to the
+window through a custom vignette shader, and draws a 2D HUD sprite, all in three
+passes.
 
-`texture_load` / `texture_from_bytes` decode QOI and TGA images; `mesh_load` /
-`mesh_from_glb` extract the first primitive (POSITION, NORMAL, TEXCOORD_0, and
-indices) of a glTF 2.0 `.glb`. Both hide the backing libraries entirely and
-return an `Error` on anything they cannot handle.
+### Vertex format
 
-The interim scalar math (`boom.graphics.math`: `Vec3`, `Mat4`, `Quat`, ...)
+A mesh is described by a `VertexFormat` (`boom.graphics.vertex`): a declared
+list of attributes (semantic, component type, count, location) rather than a
+fixed vertex struct. `texture_load` / `texture_from_bytes` decode QOI and TGA
+images; `mesh_load` / `mesh_from_glb` extract the first primitive of a glTF 2.0
+`.glb`, building the format from whatever attributes the primitive provides
+(POSITION plus any NORMAL, TEXCOORD_0, COLOR_0, TANGENT). Both hide the backing
+libraries entirely and return an `Error` on anything they cannot handle.
+
+The format can also describe the `JOINTS_0` (integer-bound) and `WEIGHTS_0`
+attributes that skinning needs, and the mesh path binds them, but the loader
+does not yet read them and no runtime consumes them.
+
+### Next phase: animation
+
+Skeletal animation (pose sampling and skinning) is the next graphics phase. The
+groundwork is in place: the vertex format carries `JOINTS_0` / `WEIGHTS_0`, and
+a pass can bind skinning uniforms to a custom shader. The animation runtime
+itself (sampling glTF animation channels, computing joint matrices, and
+uploading them) is not yet implemented.
+
+The interim scalar math (`boom.math`: `Vec3`, `Mat4`, `Quat`, `Transform`, ...)
 stands in for the shared `mach-math`, which is deferred until the compiler has
-SIMD vector types; it is imported on its own so that swap is a one-line change.
+SIMD vector types; graphics consumes it through `boom.math` so that swap is a
+localized change.
 
 ## Consuming boom
 
