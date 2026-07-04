@@ -91,6 +91,30 @@ pub fun tan64(x: f64) f64 {
     ret sin64(x) / cos64(x);
 }
 
+# arccosine, a polynomial approximation over the clamped domain
+#
+# clamps the argument to [-1, 1] and evaluates the standard degree-3
+# approximation on [0, 1], reflecting through pi for negative input.
+# accurate to about 7e-5, ample for the slerp angle it serves. inputs
+# outside [-1, 1] would otherwise arise only from rounding a dot product.
+# ---
+# x:   cosine value, clamped to [-1, 1]
+# ret: the angle in radians, 0 to pi
+pub fun acos64(x: f64) f64 {
+    var c: f64 = x;
+    if (c < 0.0 - 1.0) { c = 0.0 - 1.0; }
+    if (c > 1.0) { c = 1.0; }
+    var a: f64 = c;
+    if (a < 0.0) { a = 0.0 - a; }
+    var p: f64 = 0.0 - 0.0187293;
+    p = p * a + 0.0742610;
+    p = p * a - 0.2121144;
+    p = p * a + 1.5707288;
+    val r: f64 = p * sqrt64(1.0 - a);
+    if (c < 0.0) { ret PI - r; }
+    ret r;
+}
+
 # f32 square root
 # ---
 # x:   radicand
@@ -121,6 +145,14 @@ pub fun cosf(x: f32) f32 {
 # ret: tangent of x as f32
 pub fun tanf(x: f32) f32 {
     ret tan64(x::f64)::f32;
+}
+
+# f32 arccosine
+# ---
+# x:   cosine value, clamped to [-1, 1]
+# ret: the angle in radians as f32, 0 to pi
+pub fun acosf(x: f32) f32 {
+    ret acos64(x::f64)::f32;
 }
 
 # whether two f64 values differ by no more than eps
@@ -175,5 +207,19 @@ test "scalar: radians converts degrees" {
     val r: f32 = radians(180.0);
     val d: f64 = r::f64 - PI;
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
+    ret 0;
+}
+
+test "scalar: arccosine at cardinal values" {
+    if (!close(acos64(1.0), 0.0, 0.0001)) { ret 1; }
+    if (!close(acos64(0.0), HALF_PI, 0.0001)) { ret 2; }
+    if (!close(acos64(0.0 - 1.0), PI, 0.0001)) { ret 3; }
+    if (!close(acos64(0.5), PI / 3.0, 0.0005)) { ret 4; }
+    ret 0;
+}
+
+test "scalar: arccosine clamps out-of-range input" {
+    if (!close(acos64(1.5), 0.0, 0.0001)) { ret 1; }
+    if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 2; }
     ret 0;
 }
