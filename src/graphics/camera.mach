@@ -4,11 +4,11 @@
 # view and projection as u_view and u_projection. the camera is a plain
 # value the game owns and mutates; graphics imposes no scene structure.
 
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.vec3;
-use boom.graphics.math.mat.Mat4;
-use boom.graphics.math.mat.mat4_look_at;
-use boom.graphics.math.mat.mat4_perspective;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_look_at;
+use boom.math.mat.mat4_perspective;
 
 # a perspective camera
 # ---

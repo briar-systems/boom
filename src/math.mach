@@ -1,0 +1,59 @@
+# boom's shared scalar-interim math
+
+# a small, self-contained math layer (scalars, vectors, a 4x4 matrix,
+# quaternions, and a rigid transform) that every subsystem shares:
+# graphics builds model, view, and projection matrices from it, and
+# physics and audio draw on the same vocabulary. it stands in for the
+# shared mach-math, which is deferred until the compiler has SIMD vector
+# types; when that lands this module is replaced wholesale and the public
+# math handles keep their shape. consumers import it as `use boom.math;`.
+
+use boom.math.scalar;
+use boom.math.vec;
+use boom.math.mat;
+use boom.math.quat;
+use boom.math.transform;
+
+fwd scalar.PI;
+fwd scalar.HALF_PI;
+fwd scalar.TWO_PI;
+fwd scalar.radians;
+fwd scalar.sqrtf;
+fwd scalar.sinf;
+fwd scalar.cosf;
+fwd scalar.tanf;
+
+fwd vec.Vec2;
+fwd vec.Vec3;
+fwd vec.Vec4;
+fwd vec.vec2;
+fwd vec.vec3;
+fwd vec.vec4;
+fwd vec.vec3_add;
+fwd vec.vec3_sub;
+fwd vec.vec3_scale;
+fwd vec.vec3_dot;
+fwd vec.vec3_cross;
+fwd vec.vec3_length;
+fwd vec.vec3_normalize;
+
+fwd mat.Mat4;
+fwd mat.mat4_identity;
+fwd mat.mat4_mul;
+fwd mat.mat4_translation;
+fwd mat.mat4_scale;
+fwd mat.mat4_from_quat;
+fwd mat.mat4_perspective;
+fwd mat.mat4_orthographic;
+fwd mat.mat4_look_at;
+fwd mat.mat4_ptr;
+
+fwd quat.Quat;
+fwd quat.quat_identity;
+fwd quat.quat_from_axis_angle;
+fwd quat.quat_mul;
+fwd quat.quat_normalize;
+
+fwd transform.Transform;
+fwd transform.transform_identity;
+fwd transform.transform_matrix;

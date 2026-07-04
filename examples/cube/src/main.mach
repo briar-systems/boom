@@ -1,13 +1,22 @@
-# a spinning, textured, lit cube: the boom.graphics end-to-end example
+# the boom.graphics v2 end-to-end example: two renderers, one present
 #
-# a standalone consumer of boom. it opens a window through the engine,
-# compiles a GLSL shader, loads a cube mesh from a glTF file and a texture
-# from a QOI image, and draws the model with a material, transform, and
-# camera every frame, all through boom handles and without importing
-# mach-gl, mach-glfw, mach-image, or mach-gltf directly. run it from this
-# directory so the relative asset paths resolve. the interim math is
-# imported on its own (as gm) so swapping it for mach-math later is a
-# one-line change.
+# a standalone consumer of boom that proves the Renderer and Pass API
+# drives 2D and 3D through the same machinery, and that several renderers
+# coexist and composite into one frame. two renderers run each frame:
+#
+#   - a scene renderer draws a spinning, textured, lit cube (loaded from a
+#     .glb, textured from a QOI image) into an offscreen render target.
+#   - a UI renderer composites to the window: a post-process pass blits
+#     the scene target through a custom vignette shader (a renderer
+#     sampling another's output as a texture), then an overlay pass draws
+#     a HUD sprite with the default sprite shader.
+#
+# neither renderer presents; the engine loop swaps the window once after
+# f_draw, so the two renderers feed a single present. everything goes
+# through boom handles: the game never imports mach-gl, mach-glfw,
+# mach-image, or mach-gltf. run it from this directory so the relative
+# asset paths resolve. geometry math comes from boom.math (as gm), so
+# swapping it for mach-math later is a localized change.
 
 use std.runtime;
 use std.print;
@@ -20,44 +29,75 @@ use boom.context.context_shutdown;
 use boom.engine.run;
 use boom.app.App;
 use gfx: boom.graphics;
-use gm:  boom.graphics.math;
+use gm:  boom.math;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
 use std.types.result.Result;
 use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
+use std.types.bool.bool;
 use std.types.string.str;
 
 # the game's own state, carried through ctx.user
 # ---
-# shader:    the cube's compiled program
-# mesh:      the cube geometry, loaded from cube.glb
-# texture:   the surface texture, loaded from checker.qoi
-# material:  the shader plus the texture binding
-# camera:    the viewpoint
-# transform: the cube's placement, spun each tick
-# ready:     whether init succeeded; draw is skipped if not
+# scene_renderer: the renderer that draws the 3D scene into the target
+# ui_renderer:    the renderer that composites the scene and HUD to the window
+# shader:         the cube's 3D program
+# mesh:           the cube geometry, loaded from cube.glb
+# texture:        the surface texture, loaded from checker.qoi
+# material:       the 3D shader plus the texture binding
+# camera:         the 3D viewpoint
+# transform:      the cube's placement, spun each tick
+# scene:          the offscreen target the scene renderer draws into
+# post:           the post-process shader the blit pass drives
+# ready:          whether init succeeded; draw is skipped if not
 rec Game {
-    shader:    gfx.Shader;
-    mesh:      gfx.Mesh;
-    texture:   gfx.Texture;
-    material:  gfx.Material;
-    camera:    gfx.Camera;
-    transform: gfx.Transform;
-    ready:     u8;
+    scene_renderer: gfx.Renderer;
+    ui_renderer:    gfx.Renderer;
+    shader:         gfx.Shader;
+    mesh:           gfx.Mesh;
+    texture:        gfx.Texture;
+    material:       gfx.Material;
+    camera:         gfx.Camera;
+    transform:      gm.Transform;
+    scene:          gfx.RenderTarget;
+    post:           gfx.Shader;
+    ready:          u8;
 }
 
 val VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    v_normal = mat3(u_model) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * u_model * vec4(a_position, 1.0);\n}\n";
 
 val FRAGMENT_SRC: str = "#version 330 core\nin vec3 v_normal;\nin vec2 v_uv;\nuniform vec4 u_base_color;\nuniform sampler2D u_texture0;\nout vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light = normalize(vec3(0.4, 1.0, 0.6));\n    float d = max(dot(n, light), 0.0);\n    vec4 tex = texture(u_texture0, v_uv);\n    frag_color = vec4(tex.rgb * u_base_color.rgb * (0.25 + 0.75 * d), tex.a * u_base_color.a);\n}\n";
 
+# the post-process pass follows the sprite uniform convention: a full
+# quad in pixel space, u_texture0 the scene target. it flips v on the y
+# axis (a render target's texture origin is bottom-left) and darkens the
+# edges into a vignette.
+val POST_VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec2 a_position;\nlayout(location = 1) in vec2 a_uv;\nuniform mat4 u_projection;\nuniform mat4 u_model;\nuniform vec4 u_src;\nout vec2 v_uv;\nvoid main() {\n    v_uv = u_src.xy + a_uv * u_src.zw;\n    gl_Position = u_projection * u_model * vec4(a_position, 0.0, 1.0);\n}\n";
+
+val POST_FRAGMENT_SRC: str = "#version 330 core\nin vec2 v_uv;\nuniform sampler2D u_texture0;\nuniform vec4 u_tint;\nout vec4 frag_color;\nvoid main() {\n    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);\n    vec4 c = texture(u_texture0, uv);\n    vec2 d = uv - vec2(0.5, 0.5);\n    float vig = 1.0 - dot(d, d) * 1.1;\n    frag_color = vec4(c.rgb * vig, 1.0) * u_tint;\n}\n";
+
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     g.ready = 0;
 
-    gfx.graphics_init();
-    gfx.viewport(ctx.window.width, ctx.window.height);
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val sri: Result[bool, gfx.Error] = gfx.renderer_init(?g.scene_renderer, w, h);
+    if (is_err[bool, gfx.Error](sri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](sri);
+        print.eprintlnf("scene renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
+
+    val uri: Result[bool, gfx.Error] = gfx.renderer_init(?g.ui_renderer, w, h);
+    if (is_err[bool, gfx.Error](uri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](uri);
+        print.eprintlnf("ui renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
 
     val compiled: Result[gfx.Shader, gfx.Error] = gfx.shader(VERTEX_SRC, FRAGMENT_SRC);
     if (is_err[gfx.Shader, gfx.Error](compiled)) {
@@ -66,6 +106,14 @@ fun on_init(ctx: *Context) {
         ret;
     }
     g.shader = unwrap_ok[gfx.Shader, gfx.Error](compiled);
+
+    val post: Result[gfx.Shader, gfx.Error] = gfx.shader(POST_VERTEX_SRC, POST_FRAGMENT_SRC);
+    if (is_err[gfx.Shader, gfx.Error](post)) {
+        var e: gfx.Error = unwrap_err[gfx.Shader, gfx.Error](post);
+        print.eprintlnf("post shader error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.post = unwrap_ok[gfx.Shader, gfx.Error](post);
 
     val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load("assets/cube.glb");
     if (is_err[gfx.Mesh, gfx.Error](loaded)) {
@@ -86,7 +134,15 @@ fun on_init(ctx: *Context) {
     g.material = gfx.material(?g.shader);
     gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
 
-    val aspect: f32 = ctx.window.width::f32 / ctx.window.height::f32;
+    val st: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(w, h);
+    if (is_err[gfx.RenderTarget, gfx.Error](st)) {
+        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](st);
+        print.eprintlnf("render target error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.scene = unwrap_ok[gfx.RenderTarget, gfx.Error](st);
+
+    val aspect: f32 = w::f32 / h::f32;
     g.camera = gfx.camera_perspective(
         gm.vec3(0.0, 1.5, 4.0),
         gm.vec3(0.0, 0.0, 0.0),
@@ -96,7 +152,7 @@ fun on_init(ctx: *Context) {
         100.0,
     );
 
-    g.transform = gfx.transform_identity();
+    g.transform = gm.transform_identity();
     g.ready = 1;
 }
 
@@ -114,11 +170,51 @@ fun on_tick(ctx: *Context) {
 
 fun on_draw(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
-    gfx.clear(gm.vec4(0.08, 0.09, 0.12, 1.0));
     if (g.ready == 0) {
         ret;
     }
-    gfx.draw_material(?g.mesh, ?g.material, ?g.transform, ?g.camera);
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+
+    # scene renderer: draw the 3D cube into the offscreen target
+    gfx.renderer_begin_frame(?g.scene_renderer);
+    var scene_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
+    scene_desc.target = ?g.scene;
+    var scene_pass: gfx.Pass = gfx.pass_begin(?g.scene_renderer, ?scene_desc);
+    gfx.pass_draw_material(?scene_pass, ?g.mesh, ?g.material, ?g.transform);
+    gfx.pass_end(?scene_pass);
+    gfx.renderer_end_frame(?g.scene_renderer);
+
+    # ui renderer: composite the scene target and a HUD sprite to the window
+    gfx.renderer_begin_frame(?g.ui_renderer);
+    var post_desc: gfx.PassDesc = gfx.pass_overlay();
+    post_desc.shader = ?g.post;
+    var post_pass: gfx.Pass = gfx.pass_begin(?g.ui_renderer, ?post_desc);
+    gfx.pass_draw_sprite(?post_pass, gfx.render_target_texture(?g.scene), gfx.rect(0.0, 0.0, w, h), gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?post_pass);
+
+    var hud_desc: gfx.PassDesc = gfx.pass_overlay();
+    var hud_pass: gfx.Pass = gfx.pass_begin(?g.ui_renderer, ?hud_desc);
+    gfx.pass_draw_sprite(?hud_pass, ?g.texture, gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?hud_pass);
+    gfx.renderer_end_frame(?g.ui_renderer);
+
+    # the engine loop presents once after f_draw
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    gfx.render_target_delete(?g.scene);
+    gfx.mesh_delete(?g.mesh);
+    gfx.texture_delete(?g.texture);
+    gfx.shader_delete(?g.shader);
+    gfx.shader_delete(?g.post);
+    gfx.renderer_dnit(?g.scene_renderer);
+    gfx.renderer_dnit(?g.ui_renderer);
 }
 
 #[symbol("main")]
@@ -129,13 +225,13 @@ fun main(argc: i64, argv: **u8) i64 {
     app.f_init = on_init;
     app.f_tick = on_tick;
     app.f_draw = on_draw;
-    app.f_dnit = nil::fun(*Context);
+    app.f_dnit = on_dnit;
 
     var ctx: Context;
     val cfg: Config = Config{
         width:     960,
         height:    540,
-        title:     "boom.graphics: textured cube",
+        title:     "boom.graphics v2: 3D, offscreen, and 2D passes",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
     };

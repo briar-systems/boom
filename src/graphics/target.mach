@@ -1,0 +1,101 @@
+# the RenderTarget handle: an offscreen framebuffer a pass renders into
+#
+# a RenderTarget wraps a GL framebuffer with a sampleable color texture
+# and a depth-stencil renderbuffer, so a pass can render a scene to a
+# texture instead of the window. the color attachment is exposed as a
+# Texture for a later pass to sample, which is how post-processing and
+# render-to-texture effects are built. the backing GL ids stay hidden.
+
+use gl.gl;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.texture.Texture;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+
+# an opaque handle to an offscreen render target
+# ---
+# fbo:    the backing framebuffer id, hidden from the game
+# color:  the color attachment, sampleable as a Texture
+# depth:  the depth-stencil renderbuffer id
+# width:  target width in pixels
+# height: target height in pixels
+pub rec RenderTarget {
+    fbo:    u32;
+    color:  Texture;
+    depth:  u32;
+    width:  i32;
+    height: i32;
+}
+
+# create an offscreen render target of the given size
+#
+# allocates an RGBA8 color texture (linear filtered, clamped) and a
+# combined depth-stencil renderbuffer, attaches both to a fresh
+# framebuffer, and verifies completeness. the default framebuffer is
+# rebound before returning, so this leaves no framebuffer selected.
+# ---
+# width:  target width in pixels, positive
+# height: target height in pixels, positive
+# ret:    the render target, or an error if the framebuffer is incomplete
+pub fun render_target(width: i32, height: i32) Result[RenderTarget, Error] {
+    var fbo: u32 = 0;
+    gl.gen_framebuffers(1, ?fbo);
+    gl.bind_framebuffer(gl.FRAMEBUFFER, fbo);
+
+    var color: u32 = 0;
+    gl.gen_textures(1, ?color);
+    gl.bind_texture(gl.TEXTURE_2D, color);
+    gl.tex_image2d(gl.TEXTURE_2D, 0, gl.RGBA8::i32, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE::i32);
+    gl.bind_texture(gl.TEXTURE_2D, 0);
+    gl.framebuffer_texture2d(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
+
+    var depth: u32 = 0;
+    gl.gen_renderbuffers(1, ?depth);
+    gl.bind_renderbuffer(gl.RENDERBUFFER, depth);
+    gl.renderbuffer_storage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, width, height);
+    gl.bind_renderbuffer(gl.RENDERBUFFER, 0);
+    gl.framebuffer_renderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depth);
+
+    val status: u32 = gl.check_framebuffer_status(gl.FRAMEBUFFER);
+    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
+    if (status != gl.FRAMEBUFFER_COMPLETE) {
+        gl.delete_framebuffers(1, ?fbo);
+        gl.delete_renderbuffers(1, ?depth);
+        gl.delete_textures(1, ?color);
+        ret err[RenderTarget, Error](error("render target framebuffer is incomplete"));
+    }
+
+    ret ok[RenderTarget, Error](RenderTarget{
+        fbo:    fbo,
+        color:  Texture{id: color, width: width, height: height},
+        depth:  depth,
+        width:  width,
+        height: height,
+    });
+}
+
+# the color attachment of a render target, for a later pass to sample
+# ---
+# t:   render target to read
+# ret: the color texture; valid until the target is deleted
+pub fun render_target_texture(t: *RenderTarget) *Texture {
+    ret ?t.color;
+}
+
+# release the framebuffer, color texture, and depth buffer of a target
+# ---
+# t: render target to delete; the handle must not be used afterward
+pub fun render_target_delete(t: *RenderTarget) {
+    gl.delete_framebuffers(1, ?t.fbo);
+    gl.delete_renderbuffers(1, ?t.depth);
+    gl.delete_textures(1, ?t.color.id);
+    t.fbo      = 0;
+    t.depth    = 0;
+    t.color.id = 0;
+}

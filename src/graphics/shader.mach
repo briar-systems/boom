@@ -10,10 +10,10 @@
 use gl.gl;
 use boom.graphics.error.Error;
 use boom.graphics.error.ERROR_CAP;
-use boom.graphics.math.mat.Mat4;
-use boom.graphics.math.mat.mat4_ptr;
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.Vec4;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_ptr;
+use boom.math.vec.Vec3;
+use boom.math.vec.Vec4;
 use boom.graphics.texture.Texture;
 use std.types.result.Result;
 use std.types.result.ok;

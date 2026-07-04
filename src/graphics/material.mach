@@ -1,8 +1,8 @@
 # the Material handle: a shader plus the parameters it draws with
 #
 # a Material bundles a shader, a base color, and named texture bindings so
-# a game can describe a surface once and draw it with draw_material. it
-# references a Shader and Textures the game owns; those handles must
+# a game can describe a surface once and draw it with pass_draw_material.
+# it references a Shader and Textures the game owns; those handles must
 # outlive the material. binding a material sets u_base_color and points
 # each sampler uniform at its texture unit.
 
@@ -11,8 +11,8 @@ use boom.graphics.shader.shader_use;
 use boom.graphics.shader.shader_set_vec4;
 use boom.graphics.shader.shader_set_texture;
 use boom.graphics.texture.Texture;
-use boom.graphics.math.vec.Vec4;
-use boom.graphics.math.vec.vec4;
+use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;

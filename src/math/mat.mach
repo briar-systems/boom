@@ -1,17 +1,17 @@
-# scalar-interim 4x4 matrix type for the render path
+# scalar-interim 4x4 matrix type for the shared math layer
 #
 # Mat4 stores its 16 elements column-major, the layout OpenGL expects,
 # so a Mat4 uploads to a uniform without transposing. element (row, col)
 # lives at index col * 4 + row. engine-internal, to be replaced by
-# mach-math; see boom.graphics.math.scalar.
+# mach-math; see boom.math.scalar.
 
-use boom.graphics.math.scalar.tanf;
-use boom.graphics.math.vec.Vec3;
-use boom.graphics.math.vec.vec3_sub;
-use boom.graphics.math.vec.vec3_dot;
-use boom.graphics.math.vec.vec3_cross;
-use boom.graphics.math.vec.vec3_normalize;
-use boom.graphics.math.quat.Quat;
+use boom.math.scalar.tanf;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3_sub;
+use boom.math.vec.vec3_dot;
+use boom.math.vec.vec3_cross;
+use boom.math.vec.vec3_normalize;
+use boom.math.quat.Quat;
 
 # a 4x4 matrix in column-major order
 # ---
@@ -132,6 +132,32 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
     ret r;
 }
 
+# a right-handed orthographic projection
+#
+# maps an axis-aligned box to the OpenGL clip volume with depth in
+# [-1, 1]. a 2D pass builds one over the framebuffer in pixel
+# coordinates, e.g. left 0, right width, so screen positions map
+# directly to pixels.
+# ---
+# left:   left clip plane
+# right:  right clip plane
+# bottom: bottom clip plane
+# top:    top clip plane
+# near:   near clip plane
+# far:    far clip plane
+# ret:    the projection matrix
+pub fun mat4_orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
+    var r: Mat4;
+    r.m[0]  = 2.0 / (right - left);
+    r.m[5]  = 2.0 / (top - bottom);
+    r.m[10] = 0.0 - 2.0 / (far - near);
+    r.m[12] = 0.0 - (right + left) / (right - left);
+    r.m[13] = 0.0 - (top + bottom) / (top - bottom);
+    r.m[14] = 0.0 - (far + near) / (far - near);
+    r.m[15] = 1.0;
+    ret r;
+}
+
 # a right-handed view matrix looking from eye toward center
 # ---
 # eye:    camera position
@@ -195,6 +221,16 @@ test "mat: perspective fills the expected entries" {
     if (p.m[11] != 0.0 - 1.0) { ret 1; }
     if (p.m[15] != 0.0) { ret 2; }
     if (p.m[5] <= 0.0) { ret 3; }
+    ret 0;
+}
+
+test "mat: orthographic maps the box corners to the clip cube" {
+    var p: Mat4 = mat4_orthographic(0.0, 800.0, 600.0, 0.0, 0.0 - 1.0, 1.0);
+    val x: f32 = p.m[0] * 800.0 + p.m[12];
+    val y: f32 = p.m[5] * 0.0 + p.m[13];
+    if (x - 1.0 > 0.0001 || x - 1.0 < 0.0 - 0.0001) { ret 1; }
+    if (y - 1.0 > 0.0001 || y - 1.0 < 0.0 - 0.0001) { ret 2; }
+    if (p.m[15] != 1.0) { ret 3; }
     ret 0;
 }
 
