@@ -1,0 +1,207 @@
+# scalar-interim 4x4 matrix type for the render path
+#
+# Mat4 stores its 16 elements column-major, the layout OpenGL expects,
+# so a Mat4 uploads to a uniform without transposing. element (row, col)
+# lives at index col * 4 + row. engine-internal, to be replaced by
+# mach-math; see boom.graphics.math.scalar.
+
+use boom.graphics.math.scalar.tanf;
+use boom.graphics.math.vec.Vec3;
+use boom.graphics.math.vec.vec3_sub;
+use boom.graphics.math.vec.vec3_dot;
+use boom.graphics.math.vec.vec3_cross;
+use boom.graphics.math.vec.vec3_normalize;
+use boom.graphics.math.quat.Quat;
+
+# a 4x4 matrix in column-major order
+# ---
+# m: the 16 elements, element (row, col) at index col * 4 + row
+pub rec Mat4 {
+    m: [16]f32;
+}
+
+# the identity matrix
+# ---
+# ret: a matrix with ones on the diagonal
+pub fun mat4_identity() Mat4 {
+    var r: Mat4;
+    r.m[0]  = 1.0;
+    r.m[5]  = 1.0;
+    r.m[10] = 1.0;
+    r.m[15] = 1.0;
+    ret r;
+}
+
+# matrix product a * b
+# ---
+# a:   left matrix
+# b:   right matrix
+# ret: the product a * b
+pub fun mat4_mul(a: *Mat4, b: *Mat4) Mat4 {
+    var r: Mat4;
+    var col: i64 = 0;
+    for (col < 4) {
+        var row: i64 = 0;
+        for (row < 4) {
+            var sum: f32 = 0.0;
+            var k: i64 = 0;
+            for (k < 4) {
+                sum = sum + a.m[k * 4 + row] * b.m[col * 4 + k];
+                k = k + 1;
+            }
+            r.m[col * 4 + row] = sum;
+            row = row + 1;
+        }
+        col = col + 1;
+    }
+    ret r;
+}
+
+# a translation matrix
+# ---
+# v:   translation offset
+# ret: a matrix translating by v
+pub fun mat4_translation(v: Vec3) Mat4 {
+    var r: Mat4 = mat4_identity();
+    r.m[12] = v.x;
+    r.m[13] = v.y;
+    r.m[14] = v.z;
+    ret r;
+}
+
+# a non-uniform scale matrix
+# ---
+# v:   per-axis scale factors
+# ret: a matrix scaling by v
+pub fun mat4_scale(v: Vec3) Mat4 {
+    var r: Mat4;
+    r.m[0]  = v.x;
+    r.m[5]  = v.y;
+    r.m[10] = v.z;
+    r.m[15] = 1.0;
+    ret r;
+}
+
+# the rotation matrix for a unit quaternion
+# ---
+# q:   unit quaternion
+# ret: the equivalent rotation matrix
+pub fun mat4_from_quat(q: Quat) Mat4 {
+    val xx: f32 = q.x * q.x;
+    val yy: f32 = q.y * q.y;
+    val zz: f32 = q.z * q.z;
+    val xy: f32 = q.x * q.y;
+    val xz: f32 = q.x * q.z;
+    val yz: f32 = q.y * q.z;
+    val wx: f32 = q.w * q.x;
+    val wy: f32 = q.w * q.y;
+    val wz: f32 = q.w * q.z;
+
+    var r: Mat4;
+    r.m[0]  = 1.0 - 2.0 * (yy + zz);
+    r.m[1]  = 2.0 * (xy + wz);
+    r.m[2]  = 2.0 * (xz - wy);
+    r.m[4]  = 2.0 * (xy - wz);
+    r.m[5]  = 1.0 - 2.0 * (xx + zz);
+    r.m[6]  = 2.0 * (yz + wx);
+    r.m[8]  = 2.0 * (xz + wy);
+    r.m[9]  = 2.0 * (yz - wx);
+    r.m[10] = 1.0 - 2.0 * (xx + yy);
+    r.m[15] = 1.0;
+    ret r;
+}
+
+# a right-handed perspective projection
+#
+# maps a vertical field of view and aspect ratio to the OpenGL clip
+# volume with depth in [-1, 1].
+# ---
+# fovy:   vertical field of view in radians
+# aspect: viewport width divided by height
+# near:   distance to the near clip plane, positive
+# far:    distance to the far clip plane, positive and greater than near
+# ret:    the projection matrix
+pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
+    val f: f32 = 1.0 / tanf(fovy * 0.5);
+    var r: Mat4;
+    r.m[0]  = f / aspect;
+    r.m[5]  = f;
+    r.m[10] = (far + near) / (near - far);
+    r.m[11] = 0.0 - 1.0;
+    r.m[14] = (2.0 * far * near) / (near - far);
+    ret r;
+}
+
+# a right-handed view matrix looking from eye toward center
+# ---
+# eye:    camera position
+# center: point the camera looks at
+# up:     approximate up direction, need not be orthogonal
+# ret:    the view matrix
+pub fun mat4_look_at(eye: Vec3, center: Vec3, up: Vec3) Mat4 {
+    val f: Vec3 = vec3_normalize(vec3_sub(center, eye));
+    val s: Vec3 = vec3_normalize(vec3_cross(f, up));
+    val u: Vec3 = vec3_cross(s, f);
+
+    var r: Mat4;
+    r.m[0]  = s.x;
+    r.m[1]  = u.x;
+    r.m[2]  = 0.0 - f.x;
+    r.m[4]  = s.y;
+    r.m[5]  = u.y;
+    r.m[6]  = 0.0 - f.y;
+    r.m[8]  = s.z;
+    r.m[9]  = u.z;
+    r.m[10] = 0.0 - f.z;
+    r.m[12] = 0.0 - vec3_dot(s, eye);
+    r.m[13] = 0.0 - vec3_dot(u, eye);
+    r.m[14] = vec3_dot(f, eye);
+    r.m[15] = 1.0;
+    ret r;
+}
+
+# a pointer to the matrix elements for upload to a uniform
+# ---
+# m:   matrix to expose
+# ret: pointer to the first of the 16 column-major elements
+pub fun mat4_ptr(m: *Mat4) *f32 {
+    ret ?m.m[0];
+}
+
+test "mat: identity is the multiplicative unit" {
+    var id: Mat4 = mat4_identity();
+    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
+    var r: Mat4 = mat4_mul(?id, ?t);
+    if (r.m[12] != 1.0 || r.m[13] != 2.0 || r.m[14] != 3.0) { ret 1; }
+    ret 0;
+}
+
+test "mat: multiply composes translations" {
+    var a: Mat4 = mat4_translation(Vec3{x: 1.0, y: 0.0, z: 0.0});
+    var b: Mat4 = mat4_translation(Vec3{x: 0.0, y: 2.0, z: 0.0});
+    var r: Mat4 = mat4_mul(?a, ?b);
+    if (r.m[12] != 1.0 || r.m[13] != 2.0 || r.m[14] != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "mat: scale lands on the diagonal" {
+    var s: Mat4 = mat4_scale(Vec3{x: 2.0, y: 3.0, z: 4.0});
+    if (s.m[0] != 2.0 || s.m[5] != 3.0 || s.m[10] != 4.0 || s.m[15] != 1.0) { ret 1; }
+    ret 0;
+}
+
+test "mat: perspective fills the expected entries" {
+    var p: Mat4 = mat4_perspective(1.5707963, 1.0, 0.1, 100.0);
+    if (p.m[11] != 0.0 - 1.0) { ret 1; }
+    if (p.m[15] != 0.0) { ret 2; }
+    if (p.m[5] <= 0.0) { ret 3; }
+    ret 0;
+}
+
+test "mat: look_at from the z axis faces the origin" {
+    var v: Mat4 = mat4_look_at(Vec3{x: 0.0, y: 0.0, z: 5.0}, Vec3{x: 0.0, y: 0.0, z: 0.0}, Vec3{x: 0.0, y: 1.0, z: 0.0});
+    if (v.m[15] != 1.0) { ret 1; }
+    val d: f32 = v.m[14] - (0.0 - 5.0);
+    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
+    ret 0;
+}

@@ -1,0 +1,236 @@
+# the Texture handle: a GPU image sampled by shaders
+#
+# a game supplies raw RGBA8 pixels, encoded image bytes, or a file path and
+# receives an opaque Texture; the backing mach-gl texture id and the
+# mach-image decoder both stay hidden. texture_load and texture_from_bytes
+# decode QOI and TGA today (the formats mach-image decodes); other formats
+# return a clean error until the library grows their decoders.
+
+use gl.gl;
+use img: image;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use fs:   std.filesystem;
+use allo: std.allocator;
+use page: std.allocator.page;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+
+# an opaque handle to a GPU texture
+# ---
+# id:     the backing mach-gl texture id, hidden from the game
+# width:  texture width in texels
+# height: texture height in texels
+pub rec Texture {
+    id:     u32;
+    width:  i32;
+    height: i32;
+}
+
+# a decoded RGBA8 image, allocated from a caller allocator
+# ---
+# pixels: width*height*4 RGBA8 bytes
+# width:  image width in texels
+# height: image height in texels
+rec Decoded {
+    pixels: *u8;
+    width:  i32;
+    height: i32;
+}
+
+# upload an RGBA8 image to the GPU
+#
+# expects width * height * 4 bytes in row-major order, tightly packed.
+# the texture is created with linear filtering, mipmaps, and repeat
+# wrapping.
+# ---
+# pixels: RGBA8 pixel data, 4 bytes per texel
+# width:  image width in texels
+# height: image height in texels
+# ret:    the uploaded Texture handle
+pub fun texture(pixels: *u8, width: i32, height: i32) Texture {
+    var id: u32 = 0;
+    gl.gen_textures(1, ?id);
+    gl.bind_texture(gl.TEXTURE_2D, id);
+    gl.pixel_storei(gl.UNPACK_ALIGNMENT, 1);
+
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR::i32);
+    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR::i32);
+
+    gl.tex_image2d(gl.TEXTURE_2D, 0, gl.RGBA::i32, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels::ptr);
+    gl.generate_mipmap(gl.TEXTURE_2D);
+    gl.bind_texture(gl.TEXTURE_2D, 0);
+
+    ret Texture{id: id, width: width, height: height};
+}
+
+# decode encoded image bytes into a caller-allocated RGBA8 buffer
+#
+# detects the format, sizes the destination from the header, and decodes.
+# QOI and TGA are supported; every decoder normalizes to RGBA8 top-left.
+# the returned pixels are allocated from a and belong to the caller.
+# ---
+# data: encoded image bytes
+# len:  length of data in bytes
+# a:    allocator for the pixel buffer
+# out:  populated with the decoded pixels and dimensions on success
+# ret:  true on success, or a decode/allocation error
+fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool, Error] {
+    val fmt: u8 = img.detect(data, len);
+    var header: img.Image;
+    if (fmt == img.FORMAT_QOI) {
+        if (img.qoi_info(data, len, ?header) != img.DECODE_OK) {
+            ret err[bool, Error](error("qoi header is invalid"));
+        }
+    }
+    or (fmt == img.FORMAT_TGA) {
+        if (img.tga_info(data, len, ?header) != img.DECODE_OK) {
+            ret err[bool, Error](error("tga header is invalid"));
+        }
+    }
+    or {
+        ret err[bool, Error](error("unsupported image format (only QOI and TGA are decoded)"));
+    }
+
+    val need: usize = img.image_byte_len(header.width, header.height);
+    if (need == 0) {
+        ret err[bool, Error](error("image dimensions are invalid"));
+    }
+    val dr: Result[*u8, str] = allo.allocate[u8](a, need);
+    if (is_err[*u8, str](dr)) {
+        ret err[bool, Error](error(unwrap_err[*u8, str](dr)));
+    }
+    val dst: *u8 = unwrap_ok[*u8, str](dr);
+
+    var decoded: img.Image;
+    if (fmt == img.FORMAT_QOI) {
+        if (img.qoi_decode(data, len, dst, need, ?decoded) != img.DECODE_OK) {
+            ret err[bool, Error](error("qoi decode failed"));
+        }
+    }
+    or {
+        if (img.tga_decode(data, len, dst, need, ?decoded) != img.DECODE_OK) {
+            ret err[bool, Error](error("tga decode failed"));
+        }
+    }
+
+    out.pixels = dst;
+    out.width  = decoded.width::i32;
+    out.height = decoded.height::i32;
+    ret ok[bool, Error](true);
+}
+
+# decode encoded image bytes and upload them as a Texture
+#
+# supports QOI and TGA. the encoded bytes are not retained.
+# ---
+# data: encoded image bytes (QOI or TGA)
+# len:  length of data in bytes
+# ret:  the uploaded Texture, or a decode error
+pub fun texture_from_bytes(data: *u8, len: usize) Result[Texture, Error] {
+    var pa: allo.Allocator;
+    page.make(?pa);
+
+    var dec: Decoded;
+    val r: Result[bool, Error] = decode(data, len, ?pa, ?dec);
+    if (is_err[bool, Error](r)) {
+        ret err[Texture, Error](unwrap_err[bool, Error](r));
+    }
+
+    val t: Texture = texture(dec.pixels, dec.width, dec.height);
+    allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(dec.width::u32, dec.height::u32));
+    ret ok[Texture, Error](t);
+}
+
+# load an image file and upload it as a Texture
+#
+# reads the whole file, decodes it (QOI or TGA), and uploads. the CPU
+# pixels are freed before returning.
+# ---
+# path: filesystem path to a QOI or TGA image
+# ret:  the uploaded Texture, or a read/decode error
+pub fun texture_load(path: str) Result[Texture, Error] {
+    var pa: allo.Allocator;
+    page.make(?pa);
+
+    val br: Result[fs.Buffer, str] = fs.read_all_sized(?pa, path);
+    if (is_err[fs.Buffer, str](br)) {
+        ret err[Texture, Error](error(unwrap_err[fs.Buffer, str](br)));
+    }
+    val buf: fs.Buffer = unwrap_ok[fs.Buffer, str](br);
+
+    val res: Result[Texture, Error] = texture_from_bytes(buf.data, buf.len);
+    allo.deallocate[u8](?pa, buf.data, buf.len + 1);
+    ret res;
+}
+
+# bind a texture to a texture unit
+# ---
+# t:    texture to bind
+# unit: texture unit index
+pub fun texture_bind(t: *Texture, unit: i32) {
+    gl.active_texture(gl.TEXTURE0 + unit::u32);
+    gl.bind_texture(gl.TEXTURE_2D, t.id);
+}
+
+# release the GPU texture backing a handle
+# ---
+# t: texture to delete; the handle must not be used afterward
+pub fun texture_delete(t: *Texture) {
+    gl.delete_textures(1, ?t.id);
+    t.id = 0;
+}
+
+test "texture: a fresh handle carries no id" {
+    var t: Texture;
+    if (t.id != 0) { ret 1; }
+    ret 0;
+}
+
+test "texture: decode round-trips a qoi image" {
+    var src_px: [16]u8 = [16]u8{
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 0, 255,
+    };
+    var srcimg: img.Image;
+    srcimg.pixels     = ?src_px[0];
+    srcimg.width      = 2;
+    srcimg.height     = 2;
+    srcimg.channels   = 4;
+    srcimg.colorspace = 0;
+
+    var enc: [512]u8;
+    val n: usize = img.qoi_encode(?srcimg, ?enc[0], 512);
+    if (n == 0) { ret 1; }
+
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var dec: Decoded;
+    val r: Result[bool, Error] = decode(?enc[0], n, ?pa, ?dec);
+    if (is_err[bool, Error](r)) { ret 2; }
+    if (dec.width != 2 || dec.height != 2) { ret 3; }
+    if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 4; }
+    if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0) { ret 5; }
+    allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(2, 2));
+    ret 0;
+}
+
+test "texture: unsupported format reports cleanly" {
+    var junk: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var dec: Decoded;
+    val r: Result[bool, Error] = decode(?junk[0], 8, ?pa, ?dec);
+    if (!is_err[bool, Error](r)) { ret 1; }
+    ret 0;
+}

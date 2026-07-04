@@ -1,0 +1,174 @@
+# scalar-interim vector types for the render path
+#
+# Vec2/Vec3/Vec4 with the handful of operations the renderer and camera
+# need. engine-internal, to be replaced by mach-math once the compiler
+# has SIMD vector types; see boom.graphics.math.scalar.
+
+use boom.graphics.math.scalar.sqrtf;
+
+# a 2-component vector, used for texture coordinates
+# ---
+# x: first component
+# y: second component
+pub rec Vec2 {
+    x: f32;
+    y: f32;
+}
+
+# a 3-component vector, used for positions, directions, and colors
+# ---
+# x: first component
+# y: second component
+# z: third component
+pub rec Vec3 {
+    x: f32;
+    y: f32;
+    z: f32;
+}
+
+# a 4-component vector, used for homogeneous points and RGBA colors
+# ---
+# x: first component
+# y: second component
+# z: third component
+# w: fourth component
+pub rec Vec4 {
+    x: f32;
+    y: f32;
+    z: f32;
+    w: f32;
+}
+
+# build a Vec2
+# ---
+# x:   first component
+# y:   second component
+# ret: the vector (x, y)
+pub fun vec2(x: f32, y: f32) Vec2 {
+    ret Vec2{x: x, y: y};
+}
+
+# build a Vec3
+# ---
+# x:   first component
+# y:   second component
+# z:   third component
+# ret: the vector (x, y, z)
+pub fun vec3(x: f32, y: f32, z: f32) Vec3 {
+    ret Vec3{x: x, y: y, z: z};
+}
+
+# build a Vec4
+# ---
+# x:   first component
+# y:   second component
+# z:   third component
+# w:   fourth component
+# ret: the vector (x, y, z, w)
+pub fun vec4(x: f32, y: f32, z: f32, w: f32) Vec4 {
+    ret Vec4{x: x, y: y, z: z, w: w};
+}
+
+# add two vectors component-wise
+# ---
+# a:   left vector
+# b:   right vector
+# ret: a + b
+pub fun vec3_add(a: Vec3, b: Vec3) Vec3 {
+    ret Vec3{x: a.x + b.x, y: a.y + b.y, z: a.z + b.z};
+}
+
+# subtract two vectors component-wise
+# ---
+# a:   left vector
+# b:   right vector
+# ret: a - b
+pub fun vec3_sub(a: Vec3, b: Vec3) Vec3 {
+    ret Vec3{x: a.x - b.x, y: a.y - b.y, z: a.z - b.z};
+}
+
+# scale a vector by a scalar
+# ---
+# a:   vector
+# s:   scalar
+# ret: a * s
+pub fun vec3_scale(a: Vec3, s: f32) Vec3 {
+    ret Vec3{x: a.x * s, y: a.y * s, z: a.z * s};
+}
+
+# dot product of two vectors
+# ---
+# a:   left vector
+# b:   right vector
+# ret: a . b
+pub fun vec3_dot(a: Vec3, b: Vec3) f32 {
+    ret a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+# cross product of two vectors
+# ---
+# a:   left vector
+# b:   right vector
+# ret: a x b
+pub fun vec3_cross(a: Vec3, b: Vec3) Vec3 {
+    ret Vec3{
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    };
+}
+
+# euclidean length of a vector
+# ---
+# a:   vector
+# ret: sqrt(a . a)
+pub fun vec3_length(a: Vec3) f32 {
+    ret sqrtf(vec3_dot(a, a));
+}
+
+# unit vector in the direction of a
+#
+# returns the zero vector when a has zero length, a defined convention
+# for the degenerate case rather than a trap.
+# ---
+# a:   vector
+# ret: a scaled to unit length, or the zero vector
+pub fun vec3_normalize(a: Vec3) Vec3 {
+    val len: f32 = vec3_length(a);
+    if (len == 0.0) {
+        ret Vec3{x: 0.0, y: 0.0, z: 0.0};
+    }
+    ret vec3_scale(a, 1.0 / len);
+}
+
+test "vec: dot and cross of the basis vectors" {
+    val x: Vec3 = vec3(1.0, 0.0, 0.0);
+    val y: Vec3 = vec3(0.0, 1.0, 0.0);
+    if (vec3_dot(x, y) != 0.0) { ret 1; }
+    val z: Vec3 = vec3_cross(x, y);
+    if (z.x != 0.0 || z.y != 0.0 || z.z != 1.0) { ret 2; }
+    ret 0;
+}
+
+test "vec: length and normalize" {
+    val v: Vec3 = vec3(3.0, 4.0, 0.0);
+    if (vec3_length(v) != 5.0) { ret 1; }
+    val n: Vec3 = vec3_normalize(v);
+    val d: f32 = vec3_length(n) - 1.0;
+    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
+    ret 0;
+}
+
+test "vec: normalize of the zero vector stays zero" {
+    val n: Vec3 = vec3_normalize(vec3(0.0, 0.0, 0.0));
+    if (n.x != 0.0 || n.y != 0.0 || n.z != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "vec: add scale and subtract" {
+    val a: Vec3 = vec3(1.0, 2.0, 3.0);
+    val b: Vec3 = vec3_scale(a, 2.0);
+    val c: Vec3 = vec3_sub(b, a);
+    if (c.x != 1.0 || c.y != 2.0 || c.z != 3.0) { ret 1; }
+    ret 0;
+}
