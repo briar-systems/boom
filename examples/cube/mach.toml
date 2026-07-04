@@ -1,0 +1,46 @@
+[project]
+id      = "cube"
+version = "0.1.0"
+src     = "src"
+dep     = "dep"
+target  = "native"
+out     = "out/{target}/{profile}/bin/{name}{ext}"
+obj     = "out/{target}/{profile}/obj"
+
+[target.linux]
+isa = "x86_64"
+os  = "linux"
+abi = "sysv64"
+
+[target.windows]
+isa = "x86_64"
+os  = "windows"
+abi = "win64"
+ext = ".exe"
+
+[target.darwin]
+isa = "x86_64"
+os  = "darwin"
+abi = "sysv64"
+
+[bin.cube]
+entry = "main.mach"
+
+# boom is consumed by path from this in-repo example; a standalone game
+# would declare it by git ref instead. boom's surface exposes glfw and gl
+# ids, so the mach-glfw and mach-gl stanzas below are required and must
+# match boom's own refs (see the boom README).
+[deps.boom]
+path = "../.."
+
+[deps.mach-std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "branch/main"
+
+[deps.mach-glfw]
+git = "https://github.com/briar-systems/mach-glfw"
+ref = "branch/main"
+
+[deps.mach-gl]
+git = "https://github.com/briar-systems/mach-gl"
+ref = "branch/dev"
