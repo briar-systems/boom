@@ -119,6 +119,26 @@ pub fun shader_set_mat4(s: *Shader, name: str, m: *Mat4) {
     gl.uniform_matrix4fv(loc, 1, false, mat4_ptr(m));
 }
 
+# set a mat4-array uniform by name
+#
+# uploads count contiguous column-major matrices to a uniform array, such
+# as a skinning palette bound to u_joints. the matrices must be laid out
+# contiguously, as a Pose's palette is. a name absent from the linked
+# program is ignored.
+# ---
+# s:     shader owning the uniform
+# name:  uniform array name as declared in GLSL
+# m:     pointer to the first of count contiguous matrices
+# count: number of matrices to upload
+pub fun shader_set_mat4_array(s: *Shader, name: str, m: *Mat4, count: i32) {
+    gl.use_program(s.program);
+    val loc: i32 = gl.get_uniform_location(s.program, name);
+    if (loc < 0) {
+        ret;
+    }
+    gl.uniform_matrix4fv(loc, count, false, mat4_ptr(m));
+}
+
 # set a vec3 uniform by name
 # ---
 # s:    shader owning the uniform

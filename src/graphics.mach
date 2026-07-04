@@ -18,10 +18,15 @@
 #
 # a mesh is described by a VertexFormat (boom.graphics.vertex): a declared
 # list of attributes rather than a fixed vertex struct. mesh_load builds
-# the format from whatever attributes a glTF primitive provides. the
-# format can describe the JOINTS_0 and WEIGHTS_0 attributes skeletal
-# animation needs; the skinning runtime that consumes them is a later
-# phase (see the README).
+# the format from whatever attributes a glTF primitive provides, including
+# the JOINTS_0 and WEIGHTS_0 attributes skinning needs.
+#
+# skeletal animation builds on that: model_load returns a Model (a skinned
+# Mesh, a Skeleton, and named Animation clips) with mach-gltf fully hidden;
+# model_player(name) gives an AnimationPlayer that pass_draw_skinned draws
+# each frame. the runtime (pose sampling, joint composition, and the
+# skinning palette) lives in boom.graphics.skeleton and
+# boom.graphics.animation; boom.graphics.model is the loader.
 #
 # failures return Result[T, Error]; Error carries its message inline
 # (boom.graphics.error), so no failure needs a heap allocation or a
@@ -67,6 +72,7 @@ fwd boom.graphics.shader.Shader;
 fwd boom.graphics.shader.shader;
 fwd boom.graphics.shader.shader_use;
 fwd boom.graphics.shader.shader_set_mat4;
+fwd boom.graphics.shader.shader_set_mat4_array;
 fwd boom.graphics.shader.shader_set_vec3;
 fwd boom.graphics.shader.shader_set_vec4;
 fwd boom.graphics.shader.shader_set_f32;
@@ -88,6 +94,37 @@ fwd boom.graphics.mesh.mesh_draw;
 fwd boom.graphics.mesh.mesh_from_glb;
 fwd boom.graphics.mesh.mesh_load;
 fwd boom.graphics.mesh.mesh_delete;
+
+fwd boom.graphics.skeleton.MAX_JOINTS;
+fwd boom.graphics.skeleton.Skeleton;
+fwd boom.graphics.skeleton.Pose;
+fwd boom.graphics.skeleton.skeleton_pose;
+fwd boom.graphics.skeleton.skeleton_rest_pose;
+fwd boom.graphics.skeleton.pose_matrices;
+fwd boom.graphics.skeleton.SKINNED_VERTEX_SRC;
+
+fwd boom.graphics.animation.ChannelPath;
+fwd boom.graphics.animation.CHANNEL_TRANSLATION;
+fwd boom.graphics.animation.CHANNEL_ROTATION;
+fwd boom.graphics.animation.CHANNEL_SCALE;
+fwd boom.graphics.animation.Interp;
+fwd boom.graphics.animation.INTERP_LINEAR;
+fwd boom.graphics.animation.INTERP_STEP;
+fwd boom.graphics.animation.Channel;
+fwd boom.graphics.animation.Animation;
+fwd boom.graphics.animation.AnimationPlayer;
+fwd boom.graphics.animation.animation_duration;
+fwd boom.graphics.animation.animation_sample;
+fwd boom.graphics.animation.animation_player;
+fwd boom.graphics.animation.animation_player_advance;
+fwd boom.graphics.animation.animation_player_set_clip;
+
+fwd boom.graphics.model.Model;
+fwd boom.graphics.model.model_from_glb;
+fwd boom.graphics.model.model_load;
+fwd boom.graphics.model.model_player;
+fwd boom.graphics.model.model_rest_player;
+fwd boom.graphics.model.model_delete;
 
 fwd boom.graphics.material.MAX_TEXTURES;
 fwd boom.graphics.material.MaterialTexture;
@@ -124,5 +161,6 @@ fwd boom.graphics.renderer.pass_begin;
 fwd boom.graphics.renderer.pass_end;
 fwd boom.graphics.renderer.pass_draw;
 fwd boom.graphics.renderer.pass_draw_material;
+fwd boom.graphics.renderer.pass_draw_skinned;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
