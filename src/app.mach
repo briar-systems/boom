@@ -5,6 +5,8 @@
 # (cast, e.g. nil::fun(*Context)) and the engine skips it. f_tick runs at
 # the fixed update rate, possibly several times per frame; f_draw runs
 # once per frame with the interpolation factor available as ctx.alpha.
+# a game carries its own state through ctx.user (boom.context.context_set_user)
+# rather than module globals.
 
 use boom.context.Context;
 

@@ -5,6 +5,10 @@
 # game reads (alpha, running). context_init brings the subsystems up and
 # context_shutdown tears them down; the frame loop that drives an App
 # against this state lives in boom.engine.
+#
+# every App hook receives the running Context, so a game carries its own
+# state through the opaque ctx.user pointer (set with context_set_user)
+# rather than reaching for module globals.
 
 use boom.window.Window;
 use boom.window.window_open;
@@ -46,6 +50,8 @@ pub rec Config {
 # events:  input event queue, fed by the window
 # alpha:   render interpolation factor in [0, 1), set each frame
 # running: cleared to stop the loop
+# user:    opaque game-state pointer, nil until set; hooks reach it
+#          through the Context they receive
 pub rec Context {
     window:  Window;
     clock:   Clock;
@@ -53,6 +59,7 @@ pub rec Context {
     events:  EventQueue;
     alpha:   f64;
     running: bool;
+    user:    ptr;
 }
 
 # bring the engine subsystems up
@@ -77,6 +84,7 @@ pub fun context_init(ctx: *Context, cfg: Config) bool {
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.alpha   = 0.0;
     ctx.running = true;
+    ctx.user    = nil;
     ret true;
 }
 
@@ -85,6 +93,27 @@ pub fun context_init(ctx: *Context, cfg: Config) bool {
 # ctx: context to stop
 pub fun context_stop(ctx: *Context) {
     ctx.running = false;
+}
+
+# attach an opaque game-state pointer to the context
+#
+# the pointer is passed through untouched and reachable from every hook
+# as ctx.user (or via context_user), letting a game carry its own state
+# without module globals. set it after context_init and before run so
+# f_init sees it. the engine never dereferences it.
+# ---
+# ctx:  context to attach to
+# user: opaque pointer to game state, or nil to clear
+pub fun context_set_user(ctx: *Context, user: ptr) {
+    ctx.user = user;
+}
+
+# read the opaque game-state pointer attached to the context
+# ---
+# ctx: context to query
+# ret: the pointer set by context_set_user, or nil if none
+pub fun context_user(ctx: *Context) ptr {
+    ret ctx.user;
 }
 
 # tear the engine subsystems down
@@ -96,4 +125,23 @@ pub fun context_stop(ctx: *Context) {
 pub fun context_shutdown(ctx: *Context) {
     window_close(?ctx.window);
     ctx.running = false;
+}
+
+test "context: user pointer round-trips" {
+    var ctx: Context;
+    var state: i64 = 42;
+    if (context_user(?ctx) != nil) { ret 1; }
+    context_set_user(?ctx, (?state)::ptr);
+    if (context_user(?ctx) != (?state)::ptr) { ret 2; }
+    if (ctx.user != (?state)::ptr) { ret 3; }
+    ret 0;
+}
+
+test "context: user pointer clears to nil" {
+    var ctx: Context;
+    var state: i64 = 7;
+    context_set_user(?ctx, (?state)::ptr);
+    context_set_user(?ctx, nil);
+    if (context_user(?ctx) != nil) { ret 1; }
+    ret 0;
 }
