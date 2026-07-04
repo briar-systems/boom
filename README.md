@@ -57,6 +57,40 @@ fun main(argc: i64, argv: **u8) i64 {
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.
 
+## Consuming boom
+
+boom's public surface exposes its GLFW and GL dependencies: `boom.window.Window`
+embeds a `glfw.Window` and the engine issues `gl` calls. Because Mach's resolver
+does not propagate a dependency's surface module ids through the transitive
+graph, **a project that depends on boom must also declare `mach-glfw` and
+`mach-gl` in its own `mach.toml`**, even if it never names `glfw` or `gl`
+itself. Without them the build fails to resolve boom's modules:
+
+```
+error: use path 'glfw.glfw' does not name a module
+```
+
+`mach dep pull` materialises both packages transitively, but the flat resolver
+only registers dep ids that the consuming project declares directly, so the
+stanzas are required. Pin them to the **same refs boom uses**; the resolver has
+no version override, so a mismatched ref is a hard conflict:
+
+```toml
+[deps.boom]
+git = "https://github.com/briar-systems/boom"
+ref = "branch/dev"
+
+[deps.mach-glfw]
+git = "https://github.com/briar-systems/mach-glfw"
+ref = "branch/main"
+
+[deps.mach-gl]
+git = "https://github.com/briar-systems/mach-gl"
+ref = "branch/dev"
+```
+
+This is a manifest requirement only; your source still imports just `use boom;`.
+
 ## Building
 
 ```sh
