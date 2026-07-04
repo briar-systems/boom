@@ -218,7 +218,10 @@ fun find_attr(prim: *gd.Primitive, name: str) i64 {
 # count: receives the element count
 # comps: receives components per element
 # ret:   true on success, or a plan/read/allocation error
-fun read_floats(d: *gd.Document, bin: *u8, blen: usize, ai: usize, a: *allo.Allocator, out: **f32, count: *usize, comps: *usize) Result[bool, Error] {
+#
+# public within boom.graphics so boom.graphics.model can read animation
+# and inverse-bind accessors through the same path; not part of the facade.
+pub fun read_floats(d: *gd.Document, bin: *u8, blen: usize, ai: usize, a: *allo.Allocator, out: **f32, count: *usize, comps: *usize) Result[bool, Error] {
     val pr: Result[ga.Plan, str] = ga.plan(d, bin, blen, ai);
     if (is_err[ga.Plan, str](pr)) {
         ret err[bool, Error](error(unwrap_err[ga.Plan, str](pr)));
@@ -412,12 +415,10 @@ fun add_joints(prim: *gd.Primitive, d: *gd.Document, bin: *u8, blen: usize, a: *
 
 # extract the first primitive of the first mesh from a .glb into MeshData
 #
-# reads POSITION (required) and any present NORMAL, TEXCOORD_0, COLOR_0,
-# TANGENT, and WEIGHTS_0 float attributes plus a skinned primitive's
-# integer JOINTS_0, building a VertexFormat that mirrors the primitive and
-# interleaving the attributes into one packed buffer. all allocations come
-# from a; a single arena the caller frees afterward reclaims them in one
-# shot. no GL calls are made, so this is the testable core of the loader.
+# parses the container, then delegates to extract_loaded. all allocations
+# come from a; a single arena the caller frees afterward reclaims them in
+# one shot. no GL calls are made, so this is the testable core of the
+# loader.
 # ---
 # data: the .glb bytes
 # len:  length of data in bytes
@@ -430,6 +431,24 @@ fun extract_glb(data: *u8, len: usize, a: *allo.Allocator, out: *MeshData) Resul
         ret err[bool, Error](error(unwrap_err[gp.Loaded, str](lr)));
     }
     var loaded: gp.Loaded = unwrap_ok[gp.Loaded, str](lr);
+    ret extract_loaded(?loaded, a, out);
+}
+
+# extract the first primitive of the first mesh from a parsed document
+#
+# reads POSITION (required) and any present NORMAL, TEXCOORD_0, COLOR_0,
+# TANGENT, and WEIGHTS_0 float attributes plus a skinned primitive's
+# integer JOINTS_0, building a VertexFormat that mirrors the primitive and
+# interleaving the attributes into one packed buffer. boom.graphics.model
+# shares one parse across the mesh, skeleton, and animations by calling
+# this directly; it is public within boom.graphics but not part of the
+# game-facing facade.
+# ---
+# loaded: a parsed glTF document with its binary buffer
+# a:      allocator for the output arrays
+# out:    populated with the extracted geometry on success
+# ret:    true on success, or an extract error
+pub fun extract_loaded(loaded: *gp.Loaded, a: *allo.Allocator, out: *MeshData) Result[bool, Error] {
     if (loaded.bin == nil) {
         ret err[bool, Error](error("glb has no binary buffer"));
     }
