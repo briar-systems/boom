@@ -1,0 +1,20 @@
+# the boom engine's public surface
+#
+# re-exports the engine modules a game consumes: the app hooks, the
+# context and its lifecycle, the run loop, the timing, input-event, log,
+# and window utilities, the shared math, and the graphics renderer.
+# consumers import this as `use boom;`, or reach a subsystem directly,
+# e.g. `use boom.graphics;` or `use boom.math;`.
+
+use std.runtime;
+
+fwd boom.app;
+fwd boom.context;
+fwd boom.engine;
+fwd boom.clock;
+fwd boom.timestep;
+fwd boom.event;
+fwd boom.log;
+fwd boom.window;
+fwd boom.math;
+fwd boom.graphics;

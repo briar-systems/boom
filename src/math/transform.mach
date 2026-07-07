@@ -1,0 +1,68 @@
+# a position, orientation, and scale, and the model matrix it produces
+#
+# a Transform is the game-facing way to place a mesh in the world. a 3D
+# pass takes one per draw and uploads the composed model matrix as
+# u_model. it lives in boom.math because placement is shared vocabulary:
+# physics integrates one, graphics renders through it.
+
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.quat.Quat;
+use boom.math.quat.quat_identity;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_translation;
+use boom.math.mat.mat4_scale;
+use boom.math.mat.mat4_from_quat;
+
+# a rigid placement with scale
+# ---
+# position: world-space translation
+# rotation: orientation as a unit quaternion
+# scale:    per-axis scale
+pub rec Transform {
+    position: Vec3;
+    rotation: Quat;
+    scale:    Vec3;
+}
+
+# the identity transform, at the origin, unrotated, unit scale
+# ---
+# ret: a transform that maps model space onto itself
+pub fun transform_identity() Transform {
+    ret Transform{
+        position: vec3(0.0, 0.0, 0.0),
+        rotation: quat_identity(),
+        scale:    vec3(1.0, 1.0, 1.0),
+    };
+}
+
+# the model matrix for a transform, translation * rotation * scale
+# ---
+# t:   transform to compose
+# ret: the model matrix
+pub fun transform_matrix(t: *Transform) Mat4 {
+    var s: Mat4 = mat4_scale(t.scale);
+    var r: Mat4 = mat4_from_quat(t.rotation);
+    var tr: Mat4 = mat4_translation(t.position);
+    var rs: Mat4 = mat4_mul(?r, ?s);
+    ret mat4_mul(?tr, ?rs);
+}
+
+test "transform: identity maps a point to itself" {
+    var t: Transform = transform_identity();
+    var m: Mat4 = transform_matrix(?t);
+    if (m.m[0] != 1.0 || m.m[5] != 1.0 || m.m[10] != 1.0 || m.m[15] != 1.0) { ret 1; }
+    if (m.m[12] != 0.0 || m.m[13] != 0.0 || m.m[14] != 0.0) { ret 2; }
+    ret 0;
+}
+
+test "transform: translation and scale compose into the model matrix" {
+    var t: Transform = transform_identity();
+    t.position = vec3(5.0, 0.0, 0.0);
+    t.scale = vec3(2.0, 2.0, 2.0);
+    var m: Mat4 = transform_matrix(?t);
+    if (m.m[0] != 2.0 || m.m[5] != 2.0 || m.m[10] != 2.0) { ret 1; }
+    if (m.m[12] != 5.0) { ret 2; }
+    ret 0;
+}

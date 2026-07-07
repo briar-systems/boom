@@ -1,0 +1,83 @@
+# a viewpoint producing the view and projection matrices for a draw
+#
+# the game configures a Camera and passes it to draw, which uploads its
+# view and projection as u_view and u_projection. the camera is a plain
+# value the game owns and mutates; graphics imposes no scene structure.
+
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_look_at;
+use boom.math.mat.mat4_perspective;
+
+# a perspective camera
+# ---
+# position: eye position in world space
+# target:   point the camera looks at
+# up:       approximate up direction
+# fov:      vertical field of view in radians
+# aspect:   viewport width divided by height
+# near:     near clip distance, positive
+# far:      far clip distance, greater than near
+pub rec Camera {
+    position: Vec3;
+    target:   Vec3;
+    up:       Vec3;
+    fov:      f32;
+    aspect:   f32;
+    near:     f32;
+    far:      f32;
+}
+
+# a perspective camera looking from position toward target
+# ---
+# position: eye position
+# target:   look-at point
+# fov:      vertical field of view in radians
+# aspect:   viewport width divided by height
+# near:     near clip distance
+# far:      far clip distance
+# ret:      the configured camera, with world up (0, 1, 0)
+pub fun camera_perspective(position: Vec3, target: Vec3, fov: f32, aspect: f32, near: f32, far: f32) Camera {
+    ret Camera{
+        position: position,
+        target:   target,
+        up:       vec3(0.0, 1.0, 0.0),
+        fov:      fov,
+        aspect:   aspect,
+        near:     near,
+        far:      far,
+    };
+}
+
+# the camera's view matrix
+# ---
+# c:   camera to read
+# ret: the world-to-view matrix
+pub fun camera_view(c: *Camera) Mat4 {
+    ret mat4_look_at(c.position, c.target, c.up);
+}
+
+# the camera's projection matrix
+# ---
+# c:   camera to read
+# ret: the view-to-clip matrix
+pub fun camera_projection(c: *Camera) Mat4 {
+    ret mat4_perspective(c.fov, c.aspect, c.near, c.far);
+}
+
+test "camera: view of the origin from +z translates by -z" {
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.3333, 0.1, 100.0);
+    var v: Mat4 = camera_view(?c);
+    val d: f32 = v.m[14] - (0.0 - 4.0);
+    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
+    ret 0;
+}
+
+test "camera: projection is non-degenerate" {
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1, 100.0);
+    var p: Mat4 = camera_projection(?c);
+    if (p.m[0] <= 0.0 || p.m[5] <= 0.0) { ret 1; }
+    if (p.m[11] != 0.0 - 1.0) { ret 2; }
+    ret 0;
+}

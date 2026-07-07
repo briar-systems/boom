@@ -1,0 +1,131 @@
+# platform window, GL context, and input source
+#
+# wraps a GLFW window carrying an OpenGL core-profile context and routes
+# keyboard input into an event queue. the window's GLFW user pointer
+# holds the event sink, so the C key callback can reach it. these paths
+# drive real platform and GL calls and cannot run headless; they are
+# built but not covered by tests.
+
+use glfw.glfw;
+use gl.gl;
+use boom.event.EventQueue;
+use boom.event.Event;
+use boom.event.queue_push;
+use boom.event.KEY;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+
+# GL context version requested for the window
+val GL_MAJOR: i32 = 3;
+val GL_MINOR: i32 = 3;
+
+# a platform window and its OpenGL context
+# ---
+# handle: the underlying GLFW window, nil-handled when creation failed
+# width:  requested client-area width in screen coordinates
+# height: requested client-area height in screen coordinates
+pub rec Window {
+    handle: glfw.Window;
+    width:  i32;
+    height: i32;
+}
+
+fun gl_loader(name: *u8) ptr {
+    ret glfw.get_proc_address(name);
+}
+
+fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
+    val w: glfw.Window = glfw.window_from_handle(handle);
+    if (action == glfw.PRESS && key == glfw.KEY_ESCAPE) {
+        glfw.set_window_should_close(w, true);
+    }
+    val sink: ptr = glfw.get_window_user_pointer(w);
+    if (sink != nil) {
+        val q: *EventQueue = sink::*EventQueue;
+        queue_push(q, Event{kind: KEY, a: key::i64, b: action::i64, c: mods::i64, d: 0});
+    }
+}
+
+# create a window with an OpenGL core-profile context
+#
+# initializes GLFW, requests an OpenGL 3.3 core context, makes it
+# current, enables vsync, loads the GL command table through the
+# context, and installs the key handler. on failure the returned Window
+# carries a nil handle; check with window_is_valid.
+# ---
+# width:  desired client-area width
+# height: desired client-area height
+# title:  window title, UTF-8
+# ret:    the opened Window, nil-handled on failure
+pub fun window_open(width: i32, height: i32, title: str) Window {
+    if (!glfw.init()) {
+        ret Window{handle: glfw.no_window(), width: 0, height: 0};
+    }
+
+    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR);
+    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR);
+    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
+    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
+
+    val win: glfw.Window = glfw.open_window(width, height, title);
+    if (!glfw.window_is_valid(win)) {
+        glfw.terminate();
+        ret Window{handle: win, width: 0, height: 0};
+    }
+
+    glfw.make_context_current(win);
+    glfw.swap_interval(1);
+    gl.load(gl_loader);
+    glfw.set_key_callback(win, on_key);
+
+    ret Window{handle: win, width: width, height: height};
+}
+
+# whether the window was created successfully
+# ---
+# w:   window to test
+# ret: true if the window holds a live handle
+pub fun window_is_valid(w: *Window) bool {
+    ret glfw.window_is_valid(w.handle);
+}
+
+# route this window's input into a queue
+#
+# stores the queue as the window's user pointer; the key handler pushes
+# events there. pass a queue that outlives the window.
+# ---
+# w: window to observe
+# q: queue to receive input events
+pub fun window_set_event_sink(w: *Window, q: *EventQueue) {
+    glfw.set_window_user_pointer(w.handle, q::ptr);
+}
+
+# whether the window has been asked to close
+# ---
+# w:   window to query
+# ret: true once the close flag is set (by the user or by pressing ESC)
+pub fun window_should_close(w: *Window) bool {
+    ret glfw.window_should_close(w.handle);
+}
+
+# process pending platform events, firing input callbacks
+pub fun window_poll() {
+    glfw.poll_events();
+}
+
+# present the back buffer
+# ---
+# w: window to present
+pub fun window_swap(w: *Window) {
+    glfw.swap_buffers(w.handle);
+}
+
+# destroy the window and shut down GLFW
+# ---
+# w: window to close
+pub fun window_close(w: *Window) {
+    glfw.destroy_window(w.handle);
+    glfw.terminate();
+}

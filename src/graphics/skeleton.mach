@@ -1,0 +1,179 @@
+# the Skeleton and Pose: joint hierarchy, bind data, and the skinning palette
+#
+# a Skeleton is boom's own view of a glTF skin: the joints, their parent
+# hierarchy, each joint's rest-pose local transform, and its inverse bind
+# matrix. it holds no mach-gltf types; boom.graphics.model builds one from
+# a loaded document. a Pose is the product of posing a skeleton: the
+# per-joint skinning matrices a skinning shader multiplies its vertices
+# by, laid out contiguously so the whole palette uploads in one call.
+#
+# joint storage is fixed at MAX_JOINTS so a Skeleton and Pose are plain
+# values with no backing allocation, and MAX_JOINTS also sizes the
+# u_joints uniform array the skinning shader declares. the composition is
+# pure boom.math, so it is unit-tested with no GL context.
+
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_identity;
+use boom.math.mat.mat4_translation;
+use boom.math.vec.Vec3;
+use boom.math.quat.Quat;
+use boom.math.transform.Transform;
+use boom.math.transform.transform_matrix;
+use std.types.size.usize;
+use std.types.string.str;
+
+# the most joints a skeleton and its skinning palette carry
+#
+# also the size of the u_joints uniform array the skinning shader
+# declares; SKINNED_VERTEX_SRC hardcodes this count and a compile-time
+# guard keeps the two in sync.
+pub val MAX_JOINTS: usize = 128;
+
+$if (MAX_JOINTS != 128) {
+    $error("skeleton: SKINNED_VERTEX_SRC hardcodes u_joints[128]; keep it in sync with MAX_JOINTS");
+}
+
+# a skeleton's joints, their hierarchy, and their bind data
+#
+# joints are indexed 0..count, matching the order a skin lists them, which
+# is also the order the JOINTS_0 vertex attribute references. parents and
+# order describe the same tree two ways: parents for the child-to-root
+# link, order for a parent-before-child evaluation sweep.
+# ---
+# count:        number of joints, at most MAX_JOINTS
+# parents:      per-joint parent joint index, or -1 for a root joint
+# order:        joint indices ordered so every parent precedes its children
+# rest:         per-joint rest-pose local transform, the base a clip overrides
+# inverse_bind: per-joint inverse bind matrix, mesh space into joint space
+pub rec Skeleton {
+    count:        usize;
+    parents:      [128]i64;
+    order:        [128]usize;
+    rest:         [128]Transform;
+    inverse_bind: [128]Mat4;
+}
+
+# a posed skeleton: the skinning matrix palette ready to upload
+# ---
+# count:    number of valid joint matrices
+# matrices: per-joint skinning matrix, joint j at index j
+pub rec Pose {
+    count:    usize;
+    matrices: [128]Mat4;
+}
+
+# compose per-joint local transforms into a skinning palette
+#
+# sweeps joints in the skeleton's evaluation order so each joint's parent
+# is composed first, forming per-joint model-space matrices, then folds in
+# each inverse bind matrix to map bind-pose mesh vertices into the joint's
+# posed frame. the mesh node's own transform is deliberately ignored, per
+# the glTF skinning rule. this assumes the skin's joints form a
+# self-contained hierarchy, the common case for exported rigs; non-joint
+# intermediate nodes and a non-identity armature transform are future work.
+# ---
+# sk:     the skeleton providing the hierarchy and inverse binds
+# locals: per-joint local transform, index j for joint j
+# out:    receives the computed skinning palette
+pub fun skeleton_pose(sk: *Skeleton, locals: *Transform, out: *Pose) {
+    var globals: [128]Mat4;
+    var i: usize = 0;
+    for (i < sk.count) {
+        val j: usize = sk.order[i];
+        var local: Mat4 = transform_matrix(?locals[j]);
+        val p: i64 = sk.parents[j];
+        if (p < 0) {
+            globals[j] = local;
+        }
+        or {
+            globals[j] = mat4_mul(?globals[p::usize], ?local);
+        }
+        i = i + 1;
+    }
+    var k: usize = 0;
+    for (k < sk.count) {
+        out.matrices[k] = mat4_mul(?globals[k], ?sk.inverse_bind[k]);
+        k = k + 1;
+    }
+    out.count = sk.count;
+}
+
+# pose a skeleton in its rest pose, the bind-pose palette
+#
+# the pose a model shows before any clip is sampled; also the value a
+# skinning draw uploads when no animation is playing.
+# ---
+# sk:  the skeleton to pose
+# out: receives the rest-pose skinning palette
+pub fun skeleton_rest_pose(sk: *Skeleton, out: *Pose) {
+    skeleton_pose(sk, ?sk.rest[0], out);
+}
+
+# a pointer to the palette's first matrix, for upload as a uniform array
+# ---
+# pose: the pose to expose
+# ret:  pointer to the first of count contiguous column-major matrices
+pub fun pose_matrices(pose: *Pose) *Mat4 {
+    ret ?pose.matrices[0];
+}
+
+# a skinning vertex shader following boom's convention
+#
+# attribute locations 0 a_position (vec3), 1 a_normal (vec3), 2 a_uv
+# (vec2), 5 a_joints (uvec4, an integer attribute), and 6 a_weights
+# (vec4); uniforms u_model, u_view, u_projection (mat4) and u_joints, a
+# MAX_JOINTS-long mat4 palette a skinning draw uploads. each vertex is
+# skinned by its four weighted joint matrices, then placed by the model,
+# view, and projection like the mesh convention. pair it with any
+# fragment shader that reads v_normal and v_uv.
+pub val SKINNED_VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nlayout(location = 5) in uvec4 a_joints;\nlayout(location = 6) in vec4 a_weights;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nuniform mat4 u_joints[128];\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    mat4 skin = a_weights.x * u_joints[a_joints.x]\n              + a_weights.y * u_joints[a_joints.y]\n              + a_weights.z * u_joints[a_joints.z]\n              + a_weights.w * u_joints[a_joints.w];\n    mat4 world = u_model * skin;\n    v_normal = mat3(world) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * world * vec4(a_position, 1.0);\n}\n";
+
+# build a two-joint chain skeleton for tests: root then a child of it
+fun fixture_chain(sk: *Skeleton) {
+    sk.count = 2;
+    sk.parents[0] = 0 - 1;
+    sk.parents[1] = 0;
+    sk.order[0] = 0;
+    sk.order[1] = 1;
+    var i: usize = 0;
+    for (i < 2) {
+        sk.rest[i].position = Vec3{x: 0.0, y: 0.0, z: 0.0};
+        sk.rest[i].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
+        sk.rest[i].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
+        sk.inverse_bind[i]  = mat4_identity();
+        i = i + 1;
+    }
+}
+
+test "skeleton: composition propagates a parent transform to its child" {
+    var sk: Skeleton;
+    fixture_chain(?sk);
+
+    var locals: [2]Transform;
+    locals[0].position = Vec3{x: 2.0, y: 0.0, z: 0.0};
+    locals[0].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
+    locals[0].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
+    locals[1].position = Vec3{x: 1.0, y: 0.0, z: 0.0};
+    locals[1].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
+    locals[1].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
+
+    var pose: Pose;
+    skeleton_pose(?sk, ?locals[0], ?pose);
+    if (pose.count != 2) { ret 1; }
+    if (pose.matrices[0].m[12] != 2.0) { ret 2; }
+    if (pose.matrices[1].m[12] != 3.0) { ret 3; }
+    ret 0;
+}
+
+test "skeleton: the inverse bind matrix folds into the skinning matrix" {
+    var sk: Skeleton;
+    fixture_chain(?sk);
+    sk.inverse_bind[1] = mat4_translation(Vec3{x: 0.0 - 3.0, y: 0.0, z: 0.0});
+
+    var pose: Pose;
+    skeleton_rest_pose(?sk, ?pose);
+    # rest globals are identity, so joint 1's skinning matrix is its inverse bind
+    if (pose.matrices[1].m[12] != 0.0 - 3.0) { ret 1; }
+    ret 0;
+}

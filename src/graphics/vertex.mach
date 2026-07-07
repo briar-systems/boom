@@ -1,0 +1,224 @@
+# the vertex-format descriptor: what a vertex carries and where
+
+# a VertexFormat replaces the old fixed {position, normal, uv} vertex
+# struct with a declared list of attributes, each naming a shader
+# semantic, an attribute location, a component type, and a component
+# count. a mesh is uploaded against a format, and the loader builds a
+# format from whatever attributes a glTF primitive provides, so geometry
+# is no longer locked to one layout.
+#
+# the format is deliberately wide enough to carry the attributes skeletal
+# animation needs later: JOINTS_0 (an integer-bound uvec4) and WEIGHTS_0
+# (a vec4) are describable today even though the skinning runtime that
+# consumes them is a separate phase. COLOR_0 and TANGENT round out the
+# common set.
+#
+# this module is pure: it holds no GPU state and imports no backend, so
+# stride and offset math is unit-tested directly. boom.graphics.mesh maps
+# a Component to a GL type when it binds the attributes.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+
+# the most attributes a single vertex format carries
+pub val MAX_ATTRIBUTES: usize = 8;
+
+# a shader attribute's role, matched by name when loading glTF
+pub def Semantic: u8;
+
+# vertex position, glTF POSITION
+pub val SEMANTIC_POSITION:   Semantic = 0;
+# surface normal, glTF NORMAL
+pub val SEMANTIC_NORMAL:     Semantic = 1;
+# first texture coordinate set, glTF TEXCOORD_0
+pub val SEMANTIC_TEXCOORD_0: Semantic = 2;
+# first vertex color set, glTF COLOR_0
+pub val SEMANTIC_COLOR_0:    Semantic = 3;
+# tangent frame, glTF TANGENT
+pub val SEMANTIC_TANGENT:    Semantic = 4;
+# skin joint indices, glTF JOINTS_0, bound as an integer attribute
+pub val SEMANTIC_JOINTS_0:   Semantic = 5;
+# skin joint weights, glTF WEIGHTS_0
+pub val SEMANTIC_WEIGHTS_0:  Semantic = 6;
+
+# an attribute component's storage type
+pub def Component: u8;
+
+# 32-bit float
+pub val COMP_F32: Component = 0;
+# 8-bit unsigned integer
+pub val COMP_U8:  Component = 1;
+# 16-bit unsigned integer
+pub val COMP_U16: Component = 2;
+# 32-bit unsigned integer
+pub val COMP_U32: Component = 3;
+# 8-bit signed integer
+pub val COMP_I8:  Component = 4;
+# 16-bit signed integer
+pub val COMP_I16: Component = 5;
+
+# the byte size of one component
+# ---
+# c:   component type
+# ret: size in bytes
+pub fun component_bytes(c: Component) usize {
+    if (c == COMP_F32) { ret 4; }
+    if (c == COMP_U8)  { ret 1; }
+    if (c == COMP_U16) { ret 2; }
+    if (c == COMP_U32) { ret 4; }
+    if (c == COMP_I8)  { ret 1; }
+    if (c == COMP_I16) { ret 2; }
+    ret 0;
+}
+
+# one attribute within a vertex format
+# ---
+# semantic:   the attribute's role
+# location:   the shader attribute location it binds to
+# component:  the storage type of each component
+# count:      the number of components, 1 to 4
+# normalized: 1 to map integer components into [0, 1] or [-1, 1] on read
+# integer:    1 to bind as a true integer attribute (JOINTS_0), else 0
+# offset:     byte offset of this attribute within a vertex, computed on add
+pub rec VertexAttribute {
+    semantic:   Semantic;
+    location:   u32;
+    component:  Component;
+    count:      u32;
+    normalized: u8;
+    integer:    u8;
+    offset:     u32;
+}
+
+# a vertex layout: an ordered attribute list and its packed byte stride
+# ---
+# attributes: the declared attributes, first count valid, in packed order
+# count:      the number of live attributes
+# stride:     the byte size of one vertex, the sum of the attribute sizes
+pub rec VertexFormat {
+    attributes: [8]VertexAttribute;
+    count:      u32;
+    stride:     u32;
+}
+
+# an empty vertex format
+# ---
+# ret: a format with no attributes and zero stride
+pub fun vertex_format() VertexFormat {
+    var f: VertexFormat;
+    f.count  = 0;
+    f.stride = 0;
+    ret f;
+}
+
+# the byte size of an attribute, count times its component size
+# ---
+# a:   attribute to measure
+# ret: size in bytes
+pub fun attribute_bytes(a: *VertexAttribute) u32 {
+    ret a.count * component_bytes(a.component)::u32;
+}
+
+# append an attribute, packing it tightly after the previous one
+#
+# the attribute's offset is set to the current stride, then the stride
+# grows by the attribute's size. attributes are stored in call order,
+# which is also their layout order in the interleaved buffer.
+# ---
+# f:          format to extend
+# semantic:   the attribute's role
+# location:   the shader attribute location
+# component:  component storage type
+# count:      component count, 1 to 4
+# normalized: 1 to normalize integer components on read
+# integer:    1 to bind as an integer attribute
+# ret:        true when added, false when the format is already full
+pub fun vertex_format_add(f: *VertexFormat, semantic: Semantic, location: u32, component: Component, count: u32, normalized: u8, integer: u8) bool {
+    if (f.count::usize >= MAX_ATTRIBUTES) {
+        ret false;
+    }
+    var a: VertexAttribute;
+    a.semantic   = semantic;
+    a.location   = location;
+    a.component  = component;
+    a.count      = count;
+    a.normalized = normalized;
+    a.integer    = integer;
+    a.offset     = f.stride;
+    f.attributes[f.count] = a;
+    f.count  = f.count + 1;
+    f.stride = f.stride + attribute_bytes(?a);
+    ret true;
+}
+
+# the standard interleaved 3D vertex format
+#
+# POSITION (vec3, location 0), NORMAL (vec3, location 1), and TEXCOORD_0
+# (vec2, location 2): a 32-byte vertex matching the mesh shader
+# convention and the layout the old fixed vertex used.
+# ---
+# ret: the standard 3D format
+pub fun vertex_format_standard() VertexFormat {
+    var f: VertexFormat = vertex_format();
+    vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 3, 0, 0);
+    vertex_format_add(?f, SEMANTIC_NORMAL,     1, COMP_F32, 3, 0, 0);
+    vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 2, COMP_F32, 2, 0, 0);
+    ret f;
+}
+
+# the 2D sprite vertex format
+#
+# POSITION (vec2, location 0) and TEXCOORD_0 (vec2, location 1): a
+# 16-byte vertex for the renderer's sprite quad, proving the same mesh
+# path drives a layout with no normal.
+# ---
+# ret: the sprite format
+pub fun vertex_format_sprite() VertexFormat {
+    var f: VertexFormat = vertex_format();
+    vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
+    vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
+    ret f;
+}
+
+test "vertex: standard format packs to a 32-byte stride" {
+    var f: VertexFormat = vertex_format_standard();
+    if (f.count != 3) { ret 1; }
+    if (f.attributes[0].offset != 0) { ret 2; }
+    if (f.attributes[1].offset != 12) { ret 3; }
+    if (f.attributes[2].offset != 24) { ret 4; }
+    if (f.stride != 32) { ret 5; }
+    ret 0;
+}
+
+test "vertex: sprite format packs to a 16-byte stride" {
+    var f: VertexFormat = vertex_format_sprite();
+    if (f.count != 2) { ret 1; }
+    if (f.attributes[1].offset != 8) { ret 2; }
+    if (f.stride != 16) { ret 3; }
+    ret 0;
+}
+
+test "vertex: skinning attributes describe joints and weights" {
+    var f: VertexFormat = vertex_format_standard();
+    if (!vertex_format_add(?f, SEMANTIC_JOINTS_0,  3, COMP_U16, 4, 0, 1)) { ret 1; }
+    if (!vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 4, COMP_F32, 4, 0, 0)) { ret 2; }
+    val joints: *VertexAttribute = ?f.attributes[3];
+    if (joints.integer != 1) { ret 3; }
+    if (attribute_bytes(joints) != 8) { ret 4; }
+    if (f.attributes[3].offset != 32) { ret 5; }
+    if (f.stride != 56) { ret 6; }
+    ret 0;
+}
+
+test "vertex: add refuses to overflow the attribute table" {
+    var f: VertexFormat = vertex_format();
+    var i: u32 = 0;
+    for (i < MAX_ATTRIBUTES::u32) {
+        if (!vertex_format_add(?f, SEMANTIC_POSITION, i, COMP_F32, 1, 0, 0)) { ret 1; }
+        i = i + 1;
+    }
+    if (vertex_format_add(?f, SEMANTIC_POSITION, i, COMP_F32, 1, 0, 0)) { ret 2; }
+    ret 0;
+}

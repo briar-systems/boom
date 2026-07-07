@@ -1,0 +1,391 @@
+# the Renderer and its passes: boom's core render abstraction
+#
+# a Renderer bundles the frame lifecycle and the shared sprite resources;
+# a game creates one (or several) and drives each frame through it:
+# renderer_begin_frame, then one or more passes, then renderer_end_frame
+# to finalize. presentation is not the Renderer's job: the engine loop
+# swaps the window once per frame after the app has drawn, so several
+# renderers can composite into one frame before a single present. a
+# Renderer holds no module-global state, so instances are independent:
+# a scene renderer can draw into an offscreen RenderTarget that a UI
+# renderer then samples as a texture, both feeding the same window.
+#
+# a Pass is a unit of drawing with a target (the window or an offscreen
+# RenderTarget), a projection (perspective for 3D, orthographic for 2D),
+# clear and render state, and an optional per-pass shader. the same
+# Renderer and Pass machinery drives both 2D and 3D:
+#
+#   - pass_scene builds a 3D pass from a camera; pass_draw and
+#     pass_draw_material submit mesh draws with a model transform.
+#   - pass_overlay builds a 2D pass in pixel space; pass_draw_sprite
+#     submits textured quads.
+#   - set PassDesc.target to render into a texture, and PassDesc.shader to
+#     drive the pass (or its sprites) with a custom program, which is how
+#     offscreen and post-process passes are expressed.
+#
+# a game authors GLSL and drives the pipeline through these handles; the
+# 3D mesh shader convention is location 0 a_position, 1 a_normal,
+# 2 a_uv, with u_model, u_view, u_projection (mat4) that pass draws set,
+# plus whatever the material adds. the 2D sprite convention lives on
+# boom.graphics.sprite.
+
+use gl.gl;
+use boom.graphics.error.Error;
+use boom.graphics.texture.Texture;
+use boom.graphics.shader.Shader;
+use boom.graphics.shader.shader_use;
+use boom.graphics.shader.shader_set_mat4;
+use boom.graphics.shader.shader_set_mat4_array;
+use boom.graphics.mesh.Mesh;
+use boom.graphics.mesh.mesh_draw;
+use boom.graphics.skeleton.Pose;
+use boom.graphics.skeleton.pose_matrices;
+use boom.graphics.material.Material;
+use boom.graphics.material.material_bind;
+use boom.graphics.camera.Camera;
+use boom.graphics.camera.camera_view;
+use boom.graphics.camera.camera_projection;
+use boom.graphics.target.RenderTarget;
+use boom.graphics.sprite.Rect;
+use boom.graphics.sprite.rect;
+use boom.graphics.sprite.SpriteResources;
+use boom.graphics.sprite.sprite_resources;
+use boom.graphics.sprite.sprite_resources_delete;
+use boom.graphics.sprite.sprite_draw;
+use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_identity;
+use boom.math.mat.mat4_orthographic;
+use boom.math.transform.Transform;
+use boom.math.transform.transform_matrix;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.bool.true;
+
+# the render device: the frame lifecycle and shared sprite resources
+# ---
+# sprite: the shared sprite quad and default sprite shader
+# width:  the target width in pixels used for a window-bound pass viewport
+# height: the target height in pixels used for a window-bound pass viewport
+pub rec Renderer {
+    sprite: SpriteResources;
+    width:  i32;
+    height: i32;
+}
+
+# initialize a renderer against the current GL context
+#
+# builds the shared sprite resources; the GL context must already be
+# current (boom.window makes it current when it opens the window). safe to
+# call for several independent renderers; each owns its own resources. the
+# width and height size the viewport for passes that target the window.
+# ---
+# r:      renderer to initialize
+# width:  the window framebuffer width in pixels
+# height: the window framebuffer height in pixels
+# ret:    true on success, or a shader compile error from the sprite setup
+pub fun renderer_init(r: *Renderer, width: i32, height: i32) Result[bool, Error] {
+    val sr: Result[SpriteResources, Error] = sprite_resources();
+    if (is_err[SpriteResources, Error](sr)) {
+        ret err[bool, Error](unwrap_err[SpriteResources, Error](sr));
+    }
+    r.sprite = unwrap_ok[SpriteResources, Error](sr);
+    r.width  = width;
+    r.height = height;
+    ret ok[bool, Error](true);
+}
+
+# update the default framebuffer size after a window resize
+# ---
+# r:      renderer to update
+# width:  the new framebuffer width in pixels
+# height: the new framebuffer height in pixels
+pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
+    r.width  = width;
+    r.height = height;
+}
+
+# begin this renderer's contribution to the frame
+#
+# binds the window framebuffer and sets the full viewport, a clean
+# starting point before the renderer's passes.
+# ---
+# r: renderer to begin on
+pub fun renderer_begin_frame(r: *Renderer) {
+    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
+    gl.viewport(0, 0, r.width, r.height);
+}
+
+# finalize this renderer's GL work for the frame
+#
+# unbinds any offscreen target back to the window framebuffer and flushes
+# the command stream. it does not present: the engine loop swaps the
+# window once per frame after the app has drawn, so several renderers can
+# finalize into one frame before a single present.
+# ---
+# r: renderer to finalize
+pub fun renderer_end_frame(r: *Renderer) {
+    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
+    gl.flush();
+}
+
+# release the renderer's shared resources
+# ---
+# r: renderer to shut down; must not be used afterward
+pub fun renderer_dnit(r: *Renderer) {
+    sprite_resources_delete(?r.sprite);
+}
+
+# how a pass is configured before it begins
+#
+# pass_scene and pass_overlay build the two common descriptions; a game
+# then overrides fields as needed (target for offscreen rendering, shader
+# for a custom program, clear color, and so on) and calls pass_begin.
+# ---
+# target:      the offscreen target to render into, or nil for the window
+# perspective: 1 to take view and projection from camera, 0 for 2D ortho
+# camera:      the 3D viewpoint, read when perspective is 1
+# clear:       1 to clear color and depth when the pass begins
+# clear_color: the color cleared to when clear is 1
+# shader:      a per-pass shader driving pass_draw and sprites, or nil
+# depth_test:  1 to enable depth testing for the pass
+# blend:       1 to enable alpha blending for the pass
+pub rec PassDesc {
+    target:      *RenderTarget;
+    perspective: u8;
+    camera:      *Camera;
+    clear:       u8;
+    clear_color: Vec4;
+    shader:      *Shader;
+    depth_test:  u8;
+    blend:       u8;
+}
+
+# a 3D scene pass description: perspective camera, depth test, opaque
+#
+# targets the window and clears to a dark color by default; set .target
+# to render the scene into a texture.
+# ---
+# camera: the viewpoint providing view and projection
+# ret:    the pass description
+pub fun pass_scene(camera: *Camera) PassDesc {
+    ret PassDesc{
+        target:      nil,
+        perspective: 1,
+        camera:      camera,
+        clear:       1,
+        clear_color: vec4(0.08, 0.09, 0.12, 1.0),
+        shader:      nil,
+        depth_test:  1,
+        blend:       0,
+    };
+}
+
+# a 2D overlay pass description: pixel-space ortho, no depth, blended
+#
+# targets the window and does not clear by default, so it composites over
+# whatever the frame already drew; set .clear to start from a fill, or
+# .target to render into a texture.
+# ---
+# ret: the pass description
+pub fun pass_overlay() PassDesc {
+    ret PassDesc{
+        target:      nil,
+        perspective: 0,
+        camera:      nil,
+        clear:       0,
+        clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        shader:      nil,
+        depth_test:  0,
+        blend:       1,
+    };
+}
+
+# an open pass: the resolved target, matrices, and render state for draws
+# ---
+# renderer:   the renderer this pass draws through
+# target_fb:  the bound framebuffer id, 0 for the window
+# width:      the target width in pixels
+# height:     the target height in pixels
+# view:       the view matrix draws upload as u_view
+# projection: the projection matrix draws upload as u_projection
+# shader:     the per-pass override shader, or nil
+pub rec Pass {
+    renderer:   *Renderer;
+    target_fb:  u32;
+    width:      i32;
+    height:     i32;
+    view:       Mat4;
+    projection: Mat4;
+    shader:     *Shader;
+}
+
+# begin a pass, binding its target and applying its render state
+#
+# resolves the viewport from the target (or the window), builds the view
+# and projection (from the camera for a 3D pass, or a pixel-space
+# orthographic projection for a 2D pass), sets depth-test and blend
+# state, and clears if requested.
+# ---
+# r: the renderer
+# d: the pass description
+# ret: the open pass, passed to draw calls and pass_end
+pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
+    var p: Pass;
+    p.renderer = r;
+    p.shader   = d.shader;
+
+    if (d.target != nil) {
+        p.target_fb = d.target.fbo;
+        p.width     = d.target.width;
+        p.height    = d.target.height;
+    }
+    or {
+        p.target_fb = 0;
+        p.width     = r.width;
+        p.height    = r.height;
+    }
+
+    if (d.perspective != 0) {
+        p.view       = camera_view(d.camera);
+        p.projection = camera_projection(d.camera);
+    }
+    or {
+        p.view       = mat4_identity();
+        p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
+    }
+
+    gl.bind_framebuffer(gl.FRAMEBUFFER, p.target_fb);
+    gl.viewport(0, 0, p.width, p.height);
+
+    if (d.depth_test != 0) { gl.enable(gl.DEPTH_TEST); }
+    or { gl.disable(gl.DEPTH_TEST); }
+
+    if (d.blend != 0) {
+        gl.enable(gl.BLEND);
+        gl.blend_func(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    }
+    or { gl.disable(gl.BLEND); }
+
+    if (d.clear != 0) {
+        gl.clear_color(d.clear_color.x, d.clear_color.y, d.clear_color.z, d.clear_color.w);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
+
+    ret p;
+}
+
+# finish a pass, rebinding the default framebuffer
+# ---
+# p: the pass to end
+pub fun pass_end(p: *Pass) {
+    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
+}
+
+# the shader a draw should use: the pass override if set, else fallback
+# ---
+# p:        the pass
+# fallback: the shader to use when the pass has no override
+# ret:      the effective shader
+fun effective_shader(p: *Pass, fallback: *Shader) *Shader {
+    if (p.shader != nil) {
+        ret p.shader;
+    }
+    ret fallback;
+}
+
+# submit a 3D mesh draw with an explicit shader and a model transform
+#
+# binds the effective shader (the pass override, or the given one),
+# uploads u_model from the transform and u_view and u_projection from the
+# pass, and draws the mesh. set any other uniforms on the shader first.
+# ---
+# p:      the open pass
+# m:      the mesh to draw
+# shdr:   the shader to draw with, unless the pass overrides it
+# t:      the model transform
+pub fun pass_draw(p: *Pass, m: *Mesh, shdr: *Shader, t: *Transform) {
+    val s: *Shader = effective_shader(p, shdr);
+    var model: Mat4 = transform_matrix(t);
+    shader_use(s);
+    shader_set_mat4(s, "u_model", ?model);
+    shader_set_mat4(s, "u_view", ?p.view);
+    shader_set_mat4(s, "u_projection", ?p.projection);
+    mesh_draw(m);
+}
+
+# submit a skinned mesh draw with a pose, a shader, and a model transform
+#
+# binds the effective shader (the pass override, or the given one),
+# uploads u_model from the transform and u_view and u_projection from the
+# pass, then uploads the pose's skinning matrices as the u_joints palette
+# and draws. the shader must follow the skinning convention
+# (boom.graphics.skeleton.SKINNED_VERTEX_SRC): attribute locations 5
+# a_joints and 6 a_weights, and a u_joints mat4 array. set any other
+# uniforms on the shader first.
+# ---
+# p:    the open pass
+# m:    the skinned mesh to draw
+# pose: the current pose supplying the skinning palette
+# shdr: the shader to draw with, unless the pass overrides it
+# t:    the model transform placing the whole model in the world
+pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, shdr: *Shader, t: *Transform) {
+    val s: *Shader = effective_shader(p, shdr);
+    var model: Mat4 = transform_matrix(t);
+    shader_use(s);
+    shader_set_mat4(s, "u_model", ?model);
+    shader_set_mat4(s, "u_view", ?p.view);
+    shader_set_mat4(s, "u_projection", ?p.projection);
+    shader_set_mat4_array(s, "u_joints", pose_matrices(pose), pose.count::i32);
+    mesh_draw(m);
+}
+
+# submit a 3D mesh draw with a material and a model transform
+#
+# binds the material's shader, base color, and textures, then uploads the
+# model, view, and projection and draws. a material is self-contained, so
+# a pass override shader does not replace its shader.
+# ---
+# p:   the open pass
+# m:   the mesh to draw
+# mat: the material to draw with
+# t:   the model transform
+pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
+    material_bind(mat);
+    var model: Mat4 = transform_matrix(t);
+    shader_set_mat4(mat.shader, "u_model", ?model);
+    shader_set_mat4(mat.shader, "u_view", ?p.view);
+    shader_set_mat4(mat.shader, "u_projection", ?p.projection);
+    mesh_draw(m);
+}
+
+# submit a 2D sprite draw covering a whole texture
+# ---
+# p:       the open pass
+# texture: the texture to draw
+# dest:    the destination rectangle in pixels
+# tint:    the color multiplied into the texture
+pub fun pass_draw_sprite(p: *Pass, texture: *Texture, dest: Rect, tint: Vec4) {
+    pass_draw_sprite_uv(p, texture, dest, rect(0.0, 0.0, 1.0, 1.0), tint);
+}
+
+# submit a 2D sprite draw of a sub-rectangle of a texture
+#
+# uses the pass override shader when set, else the renderer's default
+# sprite shader; either must follow the sprite uniform convention.
+# ---
+# p:       the open pass
+# texture: the texture to sample
+# dest:    the destination rectangle in pixels
+# src:     the source rectangle in texture space, 0 to 1
+# tint:    the color multiplied into the sample
+pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, tint: Vec4) {
+    val s: *Shader = effective_shader(p, ?p.renderer.sprite.shader);
+    sprite_draw(?p.renderer.sprite, s, ?p.projection, texture, dest, src, tint);
+}

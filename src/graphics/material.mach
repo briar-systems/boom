@@ -1,0 +1,117 @@
+# the Material handle: a shader plus the parameters it draws with
+#
+# a Material bundles a shader, a base color, and named texture bindings so
+# a game can describe a surface once and draw it with pass_draw_material.
+# it references a Shader and Textures the game owns; those handles must
+# outlive the material. binding a material sets u_base_color and points
+# each sampler uniform at its texture unit.
+
+use boom.graphics.shader.Shader;
+use boom.graphics.shader.shader_use;
+use boom.graphics.shader.shader_set_vec4;
+use boom.graphics.shader.shader_set_texture;
+use boom.graphics.texture.Texture;
+use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+
+# the most texture bindings a material carries
+pub val MAX_TEXTURES: i32 = 4;
+
+# one named texture binding within a material
+# ---
+# name:    the sampler uniform name in the shader
+# texture: the bound texture, owned by the game
+pub rec MaterialTexture {
+    name:    str;
+    texture: *Texture;
+}
+
+# a surface description: a shader, a base color, and texture bindings
+# ---
+# shader:        the program this material draws with, owned by the game
+# base_color:    the u_base_color uniform value
+# textures:      the sampler bindings, first texture_count valid
+# texture_count: number of live texture bindings
+pub rec Material {
+    shader:        *Shader;
+    base_color:    Vec4;
+    textures:      [4]MaterialTexture;
+    texture_count: i32;
+}
+
+# a material over a shader, white base color and no textures
+# ---
+# shader: the program to draw with
+# ret:    the new material
+pub fun material(shader: *Shader) Material {
+    var m: Material;
+    m.shader = shader;
+    m.base_color = vec4(1.0, 1.0, 1.0, 1.0);
+    m.texture_count = 0;
+    ret m;
+}
+
+# set the material's base color
+# ---
+# m:     material to modify
+# color: the RGBA base color
+pub fun material_set_color(m: *Material, color: Vec4) {
+    m.base_color = color;
+}
+
+# add a named texture binding
+#
+# returns false without modifying the material when it already holds
+# MAX_TEXTURES bindings.
+# ---
+# m:       material to modify
+# name:    the sampler uniform name
+# texture: the texture to bind, owned by the game
+# ret:     true if the binding was added, false if the material is full
+pub fun material_add_texture(m: *Material, name: str, texture: *Texture) bool {
+    if (m.texture_count >= MAX_TEXTURES) {
+        ret false;
+    }
+    m.textures[m.texture_count] = MaterialTexture{name: name, texture: texture};
+    m.texture_count = m.texture_count + 1;
+    ret true;
+}
+
+# bind the material's shader, base color, and textures for drawing
+# ---
+# m: material to bind
+pub fun material_bind(m: *Material) {
+    shader_use(m.shader);
+    shader_set_vec4(m.shader, "u_base_color", m.base_color);
+    var i: i32 = 0;
+    for (i < m.texture_count) {
+        shader_set_texture(m.shader, m.textures[i].name, m.textures[i].texture, i);
+        i = i + 1;
+    }
+}
+
+test "material: base color defaults to white" {
+    var s: Shader;
+    var m: Material = material(?s);
+    if (m.base_color.x != 1.0 || m.base_color.w != 1.0) { ret 1; }
+    if (m.texture_count != 0) { ret 2; }
+    ret 0;
+}
+
+test "material: texture bindings fill then reject overflow" {
+    var s: Shader;
+    var t: Texture;
+    var m: Material = material(?s);
+    var i: i32 = 0;
+    for (i < MAX_TEXTURES) {
+        if (!material_add_texture(?m, "u_texture", ?t)) { ret 1; }
+        i = i + 1;
+    }
+    if (m.texture_count != MAX_TEXTURES) { ret 2; }
+    if (material_add_texture(?m, "u_texture", ?t)) { ret 3; }
+    ret 0;
+}

@@ -1,0 +1,61 @@
+# the main loop that drives an App against a Context
+#
+# run ties the pieces together: it calls the App's lifecycle hooks around
+# a frame loop that polls input, advances the clock, drains the fixed-
+# timestep accumulator into update calls, and renders once with the
+# leftover interpolation factor. it lives here rather than on the Context
+# because the loop depends on both boom.context and boom.app, and mach
+# forbids the circular module dependency that owning it on the Context
+# would create (boom.app already depends on boom.context).
+#
+# the Context must be initialized (see boom.context.context_init) before
+# run and shut down after it.
+
+use boom.context.Context;
+use boom.app.App;
+use boom.window.window_should_close;
+use boom.window.window_poll;
+use boom.window.window_swap;
+use boom.clock.clock_tick;
+use boom.timestep.timestep_add;
+use boom.timestep.timestep_step;
+use boom.timestep.timestep_alpha;
+
+fun invoke(hook: fun(*Context), ctx: *Context) {
+    if (hook != nil) {
+        hook(ctx);
+    }
+}
+
+# drive the app's lifecycle over an initialized context
+#
+# calls f_init once, then loops until the context is stopped or the
+# window is closed: each frame polls input, advances the clock, runs the
+# fixed-timestep update as many times as the accumulator allows, sets
+# ctx.alpha, renders via f_draw, and presents once. calls f_dnit once on
+# exit. absent hooks are skipped. the loop owns presentation: f_draw may
+# drive any number of renderers (each finalizing with
+# boom.graphics.renderer.renderer_end_frame) into the frame, and the loop
+# swaps the window once afterward.
+# ---
+# ctx: initialized engine context to run
+# app: lifecycle hooks to drive
+pub fun run(ctx: *Context, app: *App) {
+    invoke(app.f_init, ctx);
+
+    for (ctx.running && !window_should_close(?ctx.window)) {
+        window_poll();
+        clock_tick(?ctx.clock);
+
+        timestep_add(?ctx.step, ctx.clock.delta);
+        for (timestep_step(?ctx.step)) {
+            invoke(app.f_tick, ctx);
+        }
+
+        ctx.alpha = timestep_alpha(?ctx.step);
+        invoke(app.f_draw, ctx);
+        window_swap(?ctx.window);
+    }
+
+    invoke(app.f_dnit, ctx);
+}

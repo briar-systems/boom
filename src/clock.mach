@@ -1,0 +1,149 @@
+# per-frame engine clock
+#
+# tracks the monotonic time base of a running engine and derives the
+# per-frame values a game loop needs: the delta since the previous
+# frame, total elapsed time, a frame counter, and a smoothed frames-
+# per-second estimate. the impure sampling entrypoint (clock_tick) reads
+# the monotonic clock; the pure core (clock_sample) takes the current
+# time explicitly so the derivation is deterministic and testable.
+
+use std.chrono.time.Time;
+use std.chrono.time.monotonic;
+use std.chrono.time.time_sub;
+use std.chrono.duration.Duration;
+use std.chrono.duration.SECOND;
+
+# smoothing factor for the exponential moving average of the fps estimate
+val FPS_SMOOTHING: f64 = 0.1;
+
+# the timing state of a running engine
+# ---
+# start:   monotonic instant the clock began
+# last:    monotonic instant of the previous sample
+# elapsed: total time since start
+# delta:   time between the two most recent samples
+# frame:   number of samples taken since start
+# fps:     smoothed frames-per-second estimate
+pub rec Clock {
+    start:   Time;
+    last:    Time;
+    elapsed: Duration;
+    delta:   Duration;
+    frame:   u64;
+    fps:     f64;
+}
+
+# create a clock whose time base is a given instant
+#
+# the pure constructor: start and last are seeded to base and every
+# derived field is zero. clock_new is the wall-clock wrapper over it.
+# ---
+# base: monotonic instant to anchor the clock at
+# ret:  a fresh Clock anchored at base
+pub fun clock_at(base: Time) Clock {
+    ret Clock{
+        start:   base,
+        last:    base,
+        elapsed: 0,
+        delta:   0,
+        frame:   0,
+        fps:     0.0,
+    };
+}
+
+# create a clock anchored at the current monotonic time
+# ---
+# ret: a fresh Clock anchored at the monotonic clock's current reading
+pub fun clock_new() Clock {
+    ret clock_at(monotonic());
+}
+
+# advance the clock to a given instant
+#
+# the pure core of clock_tick: recomputes delta, elapsed, the frame
+# counter, and the smoothed fps from now without reading any clock. a
+# non-positive delta (two samples in the same tick) leaves fps
+# unchanged rather than dividing by zero.
+# ---
+# c:   clock to advance
+# now: current monotonic instant
+pub fun clock_sample(c: *Clock, now: Time) {
+    c.delta   = time_sub(now, c.last);
+    c.last    = now;
+    c.elapsed = time_sub(now, c.start);
+    c.frame   = c.frame + 1;
+
+    if (c.delta > 0) {
+        val inst: f64 = SECOND::f64 / c.delta::f64;
+        if (c.fps == 0.0) {
+            c.fps = inst;
+        }
+        or {
+            c.fps = c.fps + FPS_SMOOTHING * (inst - c.fps);
+        }
+    }
+}
+
+# advance the clock to the current monotonic time
+# ---
+# c: clock to advance
+pub fun clock_tick(c: *Clock) {
+    clock_sample(c, monotonic());
+}
+
+test "clock: fresh clock has zeroed derived fields" {
+    val c: Clock = clock_at(Time{sec: 100, nsec: 0});
+    if (c.frame != 0) { ret 1; }
+    if (c.elapsed != 0) { ret 2; }
+    if (c.delta != 0) { ret 3; }
+    if (c.fps != 0.0) { ret 4; }
+    ret 0;
+}
+
+test "clock: first sample sets delta, elapsed, and frame" {
+    var c: Clock = clock_at(Time{sec: 100, nsec: 0});
+    clock_sample(?c, Time{sec: 100, nsec: 16000000});
+    if (c.frame != 1) { ret 1; }
+    if (c.delta != 16000000) { ret 2; }
+    if (c.elapsed != 16000000) { ret 3; }
+    ret 0;
+}
+
+test "clock: elapsed accumulates across samples" {
+    var c: Clock = clock_at(Time{sec: 0, nsec: 0});
+    clock_sample(?c, Time{sec: 0, nsec: 10000000});
+    clock_sample(?c, Time{sec: 0, nsec: 25000000});
+    if (c.frame != 2) { ret 1; }
+    if (c.delta != 15000000) { ret 2; }
+    if (c.elapsed != 25000000) { ret 3; }
+    ret 0;
+}
+
+test "clock: first fps is the instantaneous rate" {
+    var c: Clock = clock_at(Time{sec: 0, nsec: 0});
+    # a 10ms frame is exactly 100 fps
+    clock_sample(?c, Time{sec: 0, nsec: 10000000});
+    if (c.fps < 99.999 || c.fps > 100.001) { ret 1; }
+    ret 0;
+}
+
+test "clock: fps smooths toward a changed rate" {
+    var c: Clock = clock_at(Time{sec: 0, nsec: 0});
+    # seed at 100 fps, then feed 50 fps frames; the ema drifts down but
+    # stays above the new instantaneous rate.
+    clock_sample(?c, Time{sec: 0, nsec: 10000000});
+    clock_sample(?c, Time{sec: 0, nsec: 30000000});
+    if (c.fps >= 100.0) { ret 1; }
+    if (c.fps <= 50.0) { ret 2; }
+    ret 0;
+}
+
+test "clock: zero delta leaves fps unchanged" {
+    var c: Clock = clock_at(Time{sec: 0, nsec: 0});
+    clock_sample(?c, Time{sec: 0, nsec: 10000000});
+    val before: f64 = c.fps;
+    clock_sample(?c, Time{sec: 0, nsec: 10000000});
+    if (c.fps != before) { ret 1; }
+    if (c.delta != 0) { ret 2; }
+    ret 0;
+}

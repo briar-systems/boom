@@ -1,0 +1,51 @@
+# a fixed-size, value-returned error for the graphics facade
+#
+# graphics operations that can fail return Result[T, Error]. Error carries
+# its message inline in a fixed buffer, so a failure needs neither a heap
+# allocation nor a module-global scratch buffer: the error travels by
+# value on the stack like any other return. messages longer than the
+# buffer are truncated.
+
+use std.types.char.char;
+use std.types.string.str;
+use std.types.size.usize;
+
+# the message buffer capacity, including the null terminator
+pub val ERROR_CAP: usize = 256;
+
+# an inline, null-terminated error message
+# ---
+# message: the message bytes, null-terminated
+pub rec Error {
+    message: [256]char;
+}
+
+# build an Error from a null-terminated string, truncating if needed
+# ---
+# message: the source message
+# ret:     an Error holding a copy of the message
+pub fun error(message: str) Error {
+    var e: Error;
+    var i: usize = 0;
+    for (i < ERROR_CAP - 1 && message[i] != 0) {
+        e.message[i] = message[i];
+        i = i + 1;
+    }
+    e.message[i] = 0;
+    ret e;
+}
+
+# the message text of an Error
+# ---
+# e:   error to read
+# ret: the null-terminated message
+pub fun error_msg(e: *Error) str {
+    ret ?e.message[0];
+}
+
+test "error: message round-trips through the buffer" {
+    val e: Error = error("boom");
+    val m: str = error_msg(?e);
+    if (m[0] != 'b' || m[1] != 'o' || m[2] != 'o' || m[3] != 'm' || m[4] != 0) { ret 1; }
+    ret 0;
+}

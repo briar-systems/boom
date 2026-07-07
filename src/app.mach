@@ -1,0 +1,24 @@
+# the hooks a game implements
+#
+# an App is the set of lifecycle callbacks the engine drives, each
+# receiving the running Context. every hook is optional: leave one nil
+# (cast, e.g. nil::fun(*Context)) and the engine skips it. f_tick runs at
+# the fixed update rate, possibly several times per frame; f_draw runs
+# once per frame with the interpolation factor available as ctx.alpha.
+# a game carries its own state through ctx.user (boom.context.context_set_user)
+# rather than module globals.
+
+use boom.context.Context;
+
+# a game's lifecycle hooks
+# ---
+# f_init: called once after the context is ready, before the loop
+# f_tick: fixed-timestep update; may run zero or more times per frame
+# f_draw: render, called once per frame; read ctx.alpha to interpolate
+# f_dnit: called once after the loop exits, before teardown
+pub rec App {
+    f_init: fun(*Context);
+    f_tick: fun(*Context);
+    f_draw: fun(*Context);
+    f_dnit: fun(*Context);
+}

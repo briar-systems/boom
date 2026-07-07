@@ -1,0 +1,230 @@
+# input event queue
+#
+# a fixed-capacity ring buffer of input events. the window layer pushes
+# events as they arrive from the platform; the game drains them once per
+# frame. push and pop are O(1) and never allocate; a push onto a full
+# queue is refused rather than overwriting unread events.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+
+# capacity of an EventQueue's backing ring, in events
+pub val CAPACITY: usize = 256;
+
+# the category of an input event
+pub def EventKind: u8;
+
+# no event; the zero value of an EventKind
+pub val NONE: EventKind = 0;
+# a keyboard key changed state; see the key payload fields
+pub val KEY: EventKind = 1;
+# a mouse button changed state
+pub val MOUSE_BUTTON: EventKind = 2;
+# the cursor moved
+pub val MOUSE_MOVE: EventKind = 3;
+# the scroll wheel moved
+pub val SCROLL: EventKind = 4;
+# the framebuffer was resized
+pub val RESIZE: EventKind = 5;
+# the window was asked to close
+pub val CLOSE: EventKind = 6;
+
+# one input event with a kind-tagged integer payload
+#
+# the four payload slots carry kind-specific data (for a KEY event: the
+# key code, action, and modifier bits); consumers read the slots that
+# the kind defines.
+# ---
+# kind: which category of event this is
+# a:    first payload slot
+# b:    second payload slot
+# c:    third payload slot
+# d:    fourth payload slot
+pub rec Event {
+    kind: EventKind;
+    a:    i64;
+    b:    i64;
+    c:    i64;
+    d:    i64;
+}
+
+# a fixed-capacity ring buffer of events
+# ---
+# events: backing storage
+# head:   index of the oldest queued event
+# len:    number of queued events
+pub rec EventQueue {
+    events: [CAPACITY]Event;
+    head:   usize;
+    len:    usize;
+}
+
+# create an empty event queue
+# ---
+# ret: an EventQueue holding no events
+pub fun queue_new() EventQueue {
+    var q: EventQueue;
+    q.head = 0;
+    q.len  = 0;
+    ret q;
+}
+
+# the number of events currently queued
+# ---
+# q:   queue to query
+# ret: count of unread events
+pub fun queue_len(q: *EventQueue) usize {
+    ret q.len;
+}
+
+# whether the queue holds no events
+# ---
+# q:   queue to query
+# ret: true if empty
+pub fun queue_is_empty(q: *EventQueue) bool {
+    ret q.len == 0;
+}
+
+# whether the queue cannot accept another event
+# ---
+# q:   queue to query
+# ret: true if at capacity
+pub fun queue_is_full(q: *EventQueue) bool {
+    ret q.len >= CAPACITY;
+}
+
+# append an event to the back of the queue
+#
+# refuses the event and returns false when the queue is full, leaving
+# the queued events untouched.
+# ---
+# q:   queue to append to
+# e:   event to enqueue
+# ret: true if the event was stored, false if the queue was full
+pub fun queue_push(q: *EventQueue, e: Event) bool {
+    if (q.len >= CAPACITY) { ret false; }
+    val slot: usize = (q.head + q.len) % CAPACITY;
+    q.events[slot] = e;
+    q.len = q.len + 1;
+    ret true;
+}
+
+# remove and return the oldest event
+#
+# writes the dequeued event through out and returns true; returns false
+# and leaves out untouched when the queue is empty.
+# ---
+# q:   queue to drain from
+# out: receives the dequeued event
+# ret: true if an event was dequeued, false if the queue was empty
+pub fun queue_pop(q: *EventQueue, out: *Event) bool {
+    if (q.len == 0) { ret false; }
+    @out = q.events[q.head];
+    q.head = (q.head + 1) % CAPACITY;
+    q.len = q.len - 1;
+    ret true;
+}
+
+# discard every queued event
+# ---
+# q: queue to empty
+pub fun queue_clear(q: *EventQueue) {
+    q.head = 0;
+    q.len  = 0;
+}
+
+test "event: fresh queue is empty" {
+    var q: EventQueue = queue_new();
+    if (!queue_is_empty(?q)) { ret 1; }
+    if (queue_len(?q) != 0) { ret 2; }
+    if (queue_is_full(?q)) { ret 3; }
+    ret 0;
+}
+
+test "event: push then pop returns the event" {
+    var q: EventQueue = queue_new();
+    if (!queue_push(?q, Event{kind: KEY, a: 65, b: 1, c: 0, d: 0})) { ret 1; }
+    if (queue_len(?q) != 1) { ret 2; }
+    var e: Event;
+    if (!queue_pop(?q, ?e)) { ret 3; }
+    if (e.kind != KEY) { ret 4; }
+    if (e.a != 65) { ret 5; }
+    if (e.b != 1) { ret 6; }
+    if (!queue_is_empty(?q)) { ret 7; }
+    ret 0;
+}
+
+test "event: pop on empty queue returns false" {
+    var q: EventQueue = queue_new();
+    var e: Event;
+    if (queue_pop(?q, ?e)) { ret 1; }
+    ret 0;
+}
+
+test "event: events dequeue in fifo order" {
+    var q: EventQueue = queue_new();
+    queue_push(?q, Event{kind: KEY, a: 1, b: 0, c: 0, d: 0});
+    queue_push(?q, Event{kind: KEY, a: 2, b: 0, c: 0, d: 0});
+    queue_push(?q, Event{kind: KEY, a: 3, b: 0, c: 0, d: 0});
+    var e: Event;
+    queue_pop(?q, ?e);
+    if (e.a != 1) { ret 1; }
+    queue_pop(?q, ?e);
+    if (e.a != 2) { ret 2; }
+    queue_pop(?q, ?e);
+    if (e.a != 3) { ret 3; }
+    ret 0;
+}
+
+test "event: push refuses events beyond capacity" {
+    var q: EventQueue = queue_new();
+    var i: usize = 0;
+    for (i < CAPACITY) {
+        if (!queue_push(?q, Event{kind: KEY, a: i::i64, b: 0, c: 0, d: 0})) { ret 1; }
+        i = i + 1;
+    }
+    if (!queue_is_full(?q)) { ret 2; }
+    if (queue_push(?q, Event{kind: KEY, a: 999, b: 0, c: 0, d: 0})) { ret 3; }
+    if (queue_len(?q) != CAPACITY) { ret 4; }
+    ret 0;
+}
+
+test "event: ring wraps around the backing store" {
+    var q: EventQueue = queue_new();
+    # fill, drain most, then push past the physical end of the ring
+    var i: usize = 0;
+    for (i < CAPACITY) {
+        queue_push(?q, Event{kind: KEY, a: i::i64, b: 0, c: 0, d: 0});
+        i = i + 1;
+    }
+    var e: Event;
+    var k: usize = 0;
+    for (k < 200) {
+        queue_pop(?q, ?e);
+        k = k + 1;
+    }
+    # 56 remain (indices 200..255); pushing wraps into freed low slots
+    var j: usize = 0;
+    for (j < 200) {
+        if (!queue_push(?q, Event{kind: MOUSE_MOVE, a: 1000 + j::i64, b: 0, c: 0, d: 0})) { ret 1; }
+        j = j + 1;
+    }
+    if (queue_len(?q) != 256) { ret 2; }
+    # the first remaining event is still the oldest undrained one
+    queue_pop(?q, ?e);
+    if (e.a != 200) { ret 3; }
+    ret 0;
+}
+
+test "event: clear empties the queue" {
+    var q: EventQueue = queue_new();
+    queue_push(?q, Event{kind: CLOSE, a: 0, b: 0, c: 0, d: 0});
+    queue_push(?q, Event{kind: CLOSE, a: 0, b: 0, c: 0, d: 0});
+    queue_clear(?q);
+    if (!queue_is_empty(?q)) { ret 1; }
+    var e: Event;
+    if (queue_pop(?q, ?e)) { ret 2; }
+    ret 0;
+}
