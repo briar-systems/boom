@@ -1,17 +1,12 @@
 [project]
 id = "boom"
-version = "0.1.0"
+name = "Boom Engine"
+description = "Boom game engine"
+version = "0.2.0"
 src = "src"
-dep = "dep"
-target = "native"
-out   = "out/{target}/{profile}/bin/{name}{ext}"
-obj   = "out/{target}/{profile}/obj"
-ir    = "out/{target}/{profile}/ir"
-asm   = "out/{target}/{profile}/asm"
-tests = "out/{target}/{profile}/test/{name}"
-module = "lib/boom.mach"
+out = "out/{target.name}/{profile.name}"
 
-[target.linux]
+[target.linux-x86_64]
 isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
@@ -20,15 +15,11 @@ abi = "sysv64"
 isa = "x86_64"
 os  = "windows"
 abi = "win64"
-ext = ".exe"
 
 [target.darwin]
 isa = "x86_64"
 os  = "darwin"
 abi = "sysv64"
-
-[lib.boom]
-entry = "lib/boom.mach"
 
 [profile.debug]
 opt = 0
@@ -36,42 +27,36 @@ opt = 0
 [profile.release]
 opt = 2
 
-[deps.mach-std]
+[artifact.boom]
+kind = "static"
+entry = "lib/boom.mach"
+out = "lib/boom"
+targets = ["*"]
+
+[dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
 ref = "branch/main"
 
-[deps.mach-glfw]
+[dep.mach-glfw]
 git = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 
-[deps.mach-gl]
+[dep.mach-gl]
 git = "https://github.com/briar-systems/mach-gl"
 ref = "branch/dev"
 
-[deps.mach-vk]
-git = "https://github.com/briar-systems/mach-vk"
-ref = "branch/main"
-
-[deps.mach-audio]
+[dep.mach-audio]
 git = "https://github.com/briar-systems/mach-audio"
 ref = "branch/dev"
 
-[deps.mach-image]
+[dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
 ref = "branch/dev"
 
-[deps.mach-font]
+[dep.mach-font]
 git = "https://github.com/briar-systems/mach-font"
 ref = "branch/dev"
 
-[deps.mach-gltf]
+[dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/dev"
-
-[deps.mach-phys]
-git = "https://github.com/briar-systems/mach-phys"
-ref = "branch/main"
-
-[deps.blit]
-git = "https://github.com/briar-systems/blit"
-ref = "branch/main"
