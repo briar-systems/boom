@@ -1,13 +1,12 @@
 [project]
-id      = "cube"
-version = "0.1.0"
-src     = "src"
-dep     = "dep"
-target  = "native"
-out     = "out/{target}/{profile}/bin/{name}{ext}"
-obj     = "out/{target}/{profile}/obj"
+id = "cube"
+name = "Cube Example"
+description = "Cube example for Boom Engine"
+version = "0.2.0"
+src = "src"
+out = "out/{target.name}/{profile.name}"
 
-[target.linux]
+[target.linux-x86_64]
 isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
@@ -16,39 +15,44 @@ abi = "sysv64"
 isa = "x86_64"
 os  = "windows"
 abi = "win64"
-ext = ".exe"
 
 [target.darwin]
 isa = "x86_64"
 os  = "darwin"
 abi = "sysv64"
 
-[bin.cube]
+[profile.debug]
+opt = 0
+
+[profile.release]
+opt = 2
+
+[artifact.cube]
+kind = "bin"
 entry = "main.mach"
+out = "bin/cube"
+targets = ["*"]
 
-# boom is consumed by path from this in-repo example; a standalone game
-# would declare it by git ref instead. boom's surface exposes glfw, gl,
-# image, and gltf ids, so the stanzas below are required and must match
-# boom's own refs (see the boom README).
-[deps.boom]
-path = "../.."
+[dep.boom]
+git = "https://github.com/briar-systems/boom"
+ref = "branch/dev"
 
-[deps.mach-std]
+[dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
 ref = "branch/main"
 
-[deps.mach-glfw]
+[dep.mach-glfw]
 git = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 
-[deps.mach-gl]
+[dep.mach-gl]
 git = "https://github.com/briar-systems/mach-gl"
 ref = "branch/dev"
 
-[deps.mach-image]
+[dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
 ref = "branch/dev"
 
-[deps.mach-gltf]
+[dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/dev"
