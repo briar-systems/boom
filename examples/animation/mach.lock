@@ -3,7 +3,7 @@
 [dep.boom]
 url = "https://github.com/briar-systems/boom"
 ref = "branch/dev"
-commit = "e901a983e78f328bd60e7d62f13b4d4606a3e196"
+commit = "27944db0386d67016d7003225526635120e980ea"
 
 [dep.mach-std]
 url = "https://github.com/briar-systems/mach-std"
@@ -29,3 +29,13 @@ commit = "9df0adf6e4e6bf641522416c2042f0b04a152463"
 url = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/dev"
 commit = "aed97beb6a9e17475f1e92bdfba0de845e43cd93"
+
+[dep.mach-audio]
+url = "https://github.com/briar-systems/mach-audio"
+ref = "branch/dev"
+commit = "0619a2287f5cc1ed441ae7d8ca164bbd5abc339b"
+
+[dep.mach-font]
+url = "https://github.com/briar-systems/mach-font"
+ref = "branch/dev"
+commit = "d60c763cbedd5012038b9d7bccb0f0be778ac2f9"
