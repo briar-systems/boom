@@ -1,7 +1,5 @@
 [project]
 id = "animation"
-name = "Animation Example"
-description = "Animation example for Boom Engine"
 version = "0.2.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -23,15 +21,19 @@ abi = "sysv64"
 
 [profile.debug]
 opt = 0
+debug = true
 
 [profile.release]
 opt = 2
+debug = false
 
 [artifact.animation]
 kind = "bin"
 entry = "main.mach"
 out = "bin/animation"
 targets = ["*"]
+link = []
+need = []
 
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
