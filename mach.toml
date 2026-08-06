@@ -47,20 +47,20 @@ ref = "branch/main"
 
 [dep.mach-gl]
 git = "https://github.com/briar-systems/mach-gl"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-audio]
 git = "https://github.com/briar-systems/mach-audio"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/dev"
+ref = "branch/main"
