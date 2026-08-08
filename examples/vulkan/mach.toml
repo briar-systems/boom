@@ -1,0 +1,82 @@
+[project]
+id = "vulkan"
+version = "0.2.0"
+src = "src"
+out = "out/{target.name}/{profile.name}"
+
+[target.linux-x86_64]
+isa = "x86_64"
+os  = "linux"
+abi = "sysv64"
+
+[target.windows]
+isa = "x86_64"
+os  = "windows"
+abi = "win64"
+
+[target.darwin]
+isa = "x86_64"
+os  = "darwin"
+abi = "sysv64"
+
+[profile.debug]
+opt = 0
+debug = true
+simd = "scalarize"
+
+[profile.release]
+opt = 2
+debug = false
+simd = "scalarize"
+
+[artifact.vulkan]
+kind = "bin"
+entry = "main.mach"
+out = "bin/vulkan"
+targets = ["*"]
+link = []
+need = []
+
+# a path dep, unlike the other examples: this exercises the working tree's
+# Vulkan bring-up, and resolving boom from a branch would test what is
+# already pushed rather than what is being changed.
+[dep.boom]
+path = "../.."
+
+[dep.mach-std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "branch/main"
+
+[dep.mach-glfw]
+git = "https://github.com/briar-systems/mach-glfw"
+ref = "branch/main"
+
+[dep.mach-gl]
+git = "https://github.com/briar-systems/mach-gl"
+ref = "branch/main"
+
+[dep.mach-image]
+git = "https://github.com/briar-systems/mach-image"
+ref = "branch/main"
+
+[dep.mach-gltf]
+git = "https://github.com/briar-systems/mach-gltf"
+ref = "branch/main"
+
+# boom links these transitively, but a consumer must still name every dep it
+# shares with a path dependency and match its ref exactly.
+[dep.mach-audio]
+git = "https://github.com/briar-systems/mach-audio"
+ref = "branch/main"
+
+[dep.mach-font]
+git = "https://github.com/briar-systems/mach-font"
+ref = "branch/main"
+
+[dep.mach-phys]
+git = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+
+[dep.mach-vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"
