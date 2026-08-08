@@ -201,3 +201,11 @@ fwd boom.graphics.swapchain.Swapchain;
 fwd boom.graphics.swapchain.swapchain_init;
 fwd boom.graphics.swapchain.swapchain_dnit;
 fwd boom.graphics.swapchain.swapchain_rebuild;
+
+fwd boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+fwd boom.graphics.frame.FrameLoop;
+fwd boom.graphics.frame.frame_init;
+fwd boom.graphics.frame.frame_begin;
+fwd boom.graphics.frame.frame_end;
+fwd boom.graphics.frame.frame_rebuild_targets;
+fwd boom.graphics.frame.frame_dnit;
