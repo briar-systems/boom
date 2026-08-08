@@ -8,7 +8,7 @@ commit = "c12a61090856d5f8f47475c377c0995423630105"
 [dep.mach-glfw]
 url = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
-commit = "46b9c775e0224868e09a3457485d9dbe7217f955"
+commit = "0268357dc3b5c44d08a24d6dff99c9976b279360"
 
 [dep.mach-gl]
 url = "https://github.com/briar-systems/mach-gl"
@@ -34,6 +34,11 @@ commit = "d60c763cbedd5012038b9d7bccb0f0be778ac2f9"
 url = "https://github.com/briar-systems/mach-phys"
 ref = "branch/main"
 commit = "33011b6198cdf5b5a381bdb2a6923afdc93ea2ae"
+
+[dep.mach-vk]
+url = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"
+commit = "a52428a59ad960adf4f468315008db2e097546ec"
 
 [dep.mach-gltf]
 url = "https://github.com/briar-systems/mach-gltf"
