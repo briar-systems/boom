@@ -70,6 +70,19 @@ jobs:
           fi
           for f in res/spv/*.spv; do spirv-val "$f"; done
 
+          # The committed modules must be what this source produces. They are
+          # checked in because a consumer pulling boom over git needs them and an
+          # #[embed] is not a build-graph edge (mach#2887), and the cost of
+          # committing generated files is exactly this: a shader edited without a
+          # rebuild would ship the old module, with the source and the binary
+          # disagreeing and nothing saying so.
+          if ! git diff --quiet -- res/spv; then
+            echo "res/spv does not match a fresh build of shaders/src"
+            git diff --stat -- res/spv
+            echo "run 'mach build .' and commit the result"
+            exit 1
+          fi
+
       - name: Check uniform blocks match their CPU records
         run: python3 ./tools/check-uniform-layout.py
 

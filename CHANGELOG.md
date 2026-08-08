@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- build: The compiled SPIR-V is committed under `res/spv/` instead of being gitignored. **boom could not be consumed as a git dependency at all**: the modules are `#[embed]`ed, an embed is not an edge in the build graph, so nothing ran the `build-shaders` step on a consumer's behalf and every `#[embed]` failed with "no such file or directory" (mach#2887). Every example resolves boom by path into a tree that had already been built locally, so all three passed CI for weeks while the library was unbuildable downstream. The first consumer that pulled it over git found it immediately.
+
+  CI asserts the committed modules match a fresh build, which is the cost of committing a generated file and the reason the check had to exist.
+
+
 ### Added
 - graphics: `pass_draw_triangles`, for a stream of already-placed, per-vertex-coloured triangles. A sprite is one rectangle placed by a model matrix, which is the wrong shape for an immediate-mode UI, a particle system or a debug overlay: those produce thousands of triangles that are already in the right place, each with its own colour, rebuilt every frame, and they belong in one draw. Geometry goes through a new per-frame vertex arena (`boom.graphics.stream`), one per frame in flight, because writing this frame's list into memory the GPU is still reading for the last one is a race whose symptom is a UI that flickers under load and looks correct when you stop to inspect it.
 - graphics: `vertex_format_ui`, the layout that path takes: position in pixels, uv, then rgba, eight f32 at a 32-byte stride. **This is blit's `Vert` exactly**, so a blit draw list uploads with no repacking, and a test asserts the two agree rather than leaving it to luck.
