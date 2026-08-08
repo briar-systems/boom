@@ -35,11 +35,14 @@
 # test can reach, plus the covered area, which does not depend on the projection
 # at all and is what catches a face that was culled.
 #
-# WHAT IS STILL NOT CHECKED. Depth testing: the cube is convex and back faces are
-# culled, so no fragment is ever hidden by another and an inverted depth test
-# draws the same picture. Lighting, beyond that the surface is not black. And the
-# window itself, since only the offscreen target is read back. Look at the window
-# for those.
+# DEPTH IS CHECKED SEPARATELY, because the cube cannot check it. A convex mesh
+# with back faces culled never has one fragment hidden by another, so an inverted
+# depth test draws exactly the same picture. Two overlapping cubes at different
+# distances, drawn in both orders, is what distinguishes them.
+#
+# WHAT IS STILL NOT CHECKED. Lighting, beyond that the surface is not black. And
+# the window itself, since only the offscreen target is read back. Look at the
+# window for those.
 #
 # WHY IT DRIVES THE RENDERER AND NOT THE MODULES BELOW IT. An earlier version
 # built the instance, swapchain and frame loop by hand. That tested a path no
@@ -622,6 +625,85 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     p.printlnf("ok   the checkerboard is sampled: covered pixels run {} to {}", lo, hi);
 
+    # ------------------------------------------------------------------ depth
+    #
+    # Two cubes on the view axis, the near one red and the far one green, drawn
+    # once in each order. The near one must win both times. Far-then-near comes
+    # out right with no depth buffer at all, so near-then-far is the actual test;
+    # running both says which of the two failed.
+    #
+    # This does not check the depth RANGE. Substituting OpenGL's [-1, 1] mapping
+    # for Vulkan's [0, 1] changes nothing visible here: the two agree closely for
+    # anything past a few times the near plane, and only diverge for geometry
+    # nearer than the midpoint of the range, which is a hundredth of a unit with
+    # this camera. The range is what the boom.math unit tests pin down.
+    var near_mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?near_mat, "u_texture0", ?tex);
+    gfx.material_set_color(?near_mat, gm.vec4(1.0, 0.0, 0.0, 1.0));
+    var far_mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?far_mat, "u_texture0", ?tex);
+    gfx.material_set_color(?far_mat, gm.vec4(0.0, 1.0, 0.0, 1.0));
+
+    var near_xf: gm.Transform = gm.transform_identity();
+    near_xf.position = gm.vec3(0.0, 0.0, 0.6);
+    var far_xf: gm.Transform = gm.transform_identity();
+    far_xf.position = gm.vec3(0.0, 0.0, 0.0 - 0.6);
+
+    # Red and green are read out of the pixel by index, and the green channel is
+    # in the middle whichever way round the surface puts red and blue.
+    val green: usize = 1;
+
+    var order: usize = 0;
+    for (order < 2) {
+        var painted: bool = false;
+        var att: usize = 0;
+        for (att < 8 && !painted) {
+            window_poll();
+            var opened: bool = false;
+            if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+            if (opened) {
+                var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+                scene.target      = ?check;
+                scene.clear       = 1;
+                scene.clear_color = gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0);
+                var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+                if (order == 0) {
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
+                }
+                or {
+                    gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                }
+                gfx.pass_end(?sp);
+                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+                painted = true;
+            }
+            att = att + 1;
+        }
+        if (!painted) {
+            p.println("FAIL depth: the swapchain never came back to draw the depth frame");
+            gfx.render_target_delete(d, ?check);
+            ret 1;
+        }
+        if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) {
+            ret 1;
+        }
+
+        val mid: usize = ((CHECK_H::usize / 2) * CHECK_W::usize + CHECK_W::usize / 2) * 4;
+        val got_r: u8 = shot[mid + red];
+        val got_g: u8 = shot[mid + green];
+        if (got_r <= got_g) {
+            p.printlnf("FAIL depth: the centre is r {} g {} with draw order {}",
+                       got_r, got_g, order);
+            p.println("      The far cube won, so the depth test is inverted or disabled.");
+            gfx.render_target_delete(d, ?check);
+            ret 1;
+        }
+        order = order + 1;
+    }
+    p.println("ok   the nearer of two overlapping cubes wins in both draw orders");
+
     gfx.render_target_delete(d, ?check);
 
     # Teardown order is part of what is being checked: everything created against
@@ -645,10 +727,9 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
     p.println("PASS: frames were presented and the rendered pixels were checked");
-    p.println("     Depth testing and lighting are still not covered: the cube is");
-    p.println("     convex with back faces culled, so nothing is ever occluded.");
-    p.println("     The window itself is not read back either. Look at it: a lit");
-    p.println("     checkered cube filling most of it, with a small checker square");
-    p.println("     at the top left.");
+    p.println("     Lighting is still not covered beyond the surface not being black,");
+    p.println("     and the window itself is never read back, only the offscreen");
+    p.println("     target. Look at it: a lit checkered cube filling most of it, with");
+    p.println("     a small checker square at the top left.");
     ret 0;
 }
