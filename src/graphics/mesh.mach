@@ -16,6 +16,7 @@
 # boom.graphics.skeleton and boom.graphics.animation.
 
 use vk;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_upload;
@@ -696,6 +697,9 @@ pub fun mesh_load(d: *Device, path: str) Result[Mesh, Error] {
 # d: the upload context the mesh was created against
 # m: mesh to delete; the handle must not be used afterward
 pub fun mesh_delete(d: *Device, m: *Mesh) {
+    # A resource may still be referenced by a command buffer the GPU has not
+    # finished. See vk_wait_idle.
+    vk_wait_idle(d.vk);
     buffer_dnit(?m.vertices, d.vk);
     buffer_dnit(?m.indices, d.vk);
     m.index_count = 0;

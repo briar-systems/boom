@@ -31,6 +31,8 @@ use boom.graphics.vk.Vk;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_write;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_unmap;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.pick_memory_type;
 use boom.graphics.buffer.NO_MEMORY_TYPE;
@@ -88,17 +90,58 @@ pub val COLOR_SRGB:   ColorSpace = 0;
 pub val COLOR_LINEAR: ColorSpace = 1;
 
 # The Vulkan format for a colour space.
+#
+# THE SPACE IS THE IMAGE'S, NOT THE SWAPCHAIN'S. A swapchain in an sRGB format
+# encodes on write; it does not decode on read. Sampling an sRGB texture through
+# a UNORM image hands the shader raw sRGB bytes as though they were linear, the
+# shader's arithmetic runs on the wrong numbers, and the attachment encodes a
+# second time. The result is washed out and there is no diagnostic: every stage
+# did exactly what it was told.
 pub fun image_format(space: ColorSpace) i32 {
     if (space == COLOR_SRGB) { ret vk.FORMAT_R8G8B8A8_SRGB; }
     ret vk.FORMAT_R8G8B8A8_UNORM;
 }
 
+# What an image will be used for, as Vulkan usage bits.
+#
+# THE USAGE IS PART OF CREATION AND CANNOT BE ADDED LATER. An image bound as a
+# framebuffer attachment without COLOR_ATTACHMENT_BIT is invalid usage, and the
+# failure is not at the draw: it is at vkCreateFramebuffer, which a driver
+# without validation may accept anyway and then render into an image it was
+# never told to make renderable.
+pub def ImageUsage: i32;
+
+# Uploaded from the host and sampled. What a loaded texture needs.
+pub val USAGE_TEXTURE: ImageUsage = 0;
+# The above, and also rendered into and read back. What an offscreen target's
+# colour attachment needs; it keeps the sampled bit because a later pass samples
+# the target, and both transfer bits because a target may be seeded by an upload
+# and is the thing a screenshot or a rendering test copies out of.
+pub val USAGE_TARGET:  ImageUsage = 1;
+
+# The Vulkan usage bits for an intended use.
+pub fun image_usage_bits(u: ImageUsage) u32 {
+    if (u == USAGE_TARGET) {
+        ret vk.IMAGE_USAGE_TRANSFER_DST_BIT
+          | vk.IMAGE_USAGE_TRANSFER_SRC_BIT
+          | vk.IMAGE_USAGE_SAMPLED_BIT
+          | vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    }
+    ret vk.IMAGE_USAGE_TRANSFER_DST_BIT | vk.IMAGE_USAGE_SAMPLED_BIT;
+}
+
 # Create an image and allocate device-local memory for it.
-pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, space: ColorSpace) Result[bool, Error] {
+#
+# TAKES A FORMAT, NOT A COLOUR SPACE. A texture derives its format from what its
+# bytes mean, through image_format; an offscreen target derives it from the
+# surface, because a pipeline built for the window pass can only draw into an
+# attachment of the same format. Neither is expressible in terms of the other,
+# so the primitive takes the format both arrive at.
+pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usage: ImageUsage) Result[bool, Error] {
     i.handle = nil;
     i.memory = nil;
     i.view   = nil;
-    i.format = image_format(space);
+    i.format = format;
     i.ready  = false;
 
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
@@ -111,14 +154,7 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, space: ColorSpace
     ci.pNext                 = nil;
     ci.flags                 = 0;
     ci.imageType             = vk.IMAGE_TYPE_2D;
-    # THE SPACE IS THE IMAGE'S, NOT THE SWAPCHAIN'S. A swapchain in an sRGB
-    # format encodes on write; it does not decode on read. Sampling an sRGB
-    # texture through a UNORM image hands the shader raw sRGB bytes as though
-    # they were linear, the shader's arithmetic runs on the wrong numbers, and
-    # the attachment encodes a second time. The result is washed out and there
-    # is no diagnostic: every stage did exactly what it was told.
-    ci.format                = image_format(space);
-    i.format                 = ci.format;
+    ci.format                = format;
     ci.extent.width          = width;
     ci.extent.height         = height;
     ci.extent.depth          = 1;
@@ -129,7 +165,7 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, space: ColorSpace
     # addressable from the host, which is why the upload goes through a staging
     # buffer rather than a map.
     ci.tiling                = vk.IMAGE_TILING_OPTIMAL;
-    ci.usage                 = vk.IMAGE_USAGE_TRANSFER_DST_BIT | vk.IMAGE_USAGE_SAMPLED_BIT;
+    ci.usage                 = image_usage_bits(usage);
     ci.sharingMode           = vk.SHARING_MODE_EXCLUSIVE;
     ci.queueFamilyIndexCount = 0;
     ci.pQueueFamilyIndices   = nil;
@@ -226,6 +262,25 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
         @src_stage  = vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         @src_access = 0;
+        @dst_access = vk.ACCESS_SHADER_READ_BIT;
+        ret true;
+    }
+    if (old == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        # Reading a rendered target back to the host. Any sampling of it must
+        # finish before the copy reads the same memory.
+        @src_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        @dst_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
+        @src_access = vk.ACCESS_SHADER_READ_BIT;
+        @dst_access = vk.ACCESS_TRANSFER_READ_BIT;
+        ret true;
+    }
+    if (old == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        # And back, so the target is left in the layout its descriptor claims.
+        # Without this a read would leave every later sample reading an image in
+        # a layout the descriptor set does not describe.
+        @src_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
+        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        @src_access = vk.ACCESS_TRANSFER_READ_BIT;
         @dst_access = vk.ACCESS_SHADER_READ_BIT;
         ret true;
     }
@@ -342,6 +397,86 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
     ret true;
 }
 
+# Copy an image's pixels back to host memory, tightly packed as RGBA8.
+#
+# WHY AN ENGINE HAS THIS. Presenting a frame proves that every call succeeded; it
+# does not prove that anything was drawn. A pipeline with its winding backwards
+# culls every face, a projection built for the wrong clip volume puts every
+# vertex outside it, and both present a correct-looking empty frame and report
+# success. Reading the pixels back is the only check that distinguishes them, and
+# it is the same operation a screenshot is, so it belongs in the engine rather
+# than in a test.
+#
+# The image is left in the layout it was found in. A read that left it in
+# TRANSFER_SRC would make every later sample read an image in a layout its
+# descriptor does not describe.
+# ---
+# i:    the image to read, in SHADER_READ_ONLY_OPTIMAL
+# out:  destination for width * height * 4 bytes
+# len:  size of out in bytes, checked against the image
+pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) Result[bool, Error] {
+    if (!i.ready) { ret err[bool, Error](error("cannot read an image that was never created")); }
+    val size: usize = image_bytes(i.width, i.height);
+    if (len < size) { ret err[bool, Error](error("the destination is smaller than the image")); }
+
+    var staging: Buffer;
+    val sr: Result[bool, Error] = buffer_init(?staging, v, size::u64,
+        vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](sr)) { ret sr; }
+
+    var cmd: vk.CommandBuffer;
+    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
+    if (is_err[bool, Error](br)) {
+        buffer_dnit(?staging, v);
+        ret br;
+    }
+
+    transition(cmd, i.handle, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    var region: vk.BufferImageCopy;
+    region.bufferOffset      = 0;
+    region.bufferRowLength   = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel       = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount     = 1;
+    region.imageOffset.x      = 0;
+    region.imageOffset.y      = 0;
+    region.imageOffset.z      = 0;
+    region.imageExtent.width  = i.width;
+    region.imageExtent.height = i.height;
+    region.imageExtent.depth  = 1;
+    vk.vkCmdCopyImageToBuffer(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              staging.handle, 1, ?region);
+
+    transition(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    val er: Result[bool, Error] = end_one_shot(v, pool, cmd);
+    if (is_err[bool, Error](er)) {
+        buffer_dnit(?staging, v);
+        ret er;
+    }
+
+    val mapped: ptr = buffer_map(?staging, v);
+    if (mapped == nil) {
+        buffer_dnit(?staging, v);
+        ret err[bool, Error](error("could not map the readback buffer"));
+    }
+    val src: *u8 = mapped:~*u8;
+    var k: usize = 0;
+    for (k < size) {
+        out[k] = src[k];
+        k = k + 1;
+    }
+    buffer_unmap(?staging, v);
+    buffer_dnit(?staging, v);
+    ret ok[bool, Error](true);
+}
+
 # Create an image and fill it from tightly packed RGBA pixels.
 #
 # The three steps are performed together because their order is the contract:
@@ -351,7 +486,7 @@ pub fun image_upload(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8,
     val size: usize = image_bytes(width, height);
     if (size == 0) { ret err[bool, Error](error("cannot upload a zero-sized image")); }
 
-    val ir: Result[bool, Error] = image_init(i, v, width, height, space);
+    val ir: Result[bool, Error] = image_init(i, v, width, height, image_format(space), USAGE_TEXTURE);
     if (is_err[bool, Error](ir)) { ret ir; }
 
     var staging: Buffer;

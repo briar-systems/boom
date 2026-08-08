@@ -155,6 +155,8 @@ fwd boom.graphics.camera.camera_projection;
 fwd boom.graphics.target.RenderTarget;
 fwd boom.graphics.target.render_target;
 fwd boom.graphics.target.render_target_texture;
+fwd boom.graphics.target.render_target_read;
+fwd boom.graphics.target.render_target_bgra;
 fwd boom.graphics.target.render_target_delete;
 
 fwd boom.graphics.sprite.Rect;
