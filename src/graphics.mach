@@ -190,3 +190,8 @@ fwd boom.graphics.spirv.MESH_VERT_SPV;
 fwd boom.graphics.spirv.VERTEX_ENTRY;
 fwd boom.graphics.spirv.FRAGMENT_ENTRY;
 fwd boom.graphics.spirv.shader_from_spirv;
+
+fwd boom.graphics.vk.NO_FAMILY;
+fwd boom.graphics.vk.Vk;
+fwd boom.graphics.vk.vk_init;
+fwd boom.graphics.vk.vk_dnit;

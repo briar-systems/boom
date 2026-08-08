@@ -80,6 +80,10 @@ ref = "branch/main"
 git = "https://github.com/briar-systems/mach-phys"
 ref = "branch/main"
 
+[dep.mach-vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"
+
 [dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"
