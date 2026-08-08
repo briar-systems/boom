@@ -1,0 +1,377 @@
+# a path-keyed store for loaded GPU resources
+#
+# `texture_load` reads, decodes, and uploads on every call, so loading the
+# same path twice produces two GPU textures. every game therefore grows its
+# own cache, which is the same shape of boilerplate the polled-input work
+# removed. this owns it once.
+#
+# HANDLES, NOT POINTERS. a lookup returns an opaque `Handle` -- an index plus
+# a generation -- rather than a `*Texture`. that costs one indirection per
+# resolve and buys three things a pointer cannot:
+#
+#   - the store can move or reload the resource underneath a game that is
+#     holding a handle, which is what hot reload needs
+#   - a handle to a released slot is detectable rather than dangling, because
+#     the generation no longer matches
+#   - a handle is a plain value, so game state holding one stays copyable
+#
+# hot reload is not implemented here, but the handle is the decision that
+# makes it possible later without changing a single call site. a `*Texture`
+# would have foreclosed it.
+#
+# GENERATIONS. a slot's generation increments on release. a handle carries the
+# generation it was issued against, so a stale handle from before a release
+# fails to resolve instead of silently addressing whatever now occupies the
+# slot. that is the bug this design exists to prevent, and it is the reason a
+# bare index is not enough.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use allo: std.allocator;
+use page: std.allocator.page;
+use text: std.text.string;
+
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.texture.Texture;
+use boom.graphics.texture.texture_load;
+use boom.graphics.texture.texture_delete;
+
+# how many resources of one kind a store holds
+pub val CAPACITY: usize = 256;
+
+# an opaque reference to a stored resource
+#
+# slot 0 with generation 0 is the null handle: it never resolves, so a
+# zero-initialized field in a game's state is safely empty rather than
+# aliasing the first loaded resource.
+# ---
+# slot: index into the store's table, biased by one so 0 is never valid
+# gen:  the generation the slot held when this handle was issued
+pub rec Handle {
+    slot: usize;
+    gen:  usize;
+}
+
+# the handle no resource ever has
+pub fun handle_none() Handle {
+    ret Handle{slot: 0, gen: 0};
+}
+
+# whether a handle could name a resource, ignoring whether it still does
+pub fun handle_is_none(h: Handle) bool {
+    ret h.slot == 0;
+}
+
+# one occupied or free slot in the texture table
+# ---
+# path:     the key this resource was loaded from, owned by the store
+# texture:  the loaded resource, valid only while live
+# gen:      current generation, incremented on release
+# live:     whether the slot holds a resource
+# refs:     how many times this path has been requested and not released
+rec TextureSlot {
+    path:    str;
+    texture: Texture;
+    gen:     usize;
+    live:    bool;
+    refs:    usize;
+}
+
+# the store itself
+#
+# holds one table per resource kind. the allocator owns the interned path
+# strings and is the caller's; the store never frees it.
+# ---
+# a:         allocator for interned paths
+# textures:  the texture table
+# tex_count: high-water mark of slots ever used, so lookup scans no further
+pub rec Assets {
+    a:         *allo.Allocator;
+    textures:  [256]TextureSlot;
+    tex_count: usize;
+}
+
+# an empty store drawing on the given allocator
+#
+# the allocator must outlive the store: it owns the interned path keys.
+pub fun assets_new(a: *allo.Allocator) Assets {
+    var s: Assets;
+    s.a = a;
+    s.tex_count = 0;
+    var i: usize = 0;
+    for (i < CAPACITY) {
+        s.textures[i].path = nil;
+        s.textures[i].gen  = 1;
+        s.textures[i].live = false;
+        s.textures[i].refs = 0;
+        i = i + 1;
+    }
+    ret s;
+}
+
+# find a live slot already holding this path, or CAPACITY when absent
+#
+# separated from loading so the dedup decision is testable without a GPU:
+# this is the whole of what makes a second request cheap, and it is pure.
+fun find_texture(s: *Assets, path: str) usize {
+    var i: usize = 0;
+    for (i < s.tex_count) {
+        if (s.textures[i].live && s.textures[i].path != nil && str_equals(s.textures[i].path, path)) {
+            ret i;
+        }
+        i = i + 1;
+    }
+    ret CAPACITY;
+}
+
+# claim a free slot, or CAPACITY when the table is full
+fun claim_texture(s: *Assets) usize {
+    var i: usize = 0;
+    for (i < s.tex_count) {
+        if (!s.textures[i].live) { ret i; }
+        i = i + 1;
+    }
+    if (s.tex_count < CAPACITY) {
+        val i2: usize = s.tex_count;
+        s.tex_count = s.tex_count + 1;
+        ret i2;
+    }
+    ret CAPACITY;
+}
+
+# a handle naming the slot's current occupant
+fun handle_of(s: *Assets, i: usize) Handle {
+    ret Handle{slot: i + 1, gen: s.textures[i].gen};
+}
+
+# load a texture, or return the handle of one already loaded from this path
+#
+# the second request for a path performs no read, no decode, and no upload.
+# it takes a reference, so a caller releasing its own handle does not pull the
+# resource out from under another holder.
+pub fun assets_texture(s: *Assets, path: str) Result[Handle, Error] {
+    val hit: usize = find_texture(s, path);
+    if (hit != CAPACITY) {
+        s.textures[hit].refs = s.textures[hit].refs + 1;
+        ret ok[Handle, Error](handle_of(s, hit));
+    }
+
+    val i: usize = claim_texture(s);
+    if (i == CAPACITY) { ret err[Handle, Error](error("asset store is full")); }
+
+    val kr: Result[str, str] = text.str_dup(s.a, path);
+    if (is_err[str, str](kr)) { ret err[Handle, Error](error(unwrap_err[str, str](kr))); }
+
+    val tr: Result[Texture, Error] = texture_load(path);
+    if (is_err[Texture, Error](tr)) {
+        # the key is freed rather than left interned, so a failed load does not
+        # poison the path against a later retry
+        text.str_free(s.a, unwrap_ok[str, str](kr));
+        ret err[Handle, Error](unwrap_err[Texture, Error](tr));
+    }
+
+    s.textures[i].path    = unwrap_ok[str, str](kr);
+    s.textures[i].texture = unwrap_ok[Texture, Error](tr);
+    s.textures[i].live    = true;
+    s.textures[i].refs    = 1;
+    ret ok[Handle, Error](handle_of(s, i));
+}
+
+# resolve a handle to its texture, or nil if it is null or stale
+#
+# a stale handle -- one whose slot has since been released and reused --
+# returns nil rather than the new occupant. that is the whole point of the
+# generation, and the failure it prevents is silent and very hard to find.
+pub fun assets_texture_get(s: *Assets, h: Handle) *Texture {
+    if (h.slot == 0 || h.slot > s.tex_count) { ret nil; }
+    val i: usize = h.slot - 1;
+    if (!s.textures[i].live)     { ret nil; }
+    if (s.textures[i].gen != h.gen) { ret nil; }
+    ret ?s.textures[i].texture;
+}
+
+# drop one reference, freeing the GPU resource when the last one goes
+#
+# returns true when the resource was actually released. releasing bumps the
+# slot's generation, so every outstanding handle to it stops resolving.
+pub fun assets_release(s: *Assets, h: Handle) bool {
+    if (!release_slot(s, h)) { ret false; }
+    val i: usize = h.slot - 1;
+    texture_delete(?s.textures[i].texture);
+    ret true;
+}
+
+# the refcount and generation bookkeeping of a release, without the GPU call
+#
+# split out so the semantics that matter -- refcounting, generation bump, and
+# stale-handle rejection -- are exercisable on a machine with no GPU. the
+# texture delete is the only part that needs a device, and it carries no
+# decision of its own.
+# ---
+# ret: true when the last reference went, meaning the caller must free the
+#      GPU resource
+fun release_slot(s: *Assets, h: Handle) bool {
+    if (h.slot == 0 || h.slot > s.tex_count) { ret false; }
+    val i: usize = h.slot - 1;
+    if (!s.textures[i].live || s.textures[i].gen != h.gen) { ret false; }
+
+    s.textures[i].refs = s.textures[i].refs - 1;
+    if (s.textures[i].refs > 0) { ret false; }
+
+    text.str_free(s.a, s.textures[i].path);
+    s.textures[i].path = nil;
+    s.textures[i].live = false;
+    s.textures[i].gen  = s.textures[i].gen + 1;
+    ret true;
+}
+
+# install a resource under a path, for tests and for loaders that already hold
+# a decoded resource. takes one reference.
+fun adopt_texture(s: *Assets, path: str, t: Texture) Result[Handle, Error] {
+    val hit: usize = find_texture(s, path);
+    if (hit != CAPACITY) {
+        s.textures[hit].refs = s.textures[hit].refs + 1;
+        ret ok[Handle, Error](handle_of(s, hit));
+    }
+    val i: usize = claim_texture(s);
+    if (i == CAPACITY) { ret err[Handle, Error](error("asset store is full")); }
+    val kr: Result[str, str] = text.str_dup(s.a, path);
+    if (is_err[str, str](kr)) { ret err[Handle, Error](error(unwrap_err[str, str](kr))); }
+    s.textures[i].path    = unwrap_ok[str, str](kr);
+    s.textures[i].texture = t;
+    s.textures[i].live    = true;
+    s.textures[i].refs    = 1;
+    ret ok[Handle, Error](handle_of(s, i));
+}
+
+# how many live resources the store holds, for tests and diagnostics
+pub fun assets_live_count(s: *Assets) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    for (i < s.tex_count) {
+        if (s.textures[i].live) { n = n + 1; }
+        i = i + 1;
+    }
+    ret n;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# these exercise the store's decisions -- dedup, refcounting, generation --
+# which is where the bugs are. the GPU upload and delete need a device and are
+# not reachable here, so adopt_texture and release_slot stand in for them.
+
+test "assets: the null handle never resolves" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    if (!handle_is_none(handle_none()))                 { ret 1; }
+    if (assets_texture_get(?s, handle_none()) != nil)   { ret 1; }
+    if (assets_live_count(?s) != 0)                     { ret 1; }
+    ret 0;
+}
+
+test "assets: the same path yields one resource and one slot" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    var t: Texture;
+
+    val h1: Result[Handle, Error] = adopt_texture(?s, "art/hero.qoi", t);
+    val h2: Result[Handle, Error] = adopt_texture(?s, "art/hero.qoi", t);
+    if (is_err[Handle, Error](h1) || is_err[Handle, Error](h2)) { ret 1; }
+
+    val a1: Handle = unwrap_ok[Handle, Error](h1);
+    val a2: Handle = unwrap_ok[Handle, Error](h2);
+    if (a1.slot != a2.slot || a1.gen != a2.gen) { ret 1; }
+    # one resource, not two: this is the whole point
+    if (assets_live_count(?s) != 1) { ret 1; }
+    ret 0;
+}
+
+test "assets: distinct paths get distinct slots" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    var t: Texture;
+
+    val h1: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "a.qoi", t));
+    val h2: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "b.qoi", t));
+    if (h1.slot == h2.slot)         { ret 1; }
+    if (assets_live_count(?s) != 2) { ret 1; }
+    ret 0;
+}
+
+test "assets: a shared resource survives one holder releasing" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    var t: Texture;
+
+    val h1: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "shared.qoi", t));
+    val h2: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "shared.qoi", t));
+
+    # the first holder lets go; the second still has it. without refcounting
+    # this frees the texture out from under a live user.
+    if (release_slot(?s, h1))                     { ret 1; }
+    if (assets_texture_get(?s, h2) == nil)        { ret 1; }
+    if (assets_live_count(?s) != 1)               { ret 1; }
+
+    if (!release_slot(?s, h2))                    { ret 1; }
+    if (assets_live_count(?s) != 0)               { ret 1; }
+    ret 0;
+}
+
+test "assets: a stale handle does not resolve to the slot's new occupant" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    var t: Texture;
+
+    val old: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "old.qoi", t));
+    if (!release_slot(?s, old)) { ret 1; }
+
+    # the slot is free, so the next load reuses it
+    val new: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "new.qoi", t));
+    if (new.slot != old.slot) { ret 1; }
+
+    # the stale handle names the same slot but an older generation. resolving
+    # it must fail rather than silently hand back the new texture -- a bare
+    # index would return "new.qoi" here and nothing would ever report it.
+    if (assets_texture_get(?s, old) != nil) { ret 1; }
+    if (assets_texture_get(?s, new) == nil) { ret 1; }
+    ret 0;
+}
+
+test "assets: releasing a stale handle is refused, not double-counted" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    var t: Texture;
+
+    val h: Handle = unwrap_ok[Handle, Error](adopt_texture(?s, "x.qoi", t));
+    if (!release_slot(?s, h)) { ret 1; }
+    # a second release of the same handle must not decrement anything
+    if (release_slot(?s, h))  { ret 1; }
+    ret 0;
+}
+
+test "assets: a handle from beyond the table is rejected" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Assets = assets_new(?a);
+    if (assets_texture_get(?s, Handle{slot: 9999, gen: 1}) != nil) { ret 1; }
+    if (release_slot(?s, Handle{slot: 9999, gen: 1}))              { ret 1; }
+    ret 0;
+}
