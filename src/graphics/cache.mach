@@ -55,6 +55,8 @@ use boom.graphics.spirv.MESH_VERT_SPV;
 use boom.graphics.spirv.SKINNED_VERT_SPV;
 use boom.graphics.spirv.SPRITE_VERT_SPV;
 use boom.graphics.spirv.SPRITE_FRAG_SPV;
+use boom.graphics.spirv.UI_VERT_SPV;
+use boom.graphics.spirv.UI_FRAG_SPV;
 
 # Which pair of shader modules a pipeline uses.
 pub def Program: u8;
@@ -65,6 +67,10 @@ pub val PROGRAM_MESH:    Program = 0;
 pub val PROGRAM_SKINNED: Program = 1;
 # sprite_vert plus sprite_frag: a textured, tinted quad in pixel space.
 pub val PROGRAM_SPRITE:  Program = 2;
+# Already-placed, per-vertex-coloured triangles: an immediate-mode UI draw list,
+# a particle system, a debug overlay. No model matrix and no tint, because one
+# draw covers the whole list.
+pub val PROGRAM_UI:      Program = 3;
 
 # The most distinct program-and-layout combinations one renderer keeps.
 #
@@ -131,7 +137,10 @@ pub fun cache_find(c: *PipelineCache, program: Program, f: *VertexFormat) usize 
 # Kept beside the Program constants rather than at the call sites, so adding a
 # program is one entry here and not a new branch in every caller.
 fun program_desc(program: Program) PipelineDesc {
-    if (program == PROGRAM_SPRITE) { ret pipeline_desc_2d(); }
+    # UI shares the 2D description: blended, unculled, no depth. A draw list is
+    # emitted back to front and its triangles are wound however the emitter
+    # happened to, so culling it would drop half of them.
+    if (program == PROGRAM_SPRITE || program == PROGRAM_UI) { ret pipeline_desc_2d(); }
     ret pipeline_desc_3d();
 }
 
@@ -156,6 +165,12 @@ fun cache_add(c: *PipelineCache, v: *Vk, program: Program, f: *VertexFormat) Res
         vlen = $length_of(SPRITE_VERT_SPV);
         frag = ?SPRITE_FRAG_SPV[0];
         flen = $length_of(SPRITE_FRAG_SPV);
+    }
+    or (program == PROGRAM_UI) {
+        vert = ?UI_VERT_SPV[0];
+        vlen = $length_of(UI_VERT_SPV);
+        frag = ?UI_FRAG_SPV[0];
+        flen = $length_of(UI_FRAG_SPV);
     }
 
     val i: usize = c.count;

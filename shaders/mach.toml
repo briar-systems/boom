@@ -63,3 +63,19 @@ need    = []
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
 ref = "tag/0.1.0"
+
+[artifact.ui_vert]
+kind    = "bin"
+entry   = "ui_vert.mach"
+out     = "ui_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.ui_frag]
+kind    = "bin"
+entry   = "ui_frag.mach"
+out     = "ui_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []

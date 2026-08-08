@@ -49,7 +49,7 @@ need = ["build-shaders"]
 [step.build-shaders]
 cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && cp shaders/out/obj/shaders/*.spv res/spv/"
 in  = ["shaders/src/*.mach", "shaders/mach.toml"]
-out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/sprite_vert.spv", "res/spv/sprite_frag.spv"]
+out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/sprite_vert.spv", "res/spv/sprite_frag.spv", "res/spv/ui_vert.spv", "res/spv/ui_frag.spv"]
 need = []
 
 [dep.mach-std]

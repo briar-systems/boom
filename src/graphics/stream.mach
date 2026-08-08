@@ -1,0 +1,252 @@
+# The per-frame vertex arena: geometry that is different every frame.
+#
+# WHY THIS EXISTS ALONGSIDE Mesh. A Mesh is uploaded once into device-local
+# memory through a staging copy, which is right for a model: the data never
+# changes and the GPU reads it at full speed for the life of the game.
+#
+# An immediate-mode UI is the opposite. Its whole draw list is rebuilt from
+# scratch every frame, it is thousands of small triangles, and it is consumed
+# once. Staging it would mean an allocation, a copy, a queue submit and a wait
+# per frame; a device-local Mesh cannot be written by the CPU at all. So this is
+# host-visible memory the CPU writes directly and the GPU reads in place. That
+# trades read bandwidth for zero upload cost, which is the correct trade for
+# geometry read once and never reused.
+#
+# ONE ARENA PER FRAME IN FLIGHT, WHICH IS THE ENTIRE REASON THIS IS A MODULE AND
+# NOT A BUFFER. The CPU runs up to MAX_FRAMES_IN_FLIGHT frames ahead. Writing
+# this frame's UI into the same memory the GPU is still reading for the last one
+# is a data race with no synchronization expressing it, and its symptom is a UI
+# that flickers between two frames' contents under load and looks correct when
+# you stop to inspect it. The frame index the renderer already threads through
+# its descriptor ring selects the arena, so the two rings advance together.
+#
+# The arena is a bump allocator that resets at the top of a frame. A draw that
+# does not fit is refused and counted rather than wrapping, because wrapping
+# would overwrite geometry already recorded into this frame's command buffer.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_unmap;
+use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+
+# Bytes of streamed geometry a single frame may hold.
+#
+# 1 MiB is 32768 vertices at blit's 32-byte stride, which is far more UI than a
+# frame has room to display. It is a fixed reservation rather than a growing one
+# because growing would mean destroying a buffer the GPU may still be reading.
+pub val STREAM_BYTES: usize = 1048576;
+
+# A ring of host-visible vertex buffers, one per frame in flight.
+# ---
+# buffers: The arenas, indexed by frame.
+# mapped:  Each arena's persistent mapping. Mapped once at creation rather than
+#          per frame: a map and unmap around every frame is two driver calls to
+#          arrive back at the same pointer.
+# used:    Bytes taken from each arena so far this frame.
+# dropped: Draws refused for want of room, across the stream's life.
+# ready:   Whether creation completed.
+pub rec VertexStream {
+    buffers: [2]Buffer;
+    mapped:  [2]*u8;
+    used:    [2]usize;
+    dropped: usize;
+    ready:   bool;
+}
+
+# Create the arenas and map them.
+pub fun stream_init(s: *VertexStream, v: *Vk) Result[bool, Error] {
+    s.ready   = false;
+    s.dropped = 0;
+
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        s.mapped[f] = nil;
+        s.used[f]   = 0;
+        # HOST_COHERENT as well as HOST_VISIBLE, so a write is visible to the
+        # GPU without an explicit flush. Without it every push would need a
+        # vkFlushMappedMemoryRanges over exactly the bytes written, and a missed
+        # flush is invisible on hardware whose host memory happens to be
+        # coherent anyway.
+        val br: Result[bool, Error] = buffer_init(?s.buffers[f], v, STREAM_BYTES::u64,
+            vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (is_err[bool, Error](br)) {
+            stream_dnit(s, v);
+            ret err[bool, Error](error("could not create a per-frame vertex arena"));
+        }
+        val m: ptr = buffer_map(?s.buffers[f], v);
+        if (m == nil) {
+            stream_dnit(s, v);
+            ret err[bool, Error](error("could not map a per-frame vertex arena"));
+        }
+        s.mapped[f] = m:~*u8;
+        f = f + 1;
+    }
+
+    s.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Reset a frame's arena. Called once as the frame opens.
+#
+# Resetting at the top of the frame rather than at the end of the last one is
+# what makes this safe: the fence the frame loop waits on before reusing a
+# frame's command buffer has already proved the GPU is done with the arena that
+# command buffer read.
+pub fun stream_begin(s: *VertexStream, frame: usize) {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret; }
+    s.used[frame] = 0;
+}
+
+# Copy vertex bytes into a frame's arena.
+#
+# Returns false when the frame's arena is full, and counts it. A refused draw
+# does not appear; wrapping instead would overwrite geometry already recorded
+# into this frame's command buffer, which is a corrupted frame rather than a
+# missing one.
+# ---
+# src:        the bytes to copy
+# len:        how many
+# stride:     one vertex's size, so the offset can be reported in vertices
+# out_first:  set to the index of the first vertex copied
+pub fun stream_push(s: *VertexStream, frame: usize, src: *u8, len: usize, stride: usize, out_first: *u32) bool {
+    @out_first = 0;
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+    if (len == 0 || stride == 0) { ret false; }
+
+    # The offset is reported in vertices because that is what vkCmdDraw's
+    # firstVertex takes. An arena whose used count is not a whole number of
+    # vertices would make that index name a vertex straddling two draws, so
+    # every push is a whole number of them by construction.
+    if (len % stride != 0) { ret false; }
+
+    val start: usize = s.used[frame];
+    if (start + len > STREAM_BYTES) {
+        s.dropped = s.dropped + 1;
+        ret false;
+    }
+    if (start % stride != 0) {
+        # Only reachable if a caller mixed strides within a frame. Align up
+        # rather than refuse, since the arena has room and the alternative is a
+        # draw that silently does not appear.
+        val pad: usize = stride - (start % stride);
+        if (start + pad + len > STREAM_BYTES) {
+            s.dropped = s.dropped + 1;
+            ret false;
+        }
+        s.used[frame] = start + pad;
+    }
+
+    val at: usize = s.used[frame];
+    var dst: *u8 = s.mapped[frame];
+    var i: usize = 0;
+    for (i < len) {
+        dst[at + i] = src[i];
+        i = i + 1;
+    }
+    s.used[frame] = at + len;
+    @out_first = (at / stride)::u32;
+    ret true;
+}
+
+# The buffer a frame's geometry lives in, for binding.
+pub fun stream_buffer(s: *VertexStream, frame: usize) vk.Buffer {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret nil; }
+    ret s.buffers[frame].handle;
+}
+
+# Bytes used in a frame's arena, for reporting.
+pub fun stream_used(s: *VertexStream, frame: usize) usize {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
+    ret s.used[frame];
+}
+
+# Draws refused for want of room.
+pub fun stream_dropped(s: *VertexStream) usize {
+    ret s.dropped;
+}
+
+# Unmap and destroy the arenas.
+pub fun stream_dnit(s: *VertexStream, v: *Vk) {
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        if (s.mapped[f] != nil) {
+            buffer_unmap(?s.buffers[f], v);
+            s.mapped[f] = nil;
+        }
+        buffer_dnit(?s.buffers[f], v);
+        s.used[f] = 0;
+        f = f + 1;
+    }
+    s.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Creation needs a device. What is testable without one is the bump arithmetic,
+# which is where an error silently overwrites geometry the GPU is about to read.
+
+test "stream: a push past the end is refused and counted, not wrapped" {
+    var s: VertexStream;
+    s.ready   = true;
+    s.dropped = 0;
+    s.used[0] = STREAM_BYTES - 32;
+    var first: u32 = 0;
+    var bytes: [64]u8;
+    # Two vertices at a 32-byte stride, into 32 bytes of room.
+    if (stream_push(?s, 0, ?bytes[0], 64, 32, ?first)) { ret 1; }
+    if (s.dropped != 1)                 { ret 2; }
+    if (s.used[0] != STREAM_BYTES - 32) { ret 3; }
+    ret 0;
+}
+
+test "stream: a frame's arena is independent of the other's" {
+    # Two frames are in flight, so the CPU writes one arena while the GPU reads
+    # the other. Sharing a used counter would let this frame's UI land in the
+    # middle of the geometry the GPU is still reading for the last one.
+    var s: VertexStream;
+    s.ready = true;
+    s.used[0] = 0;
+    s.used[1] = 4096;
+    stream_begin(?s, 0);
+    if (s.used[0] != 0)    { ret 1; }
+    if (s.used[1] != 4096) { ret 2; }
+    ret 0;
+}
+
+test "stream: a length that is not a whole number of vertices is refused" {
+    # firstVertex names a vertex, not a byte, so a partial vertex in the arena
+    # would make every later draw's offset name geometry straddling two pushes.
+    var s: VertexStream;
+    s.ready   = true;
+    s.dropped = 0;
+    s.used[0] = 0;
+    var first: u32 = 0;
+    var bytes: [64]u8;
+    if (stream_push(?s, 0, ?bytes[0], 48, 32, ?first)) { ret 1; }
+    ret 0;
+}
+
+test "stream: an out-of-range frame is refused rather than indexing past the ring" {
+    var s: VertexStream;
+    s.ready = true;
+    var first: u32 = 0;
+    var bytes: [32]u8;
+    if (stream_push(?s, MAX_FRAMES_IN_FLIGHT, ?bytes[0], 32, 32, ?first)) { ret 1; }
+    if (stream_buffer(?s, MAX_FRAMES_IN_FLIGHT) != nil)                   { ret 2; }
+    ret 0;
+}

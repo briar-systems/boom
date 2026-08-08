@@ -243,6 +243,10 @@ check_block("skinned_vert / SkinnedUniforms", "skinned_vert", 0, 128, 8)
 # SpriteUniforms: projection, model, then the source rect.
 check_block("sprite_vert / SpriteUniforms", "sprite_vert", 0, 144, 9)
 
+# ScreenUniforms: just the projection. The immediate-mode stage has no model
+# matrix, because its vertices arrive already placed.
+check_block("ui_vert / ScreenUniforms", "ui_vert", 0, 64, 4)
+
 # TintUniforms, read by both fragment stages at binding 2.
 check_block("sprite_frag / TintUniforms", "sprite_frag", 2, 16, 1)
 check_block("lit_frag / base colour", "lit_frag", 2, 16, 1)
@@ -255,6 +259,12 @@ check_bindings("skinned_vert / set_layout_full", "skinned_vert", [0, 3])
 check_bindings("sprite_vert / set_layout_full", "sprite_vert", [0])
 check_bindings("sprite_frag / set_layout_full", "sprite_frag", [1, 2])
 check_bindings("lit_frag / set_layout_full", "lit_frag", [1, 2])
+# The immediate-mode stages take a projection and a sampler and nothing else.
+# A binding 2 appearing here would be a tint block, which is the thing this
+# program exists not to need: a tint is per draw and this is one draw for a
+# whole list.
+check_bindings("ui_vert / set_layout_full", "ui_vert", [0])
+check_bindings("ui_frag / set_layout_full", "ui_frag", [1])
 
 # The joint palette must stay a storage buffer. As a uniform block its array of
 # columns would fall under std140, and boom uploads a boom.math.Mat4 palette as a
@@ -264,7 +274,8 @@ check_stride("skinned_vert / palette", "skinned_vert", 16)
 
 # Every module's capabilities. This is the check that would have caught the two
 # device features 0.3.0 required without enabling, and it needs no GPU.
-for module in ("mesh_vert", "skinned_vert", "sprite_vert", "sprite_frag", "lit_frag"):
+for module in ("mesh_vert", "skinned_vert", "sprite_vert", "sprite_frag", "lit_frag",
+               "ui_vert", "ui_frag"):
     check_capabilities(module)
 
 # A skip is not a pass. Say so rather than letting a green line count stand in

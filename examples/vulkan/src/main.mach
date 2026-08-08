@@ -303,6 +303,48 @@ fun build_skinned_cube(bytes: *u8, verts: *f32) {
     }
 }
 
+# Two triangles tiling an axis-aligned rectangle, in the immediate-mode layout.
+#
+# Eight f32 per vertex at a 32-byte stride: position in pixels, uv, then rgba.
+# The same layout blit emits, which is what boom.graphics.vertex.vertex_format_ui
+# describes and what a test there asserts.
+#
+# The two triangles are given different red values on purpose. A stream drawn
+# with a single tint instead of its vertex colours produces a rectangle in
+# exactly the right place at exactly the right size, so the position and area
+# checks cannot see the difference and this is what does.
+#
+# The uvs are all zero, which addresses the renderer's 1x1 white texel when no
+# texture is bound, so `colour * texel` is the flat colour.
+fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
+    var xs: [6]f32;
+    var ys: [6]f32;
+    var rs: [6]f32;
+    # First triangle: top-left, top-right, bottom-right.
+    xs[0] = x;     ys[0] = y;     rs[0] = 0.30;
+    xs[1] = x + w; ys[1] = y;     rs[1] = 0.30;
+    xs[2] = x + w; ys[2] = y + h; rs[2] = 0.30;
+    # Second: top-left, bottom-right, bottom-left. Shares the diagonal, so the
+    # two tile the rectangle with no gap and no overlap.
+    xs[3] = x;     ys[3] = y;     rs[3] = 0.90;
+    xs[4] = x + w; ys[4] = y + h; rs[4] = 0.90;
+    xs[5] = x;     ys[5] = y + h; rs[5] = 0.90;
+
+    var i: usize = 0;
+    for (i < 6) {
+        val b: usize = i * 8;
+        v[b]     = xs[i];
+        v[b + 1] = ys[i];
+        v[b + 2] = 0.0;
+        v[b + 3] = 0.0;
+        v[b + 4] = rs[i];
+        v[b + 5] = 0.10;
+        v[b + 6] = 0.10;
+        v[b + 7] = 1.0;
+        i = i + 1;
+    }
+}
+
 # The area of the convex hull of n points, in square pixels.
 #
 # WHY AN AREA AND NOT A PIXEL COUNT WRITTEN DOWN. The silhouette of a closed
@@ -890,6 +932,136 @@ fun main(argc: i64, argv: **u8) i64 {
     p.printlnf("ok   the skinned cube lands at half the joint translation, x {}..{}", s_min_x, s_max_x);
 
     gfx.mesh_delete(d, ?smesh);
+
+    # ------------------------------------------------- immediate-mode triangles
+    #
+    # The path an immediate-mode UI takes: a whole draw list of already-placed,
+    # per-vertex-coloured triangles, in one draw, through the renderer's
+    # per-frame vertex arena.
+    #
+    # Two triangles forming an axis-aligned rectangle of a known size at a known
+    # place, in pixels, so the covered area and its bounds are arithmetic rather
+    # than something read off the render. The colour is per vertex and differs
+    # between the two triangles, which is what distinguishes a stream drawn with
+    # its colours from one drawn with a single tint.
+    val UI_X: f32 = 20.0;
+    val UI_Y: f32 = 12.0;
+    val UI_W: f32 = 60.0;
+    val UI_H: f32 = 40.0;
+
+    var ui: [48]f32;
+    build_ui_quad(?ui[0], UI_X, UI_Y, UI_W, UI_H);
+
+    var uidrew: bool = false;
+    var uitry:  usize = 0;
+    for (uitry < 8 && !uidrew) {
+        window_poll();
+        var opened: bool = false;
+        if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+        if (opened) {
+            var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+            scene.target      = ?check;
+            scene.clear       = 1;
+            scene.clear_color = gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0);
+            var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+            gfx.pass_end(?sp);
+
+            # An overlay pass, so the projection maps pixels to clip space and
+            # the coordinates above are the ones that land.
+            var over: gfx.PassDesc = gfx.pass_overlay();
+            over.target = ?check;
+            var op: gfx.Pass = gfx.pass_begin(?r, ?over);
+            gfx.pass_draw_triangles(?op, (?ui[0])::ptr, 6, nil);
+            gfx.pass_end(?op);
+
+            if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+            uidrew = true;
+        }
+        uitry = uitry + 1;
+    }
+    if (!uidrew) {
+        p.println("FAIL triangles: the swapchain never came back to draw the UI frame");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    if (gfx.renderer_stream_dropped(?r) != 0) {
+        p.printlnf("FAIL triangles: {} draws were refused by the vertex arena",
+                   gfx.renderer_stream_dropped(?r));
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) { ret 1; }
+
+    var u_min_x: i32 = CHECK_W;
+    var u_max_x: i32 = 0 - 1;
+    var u_min_y: i32 = CHECK_H;
+    var u_max_y: i32 = 0 - 1;
+    var u_cov: usize = 0;
+    var uy: i32 = 0;
+    for (uy < CHECK_H) {
+        var ux: i32 = 0;
+        for (ux < CHECK_W) {
+            val o: usize = (uy::usize * CHECK_W::usize + ux::usize) * 4;
+            if (shot[o + red] > COVERED_R) {
+                u_cov = u_cov + 1;
+                if (ux < u_min_x) { u_min_x = ux; }
+                if (ux > u_max_x) { u_max_x = ux; }
+                if (uy < u_min_y) { u_min_y = uy; }
+                if (uy > u_max_y) { u_max_y = uy; }
+            }
+            ux = ux + 1;
+        }
+        uy = uy + 1;
+    }
+
+    if (u_cov == 0) {
+        p.println("FAIL triangles: the draw list rasterized nothing");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+
+    # The rectangle is axis-aligned and in pixels, so its extent is exact. A
+    # projection that did not map pixels to clip space, a vertex stride read
+    # wrong, or a first-vertex offset into the arena all place it somewhere else.
+    if (u_min_x != UI_X::i32 || u_min_y != UI_Y::i32) {
+        p.printlnf("FAIL triangles: the rectangle starts at {},{}; expected {},{}",
+                   u_min_x, u_min_y, UI_X::i32, UI_Y::i32);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    if (u_max_x != (UI_X + UI_W)::i32 - 1 || u_max_y != (UI_Y + UI_H)::i32 - 1) {
+        p.printlnf("FAIL triangles: the rectangle ends at {},{}; expected {},{}",
+                   u_max_x, u_max_y, (UI_X + UI_W)::i32 - 1, (UI_Y + UI_H)::i32 - 1);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    if (u_cov != (UI_W * UI_H)::usize) {
+        p.printlnf("FAIL triangles: {} pixels covered, expected exactly {}",
+                   u_cov, (UI_W * UI_H)::usize);
+        p.println("      Two triangles tile a rectangle exactly. Short of it means the");
+        p.println("      second triangle's vertices are wrong or were never uploaded.");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   a {}x{} draw list covers exactly {} pixels at {},{}",
+               UI_W::i32, UI_H::i32, u_cov, u_min_x, u_min_y);
+
+    # The two triangles carry different vertex colours. One tint for the whole
+    # draw, which is what the sprite path does, would make these equal, and the
+    # rectangle would still be in exactly the right place at exactly the right
+    # size. This is the only check that can tell those apart.
+    val lo_o: usize = ((UI_Y::usize + 2) * CHECK_W::usize + UI_X::usize + 2) * 4;
+    val hi_o: usize = ((UI_Y::usize + UI_H::usize - 3) * CHECK_W::usize
+                       + UI_X::usize + UI_W::usize - 3) * 4;
+    if (shot[lo_o + red] == shot[hi_o + red]) {
+        p.printlnf("FAIL triangles: both corners have red {}; the vertex colour was ignored",
+                   shot[lo_o + red]);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   the vertex colour varies across the list: red {} against {}",
+               shot[lo_o + red], shot[hi_o + red]);
+
     gfx.render_target_delete(d, ?check);
 
     # Teardown order is part of what is being checked: everything created against
