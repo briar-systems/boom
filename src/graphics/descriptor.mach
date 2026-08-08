@@ -1,0 +1,271 @@
+# Descriptor pools and sets: how a shader reaches its uniforms and its texture.
+#
+# A pipeline declares a descriptor set layout; a descriptor set is an instance of
+# that layout naming actual buffers and images. The set is what gets bound before
+# a draw, so this is the last piece between a built pipeline and a draw call.
+#
+# ONE SET PER FRAME IN FLIGHT, NOT ONE PER PIPELINE. A descriptor set that the
+# GPU is still reading cannot be rewritten, and with frames in flight the GPU is
+# always still reading the previous frame's. Sharing one set across frames means
+# frame N's uniforms overwrite frame N-1's while it executes, which shows up as
+# one-frame flicker under load and not at all when the GPU keeps up. The pool is
+# therefore sized by frames, and `set_index` takes the frame rather than the
+# module handing out a single set per material.
+#
+# THE POOL IS SIZED, NOT GROWN. Vulkan pools are fixed at creation, and
+# allocating past the size fails rather than expanding. The capacity is stated
+# once here so the failure is a startup error with a number in it rather than a
+# mid-game allocation failure.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.buffer.Buffer;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+
+# The most descriptor sets a pool holds.
+#
+# One per in-flight frame per material that draws in a frame. Sixteen materials
+# is generous for a 2D game and is a startup-time cost of a few kilobytes.
+pub val MAX_MATERIALS: usize = 16;
+
+# A pool and the sets allocated from it.
+# ---
+# pool:  The descriptor pool, owned here.
+# sets:  Allocated sets, indexed as material * MAX_FRAMES_IN_FLIGHT + frame.
+# count: Number of materials allocated so far.
+# ready: Whether creation completed.
+pub rec Descriptors {
+    pool:  vk.DescriptorPool;
+    sets:  [32]vk.DescriptorSet;
+    count: usize;
+    ready: bool;
+}
+
+# The index of a material's set for one frame.
+#
+# Pure, and the place a mistake makes two frames share a set, so it is tested
+# directly rather than only through the allocation that uses it.
+pub fun set_index(material: usize, frame: usize) usize {
+    ret material * MAX_FRAMES_IN_FLIGHT + frame;
+}
+
+# Create a pool sized for MAX_MATERIALS materials at MAX_FRAMES_IN_FLIGHT frames.
+pub fun descriptors_init(d: *Descriptors, v: *Vk) Result[bool, Error] {
+    d.pool  = nil;
+    d.count = 0;
+    d.ready = false;
+
+    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+
+    val total: u32 = (MAX_MATERIALS * MAX_FRAMES_IN_FLIGHT)::u32;
+
+    # A pool is sized per descriptor type, not per set: every set holds one
+    # uniform buffer and one combined image sampler, so each type needs one
+    # descriptor per set.
+    var sizes: [2]vk.DescriptorPoolSize;
+    sizes[0].type            = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    sizes[0].descriptorCount = total;
+    sizes[1].type            = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    sizes[1].descriptorCount = total;
+
+    var ci: vk.DescriptorPoolCreateInfo;
+    ci.sType         = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    ci.pNext         = nil;
+    ci.flags         = 0;
+    ci.maxSets       = total;
+    ci.poolSizeCount = 2;
+    ci.pPoolSizes    = ?sizes[0];
+
+    if (vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?d.pool) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateDescriptorPool failed"));
+    }
+    d.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Allocate one material's worth of sets, one per in-flight frame.
+#
+# Returns the material index, or MAX_MATERIALS when the pool is full.
+pub fun descriptors_allocate(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) usize {
+    if (!d.ready || d.count >= MAX_MATERIALS) { ret MAX_MATERIALS; }
+    val material: usize = d.count;
+
+    var layouts: [2]vk.DescriptorSetLayout;
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) { layouts[f] = layout; f = f + 1; }
+
+    var ai: vk.DescriptorSetAllocateInfo;
+    ai.sType              = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.pNext              = nil;
+    ai.descriptorPool     = d.pool;
+    ai.descriptorSetCount = MAX_FRAMES_IN_FLIGHT::u32;
+    ai.pSetLayouts        = ?layouts[0];
+
+    if (vk.vkAllocateDescriptorSets(v.device, ?ai, ?d.sets[set_index(material, 0)]) != vk.SUCCESS) {
+        ret MAX_MATERIALS;
+    }
+    d.count = d.count + 1;
+    ret material;
+}
+
+# Point a material's set for one frame at a uniform buffer and a texture.
+#
+# `view` and `sampler` may both be nil, which writes the uniform binding alone.
+# That is the case for geometry with no texture, and writing a combined image
+# sampler with a nil view would be invalid usage rather than a no-op.
+pub fun descriptors_write(d: *Descriptors, v: *Vk, material: usize, frame: usize,
+                          uniform: *Buffer, size: u64,
+                          view: vk.ImageView, sampler: vk.Sampler) bool {
+    if (!d.ready || material >= d.count || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+    val set: vk.DescriptorSet = d.sets[set_index(material, frame)];
+
+    var bi: vk.DescriptorBufferInfo;
+    bi.buffer = uniform.handle;
+    bi.offset = 0;
+    bi.range  = size;
+
+    var ii: vk.DescriptorImageInfo;
+    ii.sampler     = sampler;
+    ii.imageView   = view;
+    ii.imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    var writes: [2]vk.WriteDescriptorSet;
+    writes[0].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].pNext            = nil;
+    writes[0].dstSet           = set;
+    writes[0].dstBinding       = 0;
+    writes[0].dstArrayElement  = 0;
+    writes[0].descriptorCount  = 1;
+    writes[0].descriptorType   = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[0].pImageInfo       = nil;
+    writes[0].pBufferInfo      = ?bi;
+    writes[0].pTexelBufferView = nil;
+
+    var count: u32 = 1;
+    if (view != nil && sampler != nil) {
+        writes[1].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].pNext            = nil;
+        writes[1].dstSet           = set;
+        writes[1].dstBinding       = 1;
+        writes[1].dstArrayElement  = 0;
+        writes[1].descriptorCount  = 1;
+        writes[1].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo       = ?ii;
+        writes[1].pBufferInfo      = nil;
+        writes[1].pTexelBufferView = nil;
+        count = 2;
+    }
+
+    vk.vkUpdateDescriptorSets(v.device, count, ?writes[0], 0, nil);
+    ret true;
+}
+
+# Bind a material's set for the current frame before a draw.
+pub fun descriptors_bind(d: *Descriptors, cmd: vk.CommandBuffer, layout: vk.PipelineLayout,
+                         material: usize, frame: usize) bool {
+    if (!d.ready || material >= d.count || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+    var set: vk.DescriptorSet = d.sets[set_index(material, frame)];
+    vk.vkCmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, ?set, 0, nil);
+    ret true;
+}
+
+# Destroy the pool.
+#
+# The sets are owned by the pool and are freed with it; freeing them individually
+# would need the pool to have been created with the free-descriptor-set flag,
+# which costs allocator bookkeeping this never uses.
+pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
+    if (!d.ready) { ret; }
+    vk.vkDestroyDescriptorPool(v.device, d.pool, nil);
+    d.pool  = nil;
+    d.count = 0;
+    d.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Allocation needs a device, so these cover the indexing, which is pure and is
+# where a mistake makes two frames share one set. That failure appears as a
+# one-frame flicker under load and not at all when the GPU keeps up, so it is
+# exactly the kind that has to be caught here rather than by looking at it.
+
+test "descriptor: each material and frame gets a distinct slot" {
+    var seen: [32]bool;
+    var i: usize = 0;
+    for (i < 32) { seen[i] = false; i = i + 1; }
+
+    var m: usize = 0;
+    for (m < MAX_MATERIALS) {
+        var f: usize = 0;
+        for (f < MAX_FRAMES_IN_FLIGHT) {
+            val n: usize = set_index(m, f);
+            if (n >= 32)  { ret 1; }
+            if (seen[n])  { ret 2; }
+            seen[n] = true;
+            f = f + 1;
+        }
+        m = m + 1;
+    }
+
+    # Every slot must be claimed exactly once, so the table is neither
+    # over-subscribed nor larger than it needs to be.
+    i = 0;
+    for (i < MAX_MATERIALS * MAX_FRAMES_IN_FLIGHT) {
+        if (!seen[i]) { ret 3; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "descriptor: frames of one material are adjacent and different" {
+    # The two in-flight frames of a material must not resolve to one set, or
+    # frame N overwrites the uniforms frame N-1 is still reading.
+    if (set_index(0, 0) == set_index(0, 1)) { ret 1; }
+    if (set_index(3, 0) != 6)               { ret 2; }
+    if (set_index(3, 1) != 7)               { ret 3; }
+    ret 0;
+}
+
+test "descriptor: the table holds every material at every frame" {
+    if (MAX_MATERIALS * MAX_FRAMES_IN_FLIGHT > 32) { ret 1; }
+    ret 0;
+}
+
+test "descriptor: writing and binding refuse an out-of-range material" {
+    var d: Descriptors;
+    d.ready = true;
+    d.count = 2;
+    var v: Vk;
+    v.ready = false;
+    var b: Buffer;
+    b.handle = nil;
+    # Past the allocated count the set is uninitialized, and binding it would
+    # hand the driver a handle that was never allocated.
+    if (descriptors_write(?d, ?v, 2, 0, ?b, 64, nil, nil))  { ret 1; }
+    if (descriptors_write(?d, ?v, 0, MAX_FRAMES_IN_FLIGHT, ?b, 64, nil, nil)) { ret 2; }
+    if (descriptors_bind(?d, nil, nil, 5, 0))               { ret 3; }
+    ret 0;
+}
+
+test "descriptor: an uninitialized pool refuses everything" {
+    var d: Descriptors;
+    d.ready = false;
+    d.count = 0;
+    var v: Vk;
+    v.ready = false;
+    var b: Buffer;
+    b.handle = nil;
+    if (descriptors_write(?d, ?v, 0, 0, ?b, 64, nil, nil)) { ret 1; }
+    if (descriptors_bind(?d, nil, nil, 0, 0))              { ret 2; }
+    descriptors_dnit(?d, ?v);
+    ret 0;
+}
