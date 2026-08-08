@@ -43,6 +43,7 @@ use ga: gltf.accessor;
 use gd: gltf.doc;
 use slice: std.collections.slice;
 use fs:    std.filesystem;
+use vec:     std.collections.vector;
 use allo:  std.allocator;
 use page:  std.allocator.page;
 use arena: std.allocator.arena;
@@ -60,7 +61,7 @@ use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
-use std.types.string.view_eq_str;
+use std.types.string.str_equals;
 
 # an opaque handle to a drawable mesh
 # ---
@@ -201,7 +202,7 @@ fun find_attr(prim: *gd.Primitive, name: str) i64 {
         val ar: Result[*gd.Attribute, str] = slice.get[gd.Attribute](prim.attributes, i);
         if (is_err[*gd.Attribute, str](ar)) { ret gd.NONE; }
         val a: *gd.Attribute = unwrap_ok[*gd.Attribute, str](ar);
-        if (view_eq_str(a.name, name)) { ret a.accessor; }
+        if (str_equals(a.name, name)) { ret a.accessor; }
         i = i + 1;
     }
     ret gd.NONE;
@@ -568,14 +569,14 @@ pub fun mesh_load(path: str) Result[Mesh, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[fs.Buffer, str] = fs.read_all_sized(?pa, path);
-    if (is_err[fs.Buffer, str](br)) {
-        ret err[Mesh, Error](error(unwrap_err[fs.Buffer, str](br)));
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    if (is_err[vec.Vector[u8], str](br)) {
+        ret err[Mesh, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }
-    val buf: fs.Buffer = unwrap_ok[fs.Buffer, str](br);
+    var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
     val res: Result[Mesh, Error] = mesh_from_glb(buf.data, buf.len);
-    allo.deallocate[u8](?pa, buf.data, buf.len + 1);
+    vec.dnit[u8](?buf);
     ret res;
 }
 
