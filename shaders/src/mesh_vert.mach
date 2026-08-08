@@ -1,0 +1,23 @@
+# Mesh vertex shader.
+#
+# Transforms a position by the model-view-projection carried in a uniform
+# block, and passes the world-space normal to the fragment stage.
+
+rec Matrices {
+    mvp:   f32x4;
+    model: f32x4;
+}
+
+#[uniform(0, 0)] var matrices: Matrices;
+
+#[input(0)]  var in_position: f32x4;
+#[input(1)]  var in_normal:   f32x4;
+#[output(0)] var out_normal:  f32x4;
+
+#[builtin("position")] var position: f32x4;
+
+#[stage("vertex")]
+fun vert_main() {
+    position   = in_position * matrices.mvp;
+    out_normal = in_normal * matrices.model;
+}

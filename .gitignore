@@ -2,3 +2,4 @@ out/
 
 # mach dep checkouts materialized by `mach dep pull`; mach.lock is the source of truth
 dep/
+res/spv/

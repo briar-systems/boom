@@ -184,3 +184,9 @@ fwd boom.graphics.text.font_load;
 fwd boom.graphics.text.font_delete;
 fwd boom.graphics.text.text_measure;
 fwd boom.graphics.text.text_draw;
+
+fwd boom.graphics.spirv.LIT_FRAG_SPV;
+fwd boom.graphics.spirv.MESH_VERT_SPV;
+fwd boom.graphics.spirv.VERTEX_ENTRY;
+fwd boom.graphics.spirv.FRAGMENT_ENTRY;
+fwd boom.graphics.spirv.shader_from_spirv;

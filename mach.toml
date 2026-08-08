@@ -35,6 +35,21 @@ entry = "lib/boom.mach"
 out = "lib/boom"
 targets = ["*"]
 link = []
+need = ["build-shaders"]
+
+# Shaders are a separate project targeting spirv, built by this step and
+# embedded into the library. They cannot be an artifact of this project because
+# a project builds for one target and boom builds for the host.
+#
+# The output lands in res/ by project convention: game assets, including
+# compiled shaders, live under a project root's res/. That is also what
+# vfs.res_root points at by default. It cannot live under {project.out}
+# because #[embed] takes a literal path and {project.out} varies by target
+# and profile; SPIR-V is target-independent, so one copy serves every build.
+[step.build-shaders]
+cmd = "mach build shaders --target spirv --profile release && mkdir -p res/spv && cp shaders/out/obj/shaders/lit_frag.spv shaders/out/obj/shaders/mesh_vert.spv res/spv/"
+in  = ["shaders/src/lit_frag.mach", "shaders/src/mesh_vert.mach", "shaders/mach.toml"]
+out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv"]
 need = []
 
 [dep.mach-std]

@@ -1,0 +1,112 @@
+# SPIR-V shader modules, compiled from Mach.
+#
+# boom's shaders are written in Mach, compiled to SPIR-V by the build-shaders
+# step, and embedded here. The bytes are the same on every backend: Vulkan
+# consumes SPIR-V natively and GL 4.6 core accepts it through glShaderBinary
+# and glSpecializeShader, so a backend swap does not change a shader.
+#
+# Only the shaders that need no texture are ported. SPIR-V has no sampler
+# binding yet (mach#2794), so the sprite and material shaders, which every 2D
+# quad and all text go through, still use the GLSL path in shader.mach. That
+# path is deleted when the sampler binding lands.
+
+use std.types.size.usize;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use gl.gl;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.shader.Shader;
+
+# Directional-light fragment stage.
+#[embed("../../res/spv/lit_frag.spv")]
+pub val LIT_FRAG_SPV: [_]u8;
+
+# Mesh vertex stage: model-view-projection from a uniform block.
+#[embed("../../res/spv/mesh_vert.spv")]
+pub val MESH_VERT_SPV: [_]u8;
+
+# The entry point name every boom vertex stage uses.
+pub val VERTEX_ENTRY: str = "vert_main";
+# The entry point name every boom fragment stage uses.
+pub val FRAGMENT_ENTRY: str = "frag_main";
+
+# Build a program from two SPIR-V modules.
+#
+# glShaderBinary uploads the module and glSpecializeShader selects its entry
+# point and resolves specialization constants; only then can the shader be
+# compiled and linked. Passing SPIR-V to glShaderSource instead silently
+# treats it as GLSL text and fails at compile with an unhelpful message.
+# ---
+# vert:  SPIR-V bytes for the vertex stage
+# vlen:  length of vert in bytes
+# frag:  SPIR-V bytes for the fragment stage
+# flen:  length of frag in bytes
+pub fun shader_from_spirv(vert: *u8, vlen: usize, frag: *u8, flen: usize) Result[Shader, Error] {
+    var vs: u32 = gl.create_shader(gl.VERTEX_SHADER);
+    var fs: u32 = gl.create_shader(gl.FRAGMENT_SHADER);
+    if (vs == 0 || fs == 0) { ret err[Shader, Error](error("could not create shader objects")); }
+
+    if (!load_stage(vs, vert, vlen, VERTEX_ENTRY)) {
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+        ret err[Shader, Error](error("vertex stage rejected the SPIR-V module"));
+    }
+    if (!load_stage(fs, frag, flen, FRAGMENT_ENTRY)) {
+        gl.delete_shader(vs);
+        gl.delete_shader(fs);
+        ret err[Shader, Error](error("fragment stage rejected the SPIR-V module"));
+    }
+
+    val prog: u32 = gl.create_program();
+    gl.attach_shader(prog, vs);
+    gl.attach_shader(prog, fs);
+    gl.link_program(prog);
+
+    var linked: i32 = 0;
+    gl.get_programiv(prog, gl.LINK_STATUS, ?linked);
+    gl.delete_shader(vs);
+    gl.delete_shader(fs);
+    if (linked == 0) {
+        gl.delete_program(prog);
+        ret err[Shader, Error](error("SPIR-V program failed to link"));
+    }
+    ret ok[Shader, Error](Shader{program: prog});
+}
+
+# Upload one SPIR-V module into a shader object and specialize it.
+fun load_stage(sh: u32, spv: *u8, len: usize, entry: str) bool {
+    var handle: u32 = sh;
+    gl.shader_binary(1, ?handle, gl.SHADER_BINARY_FORMAT_SPIR_V, spv::ptr, len::i32);
+    gl.specialize_shader(sh, entry, 0, nil, nil);
+
+    var ok_flag: i32 = 0;
+    gl.get_shaderiv(sh, gl.COMPILE_STATUS, ?ok_flag);
+    ret ok_flag != 0;
+}
+
+test "spirv: the embedded modules carry the SPIR-V magic word" {
+    # 0x07230203 little-endian. A truncated or missing embed shows up here
+    # rather than as a driver error at first draw.
+    if (LIT_FRAG_SPV[0] != 0x03) { ret 1; }
+    if (LIT_FRAG_SPV[1] != 0x02) { ret 1; }
+    if (LIT_FRAG_SPV[2] != 0x23) { ret 1; }
+    if (LIT_FRAG_SPV[3] != 0x07) { ret 1; }
+    if (MESH_VERT_SPV[0] != 0x03) { ret 1; }
+    if (MESH_VERT_SPV[3] != 0x07) { ret 1; }
+    ret 0;
+}
+
+test "spirv: a module is a whole number of 32-bit words" {
+    # SPIR-V is a word stream; a length not divisible by 4 means a truncated
+    # embed, which a driver reports as a generic parse failure.
+    if ($length_of(LIT_FRAG_SPV) % 4 != 0)  { ret 1; }
+    if ($length_of(MESH_VERT_SPV) % 4 != 0) { ret 1; }
+    if ($length_of(LIT_FRAG_SPV) < 32)      { ret 1; }
+    ret 0;
+}
