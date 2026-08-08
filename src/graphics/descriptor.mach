@@ -37,6 +37,14 @@ use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
 # is generous for a 2D game and is a startup-time cost of a few kilobytes.
 pub val MAX_MATERIALS: usize = 16;
 
+# The most descriptors of each kind any one set holds.
+#
+# Taken from the widest layout rather than the common one: the sprite layout
+# binds two uniform buffers and one sampler. Sizing from the mesh layout instead
+# would make the pool run out at the first sprite material.
+pub val MAX_UNIFORMS_PER_SET: u32 = 2;
+pub val MAX_SAMPLERS_PER_SET: u32 = 1;
+
 # A pool and the sets allocated from it.
 # ---
 # pool:  The descriptor pool, owned here.
@@ -68,14 +76,16 @@ pub fun descriptors_init(d: *Descriptors, v: *Vk) Result[bool, Error] {
 
     val total: u32 = (MAX_MATERIALS * MAX_FRAMES_IN_FLIGHT)::u32;
 
-    # A pool is sized per descriptor type, not per set: every set holds one
-    # uniform buffer and one combined image sampler, so each type needs one
-    # descriptor per set.
+    # A pool is sized per descriptor type, not per set, and a set does not hold
+    # one of each. The sprite layout holds TWO uniform buffers, the vertex
+    # stage's transform block and the fragment stage's tint, so a pool sized at
+    # one uniform per set runs out at the first sprite material with an error
+    # that names the pool rather than the layout.
     var sizes: [2]vk.DescriptorPoolSize;
     sizes[0].type            = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[0].descriptorCount = total;
+    sizes[0].descriptorCount = total * MAX_UNIFORMS_PER_SET;
     sizes[1].type            = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = total;
+    sizes[1].descriptorCount = total * MAX_SAMPLERS_PER_SET;
 
     var ci: vk.DescriptorPoolCreateInfo;
     ci.sType         = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -122,6 +132,11 @@ pub fun descriptors_allocate(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLa
 # `view` and `sampler` may both be nil, which writes the uniform binding alone.
 # That is the case for geometry with no texture, and writing a combined image
 # sampler with a nil view would be invalid usage rather than a no-op.
+#
+# The bindings are 0 for the transform uniform and 1 for the sampler, matching
+# what the shaders declare. A second uniform, the sprite tint at binding 2, goes
+# through descriptors_write_uniform rather than being a fourth parameter here,
+# because a shader that binds three uniforms would then need a fifth.
 pub fun descriptors_write(d: *Descriptors, v: *Vk, material: usize, frame: usize,
                           uniform: *Buffer, size: u64,
                           view: vk.ImageView, sampler: vk.Sampler) bool {
@@ -166,6 +181,36 @@ pub fun descriptors_write(d: *Descriptors, v: *Vk, material: usize, frame: usize
     }
 
     vk.vkUpdateDescriptorSets(v.device, count, ?writes[0], 0, nil);
+    ret true;
+}
+
+# Point one uniform binding of a material's set at a buffer.
+#
+# Used for bindings past the first, which today is the sprite tint at binding 2.
+# Separate from descriptors_write so the common path stays one call and an
+# additional uniform does not widen its signature.
+pub fun descriptors_write_uniform(d: *Descriptors, v: *Vk, material: usize, frame: usize,
+                                  binding: u32, uniform: *Buffer, size: u64) bool {
+    if (!d.ready || material >= d.count || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+
+    var bi: vk.DescriptorBufferInfo;
+    bi.buffer = uniform.handle;
+    bi.offset = 0;
+    bi.range  = size;
+
+    var w: vk.WriteDescriptorSet;
+    w.sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w.pNext            = nil;
+    w.dstSet           = d.sets[set_index(material, frame)];
+    w.dstBinding       = binding;
+    w.dstArrayElement  = 0;
+    w.descriptorCount  = 1;
+    w.descriptorType   = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    w.pImageInfo       = nil;
+    w.pBufferInfo      = ?bi;
+    w.pTexelBufferView = nil;
+
+    vk.vkUpdateDescriptorSets(v.device, 1, ?w, 0, nil);
     ret true;
 }
 

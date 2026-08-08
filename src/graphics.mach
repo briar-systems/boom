@@ -232,6 +232,17 @@ fwd boom.graphics.pipeline.shader_module;
 fwd boom.graphics.pipeline.pipeline_init;
 fwd boom.graphics.pipeline.pipeline_bind;
 fwd boom.graphics.pipeline.pipeline_dnit;
+fwd boom.graphics.pipeline.Binding;
+fwd boom.graphics.pipeline.BINDING_NONE;
+fwd boom.graphics.pipeline.BINDING_UNIFORM;
+fwd boom.graphics.pipeline.BINDING_SAMPLER;
+fwd boom.graphics.pipeline.MAX_BINDINGS;
+fwd boom.graphics.pipeline.SetLayout;
+fwd boom.graphics.pipeline.set_layout;
+fwd boom.graphics.pipeline.set_layout_at;
+fwd boom.graphics.pipeline.set_layout_mesh;
+fwd boom.graphics.pipeline.set_layout_sprite;
+fwd boom.graphics.pipeline.set_layout_count;
 
 fwd boom.graphics.image.RGBA_BYTES;
 fwd boom.graphics.image.Image;
@@ -249,6 +260,9 @@ fwd boom.graphics.descriptor.set_index;
 fwd boom.graphics.descriptor.descriptors_init;
 fwd boom.graphics.descriptor.descriptors_allocate;
 fwd boom.graphics.descriptor.descriptors_write;
+fwd boom.graphics.descriptor.descriptors_write_uniform;
+fwd boom.graphics.descriptor.MAX_UNIFORMS_PER_SET;
+fwd boom.graphics.descriptor.MAX_SAMPLERS_PER_SET;
 fwd boom.graphics.descriptor.descriptors_bind;
 fwd boom.graphics.descriptor.descriptors_dnit;
 

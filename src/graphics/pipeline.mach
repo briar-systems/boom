@@ -217,35 +217,128 @@ pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) Resul
     ret ok[bool, Error](true);
 }
 
-# The descriptor set layout a pipeline binds.
+# What a shader binds, as a list of binding kinds.
 #
-# One uniform buffer at binding 0 and, when `sampled` is set, one combined image
-# sampler at binding 1. This mirrors what the shaders declare, and the two must
-# be changed together; a mismatch is rejected at pipeline creation rather than
-# producing wrong output, which is why it is stated once here.
-fun make_set_layout(v: *Vk, sampled: bool, out: *vk.DescriptorSetLayout) Result[bool, Error] {
-    var bindings: [2]vk.DescriptorSetLayoutBinding;
-    bindings[0].binding            = 0;
-    bindings[0].descriptorType     = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    bindings[0].descriptorCount    = 1;
-    bindings[0].stageFlags         = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT;
-    bindings[0].pImmutableSamplers = nil;
+# NOT A BOOLEAN. The first version of this took `sampled: bool` and emitted a
+# uniform at binding 0 plus, optionally, a sampler at binding 1. That was shaped
+# around the mesh pipeline, which is the easy case, and the sprite pipeline
+# breaks it: sprite_vert declares a uniform at binding 0, sprite_frag declares
+# the atlas sampler at binding 1 and its tint uniform at binding 2. A boolean
+# cannot describe that, and a layout missing binding 2 does not fail loudly; the
+# shader reads a descriptor that was never written.
+#
+# So the layout is a list, and the index in it IS the binding number. Adding a
+# shader that binds a fourth thing is one more entry rather than a new flag.
+pub def Binding: u8;
 
-    var count: u32 = 1;
-    if (sampled) {
-        bindings[1].binding            = 1;
-        bindings[1].descriptorType     = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[1].descriptorCount    = 1;
-        bindings[1].stageFlags         = vk.SHADER_STAGE_FRAGMENT_BIT;
-        bindings[1].pImmutableSamplers = nil;
-        count = 2;
+# No binding at this index. Present so a gap is describable rather than
+# implicitly shifting every later binding down by one.
+pub val BINDING_NONE:    Binding = 0;
+# A uniform buffer.
+pub val BINDING_UNIFORM: Binding = 1;
+# A combined image sampler.
+pub val BINDING_SAMPLER: Binding = 2;
+
+# The most bindings one descriptor set describes.
+pub val MAX_BINDINGS: usize = 8;
+
+# A descriptor set layout description.
+# ---
+# kinds: The kind at each binding number, BINDING_NONE where unused.
+# count: One past the highest binding number used.
+pub rec SetLayout {
+    kinds: [8]Binding;
+    count: u32;
+}
+
+# An empty layout.
+pub fun set_layout() SetLayout {
+    var l: SetLayout;
+    var i: usize = 0;
+    for (i < MAX_BINDINGS) { l.kinds[i] = BINDING_NONE; i = i + 1; }
+    l.count = 0;
+    ret l;
+}
+
+# Declare a binding at a specific number.
+#
+# The number is explicit rather than the next free slot, because it has to match
+# what the shader declares and a shader is free to leave a gap.
+pub fun set_layout_at(l: *SetLayout, binding: u32, kind: Binding) bool {
+    if (binding::usize >= MAX_BINDINGS) { ret false; }
+    l.kinds[binding] = kind;
+    if (binding + 1 > l.count) { l.count = binding + 1; }
+    ret true;
+}
+
+# The layout mesh_vert and lit_frag declare: one uniform at binding 0.
+pub fun set_layout_mesh() SetLayout {
+    var l: SetLayout = set_layout();
+    set_layout_at(?l, 0, BINDING_UNIFORM);
+    ret l;
+}
+
+# The layout sprite_vert and sprite_frag declare.
+#
+# Binding 0 is sprite_vert's projection, model and source rect; binding 1 is the
+# atlas sampler; binding 2 is the fragment stage's tint. Verified against the
+# emitted SPIR-V by tools/check-uniform-layout.sh.
+pub fun set_layout_sprite() SetLayout {
+    var l: SetLayout = set_layout();
+    set_layout_at(?l, 0, BINDING_UNIFORM);
+    set_layout_at(?l, 1, BINDING_SAMPLER);
+    set_layout_at(?l, 2, BINDING_UNIFORM);
+    ret l;
+}
+
+# How many bindings of a given kind a layout declares.
+#
+# The descriptor pool is sized per kind, not per set, so this is what a pool
+# needs to know. A sprite set holds two uniforms, and a pool sized at one per
+# set runs out at the first sprite material.
+pub fun set_layout_count(l: *SetLayout, kind: Binding) u32 {
+    var n: u32 = 0;
+    var i: u32 = 0;
+    for (i < l.count) {
+        if (l.kinds[i] == kind) { n = n + 1; }
+        i = i + 1;
     }
+    ret n;
+}
+
+# Create the Vulkan descriptor set layout for a description.
+fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[bool, Error] {
+    var bindings: [8]vk.DescriptorSetLayoutBinding;
+    var n: u32 = 0;
+    var i: u32 = 0;
+    for (i < l.count) {
+        if (l.kinds[i] != BINDING_NONE) {
+            bindings[n].binding            = i;
+            bindings[n].descriptorCount    = 1;
+            bindings[n].pImmutableSamplers = nil;
+            if (l.kinds[i] == BINDING_SAMPLER) {
+                bindings[n].descriptorType = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                bindings[n].stageFlags     = vk.SHADER_STAGE_FRAGMENT_BIT;
+            }
+            or {
+                bindings[n].descriptorType = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                # Visible to both stages. A uniform declared in one stage and
+                # named in the other is common, and restricting the stage mask
+                # to where it happens to be read today makes adding that a
+                # pipeline-creation failure later.
+                bindings[n].stageFlags     = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT;
+            }
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    if (n == 0) { ret err[bool, Error](error("a descriptor set layout with no bindings")); }
 
     var ci: vk.DescriptorSetLayoutCreateInfo;
     ci.sType        = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     ci.pNext        = nil;
     ci.flags        = 0;
-    ci.bindingCount = count;
+    ci.bindingCount = n;
     ci.pBindings    = ?bindings[0];
     if (vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out) != vk.SUCCESS) {
         ret err[bool, Error](error("vkCreateDescriptorSetLayout failed"));
@@ -255,7 +348,7 @@ fun make_set_layout(v: *Vk, sampled: bool, out: *vk.DescriptorSetLayout) Result[
 
 # Build a graphics pipeline from two SPIR-V modules and a vertex format.
 pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexFormat, d: *PipelineDesc,
-                      vert: *u8, vlen: usize, frag: *u8, flen: usize, sampled: bool) Result[bool, Error] {
+                      vert: *u8, vlen: usize, frag: *u8, flen: usize, layout: *SetLayout) Result[bool, Error] {
     p.ready      = false;
     p.handle     = nil;
     p.layout     = nil;
@@ -273,7 +366,7 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
         ret fr;
     }
 
-    val sr: Result[bool, Error] = make_set_layout(v, sampled, ?p.set_layout);
+    val sr: Result[bool, Error] = make_set_layout(v, layout, ?p.set_layout);
     if (is_err[bool, Error](sr)) {
         vk.vkDestroyShaderModule(v.device, vmod, nil);
         vk.vkDestroyShaderModule(v.device, fmod, nil);
@@ -618,5 +711,58 @@ test "pipeline: teardown on a pipeline that was never created is a no-op" {
     v.ready = false;
     pipeline_dnit(?p, ?v);
     if (p.ready) { ret 1; }
+    ret 0;
+}
+
+test "pipeline: the sprite layout declares all three bindings the shaders use" {
+    var l: SetLayout = set_layout_sprite();
+    # sprite_vert binds a uniform at 0, sprite_frag the atlas at 1 and its tint
+    # at 2. A layout stopping at binding 1 does not fail loudly: the shader
+    # reads a descriptor that was never written.
+    if (l.count != 3)                     { ret 1; }
+    if (l.kinds[0] != BINDING_UNIFORM)    { ret 2; }
+    if (l.kinds[1] != BINDING_SAMPLER)    { ret 3; }
+    if (l.kinds[2] != BINDING_UNIFORM)    { ret 4; }
+    ret 0;
+}
+
+test "pipeline: the mesh layout declares only its one uniform" {
+    var l: SetLayout = set_layout_mesh();
+    if (l.count != 1)                  { ret 1; }
+    if (l.kinds[0] != BINDING_UNIFORM) { ret 2; }
+    ret 0;
+}
+
+test "pipeline: a layout counts descriptors per kind, not per set" {
+    # What the pool has to be sized by. The sprite set holds two uniforms, so a
+    # pool sized at one per set runs out at the first sprite material.
+    var sp: SetLayout = set_layout_sprite();
+    if (set_layout_count(?sp, BINDING_UNIFORM) != 2) { ret 1; }
+    if (set_layout_count(?sp, BINDING_SAMPLER) != 1) { ret 2; }
+
+    var me: SetLayout = set_layout_mesh();
+    if (set_layout_count(?me, BINDING_UNIFORM) != 1) { ret 3; }
+    if (set_layout_count(?me, BINDING_SAMPLER) != 0) { ret 4; }
+    ret 0;
+}
+
+test "pipeline: a gap in the bindings does not shift the later ones" {
+    # A shader is free to leave a binding number unused. Packing the list would
+    # silently move binding 3 to binding 1.
+    var l: SetLayout = set_layout();
+    set_layout_at(?l, 0, BINDING_UNIFORM);
+    set_layout_at(?l, 3, BINDING_SAMPLER);
+    if (l.count != 4)                  { ret 1; }
+    if (l.kinds[1] != BINDING_NONE)    { ret 2; }
+    if (l.kinds[2] != BINDING_NONE)    { ret 3; }
+    if (l.kinds[3] != BINDING_SAMPLER) { ret 4; }
+    if (set_layout_count(?l, BINDING_UNIFORM) != 1) { ret 5; }
+    ret 0;
+}
+
+test "pipeline: a binding past the table is refused" {
+    var l: SetLayout = set_layout();
+    if (set_layout_at(?l, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 1; }
+    if (l.count != 0) { ret 2; }
     ret 0;
 }

@@ -19,6 +19,7 @@ set -euo pipefail
 
 spv_dir="res/spv"
 fail=0
+skipped=0
 
 # Total byte size of a block: the last member's offset plus its size. Every
 # member in these blocks is a vec4, so 16.
@@ -50,6 +51,7 @@ expect() {
 
     if [ ! -f "$file" ]; then
         echo "SKIP $name: $file not built"
+        skipped=$((skipped + 1))
         return
     fi
 
@@ -71,10 +73,63 @@ expect() {
     fi
 }
 
+# The descriptor bindings a shader declares, as "binding:kind" per line.
+#
+# A missing binding in the CPU's set layout does not fail loudly: the shader
+# reads a descriptor that was never written. This is the check that catches it,
+# and it is the one that caught the set layout stopping at binding 1 while
+# sprite_frag declared a tint at binding 2.
+shader_bindings() {
+    local file="$1"
+    spirv-dis "$file" | awk '
+        /OpDecorate %[0-9]+ Binding [0-9]+/ { b[$2] = $NF }
+        /OpTypeSampledImage/                { sampled = 1 }
+        /%[0-9]+ = OpVariable .*UniformConstant/ { konst[$1] = 1 }
+        END { for (v in b) print b[v] }
+    ' | sort -n | tr "\n" " " | sed "s/ $//"
+}
+
+expect_bindings() {
+    local name="$1" file="$2" want="$3"
+
+    if [ ! -f "$file" ]; then
+        echo "SKIP $name: $file not built"
+        skipped=$((skipped + 1))
+        return
+    fi
+
+    local got
+    got=$(shader_bindings "$file")
+    if [ "$got" != "$want" ]; then
+        echo "FAIL $name: shader declares bindings [$got], CPU layout declares [$want]"
+        fail=1
+    else
+        echo "ok   $name: bindings [$got] match the CPU set layout"
+    fi
+}
+
 # MeshUniforms: mvp and model, four f32x4 columns each.
 expect "mesh_vert / MeshUniforms" "$spv_dir/mesh_vert.spv" 128 8
 
 # SpriteUniforms: projection, model, then the source rect.
 expect "sprite_vert / SpriteUniforms" "$spv_dir/sprite_vert.spv" 144 9
+
+# set_layout_mesh: one uniform at binding 0.
+expect_bindings "mesh_vert / set_layout_mesh" "$spv_dir/mesh_vert.spv" "0"
+
+# set_layout_sprite across both stages: uniform 0, sampler 1, uniform 2.
+# The vertex stage declares 0; the fragment stage declares 1 and 2.
+expect_bindings "sprite_vert / set_layout_sprite" "$spv_dir/sprite_vert.spv" "0"
+expect_bindings "sprite_frag / set_layout_sprite" "$spv_dir/sprite_frag.spv" "1 2"
+
+# A skip is not a pass. Until a release carries mach#2803, sprite_frag cannot be
+# built and its checks do not run, so say so rather than letting a green line
+# count stand in for coverage that did not happen.
+if [ "$skipped" -gt 0 ]; then
+    echo
+    echo "NOTE $skipped check(s) skipped because their module was not built."
+    echo "     These are NOT passes. sprite_frag needs a toolchain carrying"
+    echo "     briar-systems/mach#2803; 4.16.0 cannot parse sampler2d."
+fi
 
 exit "$fail"
