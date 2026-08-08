@@ -3,7 +3,7 @@
 [dep.mach-std]
 url = "https://github.com/briar-systems/mach-std"
 ref = "branch/main"
-commit = "9c6eb77880de143090ef48645ba7353ec786d758"
+commit = "c12a61090856d5f8f47475c377c0995423630105"
 
 [dep.mach-glfw]
 url = "https://github.com/briar-systems/mach-glfw"
@@ -33,4 +33,4 @@ commit = "d60c763cbedd5012038b9d7bccb0f0be778ac2f9"
 [dep.mach-gltf]
 url = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"
-commit = "aed97beb6a9e17475f1e92bdfba0de845e43cd93"
+commit = "74517227c8f0188a9e36f328e8a520a01db9e23a"

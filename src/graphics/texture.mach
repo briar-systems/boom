@@ -11,6 +11,7 @@ use img: image;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use fs:   std.filesystem;
+use vec:    std.collections.vector;
 use allo: std.allocator;
 use page: std.allocator.page;
 use std.types.result.Result;
@@ -163,14 +164,14 @@ pub fun texture_load(path: str) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[fs.Buffer, str] = fs.read_all_sized(?pa, path);
-    if (is_err[fs.Buffer, str](br)) {
-        ret err[Texture, Error](error(unwrap_err[fs.Buffer, str](br)));
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    if (is_err[vec.Vector[u8], str](br)) {
+        ret err[Texture, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }
-    val buf: fs.Buffer = unwrap_ok[fs.Buffer, str](br);
+    var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
     val res: Result[Texture, Error] = texture_from_bytes(buf.data, buf.len);
-    allo.deallocate[u8](?pa, buf.data, buf.len + 1);
+    vec.dnit[u8](?buf);
     ret res;
 }
 
