@@ -80,6 +80,21 @@ pub rec TintUniforms {
     colour: Vec4;
 }
 
+# What the immediate-mode vertex stage reads.
+#
+# Only a projection. An immediate-mode draw list arrives already placed, in
+# pixels, so there is no model matrix to send and nothing else varies per draw:
+# the colour is per vertex and one draw covers the whole list.
+#
+# Deliberately the same 64 bytes as one matrix, and the smallest uniform block
+# boom uploads. It still occupies a whole aligned slot, because a uniform
+# descriptor's buffer offset must satisfy minUniformBufferOffsetAlignment.
+# ---
+# projection: pixels to clip space, column-major
+pub rec ScreenUniforms {
+    projection: Mat4;
+}
+
 # Convert an atlas rect in pixels to the UV vec4 the shader reads.
 #
 # The shader works in UV because it has no idea how large the atlas is. Doing
@@ -113,6 +128,16 @@ pub fun src_uv_unit(r: Rect) Vec4 {
 # These assert the layout, not behaviour. A wrong size or offset here is read by
 # the shader as whatever happens to be at that address, so it produces no error
 # at any layer and shows up as geometry in the wrong place.
+
+test "uniform: the screen block is exactly one matrix" {
+    # The immediate-mode stage reads a projection and nothing else. A block that
+    # grew here without the shader growing to match would leave the stage
+    # reading a projection out of the wrong bytes, which draws the whole UI
+    # somewhere unrelated rather than failing.
+    if ($size_of(ScreenUniforms) != 64) { ret 1; }
+    if ($size_of(ScreenUniforms) != $size_of(Mat4)) { ret 2; }
+    ret 0;
+}
 
 test "uniform: a matrix is four consecutive vec4s" {
     # std140 lays a mat4 out as four 16-byte-aligned vec4s, which is what the

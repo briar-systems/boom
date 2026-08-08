@@ -78,6 +78,16 @@ use boom.graphics.cache.PROGRAM_MESH;
 use boom.graphics.cache.PROGRAM_SKINNED;
 use boom.graphics.cache.PROGRAM_SPRITE;
 use boom.graphics.cache.cache_init;
+use boom.graphics.cache.PROGRAM_UI;
+use boom.graphics.stream.VertexStream;
+use boom.graphics.stream.stream_init;
+use boom.graphics.stream.stream_begin;
+use boom.graphics.stream.stream_push;
+use boom.graphics.stream.stream_buffer;
+use boom.graphics.stream.stream_dropped;
+use boom.graphics.stream.stream_dnit;
+use boom.graphics.uniform.ScreenUniforms;
+use boom.graphics.vertex.vertex_format_ui;
 use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
@@ -166,6 +176,8 @@ pub rec Renderer {
     pipes:       PipelineCache;
     white:       Texture;
     sprite:      SpriteResources;
+    stream:      VertexStream;
+    ui_format:   VertexFormat;
     width:       i32;
     height:      i32;
     frame_index: usize;
@@ -217,6 +229,7 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     # Pipelines are built on demand, keyed by program and vertex layout, because
     # a .glb decides its own layout. See boom.graphics.cache.
     cache_init(?r.pipes, r.frame.pass);
+    r.ui_format = vertex_format_ui();
 
     # The descriptor pool needs a set layout before any pipeline exists, so the
     # sprite pipeline is built first and its layout is what the pool allocates
@@ -244,6 +257,12 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
         ret err[bool, Error](unwrap_err[Texture, Error](wr));
     }
     r.white = unwrap_ok[Texture, Error](wr);
+
+    # The per-frame arena for geometry that is rebuilt every frame. Created
+    # before the sprite quad only so a failure here is reported before anything
+    # depends on it.
+    val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
+    if (is_err[bool, Error](str_r)) { ret str_r; }
 
     val qr: Result[SpriteResources, Error] = sprite_resources(?r.dev);
     if (is_err[SpriteResources, Error](qr)) {
@@ -337,6 +356,10 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     # free again. Without this the ring runs out after MAX_SLOTS total draws
     # rather than MAX_SLOTS per frame.
     descriptors_begin_frame(?r.desc);
+    # Same reasoning as the descriptor ring, and the same fence proves it: the
+    # GPU is done with everything this frame's command buffer read last time, so
+    # its arena is free again.
+    stream_begin(?r.stream, r.frame_index);
     r.drawing = true;
     @out_ok = true;
     ret ok[bool, Error](true);
@@ -375,6 +398,7 @@ pub fun renderer_dnit(r: *Renderer) {
     # Nothing may be destroyed while the GPU is still reading it, and at
     # shutdown a frame is usually still in flight.
     vk.vkDeviceWaitIdle(r.vk.device);
+    stream_dnit(?r.stream, ?r.vk);
     sprite_resources_delete(?r.dev, ?r.sprite);
     texture_delete(?r.dev, ?r.white);
     descriptors_dnit(?r.desc, ?r.vk);
@@ -741,6 +765,93 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
     pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
     descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
     mesh_draw(?r.sprite.quad, p.cmd);
+}
+
+# submit a stream of already-placed, per-vertex-coloured triangles
+#
+# WHAT THIS IS FOR. An immediate-mode UI (blit), a particle system, or a debug
+# overlay produces a whole draw list of triangles that are already in the right
+# place, each with its own colour, and rebuilds it from scratch every frame. A
+# sprite draw cannot express that: it is one rectangle placed by a model matrix,
+# so a thousand UI quads would be a thousand draws and a thousand uniform slots.
+#
+# The vertices are copied into the frame's arena and drawn non-indexed, so the
+# caller may reuse or free its buffer the moment this returns. The layout is
+# boom.graphics.vertex.vertex_format_ui: position in pixels, uv, then rgba,
+# eight f32 at a 32-byte stride, which is exactly what blit emits.
+#
+# The pass's projection is what maps those pixels to clip space, so a call in an
+# overlay pass places geometry in window pixels and one in a scene pass places it
+# in world units.
+#
+# A count that is not a multiple of three is refused: a partial triangle is a
+# caller bug, and passing it on draws whatever the arena held next.
+# ---
+# p:            the open pass
+# vertices:     the vertex data, vertex_count * 32 bytes
+# vertex_count: how many vertices, a multiple of 3
+# texture:      the atlas the uvs address, or nil for the renderer's white texel
+pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture: *Texture) {
+    val r: *Renderer = p.renderer;
+    if (vertex_count <= 0) { ret; }
+    if ((vertex_count % 3) != 0) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    val slot: usize = take_slot(p);
+    if (slot == MAX_SLOTS) { ret; }
+
+    val stride: usize = r.ui_format.stride::usize;
+    var first: u32 = 0;
+    if (!stream_push(?r.stream, r.frame_index, vertices:~*u8,
+                     vertex_count::usize * stride, stride, ?first)) {
+        # The arena is full for this frame. Counted as a dropped draw, the same
+        # as a missing uniform slot, so a UI that outgrows the arena is a number
+        # a game can read rather than geometry that quietly disappears.
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    var u: ScreenUniforms;
+    u.projection = p.projection;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) { ret; }
+
+    # ui_frag always samples, so an untextured draw list gets the renderer's
+    # white texel and `colour * texel` is the flat colour. That is also how a
+    # solid rectangle and a glyph share one shader and one draw.
+    var atlas: *Texture = texture;
+    if (atlas == nil) { atlas = ?r.white; }
+
+    # No tint block: the colour is per vertex. Passing 0 for its size is what
+    # tells the descriptor layer binding 2 is not part of this draw.
+    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+                          $size_of(ScreenUniforms)::u64, texture_view(atlas), r.sampler,
+                          0, 0);
+
+    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    if (pipe == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+
+    var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index);
+    var off: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buf, ?off);
+    # firstVertex rather than a per-draw buffer offset, so every draw list this
+    # frame shares one binding and one buffer.
+    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, first, 0);
+}
+
+# how many draws this frame's vertex arena refused for want of room
+#
+# Separate from renderer_dropped, which counts uniform slots: they run out for
+# different reasons and the fix is different. A game raising STREAM_BYTES when
+# it should be raising MAX_SLOTS has read the wrong number.
+pub fun renderer_stream_dropped(r: *Renderer) usize {
+    ret stream_dropped(?r.stream);
 }
 
 # --------------------------------------------------------------------- tests

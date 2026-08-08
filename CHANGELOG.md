@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: `pass_draw_triangles`, for a stream of already-placed, per-vertex-coloured triangles. A sprite is one rectangle placed by a model matrix, which is the wrong shape for an immediate-mode UI, a particle system or a debug overlay: those produce thousands of triangles that are already in the right place, each with its own colour, rebuilt every frame, and they belong in one draw. Geometry goes through a new per-frame vertex arena (`boom.graphics.stream`), one per frame in flight, because writing this frame's list into memory the GPU is still reading for the last one is a race whose symptom is a UI that flickers under load and looks correct when you stop to inspect it.
+- graphics: `vertex_format_ui`, the layout that path takes: position in pixels, uv, then rgba, eight f32 at a 32-byte stride. **This is blit's `Vert` exactly**, so a blit draw list uploads with no repacking, and a test asserts the two agree rather than leaving it to luck.
+- shaders: `ui_vert.mach` and `ui_frag.mach`. One shader draws both solid and textured geometry, which is what lets a whole UI reach the GPU in one draw: a solid quad samples a reserved white texel so `colour * texel` is the flat colour, and a glyph samples its cell. No tint uniform, because a tint is per draw and this is one draw for a whole list.
+- graphics: `renderer_stream_dropped`, counting draws the vertex arena refused. Separate from `renderer_dropped`, which counts uniform slots: they run out for different reasons and the fix differs.
+
+
+### Added
 - examples: `audio`, a runnable smoke test for the sound path. It generates a mono 44.1 kHz clip and a stereo 48 kHz one, writes them to disk, loads them back through `res://`, and checks that each plays to its end and returns its voice, that two overlap, and that a looping voice can be taken back. `boom.audio` had a full API and no executing coverage at all, which is how a mono clip being silent forever went unnoticed.
 
 ### Fixed

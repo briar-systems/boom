@@ -29,6 +29,13 @@
 # the build-shaders step and embedded by boom.graphics.spirv; they live in
 # shaders/.
 #
+# AN IMMEDIATE-MODE DRAW LIST GOES THROUGH pass_draw_triangles. A sprite is one
+# rectangle placed by a model matrix, which is the wrong shape for a UI, a
+# particle system or a debug overlay: those produce thousands of triangles that
+# are already in the right place, each with its own colour, rebuilt every frame.
+# Those go in one draw, through a per-frame vertex arena, in the layout
+# vertex_format_ui describes. blit emits exactly that layout.
+#
 # EVERY DRAW TAKES A UNIFORM SLOT. A Vulkan draw reads a buffer range that
 # must already hold its values when the command buffer executes, so each
 # draw writes its own slot of a per-frame ring. A frame therefore has a
@@ -88,6 +95,7 @@ fwd boom.graphics.vertex.vertex_format_add;
 fwd boom.graphics.vertex.vertex_format_standard;
 fwd boom.graphics.vertex.vertex_format_skinned;
 fwd boom.graphics.vertex.vertex_format_sprite;
+fwd boom.graphics.vertex.vertex_format_ui;
 fwd boom.graphics.vertex.vertex_format_is_skinned;
 
 
@@ -171,6 +179,7 @@ fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_device;
 fwd boom.graphics.renderer.renderer_is_srgb;
 fwd boom.graphics.renderer.renderer_dropped;
+fwd boom.graphics.renderer.renderer_stream_dropped;
 fwd boom.graphics.renderer.PassDesc;
 fwd boom.graphics.renderer.Pass;
 fwd boom.graphics.renderer.pass_scene;
@@ -183,6 +192,7 @@ fwd boom.graphics.renderer.pass_draw_skinned;
 fwd boom.graphics.renderer.pass_draw_skinned_material;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
+fwd boom.graphics.renderer.pass_draw_triangles;
 
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;
