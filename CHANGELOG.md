@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - examples: `cube` and `animation` are ported; `vulkan` is now a renderer-level smoke test rather than a parallel hand-built path. All three resolve boom by path.
 - manifest: Re-touched root and example manifests (`mach.toml`) to RFC-exact totality per mach#1964/mach#1979.
 
+- window: `window_open` records the framebuffer size in pixels rather than the requested size in screen coordinates, which differ on a scaled display. `window_refresh_size` re-reads it, and the engine loop calls it once per frame, so `ctx.window.width` is true after a resize instead of frozen at startup.
+- graphics: `renderer_resize` adopts the extent the surface actually granted rather than the one requested. A surface reporting a concrete `currentExtent` overrides the request, so recording the request left the viewport and the 2D projection sized for a window that no longer existed.
+- examples: `cube` and `animation` recompute their camera aspect each frame and skip drawing while minimized.
+
 ### Removed
 - graphics: `Shader`, `shader`, `shader_delete`, `SKINNED_VERTEX_SRC`, and every GLSL string.
 

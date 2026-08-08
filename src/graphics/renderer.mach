@@ -261,12 +261,23 @@ pub fun renderer_device(r: *Renderer) *Device {
 # height: the new framebuffer height in pixels
 pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
     if (width <= 0 || height <= 0) { ret; }
-    r.width  = width;
-    r.height = height;
 
     val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32);
     if (is_err[bool, Error](sr)) { ret; }
     frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
+
+    # THE SURFACE DECIDES, NOT THE REQUEST. A surface reporting a concrete
+    # currentExtent overrides whatever size was asked for, which is the usual
+    # case on a desktop compositor. Recording the request here instead would
+    # leave the viewport and the 2D orthographic projection sized for a window
+    # that no longer exists, so a resize would lay every sprite out against the
+    # old dimensions while the image itself was the new size.
+    #
+    # It also means the out-of-date path can rebuild with the size it already
+    # has and still converge: the driver corrects it and this reads the
+    # correction back.
+    r.width  = r.swap.width::i32;
+    r.height = r.swap.height::i32;
 }
 
 # begin this renderer's frame

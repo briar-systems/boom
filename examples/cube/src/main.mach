@@ -162,6 +162,16 @@ fun on_draw(ctx: *Context) {
 
     val w: f32 = ctx.window.width::f32;
     val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        # Minimized. There is nothing to draw into and the aspect ratio below
+        # would divide by zero.
+        ret;
+    }
+
+    # The window is resizable, so the aspect ratio is not fixed at init. The
+    # scene target keeps its original size on purpose: it is a fixed-resolution
+    # buffer that the composite pass stretches to fill the window.
+    g.camera.aspect = w / h;
 
     # A frame that did not open is a swapchain that went out of date and was
     # rebuilt, which happens on every resize. Skipping the frame is the

@@ -47,6 +47,7 @@ use boom.window.window_is_valid;
 use boom.window.window_should_close;
 use boom.window.window_poll;
 use boom.window.window_close;
+use boom.window.window_refresh_size;
 use gfx: boom.graphics;
 use gm:  boom.math;
 
@@ -214,6 +215,7 @@ fun main(argc: i64, argv: **u8) i64 {
     var n: usize = 0;
     for (n < FRAMES) {
         window_poll();
+        window_refresh_size(?w);
         if (window_should_close(?w)) { n = FRAMES; }
         or {
             spin = spin + 0.02;

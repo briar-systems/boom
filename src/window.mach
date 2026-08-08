@@ -127,10 +127,16 @@ fun map_button(b: i32) inp.Button {
 # the loader in boom.graphics.vk rather than through the window, so there
 # is no buffer swap here either: the renderer presents.
 # ---
-# width:  desired client-area width
-# height: desired client-area height
+# THE RECORDED SIZE IS IN PIXELS, NOT SCREEN COORDINATES. GLFW takes the
+# requested size in screen coordinates, which on a scaled display is not the
+# framebuffer size: a 960x540 request becomes a 1920x1080 framebuffer at 2x.
+# The swapchain, the viewport, and the 2D projection all work in pixels, so
+# the actual framebuffer size is what is recorded, not the request.
+# ---
+# width:  desired client-area width in screen coordinates
+# height: desired client-area height in screen coordinates
 # title:  window title, UTF-8
-# ret:    the opened Window, nil-handled on failure
+# ret:    the opened Window sized in framebuffer pixels, nil-handled on failure
 pub fun window_open(width: i32, height: i32, title: str) Window {
     if (!glfw.init()) {
         ret Window{handle: glfw.no_window(), width: 0, height: 0};
@@ -149,7 +155,30 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_scroll_callback(win, on_scroll);
 
-    ret Window{handle: win, width: width, height: height};
+    var fw: i32 = width;
+    var fh: i32 = height;
+    glfw.get_framebuffer_size(win, ?fw, ?fh);
+    ret Window{handle: win, width: fw, height: fh};
+}
+
+# refresh the recorded size from the platform
+#
+# A window is resizable, so its size is not a property of how it was opened. A
+# game reading w.width after a resize would otherwise lay its interface out
+# against dimensions the window has not had since startup.
+#
+# In pixels, for the same reason window_open records pixels. A minimized window
+# reports zero in at least one dimension, which is a legal state and not a
+# failure, so it is recorded as-is; callers that cannot divide by it check.
+# ---
+# w: window to update in place
+pub fun window_refresh_size(w: *Window) {
+    if (!glfw.window_is_valid(w.handle)) { ret; }
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    glfw.get_framebuffer_size(w.handle, ?fw, ?fh);
+    w.width  = fw;
+    w.height = fh;
 }
 
 # whether the window was created successfully

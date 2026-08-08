@@ -140,7 +140,8 @@ test "uniform: the mesh and skinned blocks are the same size" {
     # its colour out of the middle of a matrix and the unskinned path would read
     # past the end of its own block, neither with any diagnostic.
     #
-    # A comptime check would be better, but $if does not accept $size_of.
+    # A comptime check would be better, but $if does not accept $size_of
+    # (briar-systems/mach#2857).
     if ($size_of(MeshUniforms) != $size_of(SkinnedUniforms)) { ret 1; }
     ret 0;
 }
