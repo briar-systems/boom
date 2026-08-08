@@ -80,38 +80,59 @@ fun fail(step: str, r: Result[bool, gfx.Error]) bool {
 # Built in code rather than loaded, so the test exercises the upload path with
 # geometry whose every value is known here. Six faces of four vertices, each face
 # with its own normal so the lighting is flat rather than smoothed.
+#
+# THE IN-PLANE AXES ARE TABULATED, NOT DERIVED. Each face needs u and v with
+# u cross v equal to its normal; that is what makes the corner order
+# (-1,-1) (1,-1) (1,1) (-1,1) wind counter-clockwise as seen from outside, which
+# after boom's Y flip reaches the rasterizer as the clockwise front face
+# boom.graphics.pipeline expects. Picking u and v by which component of the
+# normal is non-zero gets three of the six faces backwards, and those three are
+# then culled: the cube still draws, still presents, and is simply hollow from
+# half its angles. Nothing here would report that, which is exactly why the
+# axes are written out where they can be checked by reading.
 fun build_cube(verts: *f32, indices: *u32) {
-    # Face axis, then the two in-plane axes, as (nx, ny, nz).
-    var normals: [18]f32;
-    normals[0]  =  0.0; normals[1]  =  0.0; normals[2]  =  1.0;
-    normals[3]  =  0.0; normals[4]  =  0.0; normals[5]  = 0.0 - 1.0;
-    normals[6]  =  1.0; normals[7]  =  0.0; normals[8]  =  0.0;
-    normals[9]  = 0.0 - 1.0; normals[10] =  0.0; normals[11] =  0.0;
-    normals[12] =  0.0; normals[13] =  1.0; normals[14] =  0.0;
-    normals[15] =  0.0; normals[16] = 0.0 - 1.0; normals[17] =  0.0;
+    # Per face: normal, then u, then v, with u cross v equal to the normal.
+    var axes: [54]f32;
+    #            nx        ny        nz        ux        uy        uz        vx        vy        vz
+    # +Z: X cross Y = Z
+    axes[0]  = 0.0;  axes[1]  = 0.0;  axes[2]  = 1.0;
+    axes[3]  = 1.0;  axes[4]  = 0.0;  axes[5]  = 0.0;
+    axes[6]  = 0.0;  axes[7]  = 1.0;  axes[8]  = 0.0;
+    # -Z: (-X) cross Y = -Z
+    axes[9]  = 0.0;  axes[10] = 0.0;  axes[11] = 0.0 - 1.0;
+    axes[12] = 0.0 - 1.0; axes[13] = 0.0; axes[14] = 0.0;
+    axes[15] = 0.0;  axes[16] = 1.0;  axes[17] = 0.0;
+    # +X: Y cross Z = X
+    axes[18] = 1.0;  axes[19] = 0.0;  axes[20] = 0.0;
+    axes[21] = 0.0;  axes[22] = 1.0;  axes[23] = 0.0;
+    axes[24] = 0.0;  axes[25] = 0.0;  axes[26] = 1.0;
+    # -X: Z cross Y = -X
+    axes[27] = 0.0 - 1.0; axes[28] = 0.0; axes[29] = 0.0;
+    axes[30] = 0.0;  axes[31] = 0.0;  axes[32] = 1.0;
+    axes[33] = 0.0;  axes[34] = 1.0;  axes[35] = 0.0;
+    # +Y: Z cross X = Y
+    axes[36] = 0.0;  axes[37] = 1.0;  axes[38] = 0.0;
+    axes[39] = 0.0;  axes[40] = 0.0;  axes[41] = 1.0;
+    axes[42] = 1.0;  axes[43] = 0.0;  axes[44] = 0.0;
+    # -Y: X cross Z = -Y
+    axes[45] = 0.0;  axes[46] = 0.0 - 1.0; axes[47] = 0.0;
+    axes[48] = 1.0;  axes[49] = 0.0;  axes[50] = 0.0;
+    axes[51] = 0.0;  axes[52] = 0.0;  axes[53] = 1.0;
 
     var f: usize = 0;
     for (f < 6) {
-        val nx: f32 = normals[f * 3];
-        val ny: f32 = normals[f * 3 + 1];
-        val nz: f32 = normals[f * 3 + 2];
-
-        # Two in-plane axes, chosen so the face is wound consistently.
-        var ux: f32 = 0.0; var uy: f32 = 0.0; var uz: f32 = 0.0;
-        var vx: f32 = 0.0; var vy: f32 = 0.0; var vz: f32 = 0.0;
-        if (nz != 0.0) { ux = 1.0; vy = 1.0; }
-        or {
-            if (nx != 0.0) { uz = 1.0; vy = 1.0; }
-            or            { ux = 1.0; vz = 1.0; }
-        }
+        val b: usize = f * 9;
+        val nx: f32 = axes[b];     val ny: f32 = axes[b + 1]; val nz: f32 = axes[b + 2];
+        val ux: f32 = axes[b + 3]; val uy: f32 = axes[b + 4]; val uz: f32 = axes[b + 5];
+        val vx: f32 = axes[b + 6]; val vy: f32 = axes[b + 7]; val vz: f32 = axes[b + 8];
 
         var c: usize = 0;
         for (c < 4) {
             # Corner signs: (-1,-1), (1,-1), (1,1), (-1,1).
             var su: f32 = 0.0 - 1.0;
             var sv: f32 = 0.0 - 1.0;
-            if (c == 1) { su = 1.0; sv = 0.0 - 1.0; }
-            if (c == 2) { su = 1.0; sv = 1.0; }
+            if (c == 1) { su = 1.0;       sv = 0.0 - 1.0; }
+            if (c == 2) { su = 1.0;       sv = 1.0; }
             if (c == 3) { su = 0.0 - 1.0; sv = 1.0; }
 
             val base: usize = (f * 4 + c) * 8;
