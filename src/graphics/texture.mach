@@ -17,6 +17,7 @@
 # their native size.
 
 use vk;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_upload;
@@ -217,6 +218,9 @@ pub fun texture_view(t: *Texture) vk.ImageView {
 # d: the upload context the texture was created against
 # t: texture to delete; the handle must not be used afterward
 pub fun texture_delete(d: *Device, t: *Texture) {
+    # A resource may still be referenced by a command buffer the GPU has not
+    # finished. See vk_wait_idle.
+    vk_wait_idle(d.vk);
     image_dnit(?t.image, d.vk);
     t.width  = 0;
     t.height = 0;

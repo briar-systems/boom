@@ -1,0 +1,227 @@
+# The render pass description every pass in boom is built from.
+#
+# WHY THIS MODULE EXISTS. A Vulkan pipeline is created against a render pass and
+# may only be used inside one *compatible* with it, and compatibility is a
+# stricter relation than it first looks: the attachment formats and sample
+# counts must match, the subpass and its attachment references must match, and
+# the subpass dependencies must match. Only the load and store operations and
+# the initial and final layouts are exempt.
+#
+# boom builds one set of pipelines, in boom.graphics.cache, and draws them into
+# the window and into offscreen targets alike. When the window pass and the
+# target pass were written out separately they agreed on everything a reader
+# would think of and differed in dependency count, one against two, which is
+# enough to make every draw into a target invalid. Nothing about that is visible
+# at either call site; it shows up as a validation error at the draw, naming two
+# render passes.
+#
+# So there is one description here and the only things a caller may vary are
+# exactly the members compatibility ignores. Adding a pass is filling in a
+# PassOptions, and a pass that would be incompatible is not expressible.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.image.DEPTH_FORMAT;
+
+# What a caller may vary about a pass.
+#
+# EVERY FIELD HERE IS EXEMPT FROM RENDER PASS COMPATIBILITY, and that is the
+# invariant this record encodes. A field added here that is not exempt would
+# reintroduce exactly the class of bug the module exists to remove, so a new
+# member has to be checked against the compatibility rules before it is added.
+# ---
+# color_format:  Format of the colour attachment. Not a free choice: it is the
+#                surface's, from Vk.color_format, for every pass, since formats
+#                must match. Carried so the field is written once, not so it can
+#                differ.
+# color_load:    Whether the colour attachment is cleared, loaded, or discarded.
+# color_initial: The layout the colour attachment is in on entry.
+# color_final:   The layout it is left in.
+# depth_load:    Whether depth is cleared or loaded.
+# depth_initial: The layout depth is in on entry.
+pub rec PassOptions {
+    color_format:  i32;
+    color_load:    i32;
+    color_initial: i32;
+    color_final:   i32;
+    depth_load:    i32;
+    depth_initial: i32;
+}
+
+# A pass that clears and is entered with its attachments in no defined state.
+#
+# What a frame or an offscreen render begins with. UNDEFINED as the initial
+# layout is what discards the previous contents; it is correct precisely because
+# the load operation is a clear, so nothing that was there is read.
+# ---
+# format: The colour format, from Vk.color_format.
+# final:  The layout to leave the colour attachment in.
+pub fun pass_clearing(format: i32, final: i32) PassOptions {
+    ret PassOptions{
+        color_format:  format,
+        color_load:    vk.ATTACHMENT_LOAD_OP_CLEAR,
+        color_initial: vk.IMAGE_LAYOUT_UNDEFINED,
+        color_final:   final,
+        depth_load:    vk.ATTACHMENT_LOAD_OP_CLEAR,
+        depth_initial: vk.IMAGE_LAYOUT_UNDEFINED,
+    };
+}
+
+# A pass that preserves what is already drawn.
+#
+# Used to resume the window pass after an offscreen excursion. Its initial
+# layouts are the ones the suspended pass left behind, which is why they are
+# attachment-optimal rather than undefined: undefined here would discard the
+# frame.
+# ---
+# format: The colour format, from Vk.color_format.
+# final:  The layout to leave the colour attachment in.
+pub fun pass_loading(format: i32, final: i32) PassOptions {
+    ret PassOptions{
+        color_format:  format,
+        color_load:    vk.ATTACHMENT_LOAD_OP_LOAD,
+        color_initial: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        color_final:   final,
+        depth_load:    vk.ATTACHMENT_LOAD_OP_LOAD,
+        depth_initial: vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+}
+
+# Create a render pass from the shared description.
+pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, Error] {
+    var atts: [2]vk.AttachmentDescription;
+    atts[0].flags          = 0;
+    atts[0].format         = o.color_format;
+    atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+    atts[0].loadOp         = o.color_load;
+    atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
+    atts[0].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[0].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[0].initialLayout  = o.color_initial;
+    atts[0].finalLayout    = o.color_final;
+
+    # Nothing reads the depth buffer after the pass, so it need not be stored.
+    # Saying so lets a tiled GPU skip writing it to memory at all.
+    atts[1].flags          = 0;
+    atts[1].format         = DEPTH_FORMAT;
+    atts[1].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+    atts[1].loadOp         = o.depth_load;
+    atts[1].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[1].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[1].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[1].initialLayout  = o.depth_initial;
+    atts[1].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    var color_ref: vk.AttachmentReference;
+    color_ref.attachment = 0;
+    color_ref.layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    var depth_ref: vk.AttachmentReference;
+    depth_ref.attachment = 1;
+    depth_ref.layout     = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    var sub: vk.SubpassDescription;
+    sub.flags                   = 0;
+    sub.pipelineBindPoint       = vk.PIPELINE_BIND_POINT_GRAPHICS;
+    sub.inputAttachmentCount    = 0;
+    sub.pInputAttachments       = nil;
+    sub.colorAttachmentCount    = 1;
+    sub.pColorAttachments       = ?color_ref;
+    sub.pResolveAttachments     = nil;
+    sub.pDepthStencilAttachment = ?depth_ref;
+    sub.preserveAttachmentCount = 0;
+    sub.pPreserveAttachments    = nil;
+
+    # TWO DEPENDENCIES, AND THE SAME TWO FOR EVERY PASS. They are the union of
+    # what a window pass and an offscreen pass each need, because dependencies
+    # participate in compatibility and so cannot be tailored per pass.
+    #
+    # The first orders whatever came before against this pass's writes. For the
+    # window that is the image acquire; for a target it is the previous frame's
+    # sampling of the same image, without which a target reused every frame is
+    # overwritten while the last frame still reads it.
+    #
+    # The second orders this pass's writes before anything samples the result.
+    # It does nothing for the window, where nothing samples the presented image,
+    # and it costs nothing there.
+    var deps: [2]vk.SubpassDependency;
+    deps[0].srcSubpass      = vk.SUBPASS_EXTERNAL;
+    deps[0].dstSubpass      = 0;
+    # The early-fragment-tests stage is included because that is where the depth
+    # attachment's load-time clear happens, and it runs before colour output.
+    deps[0].srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                            | vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[0].dstStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                            | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    deps[0].srcAccessMask   = vk.ACCESS_SHADER_READ_BIT;
+    deps[0].dstAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                            | vk.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    deps[0].dependencyFlags = 0;
+
+    deps[1].srcSubpass      = 0;
+    deps[1].dstSubpass      = vk.SUBPASS_EXTERNAL;
+    deps[1].srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[1].dstStageMask    = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    deps[1].srcAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[1].dstAccessMask   = vk.ACCESS_SHADER_READ_BIT;
+    deps[1].dependencyFlags = 0;
+
+    var ci: vk.RenderPassCreateInfo;
+    ci.sType           = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    ci.pNext           = nil;
+    ci.flags           = 0;
+    ci.attachmentCount = 2;
+    ci.pAttachments    = ?atts[0];
+    ci.subpassCount    = 1;
+    ci.pSubpasses      = ?sub;
+    ci.dependencyCount = 2;
+    ci.pDependencies   = ?deps[0];
+
+    if (vk.vkCreateRenderPass(v.device, ?ci, nil, out) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateRenderPass failed"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Creation needs a device. What is testable without one is the part that was
+# actually wrong: that two passes built for different purposes vary only in the
+# members render pass compatibility exempts.
+
+test "pass: a clearing and a loading pass differ only where compatibility allows" {
+    # Formats and the depth format are the compatibility-relevant members these
+    # options can reach. If a clearing pass and a loading pass ever disagreed on
+    # the colour format, every pipeline drawn through both would be invalid, and
+    # the diagnostic names two render passes rather than this line.
+    val a: PassOptions = pass_clearing(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    val b: PassOptions = pass_loading(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (a.color_format != b.color_format) { ret 1; }
+    ret 0;
+}
+
+test "pass: a clearing pass discards, a loading pass preserves" {
+    # The resume pass exists so an offscreen excursion does not erase the frame.
+    # A clear here, or an UNDEFINED initial layout, wipes everything already
+    # drawn and looks like the excursion itself failing to render.
+    val a: PassOptions = pass_clearing(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (a.color_load    != vk.ATTACHMENT_LOAD_OP_CLEAR)   { ret 1; }
+    if (a.color_initial != vk.IMAGE_LAYOUT_UNDEFINED)     { ret 2; }
+    if (a.depth_load    != vk.ATTACHMENT_LOAD_OP_CLEAR)   { ret 3; }
+
+    val b: PassOptions = pass_loading(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (b.color_load    != vk.ATTACHMENT_LOAD_OP_LOAD)    { ret 4; }
+    if (b.depth_load    != vk.ATTACHMENT_LOAD_OP_LOAD)    { ret 5; }
+    if (b.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) { ret 6; }
+    if (b.depth_initial != vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) { ret 7; }
+    ret 0;
+}

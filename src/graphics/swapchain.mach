@@ -23,6 +23,8 @@ use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.enumerated;
+use boom.graphics.vk.format_is_srgb;
 
 # Most images a swapchain may hold.
 pub val MAX_IMAGES: usize = 8;
@@ -46,56 +48,6 @@ pub rec Swapchain {
     width:  u32;
     height: u32;
     ready:  bool;
-}
-
-# Pick a surface format, preferring 8-bit sRGB BGRA.
-#
-# Falls back to the first format the surface reports rather than failing. Every
-# surface offers at least one, and a renderer that insists on a preferred
-# format cannot start on hardware that does not offer it.
-fun pick_format(v: *Vk, out: *vk.SurfaceFormatKHR) bool {
-    var count: u32 = 0;
-    if (vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?count, nil) != vk.SUCCESS) {
-        ret false;
-    }
-    if (count == 0) { ret false; }
-
-    var formats: [32]vk.SurfaceFormatKHR;
-    var cap: u32 = 32;
-    if (count < cap) { cap = count; }
-    if (vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?cap, ?formats[0]) != vk.SUCCESS) {
-        ret false;
-    }
-
-    # AN sRGB SURFACE IS WHAT MAKES THE COLOUR PIPELINE CLOSE. Textures are
-    # sampled through sRGB image formats, so the shader works in linear light;
-    # an sRGB surface format is what encodes the result on write. Either variant
-    # does that, and every desktop driver offers one, so both are preferred over
-    # whatever happens to be first.
-    var i: u32 = 0;
-    for (i < cap) {
-        if (formats[i].format == vk.FORMAT_B8G8R8A8_SRGB
-            || formats[i].format == vk.FORMAT_R8G8B8A8_SRGB) {
-            @out = formats[i];
-            ret true;
-        }
-        i = i + 1;
-    }
-
-    # A surface offering no sRGB format at all. Taking the first one keeps the
-    # renderer working; it does not encode, so colours come out darker than
-    # authored. Reporting it is the caller's job, since there is nothing better
-    # to do about it here.
-    @out = formats[0];
-    ret true;
-}
-
-# Whether a surface format encodes sRGB on write.
-#
-# Pure, and the thing worth asserting: the whole colour pipeline assumes the
-# encode happens exactly once, at the surface.
-pub fun format_is_srgb(format: i32) bool {
-    ret format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_R8G8B8A8_SRGB;
 }
 
 # Clamp a requested extent into what the surface allows.
@@ -127,9 +79,12 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
         ret err[bool, Error](error("could not query surface capabilities"));
     }
 
-    var fmt: vk.SurfaceFormatKHR;
-    if (!pick_format(v, ?fmt)) {
-        ret err[bool, Error](error("surface reported no formats"));
+    # The format is the surface's and was chosen once, at device bring-up. It is
+    # not re-queried here: a target created before the first swapchain rebuild
+    # would then be built against a different answer than the one the window pass
+    # holds, and the two render passes would stop being compatible.
+    if (v.color_format == 0) {
+        ret err[bool, Error](error("no surface format was chosen at device bring-up"));
     }
 
     var w: u32 = width;
@@ -151,8 +106,8 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
     ci.flags            = 0;
     ci.surface          = v.surface;
     ci.minImageCount    = want;
-    ci.imageFormat      = fmt.format;
-    ci.imageColorSpace  = fmt.colorSpace;
+    ci.imageFormat      = v.color_format;
+    ci.imageColorSpace  = v.color_space;
     ci.imageExtent.width  = w;
     ci.imageExtent.height = h;
     ci.imageArrayLayers = 1;
@@ -187,16 +142,16 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
     }
 
     var got: u32 = 0;
-    if (vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil) != vk.SUCCESS) {
+    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil))) {
         ret err[bool, Error](error("could not count swapchain images"));
     }
     if (got::usize > MAX_IMAGES) { got = MAX_IMAGES::u32; }
-    if (vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]) != vk.SUCCESS) {
+    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]))) {
         ret err[bool, Error](error("could not fetch swapchain images"));
     }
 
     s.count  = got;
-    s.format = fmt.format;
+    s.format = v.color_format;
     s.width  = w;
     s.height = h;
 
@@ -208,7 +163,7 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
         vci.flags    = 0;
         vci.image    = s.images[i];
         vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
-        vci.format   = fmt.format;
+        vci.format   = v.color_format;
         vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
         vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
         vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;

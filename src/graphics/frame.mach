@@ -14,9 +14,19 @@
 # bounds the CPU's lead. Without it the CPU would queue frames without limit
 # and latency would grow until memory ran out.
 #
-# TWO SEMAPHORES PER FRAME, not one. `available` orders acquire before render;
-# `finished` orders render before present. They guard different handoffs and
-# collapsing them to one lets presentation begin before rendering completes.
+# TWO SEMAPHORES, not one. `available` orders acquire before render; `finished`
+# orders render before present. They guard different handoffs and collapsing them
+# to one lets presentation begin before rendering completes.
+#
+# THEY ARE INDEXED DIFFERENTLY, AND THAT IS NOT AN INCONSISTENCY. `available` is
+# waited on by vkAcquireNextImageKHR, which is called before an image index
+# exists, so it can only be per in-flight frame. `finished` is signalled by the
+# submit and waited on by the present of one specific image, and a present is
+# only known to be finished when that image is acquired again. With two frames in
+# flight and three swapchain images the two counts do not divide, so a per-frame
+# `finished` is reused for image 2 while image 0's present still holds it. That
+# is a real race: the second wait may observe the first signal. Per image, the
+# acquire that returns the image is itself the proof its last present retired.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -32,7 +42,10 @@ use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
 use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.MAX_IMAGES;
-use boom.graphics.image.DEPTH_FORMAT;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_clearing;
+use boom.graphics.pass.pass_loading;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.depth_attachment_init;
 use boom.graphics.image.depth_attachment_dnit;
@@ -50,12 +63,10 @@ val FENCE_TIMEOUT: u64 = 1000000000;
 # ---
 # command:   Command buffer recorded this frame.
 # available: Signalled when the acquired image is ready to render into.
-# finished:  Signalled when rendering is done and presentation may begin.
 # in_flight: Signalled when this frame's command buffer is reusable.
 rec Frame {
     command:   vk.CommandBuffer;
     available: vk.Semaphore;
-    finished:  vk.Semaphore;
     in_flight: vk.Fence;
 }
 
@@ -70,6 +81,9 @@ rec Frame {
 # framebuffers: One per swapchain image.
 # depths:       One depth attachment per swapchain image.
 # fb_count:     Number of valid framebuffers.
+# finished:     One render-finished semaphore per swapchain image, not per
+#               in-flight frame. Allocated for MAX_IMAGES once, so a swapchain
+#               rebuild that changes the image count does not recreate them.
 # frames:       Per-frame state.
 # current:      Which in-flight frame is next.
 # image_index:  Swapchain image acquired this frame.
@@ -81,6 +95,7 @@ pub rec FrameLoop {
     framebuffers: [8]vk.Framebuffer;
     depths:       [8]DepthAttachment;
     fb_count:     u32;
+    finished:     [8]vk.Semaphore;
     frames:       [2]Frame;
     current:      usize;
     image_index:  u32;
@@ -133,9 +148,6 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
         if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.frames[i].available) != vk.SUCCESS) {
             ret err[bool, Error](error("vkCreateSemaphore failed"));
         }
-        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.frames[i].finished) != vk.SUCCESS) {
-            ret err[bool, Error](error("vkCreateSemaphore failed"));
-        }
 
         var fci: vk.FenceCreateInfo;
         fci.sType = vk.STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -150,111 +162,52 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
         i = i + 1;
     }
 
+    # One render-finished semaphore per swapchain image. MAX_IMAGES of them
+    # rather than s.count, so a rebuild to a different image count neither
+    # recreates them nor leaves an index without one.
+    var sci: vk.SemaphoreCreateInfo;
+    sci.sType = vk.STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sci.pNext = nil;
+    sci.flags = 0;
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.finished[k]) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkCreateSemaphore failed for a swapchain image"));
+        }
+        k = k + 1;
+    }
+
     f.ready = true;
     ret ok[bool, Error](true);
 }
 
-# A single-subpass render pass with a colour and a depth attachment.
+# The window's two render passes.
 #
 # THE WINDOW PASS HAS DEPTH TOO. It would not need one to clear and present, but
 # two things require it. A 3D pass drawn straight to the window needs depth
 # testing or its geometry sorts by submission order. And a pipeline is only
-# usable in a render pass compatible with the one it was built against, where
-# compatible means the same attachment formats and counts, so a window pass with
-# one attachment and an offscreen target's with two would need two sets of
-# pipelines and a draw could not move between them.
+# usable in a render pass compatible with the one it was built against, so a
+# window pass with one attachment and an offscreen target's with two would need
+# two sets of pipelines and a draw could not move between them.
+#
+# NEITHER ENDS IN PRESENT_SRC_KHR. A frame runs one pass or three, depending on
+# whether the game renders into an offscreen target part way through, so no
+# single pass knows whether it is the last one. Both leave the image
+# colour-attachment-optimal and frame_end issues the transition to presentable,
+# which is the only place that does know. Declaring it on the clearing pass, as
+# this did, made the resume pass illegal on every frame that used it: its
+# initialLayout said colour-attachment-optimal and the image was in present-src.
 fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
-    var atts: [2]vk.AttachmentDescription;
-    atts[0].flags          = 0;
-    atts[0].format         = s.format;
-    atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[0].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
-    atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
-    atts[0].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[0].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[0].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
-    atts[0].finalLayout    = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    # Nothing reads the depth buffer after the frame, so it need not be stored.
-    atts[1].flags          = 0;
-    atts[1].format         = DEPTH_FORMAT;
-    atts[1].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[1].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
-    atts[1].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[1].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
-    atts[1].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    var ref: vk.AttachmentReference;
-    ref.attachment = 0;
-    ref.layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    var depth_ref: vk.AttachmentReference;
-    depth_ref.attachment = 1;
-    depth_ref.layout     = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    var sub: vk.SubpassDescription;
-    sub.flags                   = 0;
-    sub.pipelineBindPoint       = vk.PIPELINE_BIND_POINT_GRAPHICS;
-    sub.inputAttachmentCount    = 0;
-    sub.pInputAttachments       = nil;
-    sub.colorAttachmentCount    = 1;
-    sub.pColorAttachments       = ?ref;
-    sub.pResolveAttachments     = nil;
-    sub.pDepthStencilAttachment = ?depth_ref;
-    sub.preserveAttachmentCount = 0;
-    sub.pPreserveAttachments    = nil;
-
-    # The external dependency makes the subpass wait for the acquire semaphore
-    # at the colour-output stage. Without it the render pass may begin writing
-    # the attachment before the image is actually available.
-    var dep: vk.SubpassDependency;
-    dep.srcSubpass      = vk.SUBPASS_EXTERNAL;
-    dep.dstSubpass      = 0;
-    # The early-fragment-tests stage is included because that is where the depth
-    # attachment's load-time clear happens, and it runs before colour output.
-    dep.srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.dstStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dep.srcAccessMask   = 0;
-    dep.dstAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        | vk.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    dep.dependencyFlags = 0;
-
-    var rci: vk.RenderPassCreateInfo;
-    rci.sType           = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rci.pNext           = nil;
-    rci.flags           = 0;
-    rci.attachmentCount = 2;
-    rci.pAttachments    = ?atts[0];
-    rci.subpassCount    = 1;
-    rci.pSubpasses      = ?sub;
-    rci.dependencyCount = 1;
-    rci.pDependencies   = ?dep;
-
-    if (vk.vkCreateRenderPass(v.device, ?rci, nil, ?f.pass) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateRenderPass failed"));
-    }
+    val clearing: PassOptions = pass_clearing(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    val cr: Result[bool, Error] = pass_create(v, ?clearing, ?f.pass);
+    if (is_err[bool, Error](cr)) { ret cr; }
 
     # The same attachments, preserved rather than cleared. A pass that renders
-    # into an offscreen target has to end the window's render pass and begin
-    # the target's, and resuming through the clearing pass afterwards would
-    # erase everything the frame had already drawn.
-    #
-    # A pipeline built against `pass` is usable here: Vulkan render passes are
-    # compatible when their attachment formats and sample counts match, which
-    # load and store operations do not affect. That is why there is one set of
-    # pipelines rather than one per pass.
-    atts[0].loadOp        = vk.ATTACHMENT_LOAD_OP_LOAD;
-    atts[0].initialLayout = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    atts[1].loadOp        = vk.ATTACHMENT_LOAD_OP_LOAD;
-    atts[1].initialLayout = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    if (vk.vkCreateRenderPass(v.device, ?rci, nil, ?f.pass_load) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateRenderPass failed for the resume pass"));
-    }
-    ret ok[bool, Error](true);
+    # into an offscreen target has to end the window's render pass and begin the
+    # target's, and resuming through the clearing pass afterwards would erase
+    # everything the frame had already drawn.
+    val loading: PassOptions = pass_loading(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    ret pass_create(v, ?loading, ?f.pass_load);
 }
 
 # One framebuffer per swapchain image view.
@@ -401,6 +354,33 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
 
     val i: usize = f.current;
     vk.vkCmdEndRenderPass(f.frames[i].command);
+
+    # THE TRANSITION TO PRESENTABLE BELONGS HERE, NOT TO A RENDER PASS. A frame
+    # is one pass, or three when the game renders into an offscreen target part
+    # way through, and no pass knows whether it is the last. This is the point
+    # that does.
+    var b: vk.ImageMemoryBarrier;
+    b.sType               = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.pNext               = nil;
+    b.srcAccessMask       = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    # A present is not a memory read the barrier has to name; the semaphore the
+    # submit signals is what orders it. Zero here is what the spec asks for.
+    b.dstAccessMask       = 0;
+    b.oldLayout           = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout           = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    b.image               = s.images[f.image_index];
+    b.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.baseMipLevel   = 0;
+    b.subresourceRange.levelCount     = 1;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount     = 1;
+    vk.vkCmdPipelineBarrier(f.frames[i].command,
+                            vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            0, 0, nil, 0, nil, 1, ?b);
+
     if (vk.vkEndCommandBuffer(f.frames[i].command) != vk.SUCCESS) {
         ret err[bool, Error](error("vkEndCommandBuffer failed"));
     }
@@ -415,7 +395,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
     si.commandBufferCount   = 1;
     si.pCommandBuffers      = ?f.frames[i].command;
     si.signalSemaphoreCount = 1;
-    si.pSignalSemaphores    = ?f.frames[i].finished;
+    si.pSignalSemaphores    = ?f.finished[f.image_index];
 
     if (vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight) != vk.SUCCESS) {
         ret err[bool, Error](error("vkQueueSubmit failed"));
@@ -427,7 +407,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
     pi.sType              = vk.STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.pNext              = nil;
     pi.waitSemaphoreCount = 1;
-    pi.pWaitSemaphores    = ?f.frames[i].finished;
+    pi.pWaitSemaphores    = ?f.finished[f.image_index];
     pi.swapchainCount     = 1;
     pi.pSwapchains        = ?chain;
     pi.pImageIndices      = ?index;
@@ -475,9 +455,13 @@ pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
         vk.vkDestroySemaphore(v.device, f.frames[i].available, nil);
-        vk.vkDestroySemaphore(v.device, f.frames[i].finished, nil);
         vk.vkDestroyFence(v.device, f.frames[i].in_flight, nil);
         i = i + 1;
+    }
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        vk.vkDestroySemaphore(v.device, f.finished[k], nil);
+        k = k + 1;
     }
     frame_release_targets(f, v);
     vk.vkDestroyCommandPool(v.device, f.pool, nil);
@@ -510,8 +494,8 @@ test "frame: the frame index rotates and wraps" {
 }
 
 test "frame: every in-flight frame has its own slot" {
-    # One command buffer, two semaphores, and a fence per frame. Sharing any of
-    # them across frames is the race this indexing exists to prevent.
+    # One command buffer, one acquire semaphore, and a fence per frame. Sharing
+    # any of them across frames is the race this indexing exists to prevent.
     if (MAX_FRAMES_IN_FLIGHT < 2) { ret 1; }
     var f: FrameLoop;
     var i: usize = 0;
@@ -519,6 +503,22 @@ test "frame: every in-flight frame has its own slot" {
         f.frames[i].command = nil;
         i = i + 1;
     }
+    ret 0;
+}
+
+test "frame: there is a render-finished semaphore for every swapchain image" {
+    # Not MAX_FRAMES_IN_FLIGHT of them. The signal is waited on by the present of
+    # one image and is only known to have retired when that image is acquired
+    # again, so the count that matters is the swapchain's, and the two do not
+    # divide: two frames in flight against three images reuses a per-frame
+    # semaphore while a previous present still holds it.
+    var f: FrameLoop;
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        f.finished[k] = nil;
+        k = k + 1;
+    }
+    if (MAX_IMAGES <= MAX_FRAMES_IN_FLIGHT) { ret 1; }
     ret 0;
 }
 

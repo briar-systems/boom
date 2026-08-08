@@ -20,6 +20,7 @@
 # forgotten at a call site.
 
 use std.types.bool.bool;
+use std.types.size.usize;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.result.Result;
@@ -31,14 +32,19 @@ use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.texture.Texture;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_init;
-use boom.graphics.image.COLOR_SRGB;
+use boom.graphics.image.USAGE_TARGET;
 use boom.graphics.image.image_transition;
+use boom.graphics.image.image_read;
 use boom.graphics.image.image_dnit;
 use boom.graphics.image.DEPTH_FORMAT;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_clearing;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.depth_attachment_init;
 use boom.graphics.image.depth_attachment_dnit;
@@ -64,88 +70,21 @@ pub rec RenderTarget {
 }
 
 # the render pass an offscreen target draws through
+#
+# Built from the same description as the window's, in boom.graphics.pass. That
+# is not tidiness: a pipeline may only be used in a pass compatible with the one
+# it was built against, boom builds one set of pipelines, and compatibility
+# covers the subpass dependencies as well as the attachments. Two hand-written
+# passes agreed on everything obvious and differed in dependency count, which
+# made every draw into a target invalid.
 fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
-    var atts: [2]vk.AttachmentDescription;
-    atts[0].flags          = 0;
-    atts[0].format         = t.color.image.format;
-    atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[0].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
-    atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
-    atts[0].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[0].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[0].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
     # Ends ready to be sampled, which is what an offscreen target is for.
-    atts[0].finalLayout    = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    atts[1].flags          = 0;
-    atts[1].format         = DEPTH_FORMAT;
-    atts[1].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[1].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
-    # Nothing reads the depth buffer after the pass, so it need not be stored.
-    # Saying so lets a tiled GPU skip writing it to memory at all.
-    atts[1].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[1].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
-    atts[1].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    var color_ref: vk.AttachmentReference;
-    color_ref.attachment = 0;
-    color_ref.layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    var depth_ref: vk.AttachmentReference;
-    depth_ref.attachment = 1;
-    depth_ref.layout     = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    var sub: vk.SubpassDescription;
-    sub.flags                   = 0;
-    sub.pipelineBindPoint       = vk.PIPELINE_BIND_POINT_GRAPHICS;
-    sub.inputAttachmentCount    = 0;
-    sub.pInputAttachments       = nil;
-    sub.colorAttachmentCount    = 1;
-    sub.pColorAttachments       = ?color_ref;
-    sub.pResolveAttachments     = nil;
-    sub.pDepthStencilAttachment = ?depth_ref;
-    sub.preserveAttachmentCount = 0;
-    sub.pPreserveAttachments    = nil;
-
-    # Two dependencies, not one. The first orders any previous sampling of this
-    # target before this pass overwrites it; the second orders this pass's
-    # writes before the next pass samples the result. With only the second, a
-    # target reused every frame is written while the previous frame still reads
-    # it.
-    var deps: [2]vk.SubpassDependency;
-    deps[0].srcSubpass      = vk.SUBPASS_EXTERNAL;
-    deps[0].dstSubpass      = 0;
-    deps[0].srcStageMask    = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    deps[0].dstStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    deps[0].srcAccessMask   = vk.ACCESS_SHADER_READ_BIT;
-    deps[0].dstAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    deps[0].dependencyFlags = 0;
-
-    deps[1].srcSubpass      = 0;
-    deps[1].dstSubpass      = vk.SUBPASS_EXTERNAL;
-    deps[1].srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    deps[1].dstStageMask    = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    deps[1].srcAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    deps[1].dstAccessMask   = vk.ACCESS_SHADER_READ_BIT;
-    deps[1].dependencyFlags = 0;
-
-    var ci: vk.RenderPassCreateInfo;
-    ci.sType           = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    ci.pNext           = nil;
-    ci.flags           = 0;
-    ci.attachmentCount = 2;
-    ci.pAttachments    = ?atts[0];
-    ci.subpassCount    = 1;
-    ci.pSubpasses      = ?sub;
-    ci.dependencyCount = 2;
-    ci.pDependencies   = ?deps[0];
-
-    if (vk.vkCreateRenderPass(v.device, ?ci, nil, ?t.pass) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not create the offscreen render pass"));
-    }
-    ret ok[bool, Error](true);
+    # Declaring the transition in the pass rather than as a barrier after it
+    # means the driver performs it as part of ending the pass, and it cannot be
+    # forgotten at a call site.
+    val o: PassOptions = pass_clearing(t.color.image.format,
+                                       vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ret pass_create(v, ?o, ?t.pass);
 }
 
 # create an offscreen render target of the given size
@@ -171,13 +110,19 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
         ret err[RenderTarget, Error](error("render target dimensions must be positive"));
     }
 
-    # The colour attachment is created through the texture path so it carries
-    # the same view and layout handling, then given attachment usage.
-    # sRGB, matching every other colour surface. A target holds a rendered image
-    # that a later pass samples, so it goes through the same encode on write and
-    # decode on read as a loaded texture; a linear one would band in the darks at
-    # eight bits and then be sampled as though it were encoded.
-    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32, COLOR_SRGB);
+    # THE TARGET'S FORMAT IS THE SURFACE'S, NOT A CHOICE MADE HERE. Two render
+    # passes are compatible only when their attachment formats and counts match,
+    # and a pipeline may only be used in a pass compatible with the one it was
+    # built against. boom builds one set of pipelines, against the window pass, so
+    # a target that picked its own format could not be drawn into at all. Reading
+    # the surface's answer is what keeps a single pipeline cache correct.
+    #
+    # It is an sRGB format on every driver that offers one, which is also what a
+    # target wants on its own merits: it holds a rendered image that a later pass
+    # samples, so it goes through the same encode on write and decode on read as
+    # a loaded texture, and a linear one would band in the darks at eight bits.
+    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32,
+                                             d.vk.color_format, USAGE_TARGET);
     if (is_err[bool, Error](cr)) {
         ret err[RenderTarget, Error](error("could not create the colour attachment"));
     }
@@ -241,12 +186,42 @@ pub fun render_target_texture(t: *RenderTarget) *Texture {
     ret ?t.color;
 }
 
+# copy the target's rendered pixels back to host memory, as tightly packed RGBA8
+#
+# The bytes are in the colour attachment's format, which is the surface's, so
+# the channel order is whatever the surface chose: B8G8R8A8 on most drivers,
+# R8G8B8A8 on some. A caller comparing against an authored colour has to account
+# for that; render_target_bgra reports which it is.
+# ---
+# d:   the upload context the target was created against
+# t:   the target to read
+# out: destination for width * height * 4 bytes
+# len: size of out in bytes
+# ret: true, or a readback error
+pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) Result[bool, Error] {
+    if (!t.ready) {
+        ret err[bool, Error](error("cannot read a target that was never created"));
+    }
+    ret image_read(?t.color.image, d.vk, d.pool, out, len);
+}
+
+# whether a target's pixels come back blue-green-red-alpha rather than RGBA
+#
+# The order follows the surface format, which is the surface's choice and not
+# boom's. Exposed rather than assumed, because a caller that guesses gets a
+# picture with red and blue swapped and no diagnostic.
+pub fun render_target_bgra(t: *RenderTarget) bool {
+    ret t.color.image.format == vk.FORMAT_B8G8R8A8_SRGB
+     || t.color.image.format == vk.FORMAT_B8G8R8A8_UNORM;
+}
+
 # release the target's images, render pass, and framebuffer
 # ---
 # d: the upload context the target was created against
 # t: target to delete; the handle must not be used afterward
 pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     val v: *Vk = d.vk;
+    vk_wait_idle(v);
     if (t.framebuffer != nil) { vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil); t.framebuffer = nil; }
     if (t.pass != nil)        { vk.vkDestroyRenderPass(v.device, t.pass, nil); t.pass = nil; }
     depth_attachment_dnit(?t.depth, v);

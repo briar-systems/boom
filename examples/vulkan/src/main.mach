@@ -12,11 +12,37 @@
 # the three pipelines and the offscreen suspend and resume. It reports what it
 # found and exits non-zero on any failure, so it is a check and not a demo.
 #
-# WHAT A PASS DOES AND DOES NOT MEAN. It means every call succeeded, frames were
-# acquired and presented, no draw was dropped, and teardown was clean. It does
-# NOT mean anything was visible. A pipeline with its winding backwards culls
-# every face, and this still presents 240 empty frames and reports PASS, because
-# nothing here reads the framebuffer back. Look at the window.
+# IT READS THE PIXELS BACK. Presenting a frame proves every call succeeded; it
+# proves nothing about what was drawn. A pipeline with its winding backwards
+# culls every face and a projection built for the wrong clip volume puts every
+# vertex outside it, and both present frames that look correct from the API's
+# side. So the last frame renders into a small offscreen target which is copied
+# back to host memory and checked: that the cube covers the middle and not the
+# corners, that its silhouette lands where projecting its eight corners through
+# the same camera says it should, and that the checkerboard is actually sampled.
+#
+# The silhouette bounds are COMPUTED FROM THE CAMERA, not written down. A
+# hardcoded pixel rectangle would be a record of one render rather than a check
+# on the next, since whoever wrote it would have read it off the same output.
+#
+# What that does and does not prove is worth being exact about. Projecting the
+# corners here uses the same matrices the draw used, so a projection that is
+# wrong in the same way in both places still agrees: dropping the aspect ratio
+# from mat4_perspective moves the silhouette and moves the prediction with it,
+# and this reports a pass. The matrices themselves are what the unit tests in
+# boom.math cover. What this adds is that the rasterizer, the vertex stage, the
+# viewport, and the uniform upload all agree with those matrices, which no unit
+# test can reach, plus the covered area, which does not depend on the projection
+# at all and is what catches a face that was culled.
+#
+# DEPTH IS CHECKED SEPARATELY, because the cube cannot check it. A convex mesh
+# with back faces culled never has one fragment hidden by another, so an inverted
+# depth test draws exactly the same picture. Two overlapping cubes at different
+# distances, drawn in both orders, is what distinguishes them.
+#
+# WHAT IS STILL NOT CHECKED. Lighting, beyond that the surface is not black. And
+# the window itself, since only the offscreen target is read back. Look at the
+# window for those.
 #
 # WHY IT DRIVES THE RENDERER AND NOT THE MODULES BELOW IT. An earlier version
 # built the instance, swapchain and frame loop by hand. That tested a path no
@@ -59,6 +85,31 @@ use gm:  boom.math;
 
 val WIDTH:  i32 = 640;
 val HEIGHT: i32 = 360;
+
+# The offscreen target the verification frame renders into.
+#
+# Small, because it is copied to host memory and the buffer is a local. The same
+# aspect ratio as the window, so one camera serves both and the projection under
+# test is the one the window frames used.
+val CHECK_W: i32 = 160;
+val CHECK_H: i32 = 90;
+# CHECK_W * CHECK_H * 4. Written out because an array length must be a literal;
+# check_bytes asserts the three agree.
+val CHECK_BYTES: usize = 57600;
+
+# A pixel of the verification clear colour, so a covered pixel is distinguishable
+# from an uncovered one by hue rather than by brightness. The cube is grey under
+# a white light at every texel, and the clear is pure blue, so red above a floor
+# means a fragment landed there whatever the lighting did. A dark clear colour
+# and a dark texel are not separable that way, and the dark half of a
+# checkerboard is exactly what would then read as background.
+val CLEAR_R: f32 = 0.0;
+val CLEAR_G: f32 = 0.0;
+val CLEAR_B: f32 = 0.5;
+# Red above this means a fragment was rasterized here. The clear contributes
+# exactly zero red, so any floor above sampling noise works; this one is far
+# above the darkest texel's contribution and far below the lightest.
+val COVERED_R: u8 = 16;
 
 # How many frames to present before declaring success.
 #
@@ -179,6 +230,91 @@ fun build_checker(px: *u8) {
     }
 }
 
+# The pixel a cube corner projects to, through the camera under test.
+#
+# The full 4x4 transform including the perspective divide.
+# boom.math.mat4_transform_point drops w, which is fine for a model or a view
+# matrix and wrong for a projection, so the divide is done here.
+#
+# The NDC-to-pixel mapping has no Y flip in it. boom's projection already puts Y
+# increasing downward, matching Vulkan's framebuffer, so flipping again here
+# would make this predict a mirrored silhouette and agree with a renderer that
+# had the same mistake twice.
+fun project(vp: *gm.Mat4, x: f32, y: f32, z: f32, out_x: *f32, out_y: *f32) {
+    val cx: f32 = vp.m[0] * x + vp.m[4] * y + vp.m[8]  * z + vp.m[12];
+    val cy: f32 = vp.m[1] * x + vp.m[5] * y + vp.m[9]  * z + vp.m[13];
+    val cw: f32 = vp.m[3] * x + vp.m[7] * y + vp.m[11] * z + vp.m[15];
+    @out_x = ((cx / cw) * 0.5 + 0.5) * CHECK_W::f32;
+    @out_y = ((cy / cw) * 0.5 + 0.5) * CHECK_H::f32;
+}
+
+# The area of the convex hull of n points, in square pixels.
+#
+# WHY AN AREA AND NOT A PIXEL COUNT WRITTEN DOWN. The silhouette of a closed
+# convex mesh is filled exactly once by its front faces, so the covered pixel
+# count has a value derivable from the geometry, and a count that falls short
+# means some front face was culled. A constant here would have been read off a
+# render and would agree with a culled render as readily as a correct one. This
+# is the check that found frontFace set to clockwise, where the cube kept its
+# outline and lost faces inside it.
+#
+# Gift wrapping, because eight points do not justify anything cleverer. Start at
+# the leftmost point and repeatedly take the point that leaves every other on one
+# side, then close with the shoelace formula.
+fun hull_area(xs: *f32, ys: *f32, n: usize) f32 {
+    if (n < 3) { ret 0.0; }
+
+    var start: usize = 0;
+    var i: usize = 1;
+    for (i < n) {
+        if (xs[i] < xs[start]) { start = i; }
+        i = i + 1;
+    }
+
+    var hx: [8]f32;
+    var hy: [8]f32;
+    var count: usize = 0;
+    var cur: usize = start;
+    var guard: usize = 0;
+    for (guard < n) {
+        hx[count] = xs[cur];
+        hy[count] = ys[cur];
+        count = count + 1;
+
+        var next: usize = 0;
+        if (cur == 0) { next = 1; }
+        var k: usize = 0;
+        for (k < n) {
+            # The cross product of (next - cur) and (k - cur). Positive means k
+            # is to the left, so k becomes the better candidate.
+            val cross: f32 = (xs[next] - xs[cur]) * (ys[k] - ys[cur])
+                           - (ys[next] - ys[cur]) * (xs[k] - xs[cur]);
+            if (cross > 0.0) { next = k; }
+            k = k + 1;
+        }
+        cur = next;
+        if (cur == start) { guard = n; }
+        or { guard = guard + 1; }
+    }
+
+    var twice: f32 = 0.0;
+    var j: usize = 0;
+    for (j < count) {
+        var nx: usize = j + 1;
+        if (nx == count) { nx = 0; }
+        twice = twice + (hx[j] * hy[nx] - hx[nx] * hy[j]);
+        j = j + 1;
+    }
+    if (twice < 0.0) { twice = 0.0 - twice; }
+    ret twice * 0.5;
+}
+
+# The absolute difference of two f32.
+fun fabs(x: f32) f32 {
+    if (x < 0.0) { ret 0.0 - x; }
+    ret x;
+}
+
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     var w: Window = window_open(WIDTH, HEIGHT, "boom renderer smoke");
@@ -294,6 +430,282 @@ fun main(argc: i64, argv: **u8) i64 {
 
     p.printlnf("ok   ran {} frames, {} skipped for a swapchain rebuild", presented, skipped);
 
+    # ------------------------------------------------------- what was drawn
+    #
+    # Everything above proves the calls succeeded. This is the part that proves
+    # a picture came out of them.
+    if (CHECK_W::usize * CHECK_H::usize * 4 != CHECK_BYTES) {
+        p.println("FAIL check: CHECK_BYTES does not match the check target's size");
+        ret 1;
+    }
+
+    val kr: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, CHECK_W, CHECK_H);
+    if (is_err[gfx.RenderTarget, gfx.Error](kr)) {
+        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](kr);
+        p.printlnf("FAIL check target: {}", gfx.error_msg(?e));
+        ret 1;
+    }
+    var check: gfx.RenderTarget = unwrap_ok[gfx.RenderTarget, gfx.Error](kr);
+
+    # A known orientation, so the silhouette is predictable. The frames above
+    # spun the cube precisely so that a mistake visible from only some angles
+    # would show; this one is deliberately still.
+    xf.rotation = gm.quat_identity();
+
+    # Retry, because a frame is skipped when the swapchain is out of date and a
+    # skipped frame renders nothing to read back.
+    var drew: bool = false;
+    var tries: usize = 0;
+    for (tries < 8 && !drew) {
+        window_poll();
+        window_refresh_size(?w);
+        var opened: bool = false;
+        if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+        if (opened) {
+            var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+            scene.target      = ?check;
+            scene.clear       = 1;
+            scene.clear_color = gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0);
+            var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+            gfx.pass_draw_material(?sp, ?mesh, ?mat, ?xf);
+            gfx.pass_end(?sp);
+            if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+            drew = true;
+        }
+        tries = tries + 1;
+    }
+    if (!drew) {
+        p.println("FAIL check: the swapchain never came back to draw the check frame");
+        ret 1;
+    }
+
+    var shot: [57600]u8;
+    if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) {
+        ret 1;
+    }
+
+    # The red channel's byte offset. The colour attachment is in the surface's
+    # format, so on most drivers it comes back blue first. Guessing gets a
+    # picture with red and blue swapped and every check below reading the wrong
+    # channel.
+    var red: usize = 0;
+    if (gfx.render_target_bgra(?check)) { red = 2; }
+
+    var covered:  usize = 0;
+    var min_x: i32 = CHECK_W;
+    var max_x: i32 = 0 - 1;
+    var min_y: i32 = CHECK_H;
+    var max_y: i32 = 0 - 1;
+    var lo: u8 = 255;
+    var hi: u8 = 0;
+    var py: i32 = 0;
+    for (py < CHECK_H) {
+        var px_i: i32 = 0;
+        for (px_i < CHECK_W) {
+            val o: usize = (py::usize * CHECK_W::usize + px_i::usize) * 4;
+            val rv: u8 = shot[o + red];
+            if (rv > COVERED_R) {
+                covered = covered + 1;
+                if (px_i < min_x) { min_x = px_i; }
+                if (px_i > max_x) { max_x = px_i; }
+                if (py < min_y)   { min_y = py; }
+                if (py > max_y)   { max_y = py; }
+                if (rv < lo) { lo = rv; }
+                if (rv > hi) { hi = rv; }
+            }
+            px_i = px_i + 1;
+        }
+        py = py + 1;
+    }
+
+    if (covered == 0) {
+        p.println("FAIL check: nothing was rasterized; every fragment was culled or clipped");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+
+    # Where the eight corners of the cube land, through the same camera the draw
+    # used. The model transform is the identity, so the corners are the cube's
+    # own, at plus and minus a half unit.
+    var view: gm.Mat4 = gfx.camera_view(?cam);
+    var proj: gm.Mat4 = gfx.camera_projection(?cam);
+    var vp:   gm.Mat4 = gm.mat4_mul(?proj, ?view);
+    var want_min_x: f32 = CHECK_W::f32;
+    var want_max_x: f32 = 0.0;
+    var want_min_y: f32 = CHECK_H::f32;
+    var want_max_y: f32 = 0.0;
+    var corner_x: [8]f32;
+    var corner_y: [8]f32;
+    var corner: usize = 0;
+    for (corner < 8) {
+        var cxv: f32 = 0.0 - 0.5;
+        var cyv: f32 = 0.0 - 0.5;
+        var czv: f32 = 0.0 - 0.5;
+        if ((corner & 1) != 0) { cxv = 0.5; }
+        if ((corner & 2) != 0) { cyv = 0.5; }
+        if ((corner & 4) != 0) { czv = 0.5; }
+        var sx: f32 = 0.0;
+        var sy: f32 = 0.0;
+        project(?vp, cxv, cyv, czv, ?sx, ?sy);
+        corner_x[corner] = sx;
+        corner_y[corner] = sy;
+        if (sx < want_min_x) { want_min_x = sx; }
+        if (sx > want_max_x) { want_max_x = sx; }
+        if (sy < want_min_y) { want_min_y = sy; }
+        if (sy > want_max_y) { want_max_y = sy; }
+        corner = corner + 1;
+    }
+
+    # A cube is convex, so the bounding box of its silhouette is the bounding box
+    # of its projected corners. Two pixels of slack covers the difference between
+    # a corner's exact position and the last pixel centre the rasterizer covers.
+    val SLACK: f32 = 2.0;
+    var off: bool = false;
+    if (fabs(min_x::f32 - want_min_x) > SLACK) { off = true; }
+    if (fabs(max_x::f32 - want_max_x) > SLACK) { off = true; }
+    if (fabs(min_y::f32 - want_min_y) > SLACK) { off = true; }
+    if (fabs(max_y::f32 - want_max_y) > SLACK) { off = true; }
+    if (off) {
+        p.printlnf("FAIL check: the cube covers x {}..{} y {}..{} in pixels",
+                   min_x, max_x, min_y, max_y);
+        p.printlnf("      projecting its corners through the same camera says x {}..{} y {}..{}",
+                   want_min_x::i32, want_max_x::i32, want_min_y::i32, want_max_y::i32);
+        p.println("      A silhouette in the wrong place is the projection, the Y flip,");
+        p.println("      or the viewport; one mirrored in Y is the flip alone.");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   {} pixels covered, silhouette within {} px of the projected corners",
+               covered, SLACK::i32);
+
+    # The silhouette of a closed convex mesh is filled exactly once by its front
+    # faces, so the covered count is the hull's area. Short of it means faces are
+    # missing from inside an outline that still looks right, which is what a
+    # reversed front-face winding does and what the bounds above cannot see: the
+    # faces behind the culled ones are drawn instead and reach the same extremes.
+    val area: f32 = hull_area(?corner_x[0], ?corner_y[0], 8);
+    val ratio: f32 = covered::f32 / area;
+    if (ratio < 0.9 || ratio > 1.1) {
+        p.printlnf("FAIL check: {} pixels covered against a projected hull of {}",
+                   covered, area::i32);
+        p.println("      Short of the hull means front faces were culled: the front-face");
+        p.println("      winding, or a mesh whose faces are not consistently wound.");
+        p.println("      Over it means something drew outside the silhouette.");
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   the covered area matches the projected hull's {} px", area::i32);
+
+    # The corners of the image must be background. A silhouette that filled the
+    # whole target would satisfy the bounds above only by accident, and this is
+    # the cheap direct statement that it did not.
+    var edge: usize = 0;
+    for (edge < 4) {
+        var ex: usize = 0;
+        var ey: usize = 0;
+        if ((edge & 1) != 0) { ex = (CHECK_W - 1)::usize; }
+        if ((edge & 2) != 0) { ey = (CHECK_H - 1)::usize; }
+        val o: usize = (ey * CHECK_W::usize + ex) * 4;
+        if (shot[o + red] > COVERED_R) {
+            p.println("FAIL check: a corner of the image is covered; the clear did not happen");
+            gfx.render_target_delete(d, ?check);
+            ret 1;
+        }
+        edge = edge + 1;
+    }
+    p.println("ok   the clear colour survives where no geometry covers it");
+
+    # The checkerboard has a light half and a dark half, so a covered area of one
+    # brightness means the texture was not sampled: a missing descriptor, a
+    # constant UV, or a white fallback all look like a correctly lit solid.
+    if (hi - lo < 40) {
+        p.printlnf("FAIL check: covered pixels run {} to {}; the checkerboard was not sampled", lo, hi);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   the checkerboard is sampled: covered pixels run {} to {}", lo, hi);
+
+    # ------------------------------------------------------------------ depth
+    #
+    # Two cubes on the view axis, the near one red and the far one green, drawn
+    # once in each order. The near one must win both times. Far-then-near comes
+    # out right with no depth buffer at all, so near-then-far is the actual test;
+    # running both says which of the two failed.
+    #
+    # This does not check the depth RANGE. Substituting OpenGL's [-1, 1] mapping
+    # for Vulkan's [0, 1] changes nothing visible here: the two agree closely for
+    # anything past a few times the near plane, and only diverge for geometry
+    # nearer than the midpoint of the range, which is a hundredth of a unit with
+    # this camera. The range is what the boom.math unit tests pin down.
+    var near_mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?near_mat, "u_texture0", ?tex);
+    gfx.material_set_color(?near_mat, gm.vec4(1.0, 0.0, 0.0, 1.0));
+    var far_mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?far_mat, "u_texture0", ?tex);
+    gfx.material_set_color(?far_mat, gm.vec4(0.0, 1.0, 0.0, 1.0));
+
+    var near_xf: gm.Transform = gm.transform_identity();
+    near_xf.position = gm.vec3(0.0, 0.0, 0.6);
+    var far_xf: gm.Transform = gm.transform_identity();
+    far_xf.position = gm.vec3(0.0, 0.0, 0.0 - 0.6);
+
+    # Red and green are read out of the pixel by index, and the green channel is
+    # in the middle whichever way round the surface puts red and blue.
+    val green: usize = 1;
+
+    var order: usize = 0;
+    for (order < 2) {
+        var painted: bool = false;
+        var att: usize = 0;
+        for (att < 8 && !painted) {
+            window_poll();
+            var opened: bool = false;
+            if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+            if (opened) {
+                var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+                scene.target      = ?check;
+                scene.clear       = 1;
+                scene.clear_color = gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0);
+                var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+                if (order == 0) {
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
+                }
+                or {
+                    gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                }
+                gfx.pass_end(?sp);
+                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+                painted = true;
+            }
+            att = att + 1;
+        }
+        if (!painted) {
+            p.println("FAIL depth: the swapchain never came back to draw the depth frame");
+            gfx.render_target_delete(d, ?check);
+            ret 1;
+        }
+        if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) {
+            ret 1;
+        }
+
+        val mid: usize = ((CHECK_H::usize / 2) * CHECK_W::usize + CHECK_W::usize / 2) * 4;
+        val got_r: u8 = shot[mid + red];
+        val got_g: u8 = shot[mid + green];
+        if (got_r <= got_g) {
+            p.printlnf("FAIL depth: the centre is r {} g {} with draw order {}",
+                       got_r, got_g, order);
+            p.println("      The far cube won, so the depth test is inverted or disabled.");
+            gfx.render_target_delete(d, ?check);
+            ret 1;
+        }
+        order = order + 1;
+    }
+    p.println("ok   the nearer of two overlapping cubes wins in both draw orders");
+
+    gfx.render_target_delete(d, ?check);
+
     # Teardown order is part of what is being checked: everything created against
     # the device goes before the renderer that owns it, and destroying anything
     # the GPU is still reading is what the validation layers exist to catch.
@@ -314,10 +726,10 @@ fun main(argc: i64, argv: **u8) i64 {
         p.printlnf("FAIL: {} draws were dropped for want of a uniform slot", dropped);
         ret 1;
     }
-    p.println("PASS: every call succeeded and frames were presented");
-    p.println("     This does NOT verify that anything was visible. A backwards");
-    p.println("     winding or a wrong projection presents empty frames and still");
-    p.println("     reports PASS. Look at the window: a lit checkered cube filling");
-    p.println("     most of it, with a small checker square at the top left.");
+    p.println("PASS: frames were presented and the rendered pixels were checked");
+    p.println("     Lighting is still not covered beyond the surface not being black,");
+    p.println("     and the window itself is never read back, only the offscreen");
+    p.println("     target. Look at it: a lit checkered cube filling most of it, with");
+    p.println("     a small checker square at the top left.");
     ret 0;
 }
