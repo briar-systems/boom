@@ -195,3 +195,9 @@ fwd boom.graphics.vk.NO_FAMILY;
 fwd boom.graphics.vk.Vk;
 fwd boom.graphics.vk.vk_init;
 fwd boom.graphics.vk.vk_dnit;
+
+fwd boom.graphics.swapchain.MAX_IMAGES;
+fwd boom.graphics.swapchain.Swapchain;
+fwd boom.graphics.swapchain.swapchain_init;
+fwd boom.graphics.swapchain.swapchain_dnit;
+fwd boom.graphics.swapchain.swapchain_rebuild;
