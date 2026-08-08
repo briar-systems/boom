@@ -30,6 +30,11 @@ url = "https://github.com/briar-systems/mach-font"
 ref = "branch/main"
 commit = "d60c763cbedd5012038b9d7bccb0f0be778ac2f9"
 
+[dep.mach-phys]
+url = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+commit = "33011b6198cdf5b5a381bdb2a6923afdc93ea2ae"
+
 [dep.mach-gltf]
 url = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"

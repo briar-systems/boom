@@ -31,6 +31,9 @@ pub val RESIZE: EventKind = 5;
 # the window was asked to close
 pub val CLOSE: EventKind = 6;
 
+# Two physics bodies collided. `a` and `b` are their boom.physics BodyIds.
+pub val COLLISION: EventKind = 7;
+
 # one input event with a kind-tagged integer payload
 #
 # the four payload slots carry kind-specific data (for a KEY event: the
