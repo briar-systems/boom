@@ -232,3 +232,22 @@ fwd boom.graphics.pipeline.shader_module;
 fwd boom.graphics.pipeline.pipeline_init;
 fwd boom.graphics.pipeline.pipeline_bind;
 fwd boom.graphics.pipeline.pipeline_dnit;
+
+fwd boom.graphics.image.RGBA_BYTES;
+fwd boom.graphics.image.Image;
+fwd boom.graphics.image.image_bytes;
+fwd boom.graphics.image.transition_masks;
+fwd boom.graphics.image.image_init;
+fwd boom.graphics.image.image_upload;
+fwd boom.graphics.image.image_dnit;
+fwd boom.graphics.image.sampler_init;
+fwd boom.graphics.image.sampler_dnit;
+
+fwd boom.graphics.descriptor.MAX_MATERIALS;
+fwd boom.graphics.descriptor.Descriptors;
+fwd boom.graphics.descriptor.set_index;
+fwd boom.graphics.descriptor.descriptors_init;
+fwd boom.graphics.descriptor.descriptors_allocate;
+fwd boom.graphics.descriptor.descriptors_write;
+fwd boom.graphics.descriptor.descriptors_bind;
+fwd boom.graphics.descriptor.descriptors_dnit;
