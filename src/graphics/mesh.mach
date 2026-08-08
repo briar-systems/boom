@@ -599,6 +599,48 @@ pub fun extract_loaded(loaded: *gp.Loaded, a: *allo.Allocator, out: *MeshData) R
     ret ok[bool, Error](true);
 }
 
+# the highest joint index any vertex references, or -1 when unskinned
+#
+# A skinned draw uploads a fixed MAX_JOINTS-matrix palette and the vertex stage
+# indexes it with whatever JOINTS_0 holds. An index past the skeleton's joint
+# count reads outside the palette, which is undefined in Vulkan without
+# robustBufferAccess and collapses the vertex to the origin with it: either way
+# the model tears, and nothing at load or draw time says why.
+#
+# So the range is checked once, here, against CPU data, rather than clamped per
+# vertex in the shader. The scan is O(vertices) at load and free at draw.
+# ---
+# md:  the extracted geometry
+# ret: the largest joint index present, or -1 when the layout carries no joints
+pub fun mesh_data_max_joint(md: *MeshData) i64 {
+    var off:   usize = 0;
+    var found: bool  = false;
+    var i: u32 = 0;
+    for (i < md.format.count) {
+        if (md.format.attributes[i].semantic == SEMANTIC_JOINTS_0) {
+            off   = md.format.attributes[i].offset::usize;
+            found = true;
+        }
+        i = i + 1;
+    }
+    if (!found) { ret 0 - 1; }
+
+    var best: i64 = 0 - 1;
+    var v: usize = 0;
+    val stride: usize = md.format.stride::usize;
+    val count:  usize = md.vertex_count::usize;
+    for (v < count) {
+        var c: usize = 0;
+        for (c < 4) {
+            val j: i64 = read_u16_at(md.vertices, v * stride + off + c * 2)::i64;
+            if (j > best) { best = j; }
+            c = c + 1;
+        }
+        v = v + 1;
+    }
+    ret best;
+}
+
 # build a Mesh from .glb bytes already in memory
 #
 # extracts the first primitive and uploads it. the bytes are not retained.
@@ -813,6 +855,50 @@ fun fixture_skinned_glb(out: *u8) usize {
     for (i < bchunk) { out[boff + 8 + i] = bin[i]; i = i + 1; }
 
     ret total;
+}
+
+test "mesh: the highest joint index is found across every vertex and lane" {
+    # The fixture's joint indices run 0..11 across three vertices. Scanning only
+    # the first vertex, or only the first lane, would report 3 or 8 and let a
+    # model through whose later vertices index outside the palette.
+    var glb: [1024]u8;
+    val n: usize = fixture_skinned_glb(?glb[0]);
+
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var ar: arena.Arena;
+    arena.init(?ar, ?pa, 65536);
+    var aa: allo.Allocator;
+    arena.make(?aa, ?ar);
+
+    var md: MeshData;
+    val r: Result[bool, Error] = extract_glb(?glb[0], n, ?aa, ?md);
+    if (is_err[bool, Error](r)) { arena.dnit(?ar); ret 1; }
+    if (mesh_data_max_joint(?md) != 11) { arena.dnit(?ar); ret 2; }
+    arena.dnit(?ar);
+    ret 0;
+}
+
+test "mesh: an unskinned layout reports no joints rather than zero" {
+    # Zero is a valid joint index, so a mesh with no joints at all has to be
+    # distinguishable from one that only ever references joint 0. Otherwise a
+    # static mesh would be rejected against a skeleton with no joints.
+    var glb: [512]u8;
+    val n: usize = fixture_triangle_glb(?glb[0]);
+
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var ar: arena.Arena;
+    arena.init(?ar, ?pa, 65536);
+    var aa: allo.Allocator;
+    arena.make(?aa, ?ar);
+
+    var md: MeshData;
+    val r: Result[bool, Error] = extract_glb(?glb[0], n, ?aa, ?md);
+    if (is_err[bool, Error](r)) { arena.dnit(?ar); ret 1; }
+    if (mesh_data_max_joint(?md) != 0 - 1) { arena.dnit(?ar); ret 2; }
+    arena.dnit(?ar);
+    ret 0;
 }
 
 test "mesh: a skinned primitive is conformed to the skinned layout" {

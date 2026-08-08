@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - graphics: `texture` takes a `ColorSpace`. `COLOR_SRGB` for anything authored to be looked at, `COLOR_LINEAR` for data stored in an image. `texture_load` picks `COLOR_SRGB`, since QOI and TGA carry nothing else.
 - graphics: The swapchain accepts either sRGB surface format rather than only `B8G8R8A8_SRGB`. `renderer_is_srgb` reports a surface that offers neither, which renders darker than authored and is otherwise indistinguishable from a shader bug.
 
+- graphics: `model_load` rejects a model whose vertices reference a joint the skin does not have. The skinned vertex stage indexes a fixed-size palette with whatever `JOINTS_0` holds, so an out-of-range index reads outside it.
+
 ### Removed
 - graphics: `Shader`, `shader`, `shader_delete`, `SKINNED_VERTEX_SRC`, and every GLSL string.
 
