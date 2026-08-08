@@ -1,33 +1,32 @@
-# sound playback: a mixer that owns the device and plays overlapping voices
+# Sound playback: a mixer that owns the device and plays overlapping voices.
 #
-# mach-audio supplies the pieces -- WAV decode, buffers, streams, a mixer, a
-# device -- and its `play` binary shows one sound played end to end by mixing
-# on the main thread into a finished buffer. a game needs something else: many
-# sounds starting and stopping at arbitrary times, mixed live. that is this.
+# mach-audio supplies the pieces, meaning WAV decode, buffers, streams, a
+# mixer, and a device. Its `play` binary shows one sound played end to end by
+# mixing on the main thread into a finished buffer. A game needs something
+# else: many sounds starting and stopping at arbitrary times, mixed live.
 #
-# THE REAL-TIME CONTRACT. the device's render callback runs on the audio
-# thread, and mach-audio is explicit that it must not allocate and must not
-# lock. so the scratch buffer is allocated once at init, the voice table is
-# fixed, and the handoff between the game thread and the audio thread is done
-# with atomics rather than a mutex.
+# The render callback runs on the audio thread, and mach-audio is explicit that
+# it must not allocate and must not lock. The scratch buffer is therefore
+# allocated once at init, the voice table is fixed, and the handoff between the
+# game thread and the audio thread uses atomics rather than a mutex.
 #
-# THE HANDOFF. each voice's `state` is the only field both threads touch, and
-# it is what makes the rest safe to touch without a lock:
+# Each voice's `state` is the only field both threads touch, and it is what
+# makes the rest safe to touch without a lock:
 #
-#   FREE     the game thread owns this voice and may write its stream
-#   PLAYING  the audio thread owns it and pulls from its stream
-#   STOPPING the game thread has asked for it back
+#   FREE     The game thread owns this voice and may write its stream.
+#   PLAYING  The audio thread owns it and pulls from its stream.
+#   STOPPING The game thread has asked for it back.
 #
-# a voice is claimed with a compare-and-swap from FREE, so two game-thread
-# callers cannot claim the same slot. its stream is written while still FREE
-# -- invisible to the audio thread -- and only then stored as PLAYING, which
-# publishes those writes. the audio thread never reads a voice that is not
-# PLAYING, so it never sees a half-written stream. that ordering is the whole
+# A voice is claimed with a compare and swap from FREE, so two game-thread
+# callers cannot claim the same slot. Its stream is written while still FREE,
+# invisible to the audio thread, and only then stored as PLAYING, which
+# publishes those writes. The audio thread never reads a voice that is not
+# PLAYING, so it never sees a half-written stream. That ordering is the whole
 # safety argument and is why the store must come last.
 #
-# WHAT THIS DELIBERATELY DOES NOT DO YET. no positional audio, no per-voice
-# pitch, no streaming from disk: every clip is decoded fully into memory. those
-# are additive and none of them change the shapes here.
+# Positional audio, per-voice pitch, and streaming from disk are not
+# implemented. Every clip is decoded fully into memory. All three are additive
+# and none of them change the shapes here.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -49,31 +48,31 @@ use thread: std.sync.thread;
 use audio;
 use vfs: boom.vfs;
 
-# how many sounds may play at once
+# How many sounds may play at once
 #
-# a fixed table because the render callback cannot allocate. overflow drops
+# A fixed table because the render callback cannot allocate. overflow drops
 # the newest request rather than stealing a playing voice: a dropped sound is
 # a sound nobody hears, while a stolen one is an audible glitch in something
 # already playing.
 pub val MAX_VOICES: usize = 32;
 
-# the game thread owns this slot and may write it
+# The game thread owns this slot and may write it
 val FREE: i64 = 0;
-# the audio thread owns this slot and is pulling from it
+# The audio thread owns this slot and is pulling from it
 val PLAYING: i64 = 1;
-# the game thread has asked for the slot back; the audio thread will free it
+# The game thread has asked for the slot back; the audio thread will free it
 val STOPPING: i64 = 2;
 
-# a decoded clip, ready to play any number of times
+# A decoded clip, ready to play any number of times
 #
-# owns its samples. several voices may stream the same Sound at once, since a
+# Owns its samples. several voices may stream the same Sound at once, since a
 # Stream carries its own cursor and never mutates the buffer.
 pub rec Sound {
     buffer: audio.Buffer;
     valid:  bool;
 }
 
-# one playback slot
+# One playback slot
 # ---
 # stream: cursor over a Sound's samples, written only while FREE
 # state:  FREE / PLAYING / STOPPING, the atomic that orders everything else
@@ -84,9 +83,9 @@ rec Voice {
     gain:   f32;
 }
 
-# a handle to a playing voice
+# A handle to a playing voice
 #
-# carries the generation the slot held when it started, so stopping a voice
+# Carries the generation the slot held when it started, so stopping a voice
 # that already finished cannot silence whatever took its place. the same
 # reasoning as the asset store's handles, and the same bug avoided.
 pub rec VoiceId {
@@ -94,7 +93,7 @@ pub rec VoiceId {
     gen:  i64;
 }
 
-# the mixer and its device
+# The mixer and its device
 # ---
 # a:       allocator owning the scratch buffer and decoded clips
 # device:  the open output device, nil until audio_init succeeds
@@ -116,21 +115,21 @@ pub rec Audio {
     ready:   bool;
 }
 
-# the voice id that names nothing
+# The voice id that names nothing
 pub fun voice_none() VoiceId {
     ret VoiceId{slot: 0, gen: 0};
 }
 
 # ------------------------------------------------------------ audio thread
 
-# mix every playing voice into the device's output buffer
+# Mix every playing voice into the device's output buffer
 #
-# real-time: no allocation, no locks, no syscalls. the only shared reads are
+# Real-time: no allocation, no locks, no syscalls. the only shared reads are
 # the atomic states, and a voice is touched only while it reads PLAYING.
 fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
     val s: *Audio = user:~*Audio;
 
-    # silence first: the device buffer is not guaranteed zeroed, and a voice
+    # Silence first: the device buffer is not guaranteed zeroed, and a voice
     # that ends mid-callback would otherwise leave stale samples audible
     var i: usize = 0;
     val total: usize = frames::usize * channels::usize;
@@ -141,7 +140,7 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
         val st: i64 = atomic.load(?s.voices[v].state);
 
         if (st == STOPPING) {
-            # the game thread asked for it back. release it here rather than
+            # The game thread asked for it back. release it here rather than
             # there, so the audio thread is the only writer of a PLAYING slot
             # and the game thread never races a pull in progress.
             atomic.store(?s.voices[v].state, FREE);
@@ -159,14 +158,14 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
         v = v + 1;
     }
 
-    # one clamp over the sum rather than per voice: clamping each source
+    # One clamp over the sum rather than per voice: clamping each source
     # would distort every voice individually instead of only the overflow
     audio.clamp_samples(out, total);
 }
 
 # ------------------------------------------------------------- game thread
 
-# open the output device and start mixing
+# Open the output device and start mixing
 #
 # ---
 # a:        allocator for the scratch buffer and decoded clips
@@ -186,7 +185,7 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
         v = v + 1;
     }
 
-    # a generous scratch: the device asks for a frame count per callback and
+    # A generous scratch: the device asks for a frame count per callback and
     # we must never allocate to serve a larger one
     s.frames = 4096;
     val sr: Result[*f32, str] = allo.allocate[f32](a, s.frames * s.chans);
@@ -215,9 +214,9 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
     ret ok[bool, str](true);
 }
 
-# stop the device and release the mixer's own memory
+# Stop the device and release the mixer's own memory
 #
-# decoded Sounds are not freed here: a game may hold them past the device, and
+# Decoded Sounds are not freed here: a game may hold them past the device, and
 # sound_free is where that decision belongs.
 pub fun audio_dnit(s: *Audio) {
     if (!s.ready) { ret; }
@@ -227,9 +226,9 @@ pub fun audio_dnit(s: *Audio) {
     s.ready = false;
 }
 
-# decode a clip from a virtual path
+# Decode a clip from a virtual path
 #
-# the whole file is decoded into memory, so this is for sound effects and
+# The whole file is decoded into memory, so this is for sound effects and
 # short music. `res://sfx/hit.wav` resolves through boom.vfs like every other
 # asset path.
 pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
@@ -255,9 +254,9 @@ pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
     ret ok[Sound, str](snd);
 }
 
-# release a decoded clip
+# Release a decoded clip
 #
-# stop anything playing it first: a voice streaming a freed buffer reads
+# Stop anything playing it first: a voice streaming a freed buffer reads
 # released memory on the audio thread, which is the worst place to find out.
 pub fun sound_free(snd: *Sound) {
     if (!snd.valid) { ret; }
@@ -265,9 +264,9 @@ pub fun sound_free(snd: *Sound) {
     snd.valid = false;
 }
 
-# claim a free voice, or MAX_VOICES when all are busy
+# Claim a free voice, or MAX_VOICES when all are busy
 #
-# the compare-and-swap is what makes this safe against another game-thread
+# The compare-and-swap is what makes this safe against another game-thread
 # caller claiming the same slot; the audio thread never sets a slot to
 # anything but FREE, so it cannot interfere.
 fun claim(s: *Audio) usize {
@@ -280,7 +279,7 @@ fun claim(s: *Audio) usize {
     ret MAX_VOICES;
 }
 
-# start a clip, returning the voice playing it
+# Start a clip, returning the voice playing it
 #
 # `looping` restarts the clip at its end rather than freeing the voice, so a
 # looping voice occupies its slot until stopped.
@@ -290,21 +289,21 @@ pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
     val v: usize = claim(s);
     if (v == MAX_VOICES) { ret voice_none(); }
 
-    # the slot is ours and invisible to the audio thread: it reads only
+    # The slot is ours and invisible to the audio thread: it reads only
     # PLAYING, and this is STOPPING until the store below
     s.voices[v].stream = audio.stream_over(?snd.buffer, looping);
     s.voices[v].gain   = gain;
     s.gens[v]          = s.gens[v] + 1;
     val g: i64 = s.gens[v];
 
-    # publishes every write above, and must therefore come last
+    # Publishes every write above, and must therefore come last
     atomic.store(?s.voices[v].state, PLAYING);
     ret VoiceId{slot: v + 1, gen: g};
 }
 
-# stop a voice, if it is still the one that started
+# Stop a voice, if it is still the one that started
 #
-# a stale id -- one whose voice already finished and whose slot was reused --
+# A stale id -- one whose voice already finished and whose slot was reused --
 # is ignored rather than silencing the new occupant.
 pub fun audio_stop(s: *Audio, id: VoiceId) bool {
     if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
@@ -315,7 +314,7 @@ pub fun audio_stop(s: *Audio, id: VoiceId) bool {
     ret atomic.cas(?s.voices[v].state, ?expected, STOPPING);
 }
 
-# whether a voice is still playing
+# Whether a voice is still playing
 pub fun audio_playing(s: *Audio, id: VoiceId) bool {
     if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
     val v: usize = id.slot - 1;
@@ -323,12 +322,12 @@ pub fun audio_playing(s: *Audio, id: VoiceId) bool {
     ret atomic.load(?s.voices[v].state) == PLAYING;
 }
 
-# set the volume applied to every voice
+# Set the volume applied to every voice
 pub fun audio_set_master(s: *Audio, gain: f32) {
     s.master = gain;
 }
 
-# how many voices are currently playing
+# How many voices are currently playing
 pub fun audio_voice_count(s: *Audio) usize {
     var n: usize = 0;
     var v: usize = 0;
@@ -341,12 +340,12 @@ pub fun audio_voice_count(s: *Audio) usize {
 
 # --------------------------------------------------------------------- tests
 #
-# these drive the voice table and the render callback directly. opening a
+# These drive the voice table and the render callback directly. opening a
 # device needs hardware and is unreachable on a CI runner, so audio_init is
 # not exercised here -- but the state machine it sets up is, which is where
 # the concurrency bugs would be.
 
-# a mixer with its table initialized but no device, for tests
+# A mixer with its table initialized but no device, for tests
 fun test_audio(a: *allo.Allocator, chans: usize) Audio {
     var s: Audio;
     s.a      = a;
@@ -388,7 +387,7 @@ test "audio: the table fills and then refuses rather than stealing" {
         if (claim(?s) == MAX_VOICES) { ret 1; }
         n = n + 1;
     }
-    # every slot taken: the next request is dropped, not granted by evicting
+    # Every slot taken: the next request is dropped, not granted by evicting
     # something already playing
     if (claim(?s) != MAX_VOICES) { ret 1; }
     ret 0;
@@ -400,13 +399,13 @@ test "audio: render releases a STOPPING voice and skips it" {
     var s: Audio = test_audio(?a, 2);
 
     val v: usize = claim(?s);
-    # claim leaves the slot STOPPING: it is ours, not yet published
+    # Claim leaves the slot STOPPING: it is ours, not yet published
     if (atomic.load(?s.voices[v].state) != STOPPING) { ret 1; }
 
     var out: [128]f32;
     render(?out[0], 64, 2, (?s)::ptr);
 
-    # the audio thread is the only writer of a PLAYING slot, so it is also
+    # The audio thread is the only writer of a PLAYING slot, so it is also
     # what returns a STOPPING one to FREE
     if (atomic.load(?s.voices[v].state) != FREE) { ret 1; }
     ret 0;
@@ -419,7 +418,7 @@ test "audio: render silences the output buffer before mixing" {
 
     var out: [128]f32;
     var i: usize = 0;
-    # the device buffer is not guaranteed zeroed; leaving it would make a
+    # The device buffer is not guaranteed zeroed; leaving it would make a
     # frame with no voices play whatever was there last
     for (i < 128) { out[i] = 0.5; i = i + 1; }
 
@@ -445,12 +444,12 @@ test "audio: a stale voice id neither stops nor reports playing" {
 
     if (!audio_playing(?s, id)) { ret 1; }
 
-    # the voice ends and its slot is reused by something else
+    # The voice ends and its slot is reused by something else
     atomic.store(?s.voices[v].state, FREE);
     s.gens[v] = s.gens[v] + 1;
     atomic.store(?s.voices[v].state, PLAYING);
 
-    # the old id must not silence the new occupant
+    # The old id must not silence the new occupant
     if (audio_stop(?s, id))    { ret 1; }
     if (audio_playing(?s, id)) { ret 1; }
     ret 0;
@@ -471,7 +470,7 @@ test "audio: voice_count reflects only published voices" {
     var s: Audio = test_audio(?a, 2);
 
     val v: usize = claim(?s);
-    # claimed but not yet published: the audio thread must not see it, so
+    # Claimed but not yet published: the audio thread must not see it, so
     # neither should the count
     if (audio_voice_count(?s) != 0) { ret 1; }
 
@@ -480,23 +479,23 @@ test "audio: voice_count reflects only published voices" {
     ret 0;
 }
 
-# shared state for the concurrent claim test
+# Shared state for the concurrent claim test
 var race_audio: *Audio = nil;
 var race_hits:  [32]i64;
 var race_total: i64 = 0;
 var race_overlap: i64 = 0;
 val RACE_ROUNDS: usize = 20000;
 
-# claim until the table is exhausted, tallying which slot each claim returned
+# Claim until the table is exhausted, tallying which slot each claim returned
 fun race_claimer(arg: *u8) {
-    # every slot but the last is pre-filled, so all threads contend for the
+    # Every slot but the last is pre-filled, so all threads contend for the
     # SAME slot. that is the narrowest window the claim has, and a wider scan
     # would let threads drift onto different slots and never race at all.
     var n: usize = 0;
     for (n < RACE_ROUNDS) {
         val v: usize = claim(race_audio);
         if (v != MAX_VOICES) {
-            # count concurrent holders of this slot. exactly one may be
+            # Count concurrent holders of this slot. exactly one may be
             # inside this region at a time; two means the claim was not atomic.
             if (atomic.fetch_add(?race_total, 1) != 0) {
                 atomic.store(?race_overlap, 1);
@@ -515,13 +514,13 @@ test "audio: concurrent claims never hand the same voice to two callers" {
 
     var i: usize = 0;
     for (i < MAX_VOICES) { race_hits[i] = 0; i = i + 1; }
-    # fill every slot but the last, so contention lands on one address
+    # Fill every slot but the last, so contention lands on one address
     i = 0;
     for (i < MAX_VOICES - 1) { s.voices[i].state = PLAYING; i = i + 1; }
     race_audio = ?s;
     atomic.store(?race_total, 0);
 
-    # four threads contending for 32 slots. with a plain load-then-store two
+    # Four threads contending for 32 slots. with a plain load-then-store two
     # threads can observe FREE on the same slot and both take it, which is
     # exactly what the compare-and-swap exists to prevent. a single-threaded
     # test cannot tell the two implementations apart, so this one races them.
@@ -538,8 +537,8 @@ test "audio: concurrent claims never hand the same voice to two callers" {
     thread.join(?t3);
     thread.join(?t4);
 
-    # every successful claim of the contended slot must have been exclusive.
-    # claim sets STOPPING and the claimer resets to FREE, so a correct run
+    # Every successful claim of the contended slot must have been exclusive.
+    # Claim sets STOPPING and the claimer resets to FREE, so a correct run
     # sees the slot handed out exactly as many times as it was returned. a
     # non-atomic claim lets two threads leave with the same slot, and the
     # tally of concurrent holders exceeds one.
