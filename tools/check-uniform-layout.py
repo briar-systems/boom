@@ -88,6 +88,52 @@ def parse(text):
     return bindings, classes, offsets, strides
 
 
+# Capabilities the modules are allowed to declare, and why.
+#
+# A SPIR-V capability is a hardware requirement. Declaring one that no device
+# feature was enabled for is invalid usage at vkCreateShaderModule, and a driver
+# may honour it anyway, so the shader works on the machine it was written on and
+# is rejected on someone else's. Two of these shipped in 0.3.0 undetected, and
+# neither was asked for by any shader: both came out of codegen.
+#
+# Anything not listed is a hardware requirement that arrived without being
+# chosen. Adding an entry is the moment to also enable the matching feature in
+# boom.graphics.vk, and to say here what forced it.
+ALLOWED_CAPABILITIES = {
+    # Core to every SPIR-V shader module.
+    "Shader": "the baseline capability every module declares",
+    # From codegen, not from the shaders. An optional VkPhysicalDeviceFeatures
+    # bit that boom must therefore request, narrowing the devices it runs on.
+    "Int64": "mach#2878: 32-bit array indices lower to 64-bit locals",
+}
+
+# Capabilities that must be matched by a feature request at device creation.
+REQUIRES_FEATURE = {
+    "Int64": "shaderInt64",
+}
+
+
+def check_capabilities(module):
+    """No module may declare a capability that was not chosen deliberately."""
+    text = disassemble(f"{SPV_DIR}/{module}.spv")
+    if text is None:
+        skip(f"{module}: not built, so its capabilities were not checked")
+        return
+
+    declared = set(re.findall(r"OpCapability (\w+)", text))
+    unexpected = sorted(declared - set(ALLOWED_CAPABILITIES))
+    if unexpected:
+        report(False, f"{module}: declares {unexpected}, which nothing enables a device feature for")
+        return
+
+    needed = sorted(c for c in declared if c in REQUIRES_FEATURE)
+    if needed:
+        features = ", ".join(REQUIRES_FEATURE[c] for c in needed)
+        report(True, f"{module}: declares {sorted(declared)}; {features} must be enabled")
+        return
+    report(True, f"{module}: declares {sorted(declared)}")
+
+
 def report(ok, message):
     global fail
     if ok:
@@ -215,6 +261,11 @@ check_bindings("lit_frag / set_layout_full", "lit_frag", [1, 2])
 # straight copy on the strength of std430's natural stride.
 check_class("skinned_vert / palette", "skinned_vert", 3, "StorageBuffer")
 check_stride("skinned_vert / palette", "skinned_vert", 16)
+
+# Every module's capabilities. This is the check that would have caught the two
+# device features 0.3.0 required without enabling, and it needs no GPU.
+for module in ("mesh_vert", "skinned_vert", "sprite_vert", "sprite_frag", "lit_frag"):
+    check_capabilities(module)
 
 # A skip is not a pass. Say so rather than letting a green line count stand in
 # for coverage that did not happen.
