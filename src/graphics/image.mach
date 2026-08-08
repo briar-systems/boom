@@ -33,6 +33,7 @@ use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.pick_memory_type;
+use boom.graphics.buffer.NO_MEMORY_TYPE;
 
 # Bytes per pixel of the one format this module uploads.
 #
@@ -55,6 +56,7 @@ pub rec Image {
     view:   vk.ImageView;
     width:  u32;
     height: u32;
+    format: i32;
     ready:  bool;
 }
 
@@ -67,11 +69,36 @@ pub fun image_bytes(width: u32, height: u32) usize {
     ret width::usize * height::usize * RGBA_BYTES;
 }
 
+# What the bytes in an image mean, which decides how sampling reads them.
+#
+# NOT A BOOLEAN. Colour space is an axis this will grow along: a normal map, a
+# roughness mask, and a height field are all "not sRGB" for different reasons,
+# and a format-per-purpose is where this ends up. A named space now means adding
+# one is an entry rather than a second flag threaded through every constructor.
+pub def ColorSpace: u8;
+
+# Colour authored for display. Sampling applies the inverse sRGB transfer
+# function, so the shader receives linear values. Alpha is untouched: Vulkan's
+# sRGB formats leave the fourth channel linear, which is why a glyph atlas
+# storing coverage in alpha belongs here too.
+pub val COLOR_SRGB:   ColorSpace = 0;
+# Data that happens to be stored in an image. Sampling reads the bytes as they
+# are. A normal map or a mask read as sRGB comes back subtly wrong in a way that
+# looks like a lighting bug rather than a format one.
+pub val COLOR_LINEAR: ColorSpace = 1;
+
+# The Vulkan format for a colour space.
+pub fun image_format(space: ColorSpace) i32 {
+    if (space == COLOR_SRGB) { ret vk.FORMAT_R8G8B8A8_SRGB; }
+    ret vk.FORMAT_R8G8B8A8_UNORM;
+}
+
 # Create an image and allocate device-local memory for it.
-pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32) Result[bool, Error] {
+pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, space: ColorSpace) Result[bool, Error] {
     i.handle = nil;
     i.memory = nil;
     i.view   = nil;
+    i.format = image_format(space);
     i.ready  = false;
 
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
@@ -84,10 +111,14 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32) Result[bool, Erro
     ci.pNext                 = nil;
     ci.flags                 = 0;
     ci.imageType             = vk.IMAGE_TYPE_2D;
-    # UNORM rather than SRGB. The glyph atlas stores coverage, which is not a
-    # colour, and applying the sRGB transfer function to coverage darkens every
-    # edge. Sprites that want sRGB get it from the swapchain's format.
-    ci.format                = vk.FORMAT_R8G8B8A8_UNORM;
+    # THE SPACE IS THE IMAGE'S, NOT THE SWAPCHAIN'S. A swapchain in an sRGB
+    # format encodes on write; it does not decode on read. Sampling an sRGB
+    # texture through a UNORM image hands the shader raw sRGB bytes as though
+    # they were linear, the shader's arithmetic runs on the wrong numbers, and
+    # the attachment encodes a second time. The result is washed out and there
+    # is no diagnostic: every stage did exactly what it was told.
+    ci.format                = image_format(space);
+    i.format                 = ci.format;
     ci.extent.width          = width;
     ci.extent.height         = height;
     ci.extent.depth          = 1;
@@ -137,7 +168,7 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32) Result[bool, Erro
     vci.flags    = 0;
     vci.image    = i.handle;
     vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
-    vci.format   = vk.FORMAT_R8G8B8A8_UNORM;
+    vci.format   = i.format;
     vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
     vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
     vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
@@ -186,7 +217,99 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
         @dst_access = vk.ACCESS_SHADER_READ_BIT;
         ret true;
     }
+    if (old == vk.IMAGE_LAYOUT_UNDEFINED && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        # A render target's colour image, put into a readable layout before
+        # anything has drawn into it. The contents are undefined and that is
+        # fine; what matters is that a game sampling the target before its
+        # first render finds the image in the layout its descriptor claims,
+        # rather than in UNDEFINED.
+        @src_stage  = vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        @src_access = 0;
+        @dst_access = vk.ACCESS_SHADER_READ_BIT;
+        ret true;
+    }
     ret false;
+}
+
+# Allocate and begin a command buffer recorded once and thrown away.
+#
+# Factored out because a transition and an upload need the same six calls
+# around them, and the second copy of a submit-and-wait is where the wait goes
+# missing.
+fun begin_one_shot(v: *Vk, pool: vk.CommandPool, out: *vk.CommandBuffer) Result[bool, Error] {
+    var ai: vk.CommandBufferAllocateInfo;
+    ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.pNext              = nil;
+    ai.commandPool        = pool;
+    ai.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vk.vkAllocateCommandBuffers(v.device, ?ai, out) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not allocate a one-shot command buffer"));
+    }
+
+    var bi: vk.CommandBufferBeginInfo;
+    bi.sType            = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.pNext            = nil;
+    bi.flags            = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    bi.pInheritanceInfo = nil;
+    vk.vkBeginCommandBuffer(@out, ?bi);
+    ret ok[bool, Error](true);
+}
+
+# End, submit, wait for, and free a one-shot command buffer.
+#
+# The wait is not optional: the command buffer and anything it reads are in use
+# until the queue drains, and freeing either first is a use-after-free the
+# validation layers report far from here.
+fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) Result[bool, Error] {
+    vk.vkEndCommandBuffer(cmd);
+
+    var c: vk.CommandBuffer = cmd;
+    var si: vk.SubmitInfo;
+    si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext                = nil;
+    si.waitSemaphoreCount   = 0;
+    si.pWaitSemaphores      = nil;
+    si.pWaitDstStageMask    = nil;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = ?c;
+    si.signalSemaphoreCount = 0;
+    si.pSignalSemaphores    = nil;
+
+    val rc: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, nil);
+    vk.vkQueueWaitIdle(v.graphics_queue);
+    vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
+    if (rc != vk.SUCCESS) {
+        ret err[bool, Error](error("vkQueueSubmit failed for a one-shot command buffer"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# Put an image into a layout with a one-shot command buffer.
+#
+# Used to give a render target's colour image a readable layout at creation, so
+# sampling it before anything has drawn into it is valid rather than a lie about
+# the layout. The contents are undefined, which is the caller's business.
+# ---
+# i:    the image to transition
+# v:    the device
+# pool: a command pool for the one-shot buffer
+# old:  the layout the image is in
+# new:  the layout to leave it in
+# ret:  true on success, or the step that failed
+pub fun image_transition(i: *Image, v: *Vk, pool: vk.CommandPool, old: i32, new: i32) Result[bool, Error] {
+    if (!i.ready) { ret err[bool, Error](error("cannot transition an image that was not created")); }
+
+    var cmd: vk.CommandBuffer;
+    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
+    if (is_err[bool, Error](br)) { ret br; }
+
+    if (!transition(cmd, i.handle, old, new)) {
+        end_one_shot(v, pool, cmd);
+        ret err[bool, Error](error("unhandled image layout transition"));
+    }
+    ret end_one_shot(v, pool, cmd);
 }
 
 # Record a layout transition into a command buffer.
@@ -224,11 +347,11 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
 # The three steps are performed together because their order is the contract:
 # receive, copy, read. A caller that could do them separately could get it wrong.
 pub fun image_upload(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8,
-                     width: u32, height: u32) Result[bool, Error] {
+                     width: u32, height: u32, space: ColorSpace) Result[bool, Error] {
     val size: usize = image_bytes(width, height);
     if (size == 0) { ret err[bool, Error](error("cannot upload a zero-sized image")); }
 
-    val ir: Result[bool, Error] = image_init(i, v, width, height);
+    val ir: Result[bool, Error] = image_init(i, v, width, height, space);
     if (is_err[bool, Error](ir)) { ret ir; }
 
     var staging: Buffer;
@@ -424,9 +547,28 @@ test "image: an unhandled transition is refused rather than zeroed" {
     if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
-    if (transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
-                         vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    # An arbitrary pair nothing in boom performs. The point is that the table
+    # is a closed set, not that it happens to be missing this one.
+    if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
                          ?ss, ?ds, ?sa, ?da)) { ret 2; }
+    ret 0;
+}
+
+test "image: a target's colour image can be made readable before anything draws" {
+    # A game may sample a render target before its first render. The image is
+    # in UNDEFINED then, while the descriptor claims SHADER_READ_ONLY_OPTIMAL,
+    # which is a lie about the layout rather than merely undefined contents.
+    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
+    if (!transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
+                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    # Nothing has touched the image, so there is nothing to wait for, but the
+    # fragment stage's read is what must wait for the transition.
+    if (ss != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT)     { ret 2; }
+    if (ds != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
+    if (sa != 0)                                     { ret 4; }
+    if (da != vk.ACCESS_SHADER_READ_BIT)             { ret 5; }
     ret 0;
 }
 
@@ -439,5 +581,157 @@ test "image: teardown on an image that was never created is a no-op" {
     v.ready = false;
     image_dnit(?i, ?v);
     if (i.ready) { ret 1; }
+    ret 0;
+}
+
+# The depth format every attachment in boom uses.
+#
+# D32_SFLOAT is the one depth format every Vulkan implementation must support as
+# a depth-stencil attachment, so it needs no query. Everything that owns a depth
+# attachment uses this one, which is also what makes the window's render pass and
+# an offscreen target's compatible: two render passes are compatible when their
+# attachment formats and sample counts match, and a pipeline is only usable in a
+# pass compatible with the one it was built against. A second depth format here
+# would mean a second set of pipelines.
+pub val DEPTH_FORMAT: i32 = vk.FORMAT_D32_SFLOAT;
+
+# A depth attachment: an image, its memory, and its view.
+# ---
+# image: The depth image.
+# mem:   Device-local memory backing it.
+# view:  The view a framebuffer binds.
+pub rec DepthAttachment {
+    image: vk.Image;
+    mem:   vk.DeviceMemory;
+    view:  vk.ImageView;
+}
+
+# Create a depth attachment at a size.
+#
+# Device-local and never mapped: nothing on the host reads a depth buffer, and
+# a host-visible one would be slower for the only thing that does.
+# ---
+# d:      the attachment to fill
+# v:      the device
+# width:  width in pixels
+# height: height in pixels
+# ret:    true on success, or the step that failed
+pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i32) Result[bool, Error] {
+    d.image = nil;
+    d.mem   = nil;
+    d.view  = nil;
+
+    var ci: vk.ImageCreateInfo;
+    ci.sType                 = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.pNext                 = nil;
+    ci.flags                 = 0;
+    ci.imageType             = vk.IMAGE_TYPE_2D;
+    ci.format                = DEPTH_FORMAT;
+    ci.extent.width          = width::u32;
+    ci.extent.height         = height::u32;
+    ci.extent.depth          = 1;
+    ci.mipLevels             = 1;
+    ci.arrayLayers           = 1;
+    ci.samples               = vk.SAMPLE_COUNT_1_BIT::i32;
+    ci.tiling                = vk.IMAGE_TILING_OPTIMAL;
+    ci.usage                 = vk.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    ci.sharingMode           = vk.SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices   = nil;
+    ci.initialLayout         = vk.IMAGE_LAYOUT_UNDEFINED;
+
+    if (vk.vkCreateImage(v.device, ?ci, nil, ?d.image) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not create the depth image"));
+    }
+
+    var req: vk.MemoryRequirements;
+    vk.vkGetImageMemoryRequirements(v.device, d.image, ?req);
+    var props: vk.PhysicalDeviceMemoryProperties;
+    vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
+    val index: u32 = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (index == NO_MEMORY_TYPE) {
+        ret err[bool, Error](error("no device-local memory type for the depth image"));
+    }
+
+    var ai: vk.MemoryAllocateInfo;
+    ai.sType           = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.pNext           = nil;
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = index;
+    if (vk.vkAllocateMemory(v.device, ?ai, nil, ?d.mem) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not allocate depth memory"));
+    }
+    if (vk.vkBindImageMemory(v.device, d.image, d.mem, 0) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not bind depth memory"));
+    }
+
+    var vci: vk.ImageViewCreateInfo;
+    vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.pNext    = nil;
+    vci.flags    = 0;
+    vci.image    = d.image;
+    vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
+    vci.format   = DEPTH_FORMAT;
+    vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.a = vk.COMPONENT_SWIZZLE_IDENTITY;
+    # DEPTH_BIT, not COLOR_BIT. A depth view with a colour aspect is rejected,
+    # and the message names the view rather than the aspect.
+    vci.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.baseMipLevel   = 0;
+    vci.subresourceRange.levelCount     = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount     = 1;
+    if (vk.vkCreateImageView(v.device, ?vci, nil, ?d.view) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not create the depth view"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# Destroy a depth attachment, in reverse order of creation.
+#
+# Safe on a partially created one: each handle is checked, because the failure
+# path in depth_attachment_init leaves the later handles nil.
+pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
+    if (d.view  != nil) { vk.vkDestroyImageView(v.device, d.view, nil);  d.view  = nil; }
+    if (d.image != nil) { vk.vkDestroyImage(v.device, d.image, nil);     d.image = nil; }
+    if (d.mem   != nil) { vk.vkFreeMemory(v.device, d.mem, nil);         d.mem   = nil; }
+}
+
+test "image: a colour space maps to the format that applies its transfer function" {
+    # An sRGB texture read through a UNORM image hands the shader raw bytes as
+    # though they were linear. Every stage then does exactly what it was told
+    # and the result is washed out, with no diagnostic anywhere.
+    if (image_format(COLOR_SRGB) != vk.FORMAT_R8G8B8A8_SRGB)    { ret 1; }
+    if (image_format(COLOR_LINEAR) != vk.FORMAT_R8G8B8A8_UNORM) { ret 2; }
+    ret 0;
+}
+
+test "image: an unknown colour space falls back to linear, not to sRGB" {
+    # Fail toward the space that changes nothing. A new space defaulting to sRGB
+    # would apply a transfer function to data that is not colour, which is a
+    # subtle wrongness; defaulting to linear is at worst an un-decoded colour,
+    # which is visible immediately.
+    if (image_format(7::ColorSpace) != vk.FORMAT_R8G8B8A8_UNORM) { ret 1; }
+    ret 0;
+}
+
+test "image: the depth format is the one every implementation must support" {
+    # A format chosen without a query has to be one the spec mandates. It is
+    # also what makes the window pass and an offscreen target's compatible, so
+    # changing it here without changing both breaks every pipeline.
+    if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
+    ret 0;
+}
+
+test "image: teardown of a never-created depth attachment is a no-op" {
+    var d: DepthAttachment;
+    d.image = nil;
+    d.mem   = nil;
+    d.view  = nil;
+    var v: Vk;
+    v.ready = false;
+    depth_attachment_dnit(?d, ?v);
     ret 0;
 }

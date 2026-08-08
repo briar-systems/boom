@@ -1,8 +1,9 @@
 # a viewpoint producing the view and projection matrices for a draw
 #
-# the game configures a Camera and passes it to draw, which uploads its
-# view and projection as u_view and u_projection. the camera is a plain
-# value the game owns and mutates; graphics imposes no scene structure.
+# the game configures a Camera and hands it to pass_scene, which turns it
+# into the view and projection every draw in that pass combines with its own
+# transform. the camera is a plain value the game owns and mutates; graphics
+# imposes no scene structure.
 
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
@@ -74,10 +75,14 @@ test "camera: view of the origin from +z translates by -z" {
     ret 0;
 }
 
-test "camera: projection is non-degenerate" {
+test "camera: projection is non-degenerate and targets Vulkan clip space" {
     var c: Camera = camera_perspective(vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1, 100.0);
     var p: Mat4 = camera_projection(?c);
-    if (p.m[0] <= 0.0 || p.m[5] <= 0.0) { ret 1; }
-    if (p.m[11] != 0.0 - 1.0) { ret 2; }
+    if (p.m[0] <= 0.0)        { ret 1; }
+    # Y is negative because Vulkan's Y increases downward. A positive entry
+    # here renders every scene vertically mirrored, which is easy to mistake
+    # for a camera pointing the wrong way.
+    if (p.m[5] >= 0.0)        { ret 2; }
+    if (p.m[11] != 0.0 - 1.0) { ret 3; }
     ret 0;
 }

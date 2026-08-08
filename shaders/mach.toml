@@ -52,6 +52,14 @@ targets = ["spirv"]
 link    = []
 need    = []
 
+[artifact.skinned_vert]
+kind    = "bin"
+entry   = "skinned_vert.mach"
+out     = "skinned_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
 ref = "tag/0.1.0"

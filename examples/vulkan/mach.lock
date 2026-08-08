@@ -10,11 +10,6 @@ url = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 commit = "0268357dc3b5c44d08a24d6dff99c9976b279360"
 
-[dep.mach-gl]
-url = "https://github.com/briar-systems/mach-gl"
-ref = "branch/main"
-commit = "b9edfd501cd8119be56d43b0c262108968d72bf9"
-
 [dep.mach-image]
 url = "https://github.com/briar-systems/mach-image"
 ref = "branch/main"

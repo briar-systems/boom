@@ -238,6 +238,10 @@ pub val BINDING_NONE:    Binding = 0;
 pub val BINDING_UNIFORM: Binding = 1;
 # A combined image sampler.
 pub val BINDING_SAMPLER: Binding = 2;
+# A storage buffer. Read-write and std430-laid-out, where a uniform block is
+# read-only and std140-laid-out. The skinning palette is one: at 128 joints it
+# is 8 KB, and an array of 16-byte columns needs std430's natural stride.
+pub val BINDING_STORAGE: Binding = 3;
 
 # The most bindings one descriptor set describes.
 pub val MAX_BINDINGS: usize = 8;
@@ -291,6 +295,35 @@ pub fun set_layout_sprite() SetLayout {
     ret l;
 }
 
+# The layout skinned_vert declares: the matrices at 0, the joint palette at 3.
+pub fun set_layout_skinned() SetLayout {
+    var l: SetLayout = set_layout();
+    set_layout_at(?l, 0, BINDING_UNIFORM);
+    set_layout_at(?l, 3, BINDING_STORAGE);
+    ret l;
+}
+
+# The union of every layout any of boom's shaders declares.
+#
+# WHY ONE LAYOUT FOR EVERY PIPELINE. A descriptor set is allocated against a
+# layout, and Vulkan will only bind it to a pipeline whose layout is compatible,
+# which means identical bindings. Giving each pipeline its own layout would mean
+# a pool and a set ring per pipeline, and a draw could not switch programs
+# without switching sets. Building every pipeline against the union means one
+# pool, one ring, and one set per draw regardless of which program the draw uses.
+#
+# A binding a program does not declare is simply unused by it. The cost is that
+# every set carries four descriptors rather than the one or two it needs, which
+# is bookkeeping in the pool and nothing at draw time.
+pub fun set_layout_full() SetLayout {
+    var l: SetLayout = set_layout();
+    set_layout_at(?l, 0, BINDING_UNIFORM);
+    set_layout_at(?l, 1, BINDING_SAMPLER);
+    set_layout_at(?l, 2, BINDING_UNIFORM);
+    set_layout_at(?l, 3, BINDING_STORAGE);
+    ret l;
+}
+
 # How many bindings of a given kind a layout declares.
 #
 # The descriptor pool is sized per kind, not per set, so this is what a pool
@@ -319,6 +352,10 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[
             if (l.kinds[i] == BINDING_SAMPLER) {
                 bindings[n].descriptorType = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 bindings[n].stageFlags     = vk.SHADER_STAGE_FRAGMENT_BIT;
+            }
+            or (l.kinds[i] == BINDING_STORAGE) {
+                bindings[n].descriptorType = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                bindings[n].stageFlags     = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT;
             }
             or {
                 bindings[n].descriptorType = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -455,7 +492,12 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
     if (d.cull) { rs.cullMode = vk.CULL_MODE_BACK_BIT; }
     # Counter-clockwise, matching glTF's winding and the projection this engine
     # builds. Clockwise here silently culls every front face.
-    rs.frontFace               = vk.FRONT_FACE_COUNTER_CLOCKWISE;
+    # CLOCKWISE, not counter-clockwise. boom.math's projections negate Y to
+    # reach Vulkan's downward-Y clip space, which mirrors every triangle as the
+    # rasterizer sees it, so geometry wound counter-clockwise in model space
+    # arrives clockwise. Pairing a Y flip with CCW front faces culls exactly the
+    # faces that should be drawn, which reads as a model turned inside out.
+    rs.frontFace               = vk.FRONT_FACE_CLOCKWISE;
     rs.depthBiasEnable         = vk.FALSE;
     rs.depthBiasConstantFactor = 0.0;
     rs.depthBiasClamp          = 0.0;
@@ -577,11 +619,19 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
 pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u32) {
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.handle);
 
+    # A POSITIVE HEIGHT, NOT A FLIPPED VIEWPORT. There are two ways to reach
+    # Vulkan's downward Y: negate it in the projection, or give the viewport a
+    # negative height with y at the bottom. boom does the former (see
+    # boom.math.mat). Doing both cancels out, and the result looks correct on
+    # anything symmetrical about the horizontal midline, so it survives the
+    # obvious check and shows up on the first asymmetric scene.
     var vpt: vk.Viewport;
     vpt.x        = 0.0;
     vpt.y        = 0.0;
     vpt.width    = width::f32;
     vpt.height   = height::f32;
+    # Matching the [0, 1] clip depth the projections produce. A [-1, 1] range
+    # here would map the near half of every frustum outside the depth buffer.
     vpt.minDepth = 0.0;
     vpt.maxDepth = 1.0;
     vk.vkCmdSetViewport(cmd, 0, 1, ?vpt);

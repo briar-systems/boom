@@ -1,0 +1,270 @@
+# The pipeline cache: one pipeline per program and vertex layout.
+#
+# A GL program did not care what the vertex buffer looked like; the vertex array
+# object described the layout, and the same program drew a mesh with a tangent
+# and one without. Vulkan bakes the vertex input layout into the pipeline, so a
+# program and a layout together are what identifies a pipeline, and a mesh drawn
+# through a pipeline built for a different layout reads its attributes from the
+# wrong byte offsets.
+#
+# THAT LAYOUT IS NOT KNOWN UP FRONT. A .glb primitive carries whatever
+# attributes it happens to have: POSITION always, and NORMAL, TEXCOORD_0,
+# COLOR_0, TANGENT, JOINTS_0 and WEIGHTS_0 if the exporter wrote them. The
+# extracted format is packed in that order, so two models can differ in stride
+# and in every offset past the first attribute. Building the mesh pipeline once
+# at renderer init against a fixed layout is therefore correct only for assets
+# that happen to match it, and wrong without any diagnostic for the rest.
+#
+# So pipelines are built on demand and kept, keyed by the program and the
+# format. The cache is a linear scan because the count is small: a game has a
+# handful of distinct vertex layouts, not hundreds, and a scan over eight
+# entries costs less than hashing them.
+#
+# EVERY PIPELINE SHARES ONE DESCRIPTOR SET LAYOUT. See
+# boom.graphics.pipeline.set_layout_full for why. It is what lets one descriptor
+# pool and one set per draw serve every program.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.vertex_format_eq;
+use boom.graphics.vertex.vertex_format_standard;
+use boom.graphics.vertex.vertex_format_sprite;
+use boom.graphics.pipeline.Pipeline;
+use boom.graphics.pipeline.PipelineDesc;
+use boom.graphics.pipeline.SetLayout;
+use boom.graphics.pipeline.pipeline_init;
+use boom.graphics.pipeline.pipeline_dnit;
+use boom.graphics.pipeline.pipeline_desc_2d;
+use boom.graphics.pipeline.pipeline_desc_3d;
+use boom.graphics.pipeline.set_layout_full;
+use boom.graphics.spirv.LIT_FRAG_SPV;
+use boom.graphics.spirv.MESH_VERT_SPV;
+use boom.graphics.spirv.SKINNED_VERT_SPV;
+use boom.graphics.spirv.SPRITE_VERT_SPV;
+use boom.graphics.spirv.SPRITE_FRAG_SPV;
+
+# Which pair of shader modules a pipeline uses.
+pub def Program: u8;
+
+# mesh_vert plus lit_frag: unskinned lit geometry.
+pub val PROGRAM_MESH:    Program = 0;
+# skinned_vert plus lit_frag: geometry placed by a joint palette.
+pub val PROGRAM_SKINNED: Program = 1;
+# sprite_vert plus sprite_frag: a textured, tinted quad in pixel space.
+pub val PROGRAM_SPRITE:  Program = 2;
+
+# The most distinct program-and-layout combinations one renderer keeps.
+#
+# A miss past this is reported rather than evicting: eviction would destroy a
+# pipeline a recorded command buffer still references, and a game with more
+# than sixteen distinct vertex layouts has a content problem worth surfacing.
+pub val MAX_PIPELINES: usize = 16;
+
+# One cached pipeline and the key it was built for.
+# ---
+# program:  Which shader pair it uses.
+# format:   The vertex layout it was built against.
+# pipeline: The built pipeline.
+# live:     Whether this entry holds a pipeline.
+pub rec CacheEntry {
+    program:  Program;
+    format:   VertexFormat;
+    pipeline: Pipeline;
+    live:     bool;
+}
+
+# The renderer's pipelines.
+# ---
+# entries: The cached pipelines, first `count` live.
+# count:   How many entries are live.
+# pass:    The render pass every pipeline here was built against.
+# missed:  Lookups refused because the cache was full, since renderer init.
+pub rec PipelineCache {
+    entries: [16]CacheEntry;
+    count:   usize;
+    pass:    vk.RenderPass;
+    missed:  usize;
+}
+
+# Start an empty cache bound to a render pass.
+#
+# A pipeline is only usable in a render pass compatible with the one it was
+# built against, so the pass is part of the cache's identity rather than a
+# per-lookup argument. A renderer that rebuilds its pass must clear the cache.
+pub fun cache_init(c: *PipelineCache, pass: vk.RenderPass) {
+    c.count  = 0;
+    c.missed = 0;
+    c.pass   = pass;
+    var i: usize = 0;
+    for (i < MAX_PIPELINES) { c.entries[i].live = false; i = i + 1; }
+}
+
+# Find a live entry's index, or MAX_PIPELINES when there is none.
+#
+# Separated from the lookup so the hit path is testable without a device.
+pub fun cache_find(c: *PipelineCache, program: Program, f: *VertexFormat) usize {
+    var i: usize = 0;
+    for (i < c.count) {
+        if (c.entries[i].live && c.entries[i].program == program) {
+            if (vertex_format_eq(?c.entries[i].format, f)) { ret i; }
+        }
+        i = i + 1;
+    }
+    ret MAX_PIPELINES;
+}
+
+# The description and shader modules a program is built with.
+#
+# Kept beside the Program constants rather than at the call sites, so adding a
+# program is one entry here and not a new branch in every caller.
+fun program_desc(program: Program) PipelineDesc {
+    if (program == PROGRAM_SPRITE) { ret pipeline_desc_2d(); }
+    ret pipeline_desc_3d();
+}
+
+# Build and store the pipeline for a program and format.
+fun cache_add(c: *PipelineCache, v: *Vk, program: Program, f: *VertexFormat) Result[usize, Error] {
+    if (c.count >= MAX_PIPELINES) {
+        c.missed = c.missed + 1;
+        ret err[usize, Error](error("the pipeline cache is full"));
+    }
+
+    var vert: *u8  = ?MESH_VERT_SPV[0];
+    var vlen: usize = $length_of(MESH_VERT_SPV);
+    var frag: *u8  = ?LIT_FRAG_SPV[0];
+    var flen: usize = $length_of(LIT_FRAG_SPV);
+
+    if (program == PROGRAM_SKINNED) {
+        vert = ?SKINNED_VERT_SPV[0];
+        vlen = $length_of(SKINNED_VERT_SPV);
+    }
+    or (program == PROGRAM_SPRITE) {
+        vert = ?SPRITE_VERT_SPV[0];
+        vlen = $length_of(SPRITE_VERT_SPV);
+        frag = ?SPRITE_FRAG_SPV[0];
+        flen = $length_of(SPRITE_FRAG_SPV);
+    }
+
+    val i: usize = c.count;
+    var desc: PipelineDesc = program_desc(program);
+    var lay:  SetLayout    = set_layout_full();
+    val r: Result[bool, Error] = pipeline_init(?c.entries[i].pipeline, v, c.pass, f, ?desc,
+                                               vert, vlen, frag, flen, ?lay);
+    if (is_err[bool, Error](r)) {
+        ret err[usize, Error](unwrap_err[bool, Error](r));
+    }
+
+    c.entries[i].program = program;
+    c.entries[i].format  = @f;
+    c.entries[i].live    = true;
+    c.count = c.count + 1;
+    ret ok[usize, Error](i);
+}
+
+# The pipeline for a program and vertex layout, building it on first use.
+#
+# Returns nil when the cache is full or the pipeline could not be built, which
+# the caller reports as a dropped draw. Returning a wrong pipeline instead would
+# draw geometry from the wrong byte offsets, which looks like corrupt art rather
+# than a missing one.
+# ---
+# c:       the cache
+# v:       the device
+# program: which shader pair the draw needs
+# f:       the mesh's vertex layout
+# ret:     the pipeline, or nil
+pub fun cache_get(c: *PipelineCache, v: *Vk, program: Program, f: *VertexFormat) *Pipeline {
+    var i: usize = cache_find(c, program, f);
+    if (i != MAX_PIPELINES) { ret ?c.entries[i].pipeline; }
+
+    val r: Result[usize, Error] = cache_add(c, v, program, f);
+    if (is_err[usize, Error](r)) { ret nil; }
+    ret ?c.entries[unwrap_ok[usize, Error](r)].pipeline;
+}
+
+# Destroy every pipeline the cache holds.
+pub fun cache_dnit(c: *PipelineCache, v: *Vk) {
+    var i: usize = 0;
+    for (i < c.count) {
+        if (c.entries[i].live) {
+            pipeline_dnit(?c.entries[i].pipeline, v);
+            c.entries[i].live = false;
+        }
+        i = i + 1;
+    }
+    c.count = 0;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Building a pipeline needs a device, so these cover the key: a lookup that
+# matches the wrong entry hands a draw a pipeline built for another layout,
+# which reads every attribute past the first from the wrong offset.
+
+test "cache: an empty cache finds nothing" {
+    var c: PipelineCache;
+    cache_init(?c, nil);
+    var f: VertexFormat = vertex_format_standard();
+    if (cache_find(?c, PROGRAM_MESH, ?f) != MAX_PIPELINES) { ret 1; }
+    ret 0;
+}
+
+test "cache: an entry matches only its own program and format" {
+    var c: PipelineCache;
+    cache_init(?c, nil);
+
+    # Populated directly rather than through cache_add, which needs a device.
+    c.entries[0].program = PROGRAM_MESH;
+    c.entries[0].format  = vertex_format_standard();
+    c.entries[0].live    = true;
+    c.count = 1;
+
+    var std_fmt: VertexFormat = vertex_format_standard();
+    if (cache_find(?c, PROGRAM_MESH, ?std_fmt) != 0) { ret 1; }
+
+    # Same layout, different program. Matching here would draw a skinned mesh
+    # with the unskinned shader, which ignores the joints entirely.
+    if (cache_find(?c, PROGRAM_SKINNED, ?std_fmt) != MAX_PIPELINES) { ret 2; }
+
+    # Same program, different layout. Matching here is the bug this cache
+    # exists to prevent.
+    var spr_fmt: VertexFormat = vertex_format_sprite();
+    if (cache_find(?c, PROGRAM_MESH, ?spr_fmt) != MAX_PIPELINES) { ret 3; }
+    ret 0;
+}
+
+test "cache: a dead entry is not matched" {
+    var c: PipelineCache;
+    cache_init(?c, nil);
+    c.entries[0].program = PROGRAM_MESH;
+    c.entries[0].format  = vertex_format_standard();
+    c.entries[0].live    = false;
+    c.count = 1;
+    var f: VertexFormat = vertex_format_standard();
+    if (cache_find(?c, PROGRAM_MESH, ?f) != MAX_PIPELINES) { ret 1; }
+    ret 0;
+}
+
+test "cache: teardown clears the entries" {
+    var c: PipelineCache;
+    cache_init(?c, nil);
+    c.count = 0;
+    var v: Vk;
+    v.ready = false;
+    cache_dnit(?c, ?v);
+    if (c.count != 0) { ret 1; }
+    ret 0;
+}

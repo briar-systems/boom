@@ -49,6 +49,8 @@ use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture;
+use boom.graphics.image.COLOR_SRGB;
+use boom.graphics.device.Device;
 use boom.graphics.texture.texture_delete;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
@@ -109,7 +111,7 @@ pub rec Font {
 # a:      allocator for the file bytes and the atlas, all released before return
 # vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
 # pixels: pixel height to rasterize at
-pub fun font_load(a: *allo.Allocator, vpath: str, pixels: f32) Result[Font, Error] {
+pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Result[Font, Error] {
     var f: Font;
     f.valid = false;
 
@@ -192,7 +194,17 @@ pub fun font_load(a: *allo.Allocator, vpath: str, pixels: f32) Result[Font, Erro
         g = g + 1;
     }
 
-    f.atlas = texture(rgba, aw::i32, ah::i32);
+    # sRGB. The atlas leaves RGB white and stores coverage in alpha, and Vulkan's
+    # sRGB formats leave alpha linear, so the transfer function touches only the
+    # white and coverage arrives at the shader exactly as rasterized.
+    val tr: Result[Texture, Error] = texture(d, rgba, aw::i32, ah::i32, COLOR_SRGB);
+    if (is_err[Texture, Error](tr)) {
+        allo.deallocate[u8](a, cov, cell * cell);
+        allo.deallocate[u8](a, rgba, aw * ah * 4);
+        vector.dnit[u8](?bytes);
+        ret err[Font, Error](unwrap_err[Texture, Error](tr));
+    }
+    f.atlas = unwrap_ok[Texture, Error](tr);
     f.valid = true;
 
     allo.deallocate[u8](a, cov, cell * cell);
@@ -224,9 +236,9 @@ fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, co
 }
 
 # Release the atlas texture
-pub fun font_delete(f: *Font) {
+pub fun font_delete(d: *Device, f: *Font) {
     if (!f.valid) { ret; }
-    texture_delete(?f.atlas);
+    texture_delete(d, ?f.atlas);
     f.valid = false;
 }
 

@@ -17,7 +17,7 @@ use inp: boom.input;
 use phy: boom.physics;
 use boom.window.window_should_close;
 use boom.window.window_poll;
-use boom.window.window_swap;
+use boom.window.window_refresh_size;
 use boom.clock.clock_tick;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
@@ -35,11 +35,12 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
 # calls f_init once, then loops until the context is stopped or the
 # window is closed: each frame polls input, advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
-# ctx.alpha, renders via f_draw, and presents once. calls f_dnit once on
-# exit. absent hooks are skipped. the loop owns presentation: f_draw may
-# drive any number of renderers (each finalizing with
-# boom.graphics.renderer.renderer_end_frame) into the frame, and the loop
-# swaps the window once afterward.
+# ctx.alpha, and renders via f_draw. calls f_dnit once on exit. absent
+# hooks are skipped.
+#
+# the loop does not present: a Renderer brackets its own frame with an
+# acquire and a present. what the loop owns is the timing, the input fold,
+# and keeping ctx.window's size true.
 # ---
 # ctx: initialized engine context to run
 # app: lifecycle hooks to drive
@@ -48,6 +49,11 @@ pub fun run(ctx: *Context, app: *App) {
 
     for (ctx.running && !window_should_close(?ctx.window)) {
         window_poll();
+        # A window is resizable, so its size is not fixed at open. Refreshing
+        # here rather than in a callback means a game reading ctx.window.width
+        # during a tick or a draw sees one value for the whole frame, instead
+        # of one that can change between two draws in the same frame.
+        window_refresh_size(?ctx.window);
         clock_tick(?ctx.clock);
 
         timestep_add(?ctx.step, ctx.clock.delta);
@@ -64,8 +70,12 @@ pub fun run(ctx: *Context, app: *App) {
         }
 
         ctx.alpha = timestep_alpha(?ctx.step);
+        # The renderer brackets its own frame with an acquire and a present,
+        # so the loop no longer swaps the window after drawing. Under GL the
+        # swap was the loop's because several renderers could composite into
+        # one frame; a Vulkan frame is one command buffer between one acquire
+        # and one present, and that bracket belongs to the renderer.
         invoke(app.f_draw, ctx);
-        window_swap(?ctx.window);
     }
 
     invoke(app.f_dnit, ctx);

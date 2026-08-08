@@ -41,6 +41,7 @@ use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture_load;
+use boom.graphics.device.Device;
 use vfs: boom.vfs;
 use boom.graphics.texture.texture_delete;
 
@@ -157,7 +158,7 @@ fun handle_of(s: *Assets, i: usize) Handle {
 # The second request for a path performs no read, no decode, and no upload.
 # It takes a reference, so a caller releasing its own handle does not pull the
 # resource out from under another holder.
-pub fun assets_texture(s: *Assets, path: str) Result[Handle, Error] {
+pub fun assets_texture(s: *Assets, d: *Device, path: str) Result[Handle, Error] {
     # Keyed on the VIRTUAL path, not the resolved one. identity is what the
     # game named, so two requests for `res://hero.qoi` dedup even if the root
     # moved between them, and a cached entry does not silently become a
@@ -183,7 +184,7 @@ pub fun assets_texture(s: *Assets, path: str) Result[Handle, Error] {
     }
     val real: str = unwrap_ok[str, str](pr);
 
-    val tr: Result[Texture, Error] = texture_load(real);
+    val tr: Result[Texture, Error] = texture_load(d, real);
     text.str_free(s.a, real);
     if (is_err[Texture, Error](tr)) {
         # The key is freed rather than left interned, so a failed load does not
@@ -216,10 +217,10 @@ pub fun assets_texture_get(s: *Assets, h: Handle) *Texture {
 #
 # Returns true when the resource was actually released. releasing bumps the
 # slot's generation, so every outstanding handle to it stops resolving.
-pub fun assets_release(s: *Assets, h: Handle) bool {
+pub fun assets_release(s: *Assets, d: *Device, h: Handle) bool {
     if (!release_slot(s, h)) { ret false; }
     val i: usize = h.slot - 1;
-    texture_delete(?s.textures[i].texture);
+    texture_delete(d, ?s.textures[i].texture);
     ret true;
 }
 

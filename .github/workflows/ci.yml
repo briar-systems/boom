@@ -51,13 +51,33 @@ jobs:
       # A uniform block is a contract between two separately compiled programs
       # and nothing at runtime checks it. A member at the wrong offset makes the
       # shader read whatever bytes are there, with no diagnostic anywhere.
+      # A glob over an empty directory makes the loop body run zero times and
+      # the step pass, which is exactly the state a failed shader build leaves.
       - name: Validate the emitted SPIR-V
         run: |
           set -euo pipefail
+          count=$(ls res/spv/*.spv | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "expected 5 SPIR-V modules in res/spv, found $count"
+            exit 1
+          fi
           for f in res/spv/*.spv; do spirv-val "$f"; done
 
       - name: Check uniform blocks match their CPU records
-        run: ./tools/check-uniform-layout.sh
+        run: python3 ./tools/check-uniform-layout.py
 
       - name: Test
         run: mach test .
+
+      # The examples are the only check on the shape of the public API: nothing
+      # inside boom calls renderer_init or pass_draw_material the way a game
+      # does. They resolve boom by path, so this builds them against the branch
+      # rather than against what is already pushed.
+      - name: Build the examples
+        run: |
+          set -euo pipefail
+          for e in examples/*/; do
+            echo "::group::$e"
+            (cd "$e" && mach dep pull . && mach build .)
+            echo "::endgroup::"
+          done

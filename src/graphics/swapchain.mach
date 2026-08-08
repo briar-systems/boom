@@ -67,16 +67,35 @@ fun pick_format(v: *Vk, out: *vk.SurfaceFormatKHR) bool {
         ret false;
     }
 
+    # AN sRGB SURFACE IS WHAT MAKES THE COLOUR PIPELINE CLOSE. Textures are
+    # sampled through sRGB image formats, so the shader works in linear light;
+    # an sRGB surface format is what encodes the result on write. Either variant
+    # does that, and every desktop driver offers one, so both are preferred over
+    # whatever happens to be first.
     var i: u32 = 0;
     for (i < cap) {
-        if (formats[i].format == vk.FORMAT_B8G8R8A8_SRGB) {
+        if (formats[i].format == vk.FORMAT_B8G8R8A8_SRGB
+            || formats[i].format == vk.FORMAT_R8G8B8A8_SRGB) {
             @out = formats[i];
             ret true;
         }
         i = i + 1;
     }
+
+    # A surface offering no sRGB format at all. Taking the first one keeps the
+    # renderer working; it does not encode, so colours come out darker than
+    # authored. Reporting it is the caller's job, since there is nothing better
+    # to do about it here.
     @out = formats[0];
     ret true;
+}
+
+# Whether a surface format encodes sRGB on write.
+#
+# Pure, and the thing worth asserting: the whole colour pipeline assumes the
+# encode happens exactly once, at the surface.
+pub fun format_is_srgb(format: i32) bool {
+    ret format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_R8G8B8A8_SRGB;
 }
 
 # Clamp a requested extent into what the surface allows.
@@ -241,6 +260,18 @@ pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32) Result
 #
 # Creation needs a device and a surface, so these cover the extent clamp, which
 # is pure and is where a wrong answer produces a swapchain the driver rejects.
+
+test "swapchain: both sRGB surface formats are recognized" {
+    # Textures are sampled through sRGB image formats, so the shader works in
+    # linear light and the surface is what encodes on write. Recognizing only
+    # one of the two variants would silently pick a UNORM format on a driver
+    # that offers the other, and every colour would come out dark.
+    if (!format_is_srgb(vk.FORMAT_B8G8R8A8_SRGB))  { ret 1; }
+    if (!format_is_srgb(vk.FORMAT_R8G8B8A8_SRGB))  { ret 2; }
+    if (format_is_srgb(vk.FORMAT_B8G8R8A8_UNORM))  { ret 3; }
+    if (format_is_srgb(vk.FORMAT_R8G8B8A8_UNORM))  { ret 4; }
+    ret 0;
+}
 
 test "swapchain: a surface with a fixed extent overrides the request" {
     var caps: vk.SurfaceCapabilitiesKHR;

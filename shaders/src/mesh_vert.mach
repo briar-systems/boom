@@ -1,7 +1,8 @@
 # Mesh vertex stage.
 #
 # Transforms a position by a model-view-projection matrix and a normal by the
-# model matrix, passing the result to the fragment stage.
+# model matrix, and passes the texture coordinate through unchanged, since a UV
+# is already in the space the fragment stage samples in.
 #
 # Both matrices arrive as four f32x4 columns rather than as a matrix type, which
 # Mach does not have. See mul_point below for why the product is a combination of
@@ -24,9 +25,12 @@ rec Matrices {
 
 #[uniform(0, 0)] var matrices: Matrices;
 
-#[input(0)]  var in_position: f32x3;
-#[input(1)]  var in_normal:   f32x3;
-#[output(0)] var out_normal:  f32x3;
+#[input(0)] var in_position: f32x3;
+#[input(1)] var in_normal:   f32x3;
+#[input(2)] var in_uv:       f32x2;
+
+#[output(0)] var out_normal: f32x3;
+#[output(1)] var out_uv:     f32x2;
 
 #[builtin("position")] var position: f32x4;
 
@@ -101,4 +105,5 @@ fun vert_main() {
     # rotates with the object but does not move with it.
     out_normal = mul_dir(matrices.model_0, matrices.model_1,
                          matrices.model_2, in_normal);
+    out_uv = in_uv;
 }

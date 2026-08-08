@@ -1,6 +1,6 @@
 # scalar-interim 4x4 matrix type for the shared math layer
 #
-# Mat4 stores its 16 elements column-major, the layout OpenGL expects,
+# Mat4 stores its 16 elements column-major, the layout std140 expects,
 # so a Mat4 uploads to a uniform without transposing. element (row, col)
 # lives at index col * 4 + row. engine-internal, to be replaced by
 # mach-math; see boom.math.scalar.
@@ -111,10 +111,19 @@ pub fun mat4_from_quat(q: Quat) Mat4 {
     ret r;
 }
 
-# a right-handed perspective projection
+# a right-handed perspective projection onto the Vulkan clip volume
 #
-# maps a vertical field of view and aspect ratio to the OpenGL clip
-# volume with depth in [-1, 1].
+# maps a vertical field of view and aspect ratio to clip space with depth in
+# [0, 1] and Y increasing downward, which is what Vulkan defines. This is not
+# the OpenGL convention and the difference is not cosmetic: under GL's [-1, 1]
+# depth the near half of the view volume maps to negative Z and is clipped
+# away, and under GL's upward Y everything renders vertically mirrored.
+#
+# THE Y FLIP REVERSES WINDING. Negating Y in the projection mirrors every
+# triangle as the rasterizer sees it, so a mesh wound counter-clockwise in
+# model space arrives clockwise. boom.graphics.pipeline sets frontFace to
+# CLOCKWISE for that reason; changing either one alone culls exactly the faces
+# that should be drawn, which reads as a model turned inside out.
 # ---
 # fovy:   vertical field of view in radians
 # aspect: viewport width divided by height
@@ -125,19 +134,19 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
     val f: f32 = 1.0 / tanf(fovy * 0.5);
     var r: Mat4;
     r.m[0]  = f / aspect;
-    r.m[5]  = f;
-    r.m[10] = (far + near) / (near - far);
+    r.m[5]  = 0.0 - f;
+    r.m[10] = far / (near - far);
     r.m[11] = 0.0 - 1.0;
-    r.m[14] = (2.0 * far * near) / (near - far);
+    r.m[14] = (far * near) / (near - far);
     ret r;
 }
 
-# a right-handed orthographic projection
+# a right-handed orthographic projection onto the Vulkan clip volume
 #
-# maps an axis-aligned box to the OpenGL clip volume with depth in
-# [-1, 1]. a 2D pass builds one over the framebuffer in pixel
-# coordinates, e.g. left 0, right width, so screen positions map
-# directly to pixels.
+# maps an axis-aligned box to clip space with depth in [0, 1] and Y increasing
+# downward. a 2D pass builds one over the framebuffer in pixel coordinates as
+# mat4_orthographic(0, width, height, 0, -1, 1), so a sprite at y = 0 is at the
+# top of the window and screen positions map directly to pixels.
 # ---
 # left:   left clip plane
 # right:  right clip plane
@@ -149,11 +158,14 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
 pub fun mat4_orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
     var r: Mat4;
     r.m[0]  = 2.0 / (right - left);
-    r.m[5]  = 2.0 / (top - bottom);
-    r.m[10] = 0.0 - 2.0 / (far - near);
+    # Negated against the OpenGL form, because Vulkan's Y increases downward.
+    r.m[5]  = 0.0 - 2.0 / (top - bottom);
+    # Depth maps to [0, 1], not [-1, 1]. Under the OpenGL form everything from
+    # the near plane to the midpoint lands at a negative Z and is clipped.
+    r.m[10] = 0.0 - 1.0 / (far - near);
     r.m[12] = 0.0 - (right + left) / (right - left);
-    r.m[13] = 0.0 - (top + bottom) / (top - bottom);
-    r.m[14] = 0.0 - (far + near) / (far - near);
+    r.m[13] = (top + bottom) / (top - bottom);
+    r.m[14] = 0.0 - near / (far - near);
     r.m[15] = 1.0;
     ret r;
 }
@@ -254,21 +266,57 @@ test "mat: scale lands on the diagonal" {
     ret 0;
 }
 
-test "mat: perspective fills the expected entries" {
-    var p: Mat4 = mat4_perspective(1.5707963, 1.0, 0.1, 100.0);
+test "mat: perspective maps the clip planes to the Vulkan depth range" {
+    # Vulkan clip space is z in [0, 1], not OpenGL's [-1, 1]. Under the OpenGL
+    # form everything from the near plane to the midpoint of the frustum lands
+    # at a negative z and is clipped away, which looks like the near half of
+    # every scene being invisible rather than like a wrong matrix.
+    val near: f32 = 0.1;
+    val far:  f32 = 100.0;
+    var p: Mat4 = mat4_perspective(1.5707963, 1.0, near, far);
     if (p.m[11] != 0.0 - 1.0) { ret 1; }
-    if (p.m[15] != 0.0) { ret 2; }
-    if (p.m[5] <= 0.0) { ret 3; }
+    if (p.m[15] != 0.0)       { ret 2; }
+
+    # A point on the near plane is at eye z = -near, and w is -z_eye.
+    val zn: f32 = (p.m[10] * (0.0 - near) + p.m[14]) / near;
+    if (zn > 0.0001 || zn < 0.0 - 0.0001) { ret 3; }
+
+    # A point on the far plane maps to 1.
+    val zf: f32 = (p.m[10] * (0.0 - far) + p.m[14]) / far;
+    if (zf - 1.0 > 0.0001 || zf - 1.0 < 0.0 - 0.0001) { ret 4; }
+
+    # Y is negated, because Vulkan's Y increases downward. Positive here would
+    # render every scene vertically mirrored.
+    if (p.m[5] >= 0.0) { ret 5; }
     ret 0;
 }
 
-test "mat: orthographic maps the box corners to the clip cube" {
-    var p: Mat4 = mat4_orthographic(0.0, 800.0, 600.0, 0.0, 0.0 - 1.0, 1.0);
-    val x: f32 = p.m[0] * 800.0 + p.m[12];
-    val y: f32 = p.m[5] * 0.0 + p.m[13];
-    if (x - 1.0 > 0.0001 || x - 1.0 < 0.0 - 0.0001) { ret 1; }
-    if (y - 1.0 > 0.0001 || y - 1.0 < 0.0 - 0.0001) { ret 2; }
-    if (p.m[15] != 1.0) { ret 3; }
+test "mat: orthographic maps a pixel box to the Vulkan clip cube" {
+    # The projection a 2D pass builds: origin at the top left, y growing down
+    # the window, depth in [-1, 1] eye space mapping to [0, 1] clip space.
+    val w: f32 = 800.0;
+    val h: f32 = 600.0;
+    var p: Mat4 = mat4_orthographic(0.0, w, h, 0.0, 0.0 - 1.0, 1.0);
+    if (p.m[15] != 1.0) { ret 1; }
+
+    val x0: f32 = p.m[0] * 0.0 + p.m[12];
+    val x1: f32 = p.m[0] * w   + p.m[12];
+    if (x0 + 1.0 > 0.0001 || x0 + 1.0 < 0.0 - 0.0001) { ret 2; }
+    if (x1 - 1.0 > 0.0001 || x1 - 1.0 < 0.0 - 0.0001) { ret 3; }
+
+    # y = 0 is the TOP of the window, which is clip -1 in Vulkan. The OpenGL
+    # form puts it at +1, so every sprite ends up mirrored about the midline
+    # and a full-window blit still looks plausible.
+    val y0: f32 = p.m[5] * 0.0 + p.m[13];
+    val y1: f32 = p.m[5] * h   + p.m[13];
+    if (y0 + 1.0 > 0.0001 || y0 + 1.0 < 0.0 - 0.0001) { ret 4; }
+    if (y1 - 1.0 > 0.0001 || y1 - 1.0 < 0.0 - 0.0001) { ret 5; }
+
+    # Depth: eye z = -near maps to 0 and eye z = -far maps to 1.
+    val z0: f32 = p.m[10] * 1.0 + p.m[14];
+    val z1: f32 = p.m[10] * (0.0 - 1.0) + p.m[14];
+    if (z0 > 0.0001 || z0 < 0.0 - 0.0001)             { ret 6; }
+    if (z1 - 1.0 > 0.0001 || z1 - 1.0 < 0.0 - 0.0001) { ret 7; }
     ret 0;
 }
 
