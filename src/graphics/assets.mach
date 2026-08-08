@@ -45,6 +45,7 @@ use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture_load;
+use vfs: boom.vfs;
 use boom.graphics.texture.texture_delete;
 
 # how many resources of one kind a store holds
@@ -161,6 +162,10 @@ fun handle_of(s: *Assets, i: usize) Handle {
 # it takes a reference, so a caller releasing its own handle does not pull the
 # resource out from under another holder.
 pub fun assets_texture(s: *Assets, path: str) Result[Handle, Error] {
+    # keyed on the VIRTUAL path, not the resolved one. identity is what the
+    # game named, so two requests for `res://hero.qoi` dedup even if the root
+    # moved between them, and a cached entry does not silently become a
+    # different file when a dev repoints res_root.
     val hit: usize = find_texture(s, path);
     if (hit != CAPACITY) {
         s.textures[hit].refs = s.textures[hit].refs + 1;
@@ -173,7 +178,17 @@ pub fun assets_texture(s: *Assets, path: str) Result[Handle, Error] {
     val kr: Result[str, str] = text.str_dup(s.a, path);
     if (is_err[str, str](kr)) { ret err[Handle, Error](error(unwrap_err[str, str](kr))); }
 
-    val tr: Result[Texture, Error] = texture_load(path);
+    # resolution happens here, at load, so the store holds virtual keys and
+    # the filesystem sees only real paths
+    val pr: Result[str, str] = vfs.vfs_resolve(s.a, path);
+    if (is_err[str, str](pr)) {
+        text.str_free(s.a, unwrap_ok[str, str](kr));
+        ret err[Handle, Error](error(unwrap_err[str, str](pr)));
+    }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val tr: Result[Texture, Error] = texture_load(real);
+    text.str_free(s.a, real);
     if (is_err[Texture, Error](tr)) {
         # the key is freed rather than left interned, so a failed load does not
         # poison the path against a later retry
