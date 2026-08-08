@@ -61,7 +61,7 @@ use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.swapchain_init;
 use boom.graphics.swapchain.swapchain_rebuild;
 use boom.graphics.swapchain.swapchain_dnit;
-use boom.graphics.swapchain.format_is_srgb;
+use boom.graphics.vk.format_is_srgb;
 use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.frame_init;
 use boom.graphics.frame.frame_begin;
