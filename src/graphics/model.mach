@@ -40,6 +40,7 @@ use boom.graphics.animation.INTERP_LINEAR;
 use boom.graphics.animation.INTERP_STEP;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
+use vfs: boom.vfs;
 use boom.math.vec.Vec3;
 use boom.math.quat.Quat;
 use boom.math.mat.Mat4;
@@ -440,7 +441,17 @@ pub fun model_load(d: *Device, path: str) Result[Model, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    # THROUGH THE VFS, like every other loader. A game writes `res://art/x.qoi`
+    # and boom.vfs decides what that means; a raw path here would make the
+    # graphics loaders the only ones in the engine that do not, so the same
+    # spelling would work for a sound and fail for a texture.
+    val pr: Result[str, str] = vfs.vfs_resolve(?pa, path);
+    if (is_err[str, str](pr)) {
+        ret err[Model, Error](error(unwrap_err[str, str](pr)));
+    }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, real);
     if (is_err[vec.Vector[u8], str](br)) {
         ret err[Model, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }

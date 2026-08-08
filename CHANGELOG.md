@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - build: The compiled SPIR-V is committed under `res/spv/` instead of being gitignored. **boom could not be consumed as a git dependency at all**: the modules are `#[embed]`ed, an embed is not an edge in the build graph, so nothing ran the `build-shaders` step on a consumer's behalf and every `#[embed]` failed with "no such file or directory" (mach#2887). Every example resolves boom by path into a tree that had already been built locally, so all three passed CI for weeks while the library was unbuildable downstream. The first consumer that pulled it over git found it immediately.
 
   CI asserts the committed modules match a fresh build, which is the cost of committing a generated file and the reason the check had to exist.
+- graphics: `texture_load`, `mesh_load` and `model_load` resolve their path through `boom.vfs`. They took a raw filesystem path while `sound_load` and `font_load` resolved `res://`, so the same spelling loaded a sound and failed for a texture with nothing but "no such file or directory" to go on. A path with no scheme is still passed through unchanged.
 
 
 ### Added
