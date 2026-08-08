@@ -1,29 +1,29 @@
-# text rendering: a rasterized glyph atlas drawn through the sprite path
+# Text rendering: a rasterized glyph atlas drawn through the sprite path.
 #
 # mach-font parses TrueType and rasterizes a glyph into an 8-bit coverage
-# bitmap. it does not decide where glyphs live, how they are uploaded, or how
-# a string becomes draw calls -- those are an engine's job, and this is them.
+# bitmap. It does not decide where glyphs live, how they are uploaded, or how a
+# string becomes draw calls. Those are an engine's job.
 #
-# ONE ATLAS, ONE UPLOAD, ONE TEXTURE BIND. every glyph is rasterized once at
-# load into a single RGBA texture laid out as a grid of fixed cells. drawing a
-# string is then N sprite quads against one texture, so a frame counter costs
-# no per-frame rasterization and no texture thrash. rasterizing per draw is the
-# obvious implementation and it is why naive text rendering is slow.
+# Every glyph is rasterized once at load into a single RGBA texture laid out as
+# a grid of fixed cells. Drawing a string is then N sprite quads against one
+# texture, so a frame counter costs no per-frame rasterization and no texture
+# thrash. Rasterizing per draw is the obvious implementation and is why naive
+# text rendering is slow.
 #
-# COVERAGE IN THE ALPHA CHANNEL. mach-font writes 8-bit coverage; the atlas
-# stores it as white RGB with coverage as alpha, so the existing sprite shader
-# tints text by multiplying without needing a text-specific shader or a
-# single-channel texture format.
+# Coverage is stored in the alpha channel with RGB left white, so the existing
+# sprite shader tints text by multiplying. No text-specific shader and no
+# single-channel texture format is needed.
 #
-# A FIXED CELL GRID rather than tight packing. a tight packer buys atlas space
-# and costs a rectangle-packing algorithm plus per-glyph bookkeeping; at one
-# size and 95 glyphs the whole atlas is a few hundred kilobytes either way.
-# space is not the constraint here, so the simpler layout wins.
+# The atlas uses a fixed cell grid rather than tight packing. A tight packer
+# buys atlas space and costs a rectangle-packing algorithm plus per-glyph
+# bookkeeping. At one size and 95 glyphs the whole atlas is a few hundred
+# kilobytes either way, so space is not the constraint and the simpler layout
+# wins.
 #
-# ASCII 32..126 ONLY. that is a deliberate first cut and the limit is stated
-# rather than hidden: a codepoint outside the range draws nothing instead of
-# drawing a wrong glyph. wider coverage means a real cmap walk and a packer,
-# and neither changes the shapes here.
+# Coverage is ASCII 32 to 126. That is a deliberate first cut and the limit is
+# stated rather than hidden, because a codepoint outside the range draws
+# nothing instead of drawing a wrong glyph. Wider coverage needs a real cmap
+# walk and a packer, and neither changes the shapes here.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -56,18 +56,18 @@ use boom.graphics.renderer.Pass;
 use boom.graphics.renderer.pass_draw_sprite_uv;
 use boom.math.vec.Vec4;
 
-# first and last codepoint the atlas covers
+# First and last codepoint the atlas covers
 pub val FIRST_CP: u32 = 32;
 pub val LAST_CP:  u32 = 126;
 pub val GLYPH_COUNT: usize = 95;
 
-# scratch bounds for one glyph's outline, sized for the demanding glyphs in a
+# Scratch bounds for one glyph's outline, sized for the demanding glyphs in a
 # normal text face rather than the worst case in any font ever made
 val MAX_POINTS:   usize = 512;
 val MAX_CONTOURS: usize = 32;
 val MAX_EDGES:    usize = 1024;
 
-# one glyph's placement in the atlas and its metrics
+# One glyph's placement in the atlas and its metrics
 # ---
 # cell:    index into the atlas grid
 # advance: pen movement after drawing, in pixels
@@ -80,9 +80,9 @@ rec Glyph {
     h:       f32;
 }
 
-# a loaded face at one pixel size
+# A loaded face at one pixel size
 #
-# a face is rasterized for the size it was loaded at. drawing it larger
+# A face is rasterized for the size it was loaded at. drawing it larger
 # resamples the atlas and softens, which is the trade a bitmap atlas makes;
 # load a second Font for a second size.
 # ---
@@ -103,7 +103,7 @@ pub rec Font {
     valid:  bool;
 }
 
-# load a face and rasterize its atlas
+# Load a face and rasterize its atlas
 #
 # ---
 # a:      allocator for the file bytes and the atlas, all released before return
@@ -131,7 +131,7 @@ pub fun font_load(a: *allo.Allocator, vpath: str, pixels: f32) Result[Font, Erro
 
     val scale: f32 = finfo.scale_for_pixel_height(?face, pixels);
 
-    # cells are square and sized to the requested height plus a margin, so a
+    # Cells are square and sized to the requested height plus a margin, so a
     # descender or an accent cannot bleed into the neighbouring cell
     val cell: usize = (pixels::i64 + (pixels::i64 / 4) + 2)::usize;
     f.cell_w = cell;
@@ -201,7 +201,7 @@ pub fun font_load(a: *allo.Allocator, vpath: str, pixels: f32) Result[Font, Erro
     ret ok[Font, Error](f);
 }
 
-# copy one coverage bitmap into its atlas cell as white-with-alpha
+# Copy one coverage bitmap into its atlas cell as white-with-alpha
 #
 # RGB is left white and coverage becomes alpha, so the sprite shader's tint
 # multiply colours the text and no text-specific shader is needed.
@@ -223,20 +223,20 @@ fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, co
     }
 }
 
-# release the atlas texture
+# Release the atlas texture
 pub fun font_delete(f: *Font) {
     if (!f.valid) { ret; }
     texture_delete(?f.atlas);
     f.valid = false;
 }
 
-# the glyph slot for a codepoint, or GLYPH_COUNT when outside the atlas
+# The glyph slot for a codepoint, or GLYPH_COUNT when outside the atlas
 fun slot_of(cp: u32) usize {
     if (cp < FIRST_CP || cp > LAST_CP) { ret GLYPH_COUNT; }
     ret (cp - FIRST_CP)::usize;
 }
 
-# width of a string in pixels, without drawing it
+# Width of a string in pixels, without drawing it
 #
 # UI has to lay out before it draws, so this walks the same advances the draw
 # does. measuring by counting characters times a fixed width is wrong for any
@@ -254,7 +254,7 @@ pub fun text_measure(f: *Font, s: str) f32 {
     ret w;
 }
 
-# the source rect of a glyph's cell in the atlas, in normalized UV
+# The source rect of a glyph's cell in the atlas, in normalized UV
 fun cell_uv(f: *Font, slot: usize) Rect {
     val cols: usize = f.cols;
     val rows: usize = (GLYPH_COUNT + cols - 1) / cols;
@@ -263,7 +263,7 @@ fun cell_uv(f: *Font, slot: usize) Rect {
     ret rect(u, v, 1.0 / cols::f32, 1.0 / rows::f32);
 }
 
-# draw a string into a pass, returning the pen x after the last glyph
+# Draw a string into a pass, returning the pen x after the last glyph
 #
 # `x`/`y` are the top-left of the first cell in the pass's coordinate space,
 # which for an overlay pass is pixels. one sprite quad per glyph against one
@@ -284,7 +284,7 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     for (i < n) {
         val sl: usize = slot_of(s[i]::u32);
         if (sl != GLYPH_COUNT) {
-            # a space has an advance and no coverage, so skipping the quad
+            # A space has an advance and no coverage, so skipping the quad
             # saves a draw call per space without changing the layout
             if (f.glyphs[sl].w > 0.0) {
                 val dest: Rect = rect(pen, y, f.cell_w::f32, f.cell_h::f32);
@@ -299,11 +299,11 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
 
 # --------------------------------------------------------------------- tests
 #
-# rasterizing and uploading need a font file and a GL context, so these cover
+# Rasterizing and uploading need a font file and a GL context, so these cover
 # the layout arithmetic -- slot mapping, measurement, and atlas UVs -- which is
 # what a caller's positioning depends on and where an off-by-one is silent.
 
-# a face with known metrics, for layout tests that need no font file
+# A face with known metrics, for layout tests that need no font file
 fun test_font(advance: f32) Font {
     var f: Font;
     f.cell_w = 16;
@@ -323,7 +323,7 @@ fun test_font(advance: f32) Font {
 }
 
 test "text: a codepoint outside the atlas maps to no slot" {
-    # below the range, above it, and the boundaries themselves
+    # Below the range, above it, and the boundaries themselves
     if (slot_of(31) != GLYPH_COUNT)  { ret 1; }
     if (slot_of(127) != GLYPH_COUNT) { ret 1; }
     if (slot_of(32) != 0)            { ret 1; }
@@ -336,7 +336,7 @@ test "text: measuring walks advances, not character count" {
     if (text_measure(?f, "abc") != 21.0) { ret 1; }
     if (text_measure(?f, "") != 0.0)     { ret 1; }
 
-    # a codepoint outside the atlas contributes nothing rather than a default
+    # A codepoint outside the atlas contributes nothing rather than a default
     # width, so an unsupported character cannot silently shift a layout
     if (text_measure(?f, "a\tb") != 14.0) { ret 1; }
     ret 0;
@@ -358,7 +358,7 @@ test "text: atlas UVs tile the grid without overlap or gap" {
     if (first.w != 1.0 / 16.0)            { ret 1; }
     if (first.h != 1.0 / rows::f32)       { ret 1; }
 
-    # the cell after the first wraps to the next row at the column count, so a
+    # The cell after the first wraps to the next row at the column count, so a
     # miscomputed stride shows up here rather than as a subtly wrong glyph
     val col1:  Rect = cell_uv(?f, 1);
     if (col1.x != 1.0 / 16.0 || col1.y != 0.0) { ret 1; }
@@ -373,7 +373,7 @@ test "text: the last glyph's cell stays inside the atlas" {
     var f: Font = test_font(7.0);
     val rows: usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
     val last: Rect = cell_uv(?f, GLYPH_COUNT - 1);
-    # a cell running past 1.0 samples outside the texture and wraps, which
+    # A cell running past 1.0 samples outside the texture and wraps, which
     # renders a neighbouring glyph's edge into this one
     if (last.x + last.w > 1.0001) { ret 1; }
     if (last.y + last.h > 1.0001) { ret 1; }

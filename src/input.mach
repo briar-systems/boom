@@ -1,29 +1,28 @@
-# polled keyboard and mouse state, sampled at the fixed tick
+# Polled keyboard and mouse state, sampled at the fixed tick.
 #
-# the event queue answers "what happened, in what order", which is what UI and
-# text entry want. this answers "is W held right now", which is what movement,
-# aiming, and held-fire want. both are needed and neither replaces the other, so
-# this sits alongside boom.event rather than superseding it.
+# The event queue answers "what happened, in what order", which is what UI and
+# text entry need. This answers "is W held right now", which is what movement,
+# aiming, and held fire need. Both are required and neither replaces the other,
+# so this sits alongside boom.event rather than superseding it.
 #
-# WHY THE TICK, NOT THE FRAME. f_tick runs zero, one, or several times per
-# frame depending on how much time the accumulator holds, while the platform
-# delivers events once per frame. an edge query defined against the frame is
-# therefore wrong in both directions: at a low frame rate a press that should
-# be seen by one tick is seen by three, and at a high frame rate a frame with
-# no tick drops the press entirely. so events accumulate into a pending set as
-# they arrive, and the engine folds that set into the live state exactly once
-# per tick, immediately before f_tick. every press is observed by exactly one
-# tick, and none are lost to a frame that ticked zero times.
+# Edges belong to a tick, not a frame. f_tick runs zero, one, or several times
+# per frame depending on how much time the accumulator holds, while the
+# platform delivers events once per frame. An edge query defined against the
+# frame is therefore wrong in both directions. At a low frame rate a press that
+# should be seen by one tick is seen by three. At a high frame rate a frame
+# with no tick drops the press entirely. Events accumulate into a pending set
+# as they arrive, and the engine folds that set into the live state exactly
+# once per tick, immediately before f_tick.
 #
-# a press and release of the same key between two ticks -- a tap faster than
-# the tick rate -- reports BOTH edges on the next tick, with `down` ending
-# false. dropping one of them would silently eat fast input, which is the
-# failure players notice and developers cannot reproduce.
+# A press and release of the same key between two ticks, meaning a tap faster
+# than the tick rate, reports both edges on the next tick with `down` ending
+# false. Dropping either one silently eats fast input, which is the failure
+# players notice and developers cannot reproduce.
 #
-# KEY CODES ARE BOOM'S OWN. the platform's codes never reach a game: the
-# window layer maps them at the boundary (boom.window.map_key). a game that had
-# to name a key by its GLFW integer would be importing the windowing library
-# through the back door, which is exactly what the rest of this engine avoids.
+# Key codes are boom's own. The platform's codes never reach a game, because
+# the window layer maps them at the boundary in boom.window.map_key. A game
+# that had to name a key by its GLFW integer would be importing the windowing
+# library through the back door.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -33,10 +32,10 @@ use std.types.string.str;
 
 # ---------------------------------------------------------------- key codes
 
-# a boom key identifier: a dense index, not a platform scancode
+# A boom key identifier: a dense index, not a platform scancode
 pub def Key: i32;
 
-# not a key this engine names. mapping an unrecognized platform code yields
+# Not a key this engine names. mapping an unrecognized platform code yields
 # this, and every query on it is false, so an unmapped key is inert rather
 # than aliasing onto a real one.
 pub val KEY_UNKNOWN: Key = 0;
@@ -80,28 +79,28 @@ pub val KEY_F4:  Key = 56;  pub val KEY_F5:  Key = 57;  pub val KEY_F6:  Key = 5
 pub val KEY_F7:  Key = 59;  pub val KEY_F8:  Key = 60;  pub val KEY_F9:  Key = 61;
 pub val KEY_F10: Key = 62;  pub val KEY_F11: Key = 63;  pub val KEY_F12: Key = 64;
 
-# one past the highest key, sizing the state arrays
+# One past the highest key, sizing the state arrays
 pub val KEY_COUNT: usize = 65;
 
 # ------------------------------------------------------------ mouse buttons
 
-# a boom mouse button identifier
+# A boom mouse button identifier
 pub def Button: i32;
 
 pub val BUTTON_LEFT:   Button = 0;
 pub val BUTTON_RIGHT:  Button = 1;
 pub val BUTTON_MIDDLE: Button = 2;
 
-# one past the highest button, sizing the state arrays
+# One past the highest button, sizing the state arrays
 pub val BUTTON_COUNT: usize = 3;
 
 # ------------------------------------------------------------------- state
 
-# polled input state for the current tick
+# Polled input state for the current tick
 #
 # `down` is the live held state. `pressed` and `released` are the edges
 # belonging to the current tick and are true for exactly one tick each.
-# the `pend_*` fields accumulate between ticks and are folded in by
+# The `pend_*` fields accumulate between ticks and are folded in by
 # input_begin_tick; a game never reads them.
 # ---
 # key_down:      held state per key
@@ -144,7 +143,7 @@ pub rec Input {
     pend_scroll_y:     f64;
 }
 
-# a zeroed input state, nothing held and no edges
+# A zeroed input state, nothing held and no edges
 pub fun input_new() Input {
     var i: Input;
     var k: usize = 0;
@@ -168,12 +167,12 @@ pub fun input_new() Input {
 
 # ------------------------------------------------- engine-side accumulation
 #
-# called by the window layer as platform events arrive, and by the engine at
+# Called by the window layer as platform events arrive, and by the engine at
 # each tick boundary. a game calls none of these.
 
-# record a key transition. `down` is the new state.
+# Record a key transition. `down` is the new state.
 #
-# both edges are latched independently of the resulting state, so a press and
+# Both edges are latched independently of the resulting state, so a press and
 # release arriving between the same two ticks reports both rather than
 # cancelling out.
 pub fun input_key_event(i: *Input, k: Key, down: bool) {
@@ -183,7 +182,7 @@ pub fun input_key_event(i: *Input, k: Key, down: bool) {
     i.pend_key_down[k::usize] = down;
 }
 
-# record a mouse button transition. `down` is the new state.
+# Record a mouse button transition. `down` is the new state.
 pub fun input_button_event(i: *Input, b: Button, down: bool) {
     if (b < 0 || b::usize >= BUTTON_COUNT) { ret; }
     if (down) { i.pend_btn_pressed[b::usize] = true; }
@@ -191,7 +190,7 @@ pub fun input_button_event(i: *Input, b: Button, down: bool) {
     i.pend_btn_down[b::usize] = down;
 }
 
-# record an absolute cursor position, accumulating the movement since the
+# Record an absolute cursor position, accumulating the movement since the
 # last tick rather than the last event, so a game reading delta sees the whole
 # tick's motion regardless of how many move events composed it
 pub fun input_mouse_event(i: *Input, x: f64, y: f64) {
@@ -201,15 +200,15 @@ pub fun input_mouse_event(i: *Input, x: f64, y: f64) {
     i.pend_mouse_y = y;
 }
 
-# record a scroll increment, accumulated over the tick
+# Record a scroll increment, accumulated over the tick
 pub fun input_scroll_event(i: *Input, dx: f64, dy: f64) {
     i.pend_scroll_x = i.pend_scroll_x + dx;
     i.pend_scroll_y = i.pend_scroll_y + dy;
 }
 
-# fold everything accumulated since the last tick into the live state
+# Fold everything accumulated since the last tick into the live state
 #
-# called by the engine immediately before each f_tick. this is what makes an
+# Called by the engine immediately before each f_tick. this is what makes an
 # edge belong to exactly one tick: the pending edges become this tick's edges
 # and are then cleared, so a second tick in the same frame sees held state and
 # no edges, and a frame that ticks zero times leaves the pending set intact for
@@ -247,45 +246,45 @@ pub fun input_begin_tick(i: *Input) {
 
 # ------------------------------------------------------------ game queries
 
-# whether a key is held as of this tick
+# Whether a key is held as of this tick
 pub fun key_down(i: *Input, k: Key) bool {
     if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
     ret i.key_down[k::usize];
 }
 
-# whether a key went down during this tick, true for exactly one tick per press
+# Whether a key went down during this tick, true for exactly one tick per press
 pub fun key_pressed(i: *Input, k: Key) bool {
     if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
     ret i.key_pressed[k::usize];
 }
 
-# whether a key came up during this tick, true for exactly one tick per release
+# Whether a key came up during this tick, true for exactly one tick per release
 pub fun key_released(i: *Input, k: Key) bool {
     if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
     ret i.key_released[k::usize];
 }
 
-# whether a mouse button is held as of this tick
+# Whether a mouse button is held as of this tick
 pub fun button_down(i: *Input, b: Button) bool {
     if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
     ret i.btn_down[b::usize];
 }
 
-# whether a mouse button went down during this tick
+# Whether a mouse button went down during this tick
 pub fun button_pressed(i: *Input, b: Button) bool {
     if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
     ret i.btn_pressed[b::usize];
 }
 
-# whether a mouse button came up during this tick
+# Whether a mouse button came up during this tick
 pub fun button_released(i: *Input, b: Button) bool {
     if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
     ret i.btn_released[b::usize];
 }
 
-# an axis from two keys, -1.0, 0.0, or 1.0
+# An axis from two keys, -1.0, 0.0, or 1.0
 #
-# the shape movement code actually wants: `axis(inp, KEY_A, KEY_D)` rather than
+# The shape movement code actually wants: `axis(inp, KEY_A, KEY_D)` rather than
 # two queries and a subtraction at every call site. both held cancels to zero,
 # which is what a player pressing left and right together expects.
 pub fun axis(i: *Input, negative: Key, positive: Key) f32 {
@@ -305,7 +304,7 @@ test "input: a press is observed by exactly one tick" {
     if (!key_pressed(?i, KEY_W)) { ret 1; }
     if (!key_down(?i, KEY_W))    { ret 1; }
 
-    # the second tick of the same frame sees the key held, but the edge is
+    # The second tick of the same frame sees the key held, but the edge is
     # spent. a frame-scoped implementation fires it again here.
     input_begin_tick(?i);
     if (key_pressed(?i, KEY_W)) { ret 1; }
@@ -316,8 +315,8 @@ test "input: a press is observed by exactly one tick" {
 test "input: a press during a frame that ticks zero times is not lost" {
     var i: Input = input_new();
     input_key_event(?i, KEY_SPACE, true);
-    # no tick ran this frame: the accumulator held less than one step.
-    # nothing is folded, so nothing may be discarded either.
+    # No tick ran this frame: the accumulator held less than one step.
+    # Nothing is folded, so nothing may be discarded either.
     input_begin_tick(?i);
     if (!key_pressed(?i, KEY_SPACE)) { ret 1; }
     ret 0;
@@ -329,7 +328,7 @@ test "input: a tap faster than the tick reports both edges" {
     input_key_event(?i, KEY_SPACE, false);
 
     input_begin_tick(?i);
-    # both edges, and the key ends up. collapsing this to the net state eats
+    # Both edges, and the key ends up. collapsing this to the net state eats
     # the tap entirely, which is the bug a player feels and a developer cannot
     # reproduce.
     if (!key_pressed(?i, KEY_SPACE))  { ret 1; }
@@ -365,7 +364,7 @@ test "input: mouse delta accumulates over the whole tick, not the last event" {
     # 25 total, not the 5 of the final event
     if (i.mouse_dx != 25.0 || i.mouse_dy != 5.0) { ret 1; }
 
-    # delta resets per tick; position does not
+    # Delta resets per tick; position does not
     input_begin_tick(?i);
     if (i.mouse_dx != 0.0)  { ret 1; }
     if (i.mouse_x != 25.0)  { ret 1; }
@@ -389,7 +388,7 @@ test "input: an unmapped key is inert rather than aliasing" {
     input_begin_tick(?i);
     if (key_down(?i, KEY_UNKNOWN))    { ret 1; }
     if (key_pressed(?i, KEY_UNKNOWN)) { ret 1; }
-    # and no real key was disturbed
+    # And no real key was disturbed
     if (key_down(?i, KEY_A)) { ret 1; }
     ret 0;
 }

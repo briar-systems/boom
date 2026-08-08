@@ -1,6 +1,6 @@
 # SPIR-V shader modules, compiled from Mach.
 #
-# boom's shaders are written in Mach, compiled to SPIR-V by the build-shaders
+# Boom's shaders are written in Mach, compiled to SPIR-V by the build-shaders
 # step, and embedded here. The bytes are the same on every backend: Vulkan
 # consumes SPIR-V natively and GL 4.6 core accepts it through glShaderBinary
 # and glSpecializeShader, so a backend swap does not change a shader.
@@ -38,7 +38,7 @@ pub val FRAGMENT_ENTRY: str = "frag_main";
 
 # Build a program from two SPIR-V modules.
 #
-# glShaderBinary uploads the module and glSpecializeShader selects its entry
+# GlShaderBinary uploads the module and glSpecializeShader selects its entry
 # point and resolves specialization constants; only then can the shader be
 # compiled and linked. Passing SPIR-V to glShaderSource instead silently
 # treats it as GLSL text and fails at compile with an unhelpful message.

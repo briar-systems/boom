@@ -1,36 +1,35 @@
-# virtual paths, so a game never writes a filesystem path
+# Virtual paths, so a game never writes a filesystem path.
 #
-# a game names an asset `res://art/hero.qoi`, not `assets/art/hero.qoi` and
-# certainly not an absolute one. the scheme says what kind of location it is;
-# where that lands on disk is a deployment decision the game does not encode.
+# A game names an asset `res://art/hero.qoi`, not `assets/art/hero.qoi` and
+# certainly not an absolute path. The scheme says what kind of location it is.
+# Where that lands on disk is a deployment decision the game does not encode.
 #
-# WHY THIS IS NOT COSMETIC. a literal path bakes a layout into every call site,
-# so moving assets, renaming a directory, or shipping them beside the binary
-# instead of above it becomes a search-and-replace through game code. worse,
-# `user://` cannot be a literal at all: saves belong in a different place on
-# every OS, and a game that writes beside its executable is wrong on all three.
+# This is not cosmetic. A literal path bakes a layout into every call site, so
+# moving assets, renaming a directory, or shipping them beside the binary
+# instead of above it becomes a search and replace through game code. The
+# `user://` case cannot be a literal at all, because saves belong in a
+# different place on every OS and a game that writes beside its executable is
+# wrong on all three.
 #
-# THE SCHEMES
+# The schemes are:
 #
-#   res://   read-only game content, shipped with the build. defaults to `res`
+#   res://   Read-only game content shipped with the build. Defaults to `res`
 #            relative to the working directory.
-#   user://  writable per-user state: saves, settings, logs. defaults to the
-#            platform's own location, which differs per OS and is derived at
-#            first use rather than hardcoded.
+#   user://  Writable per-user state such as saves, settings, and logs.
+#            Defaults to the platform's own location, derived at first use.
 #
-# A BARE PATH WITH NO SCHEME IS PASSED THROUGH UNCHANGED. that is the escape
-# hatch for a tool or a test that genuinely means one specific file, and it is
-# deliberately the ugly option so game code does not reach for it by accident.
+# A bare path with no scheme passes through unchanged. That is the escape hatch
+# for a tool or a test that genuinely means one specific file, and it is
+# deliberately the ugly option so that game code does not reach for it.
 #
-# CHANGING THE ROOTS. `res_root` and `user_root` are plain globals. a game sets
-# them once at startup, before loading anything:
+# The roots are plain globals. A game sets them once at startup:
 #
 #     vfs.res_root = "data";
 #     vfs.user_root = "/opt/onslaughter/state";
 #
-# and a build can drive that from wherever it likes -- a manifest value, an
-# environment variable, a debug flag pointing at a source tree so assets reload
-# without a rebuild. registering additional schemes is `vfs_register`.
+# A build can drive that from a manifest value, an environment variable, or a
+# debug flag pointing at a source tree so that assets reload without a rebuild.
+# Registering further schemes is vfs_register.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -51,22 +50,22 @@ use page: std.allocator.page;
 use text: std.text.string;
 use env:  std.process.env;
 
-# the separator between a scheme and its path
+# The separator between a scheme and its path
 val MARK: str = "://";
 
-# where `res://` resolves
+# Where `res://` resolves
 #
-# read-only content shipped with the build. relative to the working directory
+# Read-only content shipped with the build. relative to the working directory
 # unless set to an absolute path.
 pub var res_root: str = "res";
 
-# where `user://` resolves
+# Where `user://` resolves
 #
-# empty means "derive from the platform at first use". set it to override that
+# Empty means "derive from the platform at first use". set it to override that
 # entirely, which is what a portable build or a test wants.
 pub var user_root: str = "";
 
-# how many extra schemes a game may register beyond res and user
+# How many extra schemes a game may register beyond res and user
 pub val MAX_SCHEMES: usize = 8;
 
 rec Extra {
@@ -78,9 +77,9 @@ rec Extra {
 var extras: [8]Extra;
 var extra_count: usize = 0;
 
-# register or replace a scheme beyond the built-in two
+# Register or replace a scheme beyond the built-in two
 #
-# the name is the bare scheme without `://`, so `vfs_register("mods", ...)`
+# The name is the bare scheme without `://`, so `vfs_register("mods", ...)`
 # makes `mods://weapon.pack` resolve. re-registering an existing name replaces
 # its root rather than adding a second entry, so a game may call this on every
 # reload without leaking entries.
@@ -105,14 +104,14 @@ pub fun vfs_register(name: str, root: str) bool {
     ret true;
 }
 
-# whether a virtual path carries a scheme
+# Whether a virtual path carries a scheme
 pub fun vfs_has_scheme(vpath: str) bool {
     ret scheme_end(vpath) != 0;
 }
 
-# index just past the `://` of a scheme, or 0 when there is none
+# Index just past the `://` of a scheme, or 0 when there is none
 #
-# a path whose `://` appears after a `/` is not a scheme -- that is a directory
+# A path whose `://` appears after a `/` is not a scheme -- that is a directory
 # that happens to contain the characters -- so the search stops at the first
 # separator.
 fun scheme_end(vpath: str) usize {
@@ -127,7 +126,7 @@ fun scheme_end(vpath: str) usize {
     ret 0;
 }
 
-# the root a scheme resolves against, or nil when the scheme is unknown
+# The root a scheme resolves against, or nil when the scheme is unknown
 fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[str, str] {
     if (str_starts_with(vpath, "res://"))  { ret ok[str, str](res_root); }
     if (str_starts_with(vpath, "user://")) { ret user_root_resolved(a); }
@@ -148,9 +147,9 @@ fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[str, str] {
     ret err[str, str]("unknown path scheme");
 }
 
-# resolve a virtual path to a filesystem path
+# Resolve a virtual path to a filesystem path
 #
-# the result is owned by the caller and allocated from `a`. a path with no
+# The result is owned by the caller and allocated from `a`. a path with no
 # scheme is copied through unchanged, so the escape hatch costs a copy and
 # nothing else.
 # ---
@@ -170,11 +169,11 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
     val rest: usize = n - end;
     val rlen: usize = str_len(root);
 
-    # a root of "" means the rest is already the whole path, which is what an
+    # A root of "" means the rest is already the whole path, which is what an
     # absolute user_root override collapses to
     if (rlen == 0) { ret text.str_dup_range(a, vpath, end, rest); }
 
-    # join with exactly one separator regardless of whether the root carries a
+    # Join with exactly one separator regardless of whether the root carries a
     # trailing one, since both spellings are natural for a dev to write
     var sep: usize = 1;
     if (root[rlen - 1] == '/') { sep = 0; }
@@ -193,9 +192,9 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
     ret ok[str, str](buf:~str);
 }
 
-# the resolved `user://` root, deriving the platform default when unset
+# The resolved `user://` root, deriving the platform default when unset
 #
-# derived rather than hardcoded because the right answer differs per OS and,
+# Derived rather than hardcoded because the right answer differs per OS and,
 # on linux, is itself configurable. the result is not cached: a game that
 # cares sets user_root explicitly, and a game that does not resolves it a
 # handful of times over its life.
@@ -203,7 +202,7 @@ fun user_root_resolved(a: *allo.Allocator) Result[str, str] {
     if (user_root != nil && str_len(user_root) > 0) { ret ok[str, str](user_root); }
 
     $if ($mach.build.os == $mach.os.windows) {
-        # roaming application data, the documented home for per-user state
+        # Roaming application data, the documented home for per-user state
         val r: Result[str, str] = env.value(a, "APPDATA");
         if (!is_err[str, str](r)) { ret r; }
     }
@@ -222,7 +221,7 @@ fun user_root_resolved(a: *allo.Allocator) Result[str, str] {
         if (!is_err[str, str](h)) { ret h; }
     }
 
-    # no environment to derive from: fall back to the working directory rather
+    # No environment to derive from: fall back to the working directory rather
     # than failing, so a headless or sandboxed run still has somewhere to write
     ret text.str_dup(a, ".");
 }
@@ -251,7 +250,7 @@ test "vfs: a root with a trailing slash does not double it" {
     res_root = "assets/";
     val r: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
     if (is_err[str, str](r)) { ret 1; }
-    # both spellings of a root are natural to write, so both must land here
+    # Both spellings of a root are natural to write, so both must land here
     if (!str_equals(unwrap_ok[str, str](r), "assets/hero.qoi")) { ret 1; }
 
     res_root = saved;
@@ -286,7 +285,7 @@ test "vfs: a bare path passes through unchanged" {
 }
 
 test "vfs: :// after a separator is a directory, not a scheme" {
-    # a path like `weird/a://b` names a directory that happens to contain the
+    # A path like `weird/a://b` names a directory that happens to contain the
     # characters. treating it as a scheme would silently redirect the lookup.
     if (vfs_has_scheme("weird/a://b")) { ret 1; }
     var a: allo.Allocator;
@@ -299,7 +298,7 @@ test "vfs: :// after a separator is a directory, not a scheme" {
 test "vfs: an unknown scheme is an error, not a silent passthrough" {
     var a: allo.Allocator;
     page.make(?a);
-    # passing it through would resolve `bogus://x` against the working
+    # Passing it through would resolve `bogus://x` against the working
     # directory and fail later with a confusing not-found
     if (!is_err[str, str](vfs_resolve(?a, "bogus://x"))) { ret 1; }
     ret 0;
@@ -314,7 +313,7 @@ test "vfs: a registered scheme resolves, and re-registering replaces it" {
     if (is_err[str, str](r)) { ret 1; }
     if (!str_equals(unwrap_ok[str, str](r), "mods/enabled/weapons.pack")) { ret 1; }
 
-    # re-registering must replace rather than append, so a reload does not
+    # Re-registering must replace rather than append, so a reload does not
     # leak table entries or leave the old root shadowing the new one
     if (!vfs_register("mods", "other")) { ret 1; }
     val r2: Result[str, str] = vfs_resolve(?a, "mods://weapons.pack");
@@ -342,7 +341,7 @@ test "vfs: user:// derives a root when unset rather than failing" {
     val saved: str = user_root;
     user_root = "";
 
-    # whatever the platform yields, it must produce a usable path -- a game
+    # Whatever the platform yields, it must produce a usable path -- a game
     # writing a save must never be told there is nowhere to write
     val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
     if (is_err[str, str](r)) { ret 1; }

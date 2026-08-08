@@ -13,7 +13,7 @@
 #   - Collisions arrive on the existing EventQueue, so a game handles them
 #     where it already handles input.
 #
-# mach-phys uses f32x4 vectors and boom's math uses a three-field record, so
+# Mach-phys uses f32x4 vectors and boom's math uses a three-field record, so
 # this module converts at the boundary. The conversion is here rather than in
 # either library because neither should depend on the other's vector type.
 
