@@ -34,6 +34,7 @@ use boom.graphics.device.Device;
 use boom.graphics.texture.Texture;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_init;
+use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.image_dnit;
 use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.image.DepthAttachment;
@@ -64,7 +65,7 @@ pub rec RenderTarget {
 fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
     var atts: [2]vk.AttachmentDescription;
     atts[0].flags          = 0;
-    atts[0].format         = vk.FORMAT_R8G8B8A8_UNORM;
+    atts[0].format         = t.color.image.format;
     atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
     atts[0].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
     atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
@@ -170,7 +171,11 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
 
     # The colour attachment is created through the texture path so it carries
     # the same view and layout handling, then given attachment usage.
-    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32);
+    # sRGB, matching every other colour surface. A target holds a rendered image
+    # that a later pass samples, so it goes through the same encode on write and
+    # decode on read as a loaded texture; a linear one would band in the darks at
+    # eight bits and then be sampled as though it were encoded.
+    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32, COLOR_SRGB);
     if (is_err[bool, Error](cr)) {
         ret err[RenderTarget, Error](error("could not create the colour attachment"));
     }

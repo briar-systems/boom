@@ -20,6 +20,9 @@ use vk;
 use boom.graphics.device.Device;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_upload;
+use boom.graphics.image.ColorSpace;
+use boom.graphics.image.COLOR_SRGB;
+use boom.graphics.image.COLOR_LINEAR;
 use boom.graphics.image.image_dnit;
 use img: image;
 use boom.graphics.error.Error;
@@ -74,8 +77,9 @@ rec Decoded {
 # pixels: RGBA8 pixel data, 4 bytes per texel
 # width:  image width in texels
 # height: image height in texels
+# space:  what the bytes mean; COLOR_SRGB for anything authored to be looked at
 # ret:    the uploaded Texture handle, or an allocation/upload error
-pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32) Result[Texture, Error] {
+pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32, space: ColorSpace) Result[Texture, Error] {
     if (!d.ready) {
         ret err[Texture, Error](error("the upload context is not initialized"));
     }
@@ -87,7 +91,7 @@ pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32) Result[Texture
     t.width  = width;
     t.height = height;
     val r: Result[bool, Error] = image_upload(?t.image, d.vk, d.pool, pixels,
-                                              width::u32, height::u32);
+                                             width::u32, height::u32, space);
     if (is_err[bool, Error](r)) {
         ret err[Texture, Error](unwrap_err[bool, Error](r));
     }
@@ -167,7 +171,9 @@ pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Er
         ret err[Texture, Error](unwrap_err[bool, Error](r));
     }
 
-    val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height);
+    # A decoded QOI or TGA is colour authored for display, by construction: the
+    # formats have no notion of storing a normal map or a mask.
+    val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height, COLOR_SRGB);
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(dec.width::u32, dec.height::u32));
     ret tr;
 }
@@ -227,7 +233,7 @@ test "texture: creation against an uninitialized context is refused" {
     var d: Device;
     d.ready = false;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
-    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, 1))) { ret 1; }
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, 1, COLOR_SRGB))) { ret 1; }
     ret 0;
 }
 
@@ -235,8 +241,8 @@ test "texture: non-positive dimensions are refused before allocating" {
     var d: Device;
     d.ready = true;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
-    if (!is_err[Texture, Error](texture(?d, ?px[0], 0, 1)))  { ret 1; }
-    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, -4))) { ret 2; }
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 0, 1, COLOR_SRGB)))  { ret 1; }
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, -4, COLOR_SRGB))) { ret 2; }
     ret 0;
 }
 

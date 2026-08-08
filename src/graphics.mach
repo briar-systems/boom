@@ -92,6 +92,9 @@ fwd boom.graphics.vertex.vertex_format_is_skinned;
 
 
 fwd boom.graphics.texture.Texture;
+fwd boom.graphics.image.ColorSpace;
+fwd boom.graphics.image.COLOR_SRGB;
+fwd boom.graphics.image.COLOR_LINEAR;
 fwd boom.graphics.texture.texture;
 fwd boom.graphics.texture.texture_from_bytes;
 fwd boom.graphics.texture.texture_load;
@@ -164,6 +167,7 @@ fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_device;
+fwd boom.graphics.renderer.renderer_is_srgb;
 fwd boom.graphics.renderer.renderer_dropped;
 fwd boom.graphics.renderer.PassDesc;
 fwd boom.graphics.renderer.Pass;

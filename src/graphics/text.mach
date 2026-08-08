@@ -49,6 +49,7 @@ use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture;
+use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.device.Device;
 use boom.graphics.texture.texture_delete;
 use boom.graphics.sprite.Rect;
@@ -193,7 +194,10 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Resul
         g = g + 1;
     }
 
-    val tr: Result[Texture, Error] = texture(d, rgba, aw::i32, ah::i32);
+    # sRGB. The atlas leaves RGB white and stores coverage in alpha, and Vulkan's
+    # sRGB formats leave alpha linear, so the transfer function touches only the
+    # white and coverage arrives at the shader exactly as rasterized.
+    val tr: Result[Texture, Error] = texture(d, rgba, aw::i32, ah::i32, COLOR_SRGB);
     if (is_err[Texture, Error](tr)) {
         allo.deallocate[u8](a, cov, cell * cell);
         allo.deallocate[u8](a, rgba, aw * ah * 4);

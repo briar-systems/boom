@@ -61,6 +61,7 @@ use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.swapchain_init;
 use boom.graphics.swapchain.swapchain_rebuild;
 use boom.graphics.swapchain.swapchain_dnit;
+use boom.graphics.swapchain.format_is_srgb;
 use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.frame_init;
 use boom.graphics.frame.frame_begin;
@@ -95,6 +96,7 @@ use boom.graphics.descriptor.descriptors_bind_palette;
 use boom.graphics.descriptor.MAX_PALETTES;
 use boom.graphics.descriptor.COLOUR_OFFSET;
 use boom.graphics.image.sampler_init;
+use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
@@ -152,6 +154,8 @@ use boom.math.transform.transform_matrix;
 # frame_index: which in-flight frame is being recorded
 # drawing: whether a frame is currently open
 # dropped: draws refused this frame because the ring ran out
+# srgb:    whether the surface encodes sRGB on write; false means the colour
+#          pipeline is missing its final encode and output is dark
 pub rec Renderer {
     vk:          Vk;
     dev:         Device;
@@ -167,6 +171,7 @@ pub rec Renderer {
     frame_index: usize;
     drawing:     bool;
     dropped:     usize;
+    srgb:        bool;
 }
 
 # initialize a renderer against a window
@@ -198,6 +203,14 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     val fr: Result[bool, Error] = frame_init(?r.frame, ?r.vk, ?r.swap);
     if (is_err[bool, Error](fr)) { ret fr; }
 
+    # The colour pipeline assumes the sRGB encode happens exactly once, at the
+    # surface: textures are sampled through sRGB formats so the shader works in
+    # linear light. A surface offering no sRGB format leaves that encode out,
+    # and everything comes out darker than authored. Recording it rather than
+    # failing, because a dark window is better than no window and the caller
+    # can say so.
+    r.srgb = format_is_srgb(r.swap.format);
+
     val samr: Result[bool, Error] = sampler_init(?r.sampler, ?r.vk, true);
     if (is_err[bool, Error](samr)) { ret samr; }
 
@@ -223,7 +236,10 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     # come out as its base colour exactly.
     var white_px: [4]u8;
     white_px[0] = 255; white_px[1] = 255; white_px[2] = 255; white_px[3] = 255;
-    val wr: Result[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1);
+    # sRGB, so it decodes to exactly 1.0 and multiplying by it is the identity.
+    # A linear white would also be 1.0 today, but naming the space keeps this
+    # correct if the fallback ever becomes something other than pure white.
+    val wr: Result[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1, COLOR_SRGB);
     if (is_err[Texture, Error](wr)) {
         ret err[bool, Error](unwrap_err[Texture, Error](wr));
     }
@@ -236,6 +252,19 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.sprite = unwrap_ok[SpriteResources, Error](qr);
 
     ret ok[bool, Error](true);
+}
+
+# whether the surface encodes sRGB on write
+#
+# false means the driver offered no sRGB surface format, so the linear values
+# the shaders write reach the display un-encoded and everything looks darker
+# than it was authored. Nothing can be done about it inside the renderer; a
+# game that wants to tell the player, or to log it, asks here.
+# ---
+# r:   the renderer
+# ret: true when the colour pipeline is complete
+pub fun renderer_is_srgb(r: *Renderer) bool {
+    ret r.srgb;
 }
 
 # the upload context resources are created against
