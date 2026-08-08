@@ -119,11 +119,12 @@ pub fun mat4_from_quat(q: Quat) Mat4 {
 # depth the near half of the view volume maps to negative Z and is clipped
 # away, and under GL's upward Y everything renders vertically mirrored.
 #
-# THE Y FLIP REVERSES WINDING. Negating Y in the projection mirrors every
-# triangle as the rasterizer sees it, so a mesh wound counter-clockwise in
-# model space arrives clockwise. boom.graphics.pipeline sets frontFace to
-# CLOCKWISE for that reason; changing either one alone culls exactly the faces
-# that should be drawn, which reads as a model turned inside out.
+# THE Y FLIP DOES NOT REVERSE WINDING, though it reads as though it should.
+# Vulkan's framebuffer has Y increasing downward already, so negating Y here
+# converts a Y-up view space into that convention rather than mirroring the
+# triangle the rasterizer sees. boom.graphics.pipeline keeps counter-clockwise
+# front faces, matching glTF. The opposite pairing was tried, on exactly the
+# reasoning this paragraph replaces, and it culled part of every closed mesh.
 # ---
 # fovy:   vertical field of view in radians
 # aspect: viewport width divided by height

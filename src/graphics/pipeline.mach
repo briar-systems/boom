@@ -490,14 +490,22 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
     rs.polygonMode             = vk.POLYGON_MODE_FILL;
     rs.cullMode                = 0;
     if (d.cull) { rs.cullMode = vk.CULL_MODE_BACK_BIT; }
-    # Counter-clockwise, matching glTF's winding and the projection this engine
-    # builds. Clockwise here silently culls every front face.
-    # CLOCKWISE, not counter-clockwise. boom.math's projections negate Y to
-    # reach Vulkan's downward-Y clip space, which mirrors every triangle as the
-    # rasterizer sees it, so geometry wound counter-clockwise in model space
-    # arrives clockwise. Pairing a Y flip with CCW front faces culls exactly the
-    # faces that should be drawn, which reads as a model turned inside out.
-    rs.frontFace               = vk.FRONT_FACE_CLOCKWISE;
+    # COUNTER-CLOCKWISE, matching glTF's winding, and the Y flip does not change
+    # that. It is tempting to reason that boom.math negates Y to reach Vulkan's
+    # clip space, that a negation mirrors every triangle, and that CLOCKWISE
+    # therefore follows. The middle step is where it goes wrong: Vulkan's
+    # framebuffer already has Y increasing downward, so the negation converts a
+    # Y-up view space into that convention rather than mirroring anything the
+    # rasterizer sees. The winding on screen is what it was in model space.
+    #
+    # This was CLOCKWISE, and the argument above was written down next to it, and
+    # it culled part of every closed mesh. Nothing reported that: a cube missing
+    # some of its faces still draws, still presents, and still has the right
+    # silhouette from the outside, because the faces behind the missing ones are
+    # drawn instead. examples/vulkan reads the render back and compares the
+    # covered pixel count against the area of the projected hull, which is the
+    # check that caught it.
+    rs.frontFace               = vk.FRONT_FACE_COUNTER_CLOCKWISE;
     rs.depthBiasEnable         = vk.FALSE;
     rs.depthBiasConstantFactor = 0.0;
     rs.depthBiasClamp          = 0.0;
