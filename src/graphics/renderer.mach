@@ -31,11 +31,18 @@
 # needs, and a game that wants a third gets it by building a Pipeline
 # against a pass rather than by handing a program to a draw.
 #
-# Every draw takes a uniform slot. GL set named uniforms on the bound
-# program between draws; a Vulkan draw reads a buffer range that must
-# already hold its values when the command buffer executes, so each draw
-# writes its own slot. That is why a frame has a bounded number of draws
-# and why exhausting it is reported rather than silently wrapping.
+# A 3D draw takes a uniform slot. GL set named uniforms on the bound program
+# between draws; a Vulkan draw reads a buffer range that must already hold
+# its values when the command buffer executes, so each mesh draw writes its
+# own slot.
+#
+# 2D draws do not, and that is deliberate. A sprite carrying a per-draw
+# uniform put a hard ceiling on how many could be drawn in a frame, and the
+# draws refused when it was reached were whichever came last, which in a game
+# that composites an offscreen scene means the composite and the UI. So
+# sprites, text and immediate-mode geometry are appended to a per-pass batch,
+# expanded into the frame's vertex arena, and drawn as one call per texture
+# run holding one slot. See boom.graphics.batch and boom.graphics.stream.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -85,7 +92,17 @@ use boom.graphics.stream.stream_begin;
 use boom.graphics.stream.stream_push;
 use boom.graphics.stream.stream_buffer;
 use boom.graphics.stream.stream_dropped;
+use boom.graphics.stream.stream_blocks;
+use boom.graphics.stream.stream_reserved;
 use boom.graphics.stream.stream_dnit;
+use boom.graphics.batch.Batch2D;
+use boom.graphics.batch.batch_reset;
+use boom.graphics.batch.batch_breaks;
+use boom.graphics.batch.batch_continues;
+use boom.graphics.batch.sprite_expand;
+use boom.graphics.batch.SPRITE_FLOATS;
+use boom.graphics.batch.SPRITE_VERTICES;
+use boom.graphics.batch.VERTEX_FLOATS;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.vertex.vertex_format_ui;
 use boom.graphics.cache.cache_get;
@@ -110,9 +127,7 @@ use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
-use boom.graphics.uniform.SpriteUniforms;
 use boom.graphics.uniform.TintUniforms;
-use boom.graphics.uniform.src_uv_unit;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture;
 use boom.graphics.texture.texture_view;
@@ -141,8 +156,6 @@ use boom.math.vec.vec3;
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
-use boom.math.mat.mat4_scale;
-use boom.math.mat.mat4_translation;
 use boom.math.mat.mat4_orthographic;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_matrix;
@@ -164,6 +177,7 @@ use boom.math.transform.transform_matrix;
 # frame_index: which in-flight frame is being recorded
 # drawing: whether a frame is currently open
 # dropped: draws refused this frame because the ring ran out
+# draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
 pub rec Renderer {
@@ -183,6 +197,7 @@ pub rec Renderer {
     frame_index: usize;
     drawing:     bool;
     dropped:     usize;
+    draws:       usize;
     srgb:        bool;
 }
 
@@ -202,6 +217,7 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.drawing     = false;
     r.frame_index = 0;
     r.dropped     = 0;
+    r.draws       = 0;
 
     val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
     if (is_err[bool, Error](vr)) { ret vr; }
@@ -341,6 +357,7 @@ pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
 pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     @out_ok = false;
     r.dropped = 0;
+    r.draws   = 0;
 
     var began: bool = false;
     val br: Result[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap, ?began);
@@ -389,6 +406,16 @@ pub fun renderer_end_frame(r: *Renderer) Result[bool, Error] {
 # ret: the number of dropped draws in the most recent frame
 pub fun renderer_dropped(r: *Renderer) usize {
     ret r.dropped;
+}
+
+# Draw calls recorded in the most recent frame.
+#
+# The number that matters after batching: a thousand sprites from one sheet is
+# one draw here, and a count that tracks the sprite count instead means
+# something is breaking the run, usually a texture alternating between two
+# sheets in the submission order.
+pub fun renderer_draws(r: *Renderer) usize {
+    ret r.draws;
 }
 
 # release everything the renderer owns
@@ -469,6 +496,11 @@ pub rec Pass {
     height:     i32;
     view:       Mat4;
     projection: Mat4;
+
+    # The open run of 2D geometry. On the pass rather than the renderer because
+    # its vertices were placed for this pass's projection and must be drawn into
+    # this pass's render pass, so it cannot survive pass_end.
+    batch:      Batch2D;
 }
 
 # begin a pass
@@ -494,6 +526,7 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     var p: Pass;
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
+    batch_reset(?p.batch);
 
     p.target = d.target;
     if (d.target != nil) {
@@ -552,6 +585,11 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
 # ---
 # p: the pass to end
 pub fun pass_end(p: *Pass) {
+    # Before anything else, and before the early return below: geometry still in
+    # the batcher has been recorded nowhere, and a render pass that ends without
+    # it drops it silently.
+    batch_flush(p);
+
     if (p.target == nil) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
     frame_resume_pass(?p.renderer.frame, ?p.renderer.swap);
@@ -564,6 +602,111 @@ fun take_slot(p: *Pass) usize {
         p.renderer.dropped = p.renderer.dropped + 1;
     }
     ret s;
+}
+
+# Draw the open run of 2D geometry, if there is one.
+#
+# This is the only place 2D geometry is actually submitted. Every 2D draw call
+# appends to the batcher and this issues the draw, so a sprite, a glyph and a
+# UI panel all reach the GPU through one program, one pipeline and one buffer.
+#
+# One uniform slot per flush rather than per sprite is the whole point: the slot
+# carries the pass projection, which is the same for every sprite in the run.
+pub fun batch_flush(p: *Pass) {
+    val r: *Renderer = p.renderer;
+    if (!p.batch.open || p.batch.count == 0) {
+        batch_reset(?p.batch);
+        ret;
+    }
+
+    val count: u32 = p.batch.count;
+    val first: u32 = p.batch.first;
+    val block: usize = p.batch.block;
+    var tex:   *Texture = p.batch.texture;
+    # The run is closed before anything that can fail, so an early return below
+    # cannot leave it open to be drawn a second time by the next flush.
+    batch_reset(?p.batch);
+
+    val slot: usize = take_slot(p);
+    if (slot == MAX_SLOTS) { ret; }
+
+    var u: ScreenUniforms;
+    u.projection = p.projection;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) { ret; }
+
+    # The 2D program always samples, so an untextured run gets the renderer's
+    # white texel and `colour * texel` is the flat vertex colour. That is how a
+    # solid rectangle, a tinted sprite and a glyph share one shader.
+    if (tex == nil) { tex = ?r.white; }
+
+    # No tint block: the colour is per vertex. Passing 0 for its size is what
+    # tells the descriptor layer binding 2 is not part of this draw.
+    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+                          $size_of(ScreenUniforms)::u64, texture_view(tex), r.sampler,
+                          0, 0);
+
+    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    if (pipe == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+
+    var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
+    if (buf == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var off: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buf, ?off);
+    # firstVertex rather than a per-draw buffer offset, so every run sharing a
+    # block shares one binding.
+    vk.vkCmdDraw(p.cmd, count, 1, first, 0);
+    r.draws = r.draws + 1;
+}
+
+# Add 2D geometry to the open run, drawing it first if it cannot be extended.
+#
+# The vertices are copied into the frame's arena, so the caller may reuse or
+# free its buffer the moment this returns.
+# ---
+# p:            the open pass
+# texture:      what these vertices sample, or nil for the white texel
+# vertices:     vertex data in the shared 2D layout
+# vertex_count: how many vertices
+fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize) {
+    val r: *Renderer = p.renderer;
+    if (vertex_count == 0) { ret; }
+
+    if (batch_breaks(?p.batch, texture)) { batch_flush(p); }
+
+    val stride: usize = r.ui_format.stride::usize;
+    var first: u32 = 0;
+    var block: usize = 0;
+    if (!stream_push(?r.stream, ?r.vk, r.frame_index, vertices,
+                     vertex_count * stride, stride, ?first, ?block)) {
+        # The arena is full for this frame. Counted as a dropped draw, so a
+        # frame that outgrows the arena is a number a game can read rather than
+        # geometry that quietly disappears.
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    # A push that did not land next to the open run means something else took
+    # arena space in between, so the run has to be drawn as it stands and a new
+    # one started here. Extending it across the gap would draw the intervening
+    # geometry with this run's texture.
+    if (p.batch.open && !batch_continues(?p.batch, block, first)) { batch_flush(p); }
+
+    if (!p.batch.open) {
+        p.batch.open    = true;
+        p.batch.texture = texture;
+        p.batch.block   = block;
+        p.batch.first   = first;
+        p.batch.count   = 0;
+    }
+    p.batch.count = p.batch.count + vertex_count::u32;
 }
 
 # submit a 3D mesh draw with a model transform
@@ -599,6 +742,13 @@ pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
 # splitting them would duplicate the parts that are easy to get subtly wrong.
 fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose) {
     val r:    *Renderer = p.renderer;
+
+    # Any open 2D run has to be drawn before this mesh, or it would be recorded
+    # after and appear on top of geometry the caller submitted first. The
+    # batcher can defer a sprite past another sprite because it then draws them
+    # in order; it cannot defer one past a draw it does not own.
+    batch_flush(p);
+
     val slot: usize = take_slot(p);
     if (slot == MAX_SLOTS) { ret; }
 
@@ -674,6 +824,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
     descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
     mesh_draw(m, p.cmd);
+    r.draws = r.draws + 1;
 }
 
 # submit a skinned mesh draw
@@ -722,49 +873,13 @@ pub fun pass_draw_sprite(p: *Pass, texture: *Texture, dest: Rect, tint: Vec4) {
 # src:     the source rectangle in texture space, 0 to 1
 # tint:    the color multiplied into the sample
 pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, tint: Vec4) {
-    val r:    *Renderer = p.renderer;
-    val slot: usize = take_slot(p);
-    if (slot == MAX_SLOTS) { ret; }
-
-    # The unit quad is scaled to the destination size and moved to its
-    # origin, so one buffer serves every sprite and every glyph.
-    var scale: Mat4 = mat4_scale(vec3(dest.w, dest.h, 1.0));
-    var move:  Mat4 = mat4_translation(vec3(dest.x, dest.y, 0.0));
-    var model: Mat4 = mat4_mul(?move, ?scale);
-
-    var u: SpriteUniforms;
-    u.projection = p.projection;
-    u.model      = model;
-    u.src        = src_uv_unit(src);
-    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(SpriteUniforms))) { ret; }
-
-    # The tint goes in the slot's second aligned sub-slot rather than packed
-    # after the transform block, because a uniform descriptor's buffer offset
-    # has to satisfy minUniformBufferOffsetAlignment.
-    var tintu: TintUniforms;
-    tintu.colour = tint;
-    val tint_off: usize = COLOUR_OFFSET;
-    if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, tint_off,
-                                   (?tintu):~*u8, $size_of(TintUniforms))) { ret; }
-
-    # sprite_frag always samples, so an untextured sprite gets the renderer's
-    # white texel. Leaving binding 1 unwritten would make the shader read a
-    # descriptor that was never filled.
-    var src_tex: *Texture = texture;
-    if (src_tex == nil) { src_tex = ?r.white; }
-
-    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(SpriteUniforms)::u64, texture_view(src_tex), r.sampler,
-                          tint_off::u64, $size_of(TintUniforms)::u64);
-
-    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_SPRITE, ?r.sprite.quad.format);
-    if (pipe == nil) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
-    mesh_draw(?r.sprite.quad, p.cmd);
+    # Expanded to two triangles and appended to the open run rather than drawn.
+    # A run of sprites sharing a texture becomes one draw and one uniform slot,
+    # which is what lets a screenful of them cost what a handful used to. See
+    # boom.graphics.batch for why the per-sprite uniform had to go.
+    var v: [48]f32;
+    sprite_expand(dest, src, tint, ?v[0]);
+    batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);
 }
 
 # submit a stream of already-placed, per-vertex-coloured triangles
@@ -798,51 +913,10 @@ pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture:
         r.dropped = r.dropped + 1;
         ret;
     }
-
-    val slot: usize = take_slot(p);
-    if (slot == MAX_SLOTS) { ret; }
-
-    val stride: usize = r.ui_format.stride::usize;
-    var first: u32 = 0;
-    if (!stream_push(?r.stream, r.frame_index, vertices:~*u8,
-                     vertex_count::usize * stride, stride, ?first)) {
-        # The arena is full for this frame. Counted as a dropped draw, the same
-        # as a missing uniform slot, so a UI that outgrows the arena is a number
-        # a game can read rather than geometry that quietly disappears.
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-
-    var u: ScreenUniforms;
-    u.projection = p.projection;
-    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) { ret; }
-
-    # ui_frag always samples, so an untextured draw list gets the renderer's
-    # white texel and `colour * texel` is the flat colour. That is also how a
-    # solid rectangle and a glyph share one shader and one draw.
-    var atlas: *Texture = texture;
-    if (atlas == nil) { atlas = ?r.white; }
-
-    # No tint block: the colour is per vertex. Passing 0 for its size is what
-    # tells the descriptor layer binding 2 is not part of this draw.
-    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(ScreenUniforms)::u64, texture_view(atlas), r.sampler,
-                          0, 0);
-
-    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
-    if (pipe == nil) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
-
-    var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index);
-    var off: u64 = 0;
-    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buf, ?off);
-    # firstVertex rather than a per-draw buffer offset, so every draw list this
-    # frame shares one binding and one buffer.
-    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, first, 0);
+    # Appended to the same run sprites use. A draw list and a sprite are the
+    # same thing to the batcher, so UI drawn over sprites from the same atlas
+    # coalesces into one draw instead of breaking the run.
+    batch_append(p, texture, vertices:~*u8, vertex_count::usize);
 }
 
 # how many draws this frame's vertex arena refused for want of room
@@ -852,6 +926,24 @@ pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture:
 # it should be raising MAX_SLOTS has read the wrong number.
 pub fun renderer_stream_dropped(r: *Renderer) usize {
     ret stream_dropped(?r.stream);
+}
+
+# How many arena blocks the current frame has grown to.
+#
+# One means the frame fits in the base reservation. A number that climbs over
+# the first few frames and then holds is the arena finding the game's high-water
+# mark, which is the intended behaviour. A number that keeps climbing is a leak
+# in whatever builds the frame's geometry.
+pub fun renderer_stream_blocks(r: *Renderer) usize {
+    ret stream_blocks(?r.stream, r.frame_index);
+}
+
+# Bytes the current frame's arena has reserved, across its blocks.
+#
+# This is what the arena costs in host-visible memory. It only ever grows, so it
+# reports the heaviest frame the game has drawn rather than the current one.
+pub fun renderer_stream_reserved(r: *Renderer) usize {
+    ret stream_reserved(?r.stream, r.frame_index);
 }
 
 # --------------------------------------------------------------------- tests
