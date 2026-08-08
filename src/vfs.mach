@@ -1,0 +1,353 @@
+# virtual paths, so a game never writes a filesystem path
+#
+# a game names an asset `res://art/hero.qoi`, not `assets/art/hero.qoi` and
+# certainly not an absolute one. the scheme says what kind of location it is;
+# where that lands on disk is a deployment decision the game does not encode.
+#
+# WHY THIS IS NOT COSMETIC. a literal path bakes a layout into every call site,
+# so moving assets, renaming a directory, or shipping them beside the binary
+# instead of above it becomes a search-and-replace through game code. worse,
+# `user://` cannot be a literal at all: saves belong in a different place on
+# every OS, and a game that writes beside its executable is wrong on all three.
+#
+# THE SCHEMES
+#
+#   res://   read-only game content, shipped with the build. defaults to `res`
+#            relative to the working directory.
+#   user://  writable per-user state: saves, settings, logs. defaults to the
+#            platform's own location, which differs per OS and is derived at
+#            first use rather than hardcoded.
+#
+# A BARE PATH WITH NO SCHEME IS PASSED THROUGH UNCHANGED. that is the escape
+# hatch for a tool or a test that genuinely means one specific file, and it is
+# deliberately the ugly option so game code does not reach for it by accident.
+#
+# CHANGING THE ROOTS. `res_root` and `user_root` are plain globals. a game sets
+# them once at startup, before loading anything:
+#
+#     vfs.res_root = "data";
+#     vfs.user_root = "/opt/onslaughter/state";
+#
+# and a build can drive that from wherever it likes -- a manifest value, an
+# environment variable, a debug flag pointing at a source tree so assets reload
+# without a rebuild. registering additional schemes is `vfs_register`.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+use std.types.string.str_equals;
+use std.types.string.str_starts_with;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use allo: std.allocator;
+use page: std.allocator.page;
+use text: std.text.string;
+use env:  std.process.env;
+
+# the separator between a scheme and its path
+val MARK: str = "://";
+
+# where `res://` resolves
+#
+# read-only content shipped with the build. relative to the working directory
+# unless set to an absolute path.
+pub var res_root: str = "res";
+
+# where `user://` resolves
+#
+# empty means "derive from the platform at first use". set it to override that
+# entirely, which is what a portable build or a test wants.
+pub var user_root: str = "";
+
+# how many extra schemes a game may register beyond res and user
+pub val MAX_SCHEMES: usize = 8;
+
+rec Extra {
+    name: str;
+    root: str;
+    used: bool;
+}
+
+var extras: [8]Extra;
+var extra_count: usize = 0;
+
+# register or replace a scheme beyond the built-in two
+#
+# the name is the bare scheme without `://`, so `vfs_register("mods", ...)`
+# makes `mods://weapon.pack` resolve. re-registering an existing name replaces
+# its root rather than adding a second entry, so a game may call this on every
+# reload without leaking entries.
+# ---
+# name: scheme name, without the `://`
+# root: directory the scheme resolves against
+# ret:  false when the table is full
+pub fun vfs_register(name: str, root: str) bool {
+    var i: usize = 0;
+    for (i < extra_count) {
+        if (extras[i].used && str_equals(extras[i].name, name)) {
+            extras[i].root = root;
+            ret true;
+        }
+        i = i + 1;
+    }
+    if (extra_count >= MAX_SCHEMES) { ret false; }
+    extras[extra_count].name = name;
+    extras[extra_count].root = root;
+    extras[extra_count].used = true;
+    extra_count = extra_count + 1;
+    ret true;
+}
+
+# whether a virtual path carries a scheme
+pub fun vfs_has_scheme(vpath: str) bool {
+    ret scheme_end(vpath) != 0;
+}
+
+# index just past the `://` of a scheme, or 0 when there is none
+#
+# a path whose `://` appears after a `/` is not a scheme -- that is a directory
+# that happens to contain the characters -- so the search stops at the first
+# separator.
+fun scheme_end(vpath: str) usize {
+    if (vpath == nil) { ret 0; }
+    val n: usize = str_len(vpath);
+    var i: usize = 0;
+    for (i + 3 <= n) {
+        if (vpath[i] == '/') { ret 0; }
+        if (vpath[i] == ':' && vpath[i + 1] == '/' && vpath[i + 2] == '/') { ret i + 3; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+# the root a scheme resolves against, or nil when the scheme is unknown
+fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[str, str] {
+    if (str_starts_with(vpath, "res://"))  { ret ok[str, str](res_root); }
+    if (str_starts_with(vpath, "user://")) { ret user_root_resolved(a); }
+
+    var i: usize = 0;
+    for (i < extra_count) {
+        if (extras[i].used && str_len(extras[i].name) == end - 3) {
+            var m: bool = true;
+            var k: usize = 0;
+            for (k < end - 3) {
+                if (vpath[k] != extras[i].name[k]) { m = false; }
+                k = k + 1;
+            }
+            if (m) { ret ok[str, str](extras[i].root); }
+        }
+        i = i + 1;
+    }
+    ret err[str, str]("unknown path scheme");
+}
+
+# resolve a virtual path to a filesystem path
+#
+# the result is owned by the caller and allocated from `a`. a path with no
+# scheme is copied through unchanged, so the escape hatch costs a copy and
+# nothing else.
+# ---
+# a:     allocator for the result
+# vpath: virtual path, e.g. `res://art/hero.qoi`
+# ret:   the filesystem path, or an error naming the unknown scheme
+pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
+    if (vpath == nil) { ret err[str, str]("nil path"); }
+    val end: usize = scheme_end(vpath);
+    if (end == 0) { ret text.str_dup(a, vpath); }
+
+    val rr: Result[str, str] = root_for(a, vpath, end);
+    if (is_err[str, str](rr)) { ret rr; }
+    val root: str = unwrap_ok[str, str](rr);
+
+    val n:    usize = str_len(vpath);
+    val rest: usize = n - end;
+    val rlen: usize = str_len(root);
+
+    # a root of "" means the rest is already the whole path, which is what an
+    # absolute user_root override collapses to
+    if (rlen == 0) { ret text.str_dup_range(a, vpath, end, rest); }
+
+    # join with exactly one separator regardless of whether the root carries a
+    # trailing one, since both spellings are natural for a dev to write
+    var sep: usize = 1;
+    if (root[rlen - 1] == '/') { sep = 0; }
+
+    val br: Result[*u8, str] = allo.allocate[u8](a, rlen + sep + rest + 1);
+    if (is_err[*u8, str](br)) { ret err[str, str](unwrap_err[*u8, str](br)); }
+    val buf: *u8 = unwrap_ok[*u8, str](br);
+
+    var o: usize = 0;
+    var i: usize = 0;
+    for (i < rlen) { buf[o] = root[i]::u8; o = o + 1; i = i + 1; }
+    if (sep == 1) { buf[o] = '/'::u8; o = o + 1; }
+    i = 0;
+    for (i < rest) { buf[o] = vpath[end + i]::u8; o = o + 1; i = i + 1; }
+    buf[o] = 0;
+    ret ok[str, str](buf:~str);
+}
+
+# the resolved `user://` root, deriving the platform default when unset
+#
+# derived rather than hardcoded because the right answer differs per OS and,
+# on linux, is itself configurable. the result is not cached: a game that
+# cares sets user_root explicitly, and a game that does not resolves it a
+# handful of times over its life.
+fun user_root_resolved(a: *allo.Allocator) Result[str, str] {
+    if (user_root != nil && str_len(user_root) > 0) { ret ok[str, str](user_root); }
+
+    $if ($mach.build.os == $mach.os.windows) {
+        # roaming application data, the documented home for per-user state
+        val r: Result[str, str] = env.value(a, "APPDATA");
+        if (!is_err[str, str](r)) { ret r; }
+    }
+    $or ($mach.build.os == $mach.os.darwin) {
+        val h: Result[str, str] = env.value(a, "HOME");
+        if (!is_err[str, str](h)) {
+            ret text.str_dup(a, unwrap_ok[str, str](h));
+        }
+    }
+    $or {
+        # XDG first, since a user may have moved it; HOME is the fallback the
+        # spec itself names
+        val x: Result[str, str] = env.value(a, "XDG_DATA_HOME");
+        if (!is_err[str, str](x)) { ret x; }
+        val h: Result[str, str] = env.value(a, "HOME");
+        if (!is_err[str, str](h)) { ret h; }
+    }
+
+    # no environment to derive from: fall back to the working directory rather
+    # than failing, so a headless or sandboxed run still has somewhere to write
+    ret text.str_dup(a, ".");
+}
+
+# --------------------------------------------------------------------- tests
+
+test "vfs: res:// resolves against res_root" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = res_root;
+    res_root = "assets";
+
+    val r: Result[str, str] = vfs_resolve(?a, "res://art/hero.qoi");
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "assets/art/hero.qoi")) { ret 1; }
+
+    res_root = saved;
+    ret 0;
+}
+
+test "vfs: a root with a trailing slash does not double it" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = res_root;
+
+    res_root = "assets/";
+    val r: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
+    if (is_err[str, str](r)) { ret 1; }
+    # both spellings of a root are natural to write, so both must land here
+    if (!str_equals(unwrap_ok[str, str](r), "assets/hero.qoi")) { ret 1; }
+
+    res_root = saved;
+    ret 0;
+}
+
+test "vfs: an absolute root works, including one that is only a slash" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = res_root;
+
+    res_root = "/opt/game/data";
+    val r: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
+    if (!str_equals(unwrap_ok[str, str](r), "/opt/game/data/hero.qoi")) { ret 1; }
+
+    res_root = "/";
+    val r2: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
+    if (!str_equals(unwrap_ok[str, str](r2), "/hero.qoi")) { ret 1; }
+
+    res_root = saved;
+    ret 0;
+}
+
+test "vfs: a bare path passes through unchanged" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val r: Result[str, str] = vfs_resolve(?a, "some/plain/path.txt");
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "some/plain/path.txt")) { ret 1; }
+    if (vfs_has_scheme("some/plain/path.txt")) { ret 1; }
+    ret 0;
+}
+
+test "vfs: :// after a separator is a directory, not a scheme" {
+    # a path like `weird/a://b` names a directory that happens to contain the
+    # characters. treating it as a scheme would silently redirect the lookup.
+    if (vfs_has_scheme("weird/a://b")) { ret 1; }
+    var a: allo.Allocator;
+    page.make(?a);
+    val r: Result[str, str] = vfs_resolve(?a, "weird/a://b");
+    if (!str_equals(unwrap_ok[str, str](r), "weird/a://b")) { ret 1; }
+    ret 0;
+}
+
+test "vfs: an unknown scheme is an error, not a silent passthrough" {
+    var a: allo.Allocator;
+    page.make(?a);
+    # passing it through would resolve `bogus://x` against the working
+    # directory and fail later with a confusing not-found
+    if (!is_err[str, str](vfs_resolve(?a, "bogus://x"))) { ret 1; }
+    ret 0;
+}
+
+test "vfs: a registered scheme resolves, and re-registering replaces it" {
+    var a: allo.Allocator;
+    page.make(?a);
+
+    if (!vfs_register("mods", "mods/enabled")) { ret 1; }
+    val r: Result[str, str] = vfs_resolve(?a, "mods://weapons.pack");
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "mods/enabled/weapons.pack")) { ret 1; }
+
+    # re-registering must replace rather than append, so a reload does not
+    # leak table entries or leave the old root shadowing the new one
+    if (!vfs_register("mods", "other")) { ret 1; }
+    val r2: Result[str, str] = vfs_resolve(?a, "mods://weapons.pack");
+    if (!str_equals(unwrap_ok[str, str](r2), "other/weapons.pack")) { ret 1; }
+    ret 0;
+}
+
+test "vfs: user:// honours an explicit override" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = user_root;
+
+    user_root = "/tmp/game-state";
+    val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "/tmp/game-state/save1.dat")) { ret 1; }
+
+    user_root = saved;
+    ret 0;
+}
+
+test "vfs: user:// derives a root when unset rather than failing" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = user_root;
+    user_root = "";
+
+    # whatever the platform yields, it must produce a usable path -- a game
+    # writing a save must never be told there is nowhere to write
+    val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
+    if (is_err[str, str](r)) { ret 1; }
+    if (str_len(unwrap_ok[str, str](r)) == 0) { ret 1; }
+
+    user_root = saved;
+    ret 0;
+}

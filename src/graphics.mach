@@ -164,3 +164,14 @@ fwd boom.graphics.renderer.pass_draw_material;
 fwd boom.graphics.renderer.pass_draw_skinned;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
+
+fwd boom.graphics.assets.CAPACITY;
+fwd boom.graphics.assets.Handle;
+fwd boom.graphics.assets.Assets;
+fwd boom.graphics.assets.handle_none;
+fwd boom.graphics.assets.handle_is_none;
+fwd boom.graphics.assets.assets_new;
+fwd boom.graphics.assets.assets_texture;
+fwd boom.graphics.assets.assets_texture_get;
+fwd boom.graphics.assets.assets_release;
+fwd boom.graphics.assets.assets_live_count;
