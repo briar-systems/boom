@@ -12,6 +12,12 @@
 # the three pipelines and the offscreen suspend and resume. It reports what it
 # found and exits non-zero on any failure, so it is a check and not a demo.
 #
+# WHAT A PASS DOES AND DOES NOT MEAN. It means every call succeeded, frames were
+# acquired and presented, no draw was dropped, and teardown was clean. It does
+# NOT mean anything was visible. A pipeline with its winding backwards culls
+# every face, and this still presents 240 empty frames and reports PASS, because
+# nothing here reads the framebuffer back. Look at the window.
+#
 # WHY IT DRIVES THE RENDERER AND NOT THE MODULES BELOW IT. An earlier version
 # built the instance, swapchain and frame loop by hand. That tested a path no
 # game takes and drifted from the real one every time the renderer changed. What
@@ -287,6 +293,10 @@ fun main(argc: i64, argv: **u8) i64 {
         p.printlnf("FAIL: {} draws were dropped for want of a uniform slot", dropped);
         ret 1;
     }
-    p.println("PASS");
+    p.println("PASS: every call succeeded and frames were presented");
+    p.println("     This does NOT verify that anything was visible. A backwards");
+    p.println("     winding or a wrong projection presents empty frames and still");
+    p.println("     reports PASS. Look at the window: a lit checkered cube filling");
+    p.println("     most of it, with a small checker square at the top left.");
     ret 0;
 }
