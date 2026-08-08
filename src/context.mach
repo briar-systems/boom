@@ -21,6 +21,8 @@ use boom.timestep.Timestep;
 use boom.timestep.timestep_new;
 use boom.event.EventQueue;
 use boom.event.queue_new;
+use window: boom.window;
+use inp: boom.input;
 use std.chrono.duration.Duration;
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -48,6 +50,8 @@ pub rec Config {
 # clock:   per-frame timing
 # step:    fixed-timestep accumulator
 # events:  input event queue, fed by the window
+# input:   polled key and mouse state, sampled at each fixed tick
+# sink:    where the window delivers input; points into this Context
 # alpha:   render interpolation factor in [0, 1), set each frame
 # running: cleared to stop the loop
 # user:    opaque game-state pointer, nil until set; hooks reach it
@@ -57,6 +61,8 @@ pub rec Context {
     clock:   Clock;
     step:    Timestep;
     events:  EventQueue;
+    input:   inp.Input;
+    sink:    window.Sink;
     alpha:   f64;
     running: bool;
     user:    ptr;
@@ -75,11 +81,17 @@ pub rec Context {
 # ret: true on success, false if the window could not be opened
 pub fun context_init(ctx: *Context, cfg: Config) bool {
     ctx.events = queue_new();
+    ctx.input  = inp.input_new();
     ctx.window = window_open(cfg.width, cfg.height, cfg.title);
     if (!window_is_valid(?ctx.window)) {
         ret false;
     }
-    window_set_event_sink(?ctx.window, ?ctx.events);
+    # the sink lives in the Context so it outlives the window, which the
+    # platform callbacks require: they reach it through the GLFW user pointer
+    # long after context_init has returned.
+    ctx.sink.queue = ?ctx.events;
+    ctx.sink.input = ?ctx.input;
+    window_set_event_sink(?ctx.window, ?ctx.sink);
     ctx.clock   = clock_new();
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.alpha   = 0.0;
