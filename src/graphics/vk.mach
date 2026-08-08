@@ -5,8 +5,10 @@
 # one unrunnable block.
 #
 # The bootstrap entry point comes from GLFW's own declaration rather than a
-# local ext fun, so its library attribution travels with the binding instead of
-# needing a glfw link entry on every consumer.
+# local ext fun. A consumer-declared #[library("glfw")] does not bind against
+# the dependency's exported link entry (mach#2800), so the alternative would be
+# restating a [link.glfw] in this manifest describing a library boom does not
+# own. Routing through the binding avoids that and is correct regardless.
 #
 # GLFW owns the window and therefore the surface, so the required instance
 # extensions come from it rather than a hardcoded list. Hardcoding
