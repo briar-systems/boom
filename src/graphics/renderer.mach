@@ -93,6 +93,7 @@ use boom.graphics.descriptor.descriptors_take_palette;
 use boom.graphics.descriptor.descriptors_write_palette;
 use boom.graphics.descriptor.descriptors_bind_palette;
 use boom.graphics.descriptor.MAX_PALETTES;
+use boom.graphics.descriptor.COLOUR_OFFSET;
 use boom.graphics.image.sampler_init;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.uniform.MeshUniforms;
@@ -563,10 +564,12 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
         if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(MeshUniforms))) { ret; }
     }
 
-    # The base colour goes after the matrices in the same slot, which is what
+    # The base colour goes in the slot's second aligned sub-slot, which is what
     # the fragment stage's binding 2 reads. The sprite path does the same, so
-    # one descriptor write path serves both.
-    val base_off: usize = $size_of(SkinnedUniforms);
+    # one descriptor write path serves both. It is not packed immediately after
+    # the matrices, because a uniform descriptor's buffer offset has to satisfy
+    # minUniformBufferOffsetAlignment.
+    val base_off: usize = COLOUR_OFFSET;
     var basec: TintUniforms;
     basec.colour = tint;
     if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
@@ -578,7 +581,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     if (src == nil) { src = ?r.white; }
 
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          base_off::u64, texture_view(src), r.sampler,
+                          $size_of(SkinnedUniforms)::u64, texture_view(src), r.sampler,
                           base_off::u64, $size_of(TintUniforms)::u64);
 
     var program: Program = PROGRAM_MESH;
@@ -671,19 +674,23 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
     u.src        = src_uv_unit(src);
     if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(SpriteUniforms))) { ret; }
 
-    # The tint follows the transform block inside the same slot, which is
-    # why the slot is wider than either block.
+    # The tint goes in the slot's second aligned sub-slot rather than packed
+    # after the transform block, because a uniform descriptor's buffer offset
+    # has to satisfy minUniformBufferOffsetAlignment.
     var tintu: TintUniforms;
     tintu.colour = tint;
-    val tint_off: usize = $size_of(SpriteUniforms);
+    val tint_off: usize = COLOUR_OFFSET;
     if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, tint_off,
                                    (?tintu):~*u8, $size_of(TintUniforms))) { ret; }
 
-    var view: vk.ImageView = nil;
-    if (texture != nil) { view = texture_view(texture); }
+    # sprite_frag always samples, so an untextured sprite gets the renderer's
+    # white texel. Leaving binding 1 unwritten would make the shader read a
+    # descriptor that was never filled.
+    var src_tex: *Texture = texture;
+    if (src_tex == nil) { src_tex = ?r.white; }
 
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(SpriteUniforms)::u64, view, r.sampler,
+                          $size_of(SpriteUniforms)::u64, texture_view(src_tex), r.sampler,
                           tint_off::u64, $size_of(TintUniforms)::u64);
 
     val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_SPRITE, ?r.sprite.quad.format);

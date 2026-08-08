@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - graphics: Resources are created against the `Device` that `renderer_device` returns: `texture`, `texture_load`, `mesh`, `mesh_load`, `model_load`, `render_target`, and their deletes.
 - graphics: `Material` no longer carries a shader; `material()` takes no arguments and `material_texture` replaces `material_bind`.
 - graphics: The window's render pass has a depth attachment, so 3D drawn straight to the window depth-tests and its pipelines are compatible with an offscreen target's pass.
+- graphics: A draw's slot is two 256-aligned sub-slots rather than two packed blocks. A uniform descriptor's buffer offset must satisfy `minUniformBufferOffsetAlignment`, which is up to 256, so a colour block packed at 144 bytes into the slot is accepted on hardware reporting 16 and rejected on hardware reporting 256.
+- graphics: `descriptors_bind_slot` refuses a nil image view rather than leaving binding 1 unwritten. Every fragment stage boom ships samples, so the untextured case is the renderer's 1x1 white texture, not a skipped write.
 - graphics: `mesh_load` conforms a glTF primitive to one of two canonical vertex layouts, standard or skinned, filling in attributes the asset omits. A shader input with no vertex attribute behind it is invalid rather than merely unused.
 - math: `mat4_perspective` and `mat4_orthographic` target the Vulkan clip volume: depth in [0, 1] and Y increasing downward. Under the OpenGL forms the near half of every frustum was clipped away and everything rendered vertically mirrored. `frontFace` is CLOCKWISE to match the Y flip.
 - window: `window_open` creates a window with no client API; `window_open_vulkan` and `window_swap` are gone.

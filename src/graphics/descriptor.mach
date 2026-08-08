@@ -51,13 +51,34 @@ use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
 # them rather than for a handful of materials.
 pub val MAX_SLOTS: usize = 512;
 
-# Bytes reserved per slot in the ring.
+# The alignment every uniform descriptor's buffer offset must satisfy.
 #
 # 256 is the largest minUniformBufferOffsetAlignment any Vulkan implementation
-# reports, so a slot at index * 256 is correctly aligned everywhere without
-# querying the device. The widest block boom uses is 144 bytes, so the padding
-# costs 112 bytes per slot and buys not having a device-dependent stride.
-pub val SLOT_BYTES: usize = 256;
+# reports, so an offset that is a multiple of it is legal everywhere without
+# querying the device.
+pub val UNIFORM_ALIGN: usize = 256;
+
+# Bytes reserved per slot in the ring.
+#
+# TWO ALIGNED SUB-SLOTS, NOT ONE. A draw binds two uniform ranges out of its
+# slot: the vertex stage's transform block at binding 0 and the fragment stage's
+# colour at binding 2. Both are descriptor buffer offsets, and both must be
+# multiples of UNIFORM_ALIGN. Packing the colour immediately after the transform
+# block puts it at 128 or 144 bytes into the slot, which is legal on hardware
+# reporting a smaller alignment and rejected on hardware reporting 256, so it
+# would work on the machine it was written on and fail elsewhere.
+#
+# So a slot is two aligned sub-slots: the transform block at offset 0 and the
+# colour at COLOUR_OFFSET. The widest transform block is 144 bytes and the
+# colour is 16, so 240 of the 512 bytes are padding, bought in exchange for a
+# stride that does not depend on the device.
+pub val SLOT_BYTES: usize = 512;
+
+# Where a draw's colour block sits inside its slot.
+#
+# Both stages read from the same slot, which is why one descriptor write path
+# serves the sprite tint and the mesh base colour.
+pub val COLOUR_OFFSET: usize = 256;
 
 # The most skinned draws one frame may issue.
 #
@@ -322,19 +343,24 @@ pub fun descriptors_write_slot_at(d: *Descriptors, frame: usize, slot: usize, of
     ret true;
 }
 
-# Point a slot's descriptor set at its uniform range and a texture.
+# Point a slot's descriptor set at its uniform ranges and a texture.
 #
-# `view` and `sampler` may be nil, which writes the uniform bindings alone.
-# That is the untextured-geometry case, and writing a combined image sampler
-# with a nil view is invalid usage rather than a no-op.
+# A NIL VIEW IS REFUSED, NOT SKIPPED. Every fragment stage boom ships samples,
+# so a set bound with binding 1 unwritten makes the shader read a descriptor
+# that was never filled. The untextured case is a caller passing the renderer's
+# 1x1 white texture, not a caller passing nil: this cannot supply that fallback
+# because it does not own one, so it reports the mistake instead.
 #
-# A `tint_size` above zero also writes the fragment stage's tint at binding 2
-# from the same slot, since the sprite block places the tint after the
-# transform block and one slot therefore serves both bindings.
+# A `tint_size` above zero also writes the fragment stage's colour at binding 2
+# from the same slot, at `tint_offset`. That offset is a descriptor buffer
+# offset and must satisfy minUniformBufferOffsetAlignment, which is why it is
+# COLOUR_OFFSET and not the size of the transform block.
 pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize,
                               size: u64, view: vk.ImageView, sampler: vk.Sampler,
                               tint_offset: u64, tint_size: u64) bool {
     if (!d.ready || slot >= MAX_SLOTS || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+    if (view == nil || sampler == nil) { ret false; }
+    if (tint_size > 0 && (tint_offset % UNIFORM_ALIGN::u64) != 0) { ret false; }
     val set:  vk.DescriptorSet = d.sets[set_index(slot, frame)];
     val base: u64 = slot_offset(slot);
 
@@ -368,19 +394,17 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].pTexelBufferView = nil;
     n = n + 1;
 
-    if (view != nil && sampler != nil) {
-        writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[n].pNext            = nil;
-        writes[n].dstSet           = set;
-        writes[n].dstBinding       = 1;
-        writes[n].dstArrayElement  = 0;
-        writes[n].descriptorCount  = 1;
-        writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[n].pImageInfo       = ?ii;
-        writes[n].pBufferInfo      = nil;
-        writes[n].pTexelBufferView = nil;
-        n = n + 1;
-    }
+    writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[n].pNext            = nil;
+    writes[n].dstSet           = set;
+    writes[n].dstBinding       = 1;
+    writes[n].dstArrayElement  = 0;
+    writes[n].descriptorCount  = 1;
+    writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[n].pImageInfo       = ?ii;
+    writes[n].pBufferInfo      = nil;
+    writes[n].pTexelBufferView = nil;
+    n = n + 1;
 
     if (tint_size > 0) {
         writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -475,8 +499,8 @@ test "descriptor: slot offsets do not overlap and are 256-aligned" {
     # 256 is the largest minUniformBufferOffsetAlignment any implementation
     # reports. An offset that is not a multiple of it is rejected on the
     # hardware that asks for it and accepted everywhere else.
-    if (slot_offset(0) != 0)   { ret 1; }
-    if (slot_offset(1) != 256) { ret 2; }
+    if (slot_offset(0) != 0)          { ret 1; }
+    if (slot_offset(1) != SLOT_BYTES::u64) { ret 2; }
     var i: usize = 0;
     for (i < MAX_SLOTS) {
         if ((slot_offset(i) % 256) != 0) { ret 3; }
@@ -491,6 +515,29 @@ test "descriptor: a slot is wide enough for the widest uniform block" {
     # SpriteUniforms is 144 bytes. A slot narrower than the block would make a
     # draw's uniforms run into the next draw's.
     if (SLOT_BYTES < 144) { ret 1; }
+    ret 0;
+}
+
+test "descriptor: both uniform ranges in a slot are correctly aligned" {
+    # A uniform descriptor's buffer offset must be a multiple of
+    # minUniformBufferOffsetAlignment, which is up to 256. This applies to the
+    # colour block at COLOUR_OFFSET as much as to the slot itself: an offset of
+    # 144 into an aligned slot is accepted on hardware reporting 16 and rejected
+    # on hardware reporting 256, so it passes wherever it was written and fails
+    # on someone else's machine.
+    if ((SLOT_BYTES % UNIFORM_ALIGN) != 0)    { ret 1; }
+    if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0) { ret 2; }
+    if (COLOUR_OFFSET == 0)                   { ret 3; }
+    # The colour must not run past the end of its slot.
+    if (COLOUR_OFFSET + 16 > SLOT_BYTES)      { ret 4; }
+    ret 0;
+}
+
+test "descriptor: the transform block fits before the colour" {
+    # SpriteUniforms is 144 bytes and is the widest. A colour offset below it
+    # would place the fragment stage's colour inside the vertex stage's source
+    # rect, which mis-samples every sprite while still drawing it in place.
+    if (COLOUR_OFFSET < 144) { ret 1; }
     ret 0;
 }
 
@@ -535,9 +582,22 @@ test "descriptor: an offset write must fit inside its slot" {
 }
 
 test "descriptor: a slot holds the sprite block and its tint together" {
-    # 144 for SpriteUniforms plus 16 for TintUniforms. If they did not both
-    # fit, the tint would need a slot of its own and the two would drift.
-    if (144 + 16 > SLOT_BYTES) { ret 1; }
+    # 144 for SpriteUniforms at offset 0 and 16 for TintUniforms at
+    # COLOUR_OFFSET. If they did not both fit, the tint would need a slot of its
+    # own and the two would drift.
+    if (COLOUR_OFFSET + 16 > SLOT_BYTES) { ret 1; }
+    ret 0;
+}
+
+test "descriptor: a nil image view is refused rather than left unwritten" {
+    # Every fragment stage samples, so a set bound with binding 1 unwritten has
+    # the shader read a descriptor that was never filled. Silently skipping the
+    # write is what made that possible.
+    var d: Descriptors;
+    d.ready = true;
+    var v: Vk;
+    v.ready = false;
+    if (descriptors_bind_slot(?d, ?v, 0, 0, 64, nil, nil, 0, 0)) { ret 1; }
     ret 0;
 }
 
