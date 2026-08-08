@@ -1,0 +1,301 @@
+# Audio smoke test.
+#
+# boom.audio had a full API, eight unit tests, and no executing coverage at all:
+# nothing in the repo had ever opened a device. The first time one was opened it
+# found that a mono clip against a stereo device was silent forever and leaked
+# its voice permanently, which is the shape of nearly every sound effect a game
+# ships. This exists so that cannot happen again quietly.
+#
+# WHY IT GENERATES ITS OWN CLIPS. Two reasons. A committed .wav is a binary the
+# repo has to carry and nobody can read in a diff, and more importantly the
+# interesting cases are the format mismatches: mono against a stereo device, and
+# 44.1 kHz against 48 kHz. Writing the files here means the test says in source
+# what it is testing, and the decode and VFS paths are still exercised because
+# the clips go to disk and come back through `res://`.
+#
+# WHAT A PASS MEANS. A device opened, a WAV decoded, a voice was claimed, and the
+# audio thread pulled the clip to its end and released the voice on its own. That
+# last part is the one that matters: a device that opens but never pulls, or a
+# stream the mixer cannot read, both leave the voice playing forever, and both
+# are silent.
+#
+# WHAT IT DOES NOT CHECK. That the sound is correct, or audible at all. Nothing
+# here reads the device's output back, so a mixer writing garbage, or the wrong
+# clip, or the right clip at the wrong gain would all pass. Listen to it.
+#
+# It is not part of CI, which has no sound device. Run it on a machine with one:
+#
+#   mach dep pull && mach build . && ./out/*/debug/bin/audio
+#
+# A machine with no device reports that and exits non-zero, which is the correct
+# outcome and not a pass.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.option.Option;
+use std.types.option.is_some;
+use std.chrono.time.Time;
+use std.chrono.time.monotonic;
+use std.chrono.time.time_sub;
+use std.chrono.duration.Duration;
+use std.chrono.duration.MILLISECOND;
+use allo: std.allocator;
+use page: std.allocator.page;
+use fs:   std.filesystem;
+use p:    std.print;
+use snd:  boom.audio;
+use vfs:  boom.vfs;
+use gm:   boom.math;
+
+# The device format. Stereo at 48 kHz, which is what a desktop device usually
+# runs at and what makes both generated clips a mismatch.
+val RATE:  u32 = 48000;
+val CHANS: u16 = 2;
+
+# Clip length. Short enough that the test is quick, long enough that several
+# render callbacks are needed to reach the end, which is what proves the audio
+# thread is pulling rather than the clip being consumed in one go.
+val CLIP_MS: usize = 400;
+
+# Spin until ms have passed.
+#
+# std has no sleep. A busy wait is wasteful and completely adequate here: the
+# audio thread is a separate OS thread and does not need this one to yield.
+fun wait_ms(ms: i64) {
+    val start: Time = monotonic();
+    var elapsed: Duration = 0;
+    for (elapsed < ms * MILLISECOND) {
+        elapsed = time_sub(monotonic(), start);
+    }
+}
+
+# Write a little-endian u16 at off.
+fun put_u16(b: *u8, off: usize, v: u16) {
+    b[off]     = (v & 0xFF)::u8;
+    b[off + 1] = ((v >> 8) & 0xFF)::u8;
+}
+
+# Write a little-endian u32 at off.
+fun put_u32(b: *u8, off: usize, v: u32) {
+    b[off]     = (v & 0xFF)::u8;
+    b[off + 1] = ((v >> 8) & 0xFF)::u8;
+    b[off + 2] = ((v >> 16) & 0xFF)::u8;
+    b[off + 3] = ((v >> 24) & 0xFF)::u8;
+}
+
+# Write the four bytes of a tag at off.
+fun put_tag(b: *u8, off: usize, s: str) {
+    var i: usize = 0;
+    for (i < 4) {
+        b[off + i] = s[i];
+        i = i + 1;
+    }
+}
+
+# Build a 16-bit PCM WAV of a sine tone into `bytes`, returning its length.
+#
+# The header is written out field by field rather than copied from a template,
+# so what each number means is visible. A wrong field here is a decode failure,
+# which is a much clearer symptom than anything this test is looking for.
+fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
+    val frames: usize = (rate::usize * ms) / 1000;
+    val ch:     usize = chans::usize;
+    val data:   usize = frames * ch * 2;
+
+    put_tag(bytes, 0, "RIFF");
+    put_u32(bytes, 4, (36 + data)::u32);
+    put_tag(bytes, 8, "WAVE");
+    put_tag(bytes, 12, "fmt ");
+    put_u32(bytes, 16, 16);                                 # PCM header size
+    put_u16(bytes, 20, 1);                                  # format: PCM
+    put_u16(bytes, 22, chans);
+    put_u32(bytes, 24, rate);
+    put_u32(bytes, 28, rate * chans::u32 * 2);              # bytes per second
+    put_u16(bytes, 32, (chans * 2)::u16);                   # bytes per frame
+    put_u16(bytes, 34, 16);                                 # bits per sample
+    put_tag(bytes, 36, "data");
+    put_u32(bytes, 40, data::u32);
+
+    var f: usize = 0;
+    for (f < frames) {
+        val phase: f32 = 6.2831853 * freq * (f::f32 / rate::f32);
+        # A quarter of full scale, so mixing two voices cannot clip.
+        val v: i32 = (gm.sinf(phase) * 8000.0)::i32;
+        var c: usize = 0;
+        for (c < ch) {
+            put_u16(bytes, 44 + (f * ch + c) * 2, (v & 0xFFFF)::u16);
+            c = c + 1;
+        }
+        f = f + 1;
+    }
+    ret 44 + data;
+}
+
+# Write a generated clip to disk under the given path.
+fun emit(path: str, bytes: *u8, rate: u32, chans: u16, freq: f32) bool {
+    val len: usize = build_wav(bytes, rate, chans, freq, CLIP_MS);
+    val e: Option[str] = fs.write_bytes(path, bytes, len, 0o644);
+    ret !is_some[str](e);
+}
+
+# Report a failed step and say which one.
+fun failed(step: str, r: Result[bool, str]) bool {
+    if (!is_err[bool, str](r)) { ret false; }
+    p.printlnf("FAIL {}: {}", step, unwrap_err[bool, str](r));
+    ret true;
+}
+
+# Play a clip and wait for the mixer to retire its voice on its own.
+#
+# The wait is generous against the clip length rather than tight: this is
+# checking that the voice is released at all, and a tight bound would turn a
+# loaded machine into a failure.
+fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
+    val lr: Result[snd.Sound, str] = snd.sound_load(s, vpath);
+    if (is_err[snd.Sound, str](lr)) {
+        p.printlnf("FAIL {}: {}", label, unwrap_err[snd.Sound, str](lr));
+        ret false;
+    }
+    var clip: snd.Sound = unwrap_ok[snd.Sound, str](lr);
+
+    val v: snd.VoiceId = snd.audio_play(s, ?clip, 0.5, false);
+    if (snd.audio_voice_count(s) == 0) {
+        p.printlnf("FAIL {}: no voice was claimed", label);
+        snd.sound_free(?clip);
+        ret false;
+    }
+
+    wait_ms((CLIP_MS * 3)::i64);
+    if (snd.audio_playing(s, v)) {
+        p.printlnf("FAIL {}: the voice is still playing after three times the clip", label);
+        p.println("      Either the device never pulled, or the mixer cannot read this");
+        p.println("      clip's format and is emitting silence without advancing. Both");
+        p.println("      leak the voice permanently: after 32 the mixer refuses to play.");
+        snd.sound_free(?clip);
+        ret false;
+    }
+    snd.sound_free(?clip);
+    p.printlnf("ok   {}", label);
+    ret true;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var a: allo.Allocator;
+    page.make(?a);
+
+    # 48000 frames of stereo 16-bit is the largest clip this writes, plus the
+    # 44-byte header. Sized here rather than allocated so the generator cannot
+    # outrun its buffer unnoticed.
+    var bytes: [200000]u8;
+
+    if (!emit("mono441.wav", ?bytes[0], 44100, 1, 440.0)) {
+        p.println("FAIL: could not write the generated mono clip");
+        ret 1;
+    }
+    if (!emit("stereo48.wav", ?bytes[0], 48000, 2, 660.0)) {
+        p.println("FAIL: could not write the generated stereo clip");
+        ret 1;
+    }
+    # res:// is a built-in scheme and is redirected by assigning its root, not
+    # by vfs_register, which refuses the two built-in names. The clips are
+    # written beside the binary rather than into res/, since the point of
+    # generating them is that the repo carries no binary asset.
+    vfs.res_root = ".";
+    p.println("ok   generated a mono 44.1 kHz clip and a stereo 48 kHz clip");
+
+    var s: snd.Audio;
+    val ir: Result[bool, str] = snd.audio_init(?s, ?a, RATE, CHANS);
+    if (failed("audio_init", ir)) {
+        p.println("      No sound device, or none this backend can open. That is a");
+        p.println("      real failure of this test's environment, not a pass.");
+        ret 1;
+    }
+    p.printlnf("ok   device opened at {} Hz, {} channels", RATE, CHANS);
+
+    # The mismatched clip first, because it is the one that was broken. Its
+    # channel count and its rate both differ from the device's.
+    if (!plays_to_completion(?s, "res://mono441.wav", "a mono 44.1 kHz clip plays to its end and frees its voice")) {
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    if (!plays_to_completion(?s, "res://stereo48.wav", "a clip already in the device's format plays to its end")) {
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+
+    # Overlapping voices, which is the whole reason this mixer exists rather
+    # than mach-audio's own single-sound example.
+    val l1: Result[snd.Sound, str] = snd.sound_load(?s, "res://mono441.wav");
+    val l2: Result[snd.Sound, str] = snd.sound_load(?s, "res://stereo48.wav");
+    if (is_err[snd.Sound, str](l1) || is_err[snd.Sound, str](l2)) {
+        p.println("FAIL: could not reload the clips for the overlap check");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    var c1: snd.Sound = unwrap_ok[snd.Sound, str](l1);
+    var c2: snd.Sound = unwrap_ok[snd.Sound, str](l2);
+
+    snd.audio_play(?s, ?c1, 0.5, false);
+    snd.audio_play(?s, ?c2, 0.5, false);
+    if (snd.audio_voice_count(?s) != 2) {
+        p.printlnf("FAIL overlap: the mixer reports {} voices, expected 2", snd.audio_voice_count(?s));
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    wait_ms((CLIP_MS * 3)::i64);
+    if (snd.audio_voice_count(?s) != 0) {
+        p.printlnf("FAIL overlap: {} voices are still held after both clips ended",
+                   snd.audio_voice_count(?s));
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    p.println("ok   two clips play at once and both voices come back");
+
+    # A looping voice, which never ends on its own, taken back by the game
+    # thread. This is the handoff the STOPPING state exists for.
+    val l3: Result[snd.Sound, str] = snd.sound_load(?s, "res://stereo48.wav");
+    if (is_err[snd.Sound, str](l3)) {
+        p.println("FAIL: could not load the clip for the loop check");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    var c3: snd.Sound = unwrap_ok[snd.Sound, str](l3);
+    val loop: snd.VoiceId = snd.audio_play(?s, ?c3, 0.4, true);
+    wait_ms((CLIP_MS * 2)::i64);
+    if (!snd.audio_playing(?s, loop)) {
+        p.println("FAIL loop: a looping voice ended on its own");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    if (!snd.audio_stop(?s, loop)) {
+        p.println("FAIL loop: a playing voice refused to stop");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    wait_ms(200);
+    if (snd.audio_playing(?s, loop)) {
+        p.println("FAIL loop: the voice is still playing after being stopped");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    p.println("ok   a looping voice runs past the clip and is reclaimed on request");
+
+    snd.sound_free(?c1);
+    snd.sound_free(?c2);
+    snd.sound_free(?c3);
+    snd.audio_dnit(?s);
+    p.println("ok   teardown");
+    p.println("PASS: a device opened, clips decoded and mixed, and every voice came back");
+    p.println("     This does NOT check that anything was audible or correct. Nothing");
+    p.println("     here reads the device's output. Listen to it: a low tone, then a");
+    p.println("     higher one, then both together, then the higher one looping.");
+    ret 0;
+}

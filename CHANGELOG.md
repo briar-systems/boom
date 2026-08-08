@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- examples: `audio`, a runnable smoke test for the sound path. It generates a mono 44.1 kHz clip and a stereo 48 kHz one, writes them to disk, loads them back through `res://`, and checks that each plays to its end and returns its voice, that two overlap, and that a looping voice can be taken back. `boom.audio` had a full API and no executing coverage at all, which is how a mono clip being silent forever went unnoticed.
+
+### Fixed
+- vfs: `vfs_register` refuses `res` and `user` rather than accepting them and doing nothing. `vfs_resolve` answers those two from `res_root` and `user_root` before it consults the table, so an entry under either name could never be used, and returning true told the caller it had redirected `res://` when every asset would still load from the old root. Assign `res_root` or `user_root`; both are public.
+
+
 ### Fixed
 - audio: A decoded clip is conformed to the device's format at load. mach-audio's `pull` emits silence and does not advance its cursor when a stream's channel count differs from the device's, and it does not look at sample rate at all. So **a mono clip against a stereo device was silent forever and its voice was never reclaimed**, and a 44.1 kHz clip on a 48 kHz device played sharp. Both are the common case: sound effects are usually mono and usually 44.1.
 
