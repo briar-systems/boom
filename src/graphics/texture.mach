@@ -28,6 +28,7 @@ use boom.graphics.image.image_dnit;
 use img: image;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
+use vfs: boom.vfs;
 use fs:   std.filesystem;
 use vec:    std.collections.vector;
 use allo: std.allocator;
@@ -43,6 +44,7 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_equals;
 
 # an opaque handle to a GPU texture
 # ---
@@ -186,11 +188,29 @@ pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Er
 # ---
 # path: filesystem path to a QOI or TGA image
 # ret:  the uploaded Texture, or a read/decode error
+# THE PATH IS VIRTUAL. `res://art/sheet.qoi` resolves through boom.vfs, the same
+# as boom.audio.sound_load and boom.graphics.text.font_load. A path with no
+# scheme is passed through unchanged, so an absolute or relative filesystem path
+# still works and a game may mix the two.
+#
+# These three loaders took raw paths while the audio and font ones did not, which
+# meant the same spelling loaded a sound and failed for a texture with nothing
+# but "no such file or directory" to go on.
 pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    # THROUGH THE VFS, like every other loader. A game writes `res://art/x.qoi`
+    # and boom.vfs decides what that means; a raw path here would make the
+    # graphics loaders the only ones in the engine that do not, so the same
+    # spelling would work for a sound and fail for a texture.
+    val pr: Result[str, str] = vfs.vfs_resolve(?pa, path);
+    if (is_err[str, str](pr)) {
+        ret err[Texture, Error](error(unwrap_err[str, str](pr)));
+    }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, real);
     if (is_err[vec.Vector[u8], str](br)) {
         ret err[Texture, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }
@@ -285,5 +305,27 @@ test "texture: unsupported format reports cleanly" {
     var dec: Decoded;
     val r: Result[bool, Error] = decode(?junk[0], 8, ?pa, ?dec);
     if (!is_err[bool, Error](r)) { ret 1; }
+    ret 0;
+}
+
+test "texture: a load path is resolved through the vfs" {
+    # The loaders that read files must agree on what a path means. This one took
+    # a raw filesystem path while sound_load and font_load resolved `res://`, so
+    # `res://art/x.qoi` loaded a sound and failed for a texture.
+    #
+    # Asserted through vfs_resolve rather than by loading, which needs a device:
+    # what is being pinned is that the scheme is honoured and that a plain path
+    # is left alone, and both are decided before any device is touched.
+    var a: allo.Allocator;
+    page.make(?a);
+
+    val r: Result[str, str] = vfs.vfs_resolve(?a, "res://art/sheet.qoi");
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "res/art/sheet.qoi")) { ret 2; }
+
+    # No scheme, so it is a filesystem path and must survive untouched.
+    val p2: Result[str, str] = vfs.vfs_resolve(?a, "assets/sheet.qoi");
+    if (is_err[str, str](p2)) { ret 3; }
+    if (!str_equals(unwrap_ok[str, str](p2), "assets/sheet.qoi")) { ret 4; }
     ret 0;
 }

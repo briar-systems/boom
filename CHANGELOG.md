@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- graphics: `texture_load`, `mesh_load` and `model_load` resolve their path through `boom.vfs`. They took a raw filesystem path while `sound_load` and `font_load` resolved `res://`, so the same spelling loaded a sound and failed for a texture with nothing but "no such file or directory" to go on. A path with no scheme is still passed through unchanged.
+
+
 ### Added
 - graphics: `pass_draw_triangles`, for a stream of already-placed, per-vertex-coloured triangles. A sprite is one rectangle placed by a model matrix, which is the wrong shape for an immediate-mode UI, a particle system or a debug overlay: those produce thousands of triangles that are already in the right place, each with its own colour, rebuilt every frame, and they belong in one draw. Geometry goes through a new per-frame vertex arena (`boom.graphics.stream`), one per frame in flight, because writing this frame's list into memory the GPU is still reading for the last one is a race whose symptom is a UI that flickers under load and looks correct when you stop to inspect it.
 - graphics: `vertex_format_ui`, the layout that path takes: position in pixels, uv, then rgba, eight f32 at a 32-byte stride. **This is blit's `Vert` exactly**, so a blit draw list uploads with no repacking, and a test asserts the two agree rather than leaving it to luck.
