@@ -5,10 +5,9 @@
 # consumes SPIR-V natively and GL 4.6 core accepts it through glShaderBinary
 # and glSpecializeShader, so a backend swap does not change a shader.
 #
-# Only the shaders that need no texture are ported. SPIR-V has no sampler
-# binding yet (mach#2794), so the sprite and material shaders, which every 2D
-# quad and all text go through, still use the GLSL path in shader.mach. That
-# path is deleted when the sampler binding lands.
+# All four stages are ported. The sampler binding landed in mach#2803, shipped
+# in 4.17.0, so the sprite path no longer needs GLSL. The bytes here are the
+# whole shader surface of the engine.
 
 use std.types.size.usize;
 use std.types.bool.bool;
@@ -30,6 +29,17 @@ pub val LIT_FRAG_SPV: [_]u8;
 # Mesh vertex stage: model-view-projection from a uniform block.
 #[embed("../../res/spv/mesh_vert.spv")]
 pub val MESH_VERT_SPV: [_]u8;
+
+# Sprite vertex stage: projection and model from a uniform block, with the
+# atlas sub-rectangle applied to the unit quad's UVs.
+#[embed("../../res/spv/sprite_vert.spv")]
+pub val SPRITE_VERT_SPV: [_]u8;
+
+# Sprite fragment stage: samples the atlas at binding 1 and multiplies by the
+# tint at binding 2. Text goes through this too, because a glyph atlas stores
+# coverage in alpha with RGB left white.
+#[embed("../../res/spv/sprite_frag.spv")]
+pub val SPRITE_FRAG_SPV: [_]u8;
 
 # The entry point name every boom vertex stage uses.
 pub val VERTEX_ENTRY: str = "vert_main";
@@ -108,5 +118,40 @@ test "spirv: a module is a whole number of 32-bit words" {
     if ($length_of(LIT_FRAG_SPV) % 4 != 0)  { ret 1; }
     if ($length_of(MESH_VERT_SPV) % 4 != 0) { ret 1; }
     if ($length_of(LIT_FRAG_SPV) < 32)      { ret 1; }
+    ret 0;
+}
+
+test "spirv: every embedded module is a SPIR-V module of whole words" {
+    # The magic number, little-endian. A module that failed to build leaves a
+    # stale or empty file, and #[embed] carries whatever is there without
+    # complaint, so the bytes are checked rather than assumed.
+    var mods: [4]*u8;
+    var lens: [4]usize;
+    mods[0] = ?LIT_FRAG_SPV[0];    lens[0] = $length_of(LIT_FRAG_SPV);
+    mods[1] = ?MESH_VERT_SPV[0];   lens[1] = $length_of(MESH_VERT_SPV);
+    mods[2] = ?SPRITE_VERT_SPV[0]; lens[2] = $length_of(SPRITE_VERT_SPV);
+    mods[3] = ?SPRITE_FRAG_SPV[0]; lens[3] = $length_of(SPRITE_FRAG_SPV);
+
+    var i: usize = 0;
+    for (i < 4) {
+        if (lens[i] == 0)       { ret 1; }
+        if ((lens[i] % 4) != 0) { ret 2; }
+        val m: *u8 = mods[i];
+        # 0x07230203
+        if (m[0] != 0x03) { ret 3; }
+        if (m[1] != 0x02) { ret 4; }
+        if (m[2] != 0x23) { ret 5; }
+        if (m[3] != 0x07) { ret 6; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "spirv: the sprite modules are distinct from the mesh ones" {
+    # A copy-paste in the embed paths would silently make the sprite pipeline
+    # draw with the mesh shader, which fails at pipeline creation with a vertex
+    # input mismatch rather than saying the path was wrong.
+    if ($length_of(SPRITE_VERT_SPV) == $length_of(MESH_VERT_SPV)
+        && $length_of(SPRITE_FRAG_SPV) == $length_of(LIT_FRAG_SPV)) { ret 1; }
     ret 0;
 }
