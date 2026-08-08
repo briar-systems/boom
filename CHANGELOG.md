@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - graphics: `renderer_resize` adopts the extent the surface actually granted rather than the one requested. A surface reporting a concrete `currentExtent` overrides the request, so recording the request left the viewport and the 2D projection sized for a window that no longer existed.
 - examples: `cube` and `animation` recompute their camera aspect each frame and skip drawing while minimized.
 
+- graphics: `skeleton_pose` fills the joints past `count` with identity. A skinned draw uploads the whole `MAX_JOINTS` palette in one copy, so an out-of-range joint index would otherwise transform a vertex by uninitialized floats.
+
 ### Removed
 - graphics: `Shader`, `shader`, `shader_delete`, `SKINNED_VERTEX_SRC`, and every GLSL string.
 
