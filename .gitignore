@@ -2,7 +2,17 @@ out/
 
 # mach dep checkouts materialized by `mach dep pull`; mach.lock is the source of truth
 dep/
-res/spv/
+
+# res/spv/ is NOT ignored. The compiled SPIR-V is committed, because a consumer
+# that pulls boom over git has to have it: the modules are #[embed]ed, and an
+# embed is not a build-graph edge, so nothing runs the build-shaders step on a
+# consumer's behalf (mach#2887). Ignoring them made boom unbuildable as a
+# dependency while every example, which resolves boom by path into a tree that
+# had been built locally, kept working.
+#
+# They are also asset-shaped rather than output-shaped: SPIR-V is
+# target-independent, so one copy serves every target and profile, which is why
+# they live under res/ and not under out/. CI asserts they match a fresh build.
 
 # generated at runtime by examples/audio, not assets
 *.wav
