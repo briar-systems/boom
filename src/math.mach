@@ -62,3 +62,8 @@ fwd quat.quat_slerp;
 fwd transform.Transform;
 fwd transform.transform_identity;
 fwd transform.transform_matrix;
+fwd boom.math.mat.mat4_project_point;
+fwd boom.math.ray.Ray;
+fwd boom.math.ray.ray;
+fwd boom.math.ray.ray_at;
+fwd boom.math.ray.ray_plane_y;

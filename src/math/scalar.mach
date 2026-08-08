@@ -71,16 +71,41 @@ pub fun sin64(x: f64) f64 {
     or (r < 0.0 - HALF_PI) {
         r = 0.0 - PI - r;
     }
+    # Five terms rather than four. Reduction leaves r as large as pi/2, which is
+    # where a truncated series is least accurate, and four terms were 3.5e-6 out
+    # there. That is about thirty ulp in f32, so it was visible in the f32
+    # wrappers everything else calls. The fifth term costs one multiply and
+    # brings the worst case to 5.6e-8, below what f32 can represent.
     val x2: f64 = r * r;
-    ret r * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0))));
+    ret r * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0 * (1.0 - x2 / 72.0 * (1.0 - x2 / 110.0)))));
 }
 
-# cosine, expressed as a shifted sine
+# cosine, range-reduced Taylor series
+#
+# ITS OWN SERIES, NOT A SHIFTED SINE. cos(x) = sin(x + pi/2) is exact in
+# arithmetic and wrong in practice: shifting by pi/2 lands every small angle on
+# the far end of sine's reduced range, which is precisely where the truncated
+# series is least accurate. cos(0) came back as 1.0000035, greater than one,
+# which is worse than imprecise. A rotation matrix built from it is not
+# orthonormal, and feeding it to acos is outside the domain.
+#
+# Evaluating cosine's own series puts the common case, an angle near zero, at
+# the point where the series is exact. cos(0) is now exactly 1.
 # ---
 # x:   angle in radians
 # ret: cosine of x
 pub fun cos64(x: f64) f64 {
-    ret sin64(x + HALF_PI);
+    var r: f64 = x - round64(x / TWO_PI) * TWO_PI;
+    # Cosine is even, so the sign of the reduced angle does not matter.
+    if (r < 0.0) { r = 0.0 - r; }
+    # Beyond a quarter turn, fold back and negate: cos(x) = -cos(pi - x).
+    var sign: f64 = 1.0;
+    if (r > HALF_PI) {
+        r    = PI - r;
+        sign = 0.0 - 1.0;
+    }
+    val x2: f64 = r * r;
+    ret sign * (1.0 - x2 / 2.0 * (1.0 - x2 / 12.0 * (1.0 - x2 / 30.0 * (1.0 - x2 / 56.0 * (1.0 - x2 / 90.0)))));
 }
 
 # tangent, the ratio of sine to cosine
@@ -221,5 +246,66 @@ test "scalar: arccosine at cardinal values" {
 test "scalar: arccosine clamps out-of-range input" {
     if (!close(acos64(1.5), 0.0, 0.0001)) { ret 1; }
     if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 2; }
+    ret 0;
+}
+
+test "scalar: cosine of zero is exactly one" {
+    # The defect this guards. cos was sin(x + pi/2), which evaluated sine's
+    # series at the far end of its reduced range, so cos(0) returned 1.0000035:
+    # not merely imprecise but greater than one. A rotation matrix built from it
+    # is not orthonormal and acos of it is outside the domain.
+    if (cos64(0.0) != 1.0) { ret 1; }
+    if (cosf(0.0) != 1.0)  { ret 2; }
+    if (sin64(0.0) != 0.0) { ret 3; }
+    if (sinf(0.0) != 0.0)  { ret 4; }
+    ret 0;
+}
+
+test "scalar: sine and cosine never leave [-1, 1]" {
+    # A value outside the range is what makes downstream code fail rather than
+    # merely drift: acos rejects it and a normalize divides by more than it
+    # should. Swept rather than spot-checked, since the old error was worst at
+    # the ends of the reduced range and zero in the middle.
+    var i: i32 = 0;
+    for (i <= 400) {
+        val x: f64 = (0.0 - 25.0) + i::f64 * 0.125;
+        if (sin64(x) > 1.0 || sin64(x) < 0.0 - 1.0) { ret 1; }
+        if (cos64(x) > 1.0 || cos64(x) < 0.0 - 1.0) { ret 2; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "scalar: sine and cosine satisfy the pythagorean identity" {
+    # Derived rather than recorded: whatever the series does, sin^2 + cos^2 must
+    # be one at every angle. This is what catches a range reduction that drifts
+    # or a series truncated too early, without pinning either to a table of
+    # values that would need regenerating.
+    var i: i32 = 0;
+    for (i <= 400) {
+        val x: f64 = (0.0 - 25.0) + i::f64 * 0.125;
+        val s: f64 = sin64(x);
+        val c: f64 = cos64(x);
+        var d: f64 = s * s + c * c - 1.0;
+        if (d < 0.0) { d = 0.0 - d; }
+        # Comfortably tighter than the 3.5e-6 the four-term series produced, and
+        # loose enough not to pin the exact truncation.
+        if (d > 0.000001) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "scalar: cosine leads sine by a quarter turn" {
+    # The identity the old implementation was built on, now checked rather than
+    # assumed. If the two ever disagree, one of the reductions is wrong.
+    var i: i32 = 0;
+    for (i <= 200) {
+        val x: f64 = (0.0 - 12.0) + i::f64 * 0.125;
+        var d: f64 = cos64(x) - sin64(x + HALF_PI);
+        if (d < 0.0) { d = 0.0 - d; }
+        if (d > 0.00001) { ret 1; }
+        i = i + 1;
+    }
     ret 0;
 }

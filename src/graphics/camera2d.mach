@@ -35,9 +35,13 @@ use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_translation;
 use boom.math.mat.mat4_orthographic;
 use boom.math.mat.mat4_from_quat;
-use boom.math.mat.mat4_ptr;
+use boom.math.mat.mat4_project_point;
 use boom.math.quat.Quat;
 use boom.math.quat.quat_from_axis_angle;
+use boom.math.scalar.sinf;
+use boom.math.scalar.cosf;
+use boom.graphics.sprite.Rect;
+use boom.graphics.sprite.rect;
 
 # A view of a 2D world.
 # ---
@@ -109,6 +113,86 @@ pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
 
     ret mat4_mul(?proj, ?view);
 }
+
+
+# Where a point on the target lands in the world.
+#
+# THE REASON A CAMERA IS NOT JUST A MATRIX. A game reads a pointer in target
+# pixels and has to act on world things: what was clicked, where to aim, where
+# to drop what is being dragged. Without this every game inverts the camera by
+# hand, and a hand-rolled inverse that forgets the roll or the zoom is wrong
+# only when the camera is rotated or zoomed, which is exactly when nobody is
+# looking closely.
+#
+# Derived analytically rather than by inverting the matrix: the forward
+# transform is a translate, a roll and a uniform scale, so the inverse is the
+# same three undone in reverse, with no general 4x4 inversion and no chance of a
+# singular matrix.
+# ---
+# c:      the camera
+# screen: the point in target pixels, origin top left
+# width:  target width in pixels
+# height: target height in pixels
+pub fun camera2d_screen_to_world(c: *Camera2D, screen: Vec2, width: f32, height: f32) Vec2 {
+    val z: f32 = camera2d_zoom(c);
+    # Undo the projection: back to view space, where the camera centre is 0.
+    val vx: f32 = (screen.x - width  * 0.5) / z;
+    val vy: f32 = (screen.y - height * 0.5) / z;
+    # Undo the roll. The forward transform rolls by -rotation, so this rolls by
+    # +rotation.
+    val s: f32 = sinf(c.rotation);
+    val k: f32 = cosf(c.rotation);
+    ret vec2(c.center.x + vx * k - vy * s,
+             c.center.y + vx * s + vy * k);
+}
+
+# Where a world point lands on the target, in pixels.
+#
+# The exact inverse of camera2d_screen_to_world, for placing a label over a
+# world object or deciding whether something is on screen at all.
+pub fun camera2d_world_to_screen(c: *Camera2D, world: Vec2, width: f32, height: f32) Vec2 {
+    val z: f32 = camera2d_zoom(c);
+    val dx: f32 = world.x - c.center.x;
+    val dy: f32 = world.y - c.center.y;
+    # Roll by -rotation, matching the forward transform.
+    val s: f32 = sinf(0.0 - c.rotation);
+    val k: f32 = cosf(0.0 - c.rotation);
+    val vx: f32 = dx * k - dy * s;
+    val vy: f32 = dx * s + dy * k;
+    ret vec2(vx * z + width * 0.5, vy * z + height * 0.5);
+}
+
+# The axis-aligned world rectangle the camera can see.
+#
+# What a game needs to decide what to build or draw at all: a tile field has to
+# cover what is visible, and anything outside this does not need submitting.
+# Without it a game bounds its loops by the target size, which is only the
+# visible area at zoom 1, so zooming out leaves the edges empty.
+#
+# Axis-aligned, and under a roll that is the bounding box of the rotated view
+# rather than the view itself, so it over-covers rather than clipping something
+# that is actually on screen. Computed from the four corners for that reason: a
+# bound derived from the width and height alone would be right only at zero
+# rotation.
+pub fun camera2d_visible(c: *Camera2D, width: f32, height: f32) Rect {
+    val a: Vec2 = camera2d_screen_to_world(c, vec2(0.0, 0.0), width, height);
+    val b: Vec2 = camera2d_screen_to_world(c, vec2(width, 0.0), width, height);
+    val d: Vec2 = camera2d_screen_to_world(c, vec2(0.0, height), width, height);
+    val e: Vec2 = camera2d_screen_to_world(c, vec2(width, height), width, height);
+
+    var x0: f32 = a.x;
+    var x1: f32 = a.x;
+    var y0: f32 = a.y;
+    var y1: f32 = a.y;
+    x0 = minf(minf(x0, b.x), minf(d.x, e.x));
+    x1 = maxf(maxf(x1, b.x), maxf(d.x, e.x));
+    y0 = minf(minf(y0, b.y), minf(d.y, e.y));
+    y1 = maxf(maxf(y1, b.y), maxf(d.y, e.y));
+    ret rect(x0, y0, x1 - x0, y1 - y0);
+}
+
+fun minf(a: f32, b: f32) f32 { if (a < b) { ret a; } ret b; }
+fun maxf(a: f32, b: f32) f32 { if (a > b) { ret a; } ret b; }
 
 # --------------------------------------------------------------------- tests
 #
@@ -227,19 +311,90 @@ test "camera2d: a zero or negative zoom is treated as one" {
     ret 0;
 }
 
-# Apply a matrix to a 2D point, with the perspective divide a projection needs.
+# Apply a matrix to a 2D point, through the shared projecting transform.
 fun apply(m: *Mat4, x: f32, y: f32) Vec3 {
-    val p: *f32 = mat4_ptr(m);
-    val cx: f32 = p[0] * x + p[4] * y + p[12];
-    val cy: f32 = p[1] * x + p[5] * y + p[13];
-    val cz: f32 = p[2] * x + p[6] * y + p[14];
-    var cw: f32 = p[3] * x + p[7] * y + p[15];
-    if (cw == 0.0) { cw = 1.0; }
-    ret vec3(cx / cw, cy / cw, cz / cw);
+    ret mat4_project_point(m, vec3(x, y, 0.0));
 }
 
 fun near(a: f32, b: f32) bool {
     var d: f32 = a - b;
     if (d < 0.0) { d = 0.0 - d; }
     ret d < 0.0001;
+}
+
+test "camera2d: screen to world and back is a round trip" {
+    # Under a zoom and a roll, which is where a hand-rolled inverse goes wrong:
+    # at zoom 1 and no rotation almost any wrong inverse still round-trips.
+    var c: Camera2D = camera2d(vec2(500.0, 300.0), 2.5);
+    c.rotation = 0.7;
+    val p: Vec2 = vec2(64.0, 48.0);
+    val w: Vec2 = camera2d_screen_to_world(?c, p, 320.0, 180.0);
+    val b: Vec2 = camera2d_world_to_screen(?c, w, 320.0, 180.0);
+    if (!near(b.x, p.x)) { ret 1; }
+    if (!near(b.y, p.y)) { ret 2; }
+    ret 0;
+}
+
+test "camera2d: the middle of the target is the camera centre" {
+    var c: Camera2D = camera2d(vec2(500.0, 300.0), 3.0);
+    c.rotation = 1.1;
+    val w: Vec2 = camera2d_screen_to_world(?c, vec2(160.0, 90.0), 320.0, 180.0);
+    if (!near(w.x, 500.0)) { ret 1; }
+    if (!near(w.y, 300.0)) { ret 2; }
+    ret 0;
+}
+
+test "camera2d: screen to world agrees with the matrix" {
+    # The two are separate derivations of the same transform: the matrix maps
+    # world to clip, this maps screen to world. If they disagree, picking lands
+    # somewhere other than what was drawn, and nothing reports it.
+    var c: Camera2D = camera2d(vec2(120.0, 70.0), 1.75);
+    c.rotation = 0.4;
+    val w: Vec2 = camera2d_screen_to_world(?c, vec2(40.0, 150.0), 320.0, 180.0);
+
+    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
+    val clip: Vec3 = apply(?m, w.x, w.y);
+    # Clip back to target pixels, y down in both.
+    val sx: f32 = (clip.x + 1.0) * 0.5 * 320.0;
+    val sy: f32 = (clip.y + 1.0) * 0.5 * 180.0;
+    if (!near(sx, 40.0))  { ret 1; }
+    if (!near(sy, 150.0)) { ret 2; }
+    ret 0;
+}
+
+test "camera2d: the visible rectangle grows as the camera zooms out" {
+    # A tile field bounded by the target size instead of this is right only at
+    # zoom 1, and zooming out leaves the edges of the world empty.
+    var c: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
+    val at1: Rect = camera2d_visible(?c, 320.0, 180.0);
+    if (!near(at1.w, 320.0)) { ret 1; }
+    if (!near(at1.h, 180.0)) { ret 2; }
+    if (!near(at1.x, 0.0))   { ret 3; }
+    if (!near(at1.y, 0.0))   { ret 4; }
+
+    c.zoom = 0.5;
+    val out: Rect = camera2d_visible(?c, 320.0, 180.0);
+    if (!near(out.w, 640.0)) { ret 5; }
+    if (!near(out.h, 360.0)) { ret 6; }
+    # Still centred on the camera.
+    if (!near(out.x + out.w * 0.5, 160.0)) { ret 7; }
+    ret 0;
+}
+
+test "camera2d: a rolled view is bounded by its corners, not its size" {
+    # Under a 45 degree roll the axis-aligned bound of a 320x180 view is wider
+    # than 320, so a bound taken from the width and height would clip things
+    # that are genuinely on screen. Derived: (320 + 180) / sqrt(2) = 353.55.
+    var c: Camera2D = camera2d(vec2(0.0, 0.0), 1.0);
+    c.rotation = 0.78539816;
+    val v: Rect = camera2d_visible(?c, 320.0, 180.0);
+    if (!near_eps(v.w, 353.553, 0.02)) { ret 1; }
+    if (!near_eps(v.h, 353.553, 0.02)) { ret 2; }
+    ret 0;
+}
+
+fun near_eps(a: f32, b: f32, eps: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < eps;
 }

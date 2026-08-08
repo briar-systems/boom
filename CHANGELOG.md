@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- graphics: `Camera2D` and `pass_world`, so a 2D pass can pan, zoom and roll. See below for why a hand-rolled camera fails quietly.
+- graphics: `camera2d_screen_to_world`, `camera2d_world_to_screen` and `camera2d_visible`. A pointer arrives in target pixels and a game has to answer world questions with it, so without these every game inverts the camera by hand; `camera2d_visible` is what bounds a tile field or a cull to what is actually on screen rather than to the target size, which is only the visible area at zoom 1.
+- graphics: `camera_orthographic`, a 3D camera without foreshortening. Isometric and 2.5D views are not expressible by a perspective camera at any field of view, and `camera_perspective` was the only constructor.
+- graphics: `camera_ray`, the ray through a viewport pixel, for picking and aiming. Built from the camera basis rather than by inverting the view-projection, so it needs no general 4x4 inverse and cannot go singular. Perspective and orthographic differ in the way they should: one fans out from a fixed origin, the other keeps one direction from a moving origin.
+- math: `boom.math.ray`, with `Ray`, `ray_at` and `ray_plane_y`. A camera ray against a plane at constant height is what clicking on the ground, placing a building and aiming at a floor all reduce to. It reports whether it hit rather than returning a sentinel, so a click on the sky is distinguishable from a click at the origin.
+- math: `mat4_project_point`, which divides through by w.
+
+### Fixed
+- math: `cos64` was `sin64(x + pi/2)`, which is exact in arithmetic and wrong in practice: shifting by a quarter turn lands every small angle on the far end of sine's reduced range, exactly where the truncated series is least accurate. **`cos(0)` returned 1.0000035, greater than one.** A rotation matrix built from it is not orthonormal and feeding it to `acos` is outside the domain. Cosine now evaluates its own series, so the common case of a small angle sits where the series is exact and `cos(0)` is exactly 1. Worst-case error over sixteen pi improves from 3.5e-6 to 4.6e-7.
+
+  Sine gained a fifth term at the same time. Its worst case was the same 3.5e-6, about thirty ulp in f32, so it was visible through the f32 wrappers everything else calls; it is now 5.6e-8, below what f32 can represent. Found because a camera test that should have been exact was not.
+
+- math: `mat4_transform_point` silently returned unclipped coordinates when handed a projection, because it applies no perspective divide. That is correct for a model or view matrix and wrong by a factor of w for a projection, and the error approaches zero near the view axis, so it looks right exactly where it is checked first. The contract is now documented and `mat4_project_point` does the divide. Two call sites had already hand-rolled it.
+
 ### Changed
 - graphics: 2D draws are batched. A sprite used to be a draw of its own holding a uniform slot for its model matrix, tint and source rectangle. The slot ring is a fixed per-frame reservation shared by every draw in the frame, so a few hundred sprites exhausted it, and because draws are refused in submission order the ones lost were whichever came last. In a game that renders its world to an offscreen target and composites it afterwards, the last draws are the composite and the UI, so **a screenful of sprites did not lose some sprites, it lost the picture** and the drop counters that would have explained it were part of the UI that vanished. Measured in the onslaughter testbed: 600 drones submitted 687 draws against 512 slots, refused 175, and rendered a black window.
 
