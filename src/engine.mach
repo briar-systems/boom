@@ -14,6 +14,7 @@
 use boom.context.Context;
 use boom.app.App;
 use inp: boom.input;
+use phy: boom.physics;
 use boom.window.window_should_close;
 use boom.window.window_poll;
 use boom.window.window_swap;
@@ -21,6 +22,7 @@ use boom.clock.clock_tick;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
 use boom.timestep.timestep_alpha;
+use boom.timestep.timestep_dt_seconds;
 
 fun invoke(hook: fun(*Context), ctx: *Context) {
     if (hook != nil) {
@@ -55,6 +57,9 @@ pub fun run(ctx: *Context, app: *App) {
             # running three ticks shows the press to the first only, and a
             # frame running none leaves it pending for whichever tick is next.
             inp.input_begin_tick(?ctx.input);
+            # Physics runs before the tick so a game reacts to this step's
+            # collisions in the same tick they happened.
+            phy.physics_step(?ctx.physics, ?ctx.events, timestep_dt_seconds(?ctx.step));
             invoke(app.f_tick, ctx);
         }
 

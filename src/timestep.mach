@@ -13,6 +13,7 @@
 #   render(alpha);
 
 use std.chrono.duration.Duration;
+use std.chrono.duration.SECOND;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
@@ -143,4 +144,13 @@ test "timestep: alpha is the fractional remainder" {
     val a: f64 = timestep_alpha(?ts);
     if (a < 0.499 || a > 0.501) { ret 1; }
     ret 0;
+}
+
+# The fixed step in seconds, for consumers that integrate in f32.
+#
+# The accumulator works in Duration, but a physics step wants seconds as a
+# float. Converting here keeps the unit conversion in one place rather than at
+# every call site.
+pub fun timestep_dt_seconds(ts: *Timestep) f32 {
+    ret ts.fixed::f64::f32 / SECOND::f64::f32;
 }

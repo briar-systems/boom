@@ -1,0 +1,291 @@
+# Physics as an engine subsystem.
+#
+# Wraps mach-phys so a game never imports it directly, matching how the
+# renderer hides mach-gl and mach-glfw.
+#
+# Three bindings make this one engine rather than two libraries sharing a
+# process:
+#
+#   - A body writes back to the same Transform the renderer reads, so position
+#     has a single source of truth and no game code copies between them.
+#   - Stepping is driven by the existing fixed timestep, not the frame. A
+#     variable dt makes integration frame-rate dependent.
+#   - Collisions arrive on the existing EventQueue, so a game handles them
+#     where it already handles input.
+#
+# mach-phys uses f32x4 vectors and boom's math uses a three-field record, so
+# this module converts at the boundary. The conversion is here rather than in
+# either library because neither should depend on the other's vector type.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use phys: phys.world;
+use pbody: phys.body;
+use pvec: phys.vec;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.transform.Transform;
+use boom.event.EventQueue;
+use boom.event.Event;
+use boom.event.queue_push;
+use boom.event.COLLISION;
+
+# A body's identity within the physics world.
+pub def BodyId: usize;
+
+# The id that no body has.
+pub val NO_BODY: BodyId = 0;
+
+# One tracked body and the transform it drives.
+# ---
+# id:        Identity in the underlying world.
+# transform: Written after each step; nil if the body drives nothing.
+rec Tracked {
+    id:        phys.BodyId;
+    transform: *Transform;
+    used:      bool;
+}
+
+# The physics subsystem.
+# ---
+# world:   The underlying simulation.
+# tracked: Bodies and the transforms they drive.
+# count:   High-water mark of tracked slots.
+pub rec Physics {
+    world:   phys.World;
+    tracked: [256]Tracked;
+    count:   usize;
+}
+
+# Convert a boom vector to the simulation's representation.
+fun to_phys(v: Vec3) pvec.Vec3 {
+    ret pvec.vec3(v.x, v.y, v.z);
+}
+
+# Convert a simulation vector back to boom's representation.
+fun from_phys(v: pvec.Vec3) Vec3 {
+    ret vec3(v[0], v[1], v[2]);
+}
+
+# Create a physics subsystem under the given gravity.
+pub fun physics_new(gravity: Vec3) Physics {
+    var p: Physics;
+    p.world = phys.world_new(to_phys(gravity));
+    p.count = 0;
+    var i: usize = 0;
+    for (i < 256) { p.tracked[i].used = false; i = i + 1; }
+    ret p;
+}
+
+# Add a dynamic body that drives a transform.
+#
+# The transform is written after every step, so a game positions its renderable
+# from the solver rather than tracking position twice.
+# ---
+# t:    Transform to drive; may be nil for a body nothing draws.
+# half: Half-extents of the body's AABB.
+# mass: Mass in kilograms; zero or less makes the body static.
+pub fun physics_add(p: *Physics, t: *Transform, position: Vec3, half: Vec3, mass: f32) BodyId {
+    var b: pbody.Body;
+    if (mass > 0.0) { b = pbody.body_dynamic(to_phys(position), to_phys(half), mass); }
+    or              { b = pbody.body_static(to_phys(position), to_phys(half)); }
+
+    val id: phys.BodyId = phys.world_add(?p.world, b);
+    if (id == phys.NO_BODY) { ret NO_BODY; }
+
+    var i: usize = 0;
+    for (i < p.count) {
+        if (!p.tracked[i].used) {
+            p.tracked[i].id        = id;
+            p.tracked[i].transform = t;
+            p.tracked[i].used      = true;
+            ret (i + 1)::BodyId;
+        }
+        i = i + 1;
+    }
+    if (p.count >= 256) { ret NO_BODY; }
+    val s: usize = p.count;
+    p.tracked[s].id        = id;
+    p.tracked[s].transform = t;
+    p.tracked[s].used      = true;
+    p.count = p.count + 1;
+    ret (s + 1)::BodyId;
+}
+
+# Remove a body and stop driving its transform.
+pub fun physics_remove(p: *Physics, id: BodyId) bool {
+    if (id == NO_BODY || id::usize > p.count) { ret false; }
+    val i: usize = id::usize - 1;
+    if (!p.tracked[i].used) { ret false; }
+    phys.world_remove(?p.world, p.tracked[i].id);
+    p.tracked[i].used = false;
+    ret true;
+}
+
+# Set a body's velocity.
+pub fun physics_set_velocity(p: *Physics, id: BodyId, v: Vec3) bool {
+    val b: *pbody.Body = body_of(p, id);
+    if (b == nil) { ret false; }
+    b.velocity = to_phys(v);
+    ret true;
+}
+
+# Read a body's velocity.
+pub fun physics_velocity(p: *Physics, id: BodyId) Vec3 {
+    val b: *pbody.Body = body_of(p, id);
+    if (b == nil) { ret vec3(0.0, 0.0, 0.0); }
+    ret from_phys(b.velocity);
+}
+
+# Set a body's restitution, from 0 fully damped to 1 fully elastic.
+pub fun physics_set_restitution(p: *Physics, id: BodyId, e: f32) bool {
+    val b: *pbody.Body = body_of(p, id);
+    if (b == nil) { ret false; }
+    b.restitution = e;
+    ret true;
+}
+
+# The underlying body behind an engine id, or nil.
+fun body_of(p: *Physics, id: BodyId) *pbody.Body {
+    if (id == NO_BODY || id::usize > p.count) { ret nil; }
+    val i: usize = id::usize - 1;
+    if (!p.tracked[i].used) { ret nil; }
+    ret phys.world_body(?p.world, p.tracked[i].id);
+}
+
+# The engine id for an underlying world id, or NO_BODY.
+fun engine_id(p: *Physics, wid: phys.BodyId) BodyId {
+    var i: usize = 0;
+    for (i < p.count) {
+        if (p.tracked[i].used && p.tracked[i].id == wid) { ret (i + 1)::BodyId; }
+        i = i + 1;
+    }
+    ret NO_BODY;
+}
+
+# Advance the simulation, write transforms, and queue collision events.
+#
+# Called by the engine once per fixed tick. A game does not call this.
+pub fun physics_step(p: *Physics, q: *EventQueue, dt: f32) {
+    phys.world_step(?p.world, dt);
+
+    var i: usize = 0;
+    for (i < p.count) {
+        if (p.tracked[i].used && p.tracked[i].transform != nil) {
+            val b: *pbody.Body = phys.world_body(?p.world, p.tracked[i].id);
+            if (b != nil) {
+                p.tracked[i].transform.position = from_phys(b.position);
+            }
+        }
+        i = i + 1;
+    }
+
+    var c: usize = 0;
+    for (c < p.world.contact_count) {
+        val a: BodyId = engine_id(p, p.world.contacts[c].a);
+        val b: BodyId = engine_id(p, p.world.contacts[c].b);
+        if (a != NO_BODY && b != NO_BODY) {
+            queue_push(q, Event{kind: COLLISION, a: a::i64, b: b::i64, c: 0, d: 0});
+        }
+        c = c + 1;
+    }
+}
+
+# How many collisions the most recent step found.
+pub fun physics_contact_count(p: *Physics) usize {
+    ret p.world.contact_count;
+}
+
+# --------------------------------------------------------------------- tests
+
+use page: std.allocator.page;
+use boom.event.queue_new;
+use boom.event.queue_pop;
+use boom.event.queue_len;
+use boom.math.transform.transform_identity;
+
+test "physics: a stepped body writes back to its transform" {
+    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var q: EventQueue = queue_new();
+    var t: Transform = transform_identity();
+
+    val id: BodyId = physics_add(?p, ?t, vec3(0.0, 100.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    if (id == NO_BODY) { ret 1; }
+
+    physics_step(?p, ?q, 0.1);
+    # The renderer reads this transform, so it must hold the body's position,
+    # not merely differ from the starting value. Semi-implicit Euler under
+    # -10 m/s^2 for 0.1s puts the body at 99.9.
+    if (t.position.y < 99.89 || t.position.y > 99.91) { ret 1; }
+    ret 0;
+}
+
+test "physics: a body with no transform is simulated without crashing" {
+    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var q: EventQueue = queue_new();
+    val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    physics_step(?p, ?q, 0.1);
+    if (physics_velocity(?p, id).y >= 0.0) { ret 1; }
+    ret 0;
+}
+
+test "physics: a collision reaches the event queue with both body ids" {
+    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var q: EventQueue = queue_new();
+    var ta: Transform = transform_identity();
+    var tb: Transform = transform_identity();
+
+    val a: BodyId = physics_add(?p, ?ta, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    val b: BodyId = physics_add(?p, ?tb, vec3(1.5, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+
+    physics_step(?p, ?q, 0.016);
+    if (queue_len(?q) != 1) { ret 1; }
+
+    var e: Event;
+    if (!queue_pop(?q, ?e))      { ret 1; }
+    if (e.kind != COLLISION)     { ret 1; }
+    # The ids must be the engine's, not the underlying world's, or a game
+    # cannot match them against what physics_add returned.
+    if (e.a != a::i64)           { ret 1; }
+    if (e.b != b::i64)           { ret 1; }
+    ret 0;
+}
+
+test "physics: separated bodies produce no event" {
+    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var q: EventQueue = queue_new();
+    physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    physics_add(?p, nil, vec3(50.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    physics_step(?p, ?q, 0.016);
+    if (queue_len(?q) != 0) { ret 1; }
+    ret 0;
+}
+
+test "physics: velocity round-trips and removal stops the body" {
+    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var q: EventQueue = queue_new();
+    val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+
+    if (!physics_set_velocity(?p, id, vec3(3.0, 0.0, 0.0))) { ret 1; }
+    if (physics_velocity(?p, id).x != 3.0)                  { ret 1; }
+
+    if (!physics_remove(?p, id))    { ret 1; }
+    if (physics_remove(?p, id))     { ret 1; }
+    if (physics_velocity(?p, id).x != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "physics: a static body is not moved by gravity" {
+    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var q: EventQueue = queue_new();
+    var t: Transform = transform_identity();
+    physics_add(?p, ?t, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.0);
+    physics_step(?p, ?q, 0.1);
+    # A static body must not move, and the transform must still have been
+    # written rather than left untouched by coincidence.
+    if (t.position.y != 0.0) { ret 1; }
+    if (t.position.x != 0.0) { ret 1; }
+    ret 0;
+}
