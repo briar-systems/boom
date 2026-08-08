@@ -1,0 +1,99 @@
+# The upload context: what creating a GPU resource needs.
+#
+# GL had an implicit current context, so `texture(pixels, w, h)` could create a
+# texture from anywhere. Vulkan has no such thing: every object is created
+# against a device, and a staged upload also needs a command pool and a queue.
+# That is why resource constructors take a Device where they used to take
+# nothing, and it is the single largest shape change in moving off GL.
+#
+# THE UPLOAD POOL IS NOT THE FRAME POOL. Loading a texture mid-frame would
+# otherwise allocate from the pool whose buffers the GPU is executing, and the
+# queue wait an upload performs would stall the frame. A separate pool keeps
+# asset loading independent of the frame loop, which also means a Device is
+# usable before the frame loop exists.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+
+# What a resource constructor needs.
+# ---
+# vk:    The device and its queues.
+# pool:  Command pool for one-shot transfers, separate from the frame's.
+# ready: Whether creation completed.
+pub rec Device {
+    vk:    *Vk;
+    pool:  vk.CommandPool;
+    ready: bool;
+}
+
+# Create an upload context against a live device.
+pub fun device_init(d: *Device, v: *Vk) Result[bool, Error] {
+    d.vk    = v;
+    d.pool  = nil;
+    d.ready = false;
+
+    if (v == nil || !v.ready) {
+        ret err[bool, Error](error("Vulkan device is not initialized"));
+    }
+
+    var ci: vk.CommandPoolCreateInfo;
+    ci.sType            = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    ci.pNext            = nil;
+    # Transient: every buffer from this pool is recorded once, submitted, and
+    # freed. Saying so lets the driver use a cheaper allocator than the frame
+    # pool's, which resets and reuses its buffers every frame.
+    ci.flags            = vk.COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    ci.queueFamilyIndex = v.graphics_family;
+
+    if (vk.vkCreateCommandPool(v.device, ?ci, nil, ?d.pool) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not create the upload command pool"));
+    }
+    d.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Destroy the upload pool.
+#
+# The device itself is borrowed, not owned, so it is not destroyed here.
+pub fun device_dnit(d: *Device) {
+    if (!d.ready) { ret; }
+    vk.vkDestroyCommandPool(d.vk.device, d.pool, nil);
+    d.pool  = nil;
+    d.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+
+test "device: an uninitialized device is refused rather than used" {
+    var d: Device;
+    var v: Vk;
+    v.ready = false;
+    val r: Result[bool, Error] = device_init(?d, ?v);
+    if (!is_err[bool, Error](r)) { ret 1; }
+    if (d.ready)                 { ret 2; }
+    ret 0;
+}
+
+test "device: a nil device is refused rather than dereferenced" {
+    var d: Device;
+    val r: Result[bool, Error] = device_init(?d, nil);
+    if (!is_err[bool, Error](r)) { ret 1; }
+    ret 0;
+}
+
+test "device: teardown on a context that was never created is a no-op" {
+    var d: Device;
+    d.ready = false;
+    device_dnit(?d);
+    if (d.ready) { ret 1; }
+    ret 0;
+}

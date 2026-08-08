@@ -1,7 +1,7 @@
 # Physics as an engine subsystem.
 #
 # Wraps mach-phys so a game never imports it directly, matching how the
-# renderer hides mach-gl and mach-glfw.
+# renderer hides mach-vk and mach-glfw.
 #
 # Three bindings make this one engine rather than two libraries sharing a
 # process:

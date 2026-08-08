@@ -51,10 +51,6 @@ ref = "branch/main"
 git = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 
-[dep.mach-gl]
-git = "https://github.com/briar-systems/mach-gl"
-ref = "branch/main"
-
 [dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
 ref = "branch/main"

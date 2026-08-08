@@ -1,23 +1,34 @@
-# Vulkan bring-up smoke test.
+# Renderer smoke test.
 #
 # Everything in boom's Vulkan path is unit-tested only where it is pure: extent
-# clamping, memory-type search, format mapping, barrier masks, frame rotation.
-# The parts that talk to a driver, which is most of the code, have no coverage at
-# all in CI because CI has no GPU.
+# clamping, memory-type search, format mapping, barrier masks, frame rotation,
+# slot arithmetic, pipeline cache keys. The parts that talk to a driver, which is
+# most of the code, have no coverage at all in CI because CI has no GPU.
 #
-# This runs them. It opens a window with no client API, brings up an instance,
-# surface, device and queues, builds a swapchain and a frame loop, then acquires,
-# clears and presents real frames, rebuilding on resize. It reports what it found
-# and exits non-zero on any failure, so it is a check and not a demo.
+# This runs them, through the same surface a game uses. It opens a window,
+# creates a Renderer, builds geometry and a texture in memory, then draws real
+# frames: a 3D mesh into an offscreen target, that target composited back to the
+# window, and a sprite on top. Every path a game touches is exercised, including
+# the three pipelines and the offscreen suspend and resume. It reports what it
+# found and exits non-zero on any failure, so it is a check and not a demo.
+#
+# WHY IT DRIVES THE RENDERER AND NOT THE MODULES BELOW IT. An earlier version
+# built the instance, swapchain and frame loop by hand. That tested a path no
+# game takes and drifted from the real one every time the renderer changed. What
+# is worth knowing is whether the thing a game calls works.
+#
+# NO FILES ARE READ. Geometry, the texture, and the shaders all come from memory
+# or from the embedded SPIR-V, so the test can run from any directory and a
+# failure is never a missing asset.
 #
 # It is not part of CI. Run it on a machine with a working GPU:
 #
 #   mach dep pull && mach build . && ./out/*/debug/bin/vulkan
 #
 # A machine whose driver cannot initialize reports that and exits non-zero,
-# which is the correct outcome and not a pass. Confirm with an independent
-# probe before blaming this: an ICD present in /usr/share/vulkan/icd.d and
-# device nodes in /dev do not mean vkEnumeratePhysicalDevices will succeed.
+# which is the correct outcome and not a pass. Confirm with an independent probe
+# before blaming this: an ICD present in /usr/share/vulkan/icd.d and device nodes
+# in /dev do not mean vkEnumeratePhysicalDevices will succeed.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -26,163 +37,242 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.result.Result;
 use std.types.result.is_err;
+use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use std.runtime;
 use p: std.print;
-use vk;
 use boom.window.Window;
-use boom.window.window_open_vulkan;
+use boom.window.window_open;
 use boom.window.window_is_valid;
 use boom.window.window_should_close;
 use boom.window.window_poll;
 use boom.window.window_close;
-use boom.graphics.error.Error;
-use boom.graphics.error.error_msg;
-use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_init;
-use boom.graphics.vk.vk_dnit;
-use boom.graphics.swapchain.Swapchain;
-use boom.graphics.swapchain.swapchain_init;
-use boom.graphics.swapchain.swapchain_rebuild;
-use boom.graphics.swapchain.swapchain_dnit;
-use boom.graphics.frame.FrameLoop;
-use boom.graphics.frame.frame_init;
-use boom.graphics.frame.frame_begin;
-use boom.graphics.frame.frame_end;
-use boom.graphics.frame.frame_rebuild_targets;
-use boom.graphics.frame.frame_dnit;
-use boom.graphics.buffer.Buffer;
-use boom.graphics.buffer.buffer_init;
-use boom.graphics.buffer.buffer_write;
-use boom.graphics.buffer.buffer_dnit;
-use boom.graphics.descriptor.Descriptors;
-use boom.graphics.descriptor.descriptors_init;
-use boom.graphics.descriptor.descriptors_dnit;
-use boom.graphics.image.Image;
-use boom.graphics.image.image_upload;
-use boom.graphics.image.image_dnit;
-use boom.graphics.image.sampler_init;
-use boom.graphics.image.sampler_dnit;
+use gfx: boom.graphics;
+use gm:  boom.math;
 
-# How many frames to present before exiting.
+val WIDTH:  i32 = 640;
+val HEIGHT: i32 = 360;
+
+# How many frames to present before declaring success.
 #
-# Enough to cycle the in-flight frames many times, so a frame that reused a
-# semaphore or a fence still owned by the GPU has many chances to be caught by
-# the validation layers or to deadlock, rather than passing on the first frame.
+# More than MAX_FRAMES_IN_FLIGHT, so the frame fences are actually waited on and
+# a slot reused, which is where a synchronization mistake shows. A count in the
+# hundreds also gives a resize somewhere to land.
 val FRAMES: usize = 240;
 
-val WIDTH:  i32 = 960;
-val HEIGHT: i32 = 540;
-
-fun fail(step: str, r: Result[bool, Error]) bool {
-    if (!is_err[bool, Error](r)) { ret false; }
-    var e: Error = unwrap_err[bool, Error](r);
-    p.eprintlnf("FAIL {}: {}", step, error_msg(?e));
+# Report a failed step and say which one.
+fun fail(step: str, r: Result[bool, gfx.Error]) bool {
+    if (!is_err[bool, gfx.Error](r)) { ret false; }
+    var e: gfx.Error = unwrap_err[bool, gfx.Error](r);
+    p.printlnf("FAIL {}: {}", step, gfx.error_msg(?e));
     ret true;
+}
+
+# A unit cube's 24 vertices in the canonical standard layout.
+#
+# Built in code rather than loaded, so the test exercises the upload path with
+# geometry whose every value is known here. Six faces of four vertices, each face
+# with its own normal so the lighting is flat rather than smoothed.
+fun build_cube(verts: *f32, indices: *u32) {
+    # Face axis, then the two in-plane axes, as (nx, ny, nz).
+    var normals: [18]f32;
+    normals[0]  =  0.0; normals[1]  =  0.0; normals[2]  =  1.0;
+    normals[3]  =  0.0; normals[4]  =  0.0; normals[5]  = 0.0 - 1.0;
+    normals[6]  =  1.0; normals[7]  =  0.0; normals[8]  =  0.0;
+    normals[9]  = 0.0 - 1.0; normals[10] =  0.0; normals[11] =  0.0;
+    normals[12] =  0.0; normals[13] =  1.0; normals[14] =  0.0;
+    normals[15] =  0.0; normals[16] = 0.0 - 1.0; normals[17] =  0.0;
+
+    var f: usize = 0;
+    for (f < 6) {
+        val nx: f32 = normals[f * 3];
+        val ny: f32 = normals[f * 3 + 1];
+        val nz: f32 = normals[f * 3 + 2];
+
+        # Two in-plane axes, chosen so the face is wound consistently.
+        var ux: f32 = 0.0; var uy: f32 = 0.0; var uz: f32 = 0.0;
+        var vx: f32 = 0.0; var vy: f32 = 0.0; var vz: f32 = 0.0;
+        if (nz != 0.0) { ux = 1.0; vy = 1.0; }
+        or {
+            if (nx != 0.0) { uz = 1.0; vy = 1.0; }
+            or            { ux = 1.0; vz = 1.0; }
+        }
+
+        var c: usize = 0;
+        for (c < 4) {
+            # Corner signs: (-1,-1), (1,-1), (1,1), (-1,1).
+            var su: f32 = 0.0 - 1.0;
+            var sv: f32 = 0.0 - 1.0;
+            if (c == 1) { su = 1.0; sv = 0.0 - 1.0; }
+            if (c == 2) { su = 1.0; sv = 1.0; }
+            if (c == 3) { su = 0.0 - 1.0; sv = 1.0; }
+
+            val base: usize = (f * 4 + c) * 8;
+            verts[base]     = (nx + su * ux + sv * vx) * 0.5;
+            verts[base + 1] = (ny + su * uy + sv * vy) * 0.5;
+            verts[base + 2] = (nz + su * uz + sv * vz) * 0.5;
+            verts[base + 3] = nx;
+            verts[base + 4] = ny;
+            verts[base + 5] = nz;
+            verts[base + 6] = (su + 1.0) * 0.5;
+            verts[base + 7] = (sv + 1.0) * 0.5;
+            c = c + 1;
+        }
+
+        val vi: u32 = (f * 4)::u32;
+        val ii: usize = f * 6;
+        indices[ii]     = vi;
+        indices[ii + 1] = vi + 1;
+        indices[ii + 2] = vi + 2;
+        indices[ii + 3] = vi;
+        indices[ii + 4] = vi + 2;
+        indices[ii + 5] = vi + 3;
+        f = f + 1;
+    }
+}
+
+# An 8x8 checkerboard in RGBA, so a texturing mistake is visible rather than
+# plausible: a solid colour would look correct with the UVs wrong.
+fun build_checker(px: *u8) {
+    var y: usize = 0;
+    for (y < 8) {
+        var x: usize = 0;
+        for (x < 8) {
+            var v: u8 = 40;
+            if (((x + y) % 2) == 0) { v = 220; }
+            val i: usize = (y * 8 + x) * 4;
+            px[i]     = v;
+            px[i + 1] = v;
+            px[i + 2] = v;
+            px[i + 3] = 255;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
 }
 
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
-    var w: Window = window_open_vulkan(WIDTH, HEIGHT, "boom vulkan smoke");
+    var w: Window = window_open(WIDTH, HEIGHT, "boom renderer smoke");
     if (!window_is_valid(?w)) {
-        p.println("FAIL window: could not open a window with no client API");
+        p.println("FAIL window_open: could not open a window");
         ret 1;
     }
+    p.println("ok   window");
 
-    var v: Vk;
-    if (fail("vk_init", vk_init(?v, w.handle, "boom vulkan smoke"))) { ret 1; }
-    p.printlnf("ok   device and queues: graphics family {}, present family {}",
-               v.graphics_family, v.present_family);
+    var r: gfx.Renderer;
+    if (fail("renderer_init", gfx.renderer_init(?r, w.handle, WIDTH, HEIGHT))) { ret 1; }
+    p.println("ok   renderer: instance, surface, device, swapchain, frame loop, descriptors");
 
-    var s: Swapchain;
-    if (fail("swapchain_init", swapchain_init(?s, ?v, WIDTH::u32, HEIGHT::u32))) { ret 1; }
-    p.printlnf("ok   swapchain: {} images at {}x{}", s.count, s.width, s.height);
+    val d: *gfx.Device = gfx.renderer_device(?r);
 
-    var f: FrameLoop;
-    if (fail("frame_init", frame_init(?f, ?v, ?s))) { ret 1; }
-    p.println("ok   render pass, framebuffers, and per-frame synchronization");
-
-    # A host-visible buffer written from the CPU, which is the per-frame uniform
-    # path, and a device-local image filled through a staging copy, which is the
-    # texture path. Both exercise the memory-type search against a real driver's
-    # memory table rather than the synthetic one in the unit tests.
-    var ubo: Buffer;
-    if (fail("buffer_init", buffer_init(?ubo, ?v, 256,
-        vk.BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT))) { ret 1; }
-    var bytes: [256]u8;
-    var i: usize = 0;
-    for (i < 256) { bytes[i] = i::u8; i = i + 1; }
-    if (!buffer_write(?ubo, ?v, ?bytes[0], 256)) {
-        p.println("FAIL buffer_write: could not map and fill a host-visible buffer");
+    var verts:   [192]f32;
+    var indices: [36]u32;
+    build_cube(?verts[0], ?indices[0]);
+    var fmt: gfx.VertexFormat = gfx.vertex_format_standard();
+    val mr: Result[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 24, ?fmt, ?indices[0], 36);
+    if (is_err[gfx.Mesh, gfx.Error](mr)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mr);
+        p.printlnf("FAIL mesh: {}", gfx.error_msg(?e));
         ret 1;
     }
-    p.println("ok   host-visible buffer mapped and written");
+    var mesh: gfx.Mesh = unwrap_ok[gfx.Mesh, gfx.Error](mr);
+    p.println("ok   mesh uploaded through a staging copy");
 
-    var pixels: [64]u8;
-    i = 0;
-    for (i < 64) { pixels[i] = 255; i = i + 1; }
-    var tex: Image;
-    if (fail("image_upload", image_upload(?tex, ?v, f.pool, ?pixels[0], 4, 4))) { ret 1; }
-    p.println("ok   image created, staged, and transitioned for sampling");
+    var px: [256]u8;
+    build_checker(?px[0]);
+    val tr: Result[gfx.Texture, gfx.Error] = gfx.texture(d, ?px[0], 8, 8);
+    if (is_err[gfx.Texture, gfx.Error](tr)) {
+        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tr);
+        p.printlnf("FAIL texture: {}", gfx.error_msg(?e));
+        ret 1;
+    }
+    var tex: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](tr);
+    p.println("ok   texture staged and transitioned for sampling");
 
-    var sampler: vk.Sampler;
-    if (fail("sampler_init", sampler_init(?sampler, ?v, true))) { ret 1; }
-    p.println("ok   sampler");
+    var mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?mat, "u_texture0", ?tex);
 
-    var desc: Descriptors;
-    if (fail("descriptors_init", descriptors_init(?desc, ?v))) { ret 1; }
-    p.println("ok   descriptor pool");
+    val gr: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, WIDTH, HEIGHT);
+    if (is_err[gfx.RenderTarget, gfx.Error](gr)) {
+        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](gr);
+        p.printlnf("FAIL render_target: {}", gfx.error_msg(?e));
+        ret 1;
+    }
+    var target: gfx.RenderTarget = unwrap_ok[gfx.RenderTarget, gfx.Error](gr);
+    p.println("ok   offscreen target: colour, depth, pass, framebuffer");
 
+    var cam: gfx.Camera = gfx.camera_perspective(
+        gm.vec3(0.0, 1.2, 3.0), gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0), WIDTH::f32 / HEIGHT::f32, 0.1, 100.0);
+    var xf: gm.Transform = gm.transform_identity();
+
+    var spin:      f32 = 0.0;
     var presented: usize = 0;
-    var rebuilds:  usize = 0;
+    var skipped:   usize = 0;
+    var dropped:   usize = 0;
     var n: usize = 0;
     for (n < FRAMES) {
         window_poll();
         if (window_should_close(?w)) { n = FRAMES; }
         or {
-            var began: bool = false;
-            if (fail("frame_begin", frame_begin(?f, ?v, ?s, ?began))) { ret 1; }
+            spin = spin + 0.02;
+            xf.rotation = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), spin);
 
-            if (!began) {
+            var opened: bool = false;
+            if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+
+            if (!opened) {
                 # Out of date, which a resize causes and which is not an error.
-                # Rebuilding here is the path a real resize takes, so exercising
-                # it is the point rather than an inconvenience.
-                if (fail("swapchain_rebuild", swapchain_rebuild(?s, ?v, s.width, s.height))) { ret 1; }
-                if (fail("frame_rebuild_targets", frame_rebuild_targets(?f, ?v, ?s))) { ret 1; }
-                rebuilds = rebuilds + 1;
+                # The renderer has already rebuilt; this frame is simply skipped.
+                skipped = skipped + 1;
             }
             or {
-                var ended: bool = false;
-                if (fail("frame_end", frame_end(?f, ?v, ?s, ?ended))) { ret 1; }
-                if (ended) { presented = presented + 1; }
-                or {
-                    if (fail("swapchain_rebuild", swapchain_rebuild(?s, ?v, s.width, s.height))) { ret 1; }
-                    if (fail("frame_rebuild_targets", frame_rebuild_targets(?f, ?v, ?s))) { ret 1; }
-                    rebuilds = rebuilds + 1;
-                }
+                var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+                scene.target      = ?target;
+                scene.clear       = 1;
+                scene.clear_color = gm.vec4(0.05, 0.06, 0.09, 1.0);
+                var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+                gfx.pass_draw_material(?sp, ?mesh, ?mat, ?xf);
+                gfx.pass_end(?sp);
+
+                var over: gfx.PassDesc = gfx.pass_overlay();
+                var op: gfx.Pass = gfx.pass_begin(?r, ?over);
+                gfx.pass_draw_sprite(?op, gfx.render_target_texture(?target),
+                                     gfx.rect(0.0, 0.0, WIDTH::f32, HEIGHT::f32),
+                                     gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gfx.pass_draw_sprite(?op, ?tex, gfx.rect(8.0, 8.0, 64.0, 64.0),
+                                     gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gfx.pass_end(?op);
+
+                dropped = dropped + gfx.renderer_dropped(?r);
+                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+                presented = presented + 1;
             }
             n = n + 1;
         }
     }
 
-    p.printlnf("ok   presented {} frames, {} swapchain rebuilds", presented, rebuilds);
+    p.printlnf("ok   ran {} frames, {} skipped for a swapchain rebuild", presented, skipped);
 
-    # Teardown order is part of what is being checked: the surface outlives the
-    # device, the pool outlives the frames, and destroying anything the GPU is
-    # still reading is what the validation layers exist to catch.
-    descriptors_dnit(?desc, ?v);
-    sampler_dnit(sampler, ?v);
-    image_dnit(?tex, ?v);
-    buffer_dnit(?ubo, ?v);
-    frame_dnit(?f, ?v);
-    swapchain_dnit(?s, ?v);
-    vk_dnit(?v);
+    # Teardown order is part of what is being checked: everything created against
+    # the device goes before the renderer that owns it, and destroying anything
+    # the GPU is still reading is what the validation layers exist to catch.
+    gfx.render_target_delete(d, ?target);
+    gfx.texture_delete(d, ?tex);
+    gfx.mesh_delete(d, ?mesh);
+    gfx.renderer_dnit(?r);
     window_close(?w);
     p.println("ok   teardown");
 
     if (presented == 0) {
         p.println("FAIL: no frame was presented");
+        ret 1;
+    }
+    # A dropped draw is otherwise invisible: the thing simply does not appear, so
+    # a frame that drew nothing would still count as presented.
+    if (dropped != 0) {
+        p.printlnf("FAIL: {} draws were dropped for want of a uniform slot", dropped);
         ret 1;
     }
     p.println("PASS");

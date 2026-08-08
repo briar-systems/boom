@@ -1,12 +1,26 @@
 # the Texture handle: a GPU image sampled by shaders
 #
 # a game supplies raw RGBA8 pixels, encoded image bytes, or a file path and
-# receives an opaque Texture; the backing mach-gl texture id and the
-# mach-image decoder both stay hidden. texture_load and texture_from_bytes
-# decode QOI and TGA today (the formats mach-image decodes); other formats
-# return a clean error until the library grows their decoders.
+# receives an opaque Texture; the backing Vulkan image and the mach-image
+# decoder both stay hidden. texture_load and texture_from_bytes decode QOI
+# and TGA today (the formats mach-image decodes); other formats return a
+# clean error until the library grows their decoders.
+#
+# creation takes a Device because Vulkan has no implicit current context the
+# way GL did: an image is created against a device, and the staged upload
+# needs a command pool and a queue. see boom.graphics.device.
+#
+# mipmaps are not generated. GL's generate_mipmap has no Vulkan equivalent;
+# the levels have to be produced with explicit blits, which is a change to
+# boom.graphics.image rather than to this module, and nothing in the engine
+# samples a minified texture yet: sprites and glyphs are drawn at or near
+# their native size.
 
-use gl.gl;
+use vk;
+use boom.graphics.device.Device;
+use boom.graphics.image.Image;
+use boom.graphics.image.image_upload;
+use boom.graphics.image.image_dnit;
 use img: image;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
@@ -22,16 +36,17 @@ use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use std.types.bool.bool;
 use std.types.bool.true;
+use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
 
 # an opaque handle to a GPU texture
 # ---
-# id:     the backing mach-gl texture id, hidden from the game
+# image:  the backing Vulkan image and its view, hidden from the game
 # width:  texture width in texels
 # height: texture height in texels
 pub rec Texture {
-    id:     u32;
+    image:  Image;
     width:  i32;
     height: i32;
 }
@@ -50,29 +65,33 @@ rec Decoded {
 # upload an RGBA8 image to the GPU
 #
 # expects width * height * 4 bytes in row-major order, tightly packed.
-# the texture is created with linear filtering, mipmaps, and repeat
-# wrapping.
+# the image is created device-local, filled through a staging buffer, and
+# left in the layout a shader samples from. filtering and wrapping belong
+# to the sampler, not the image, so they are the renderer's choice rather
+# than this one's.
 # ---
+# d:      the upload context
 # pixels: RGBA8 pixel data, 4 bytes per texel
 # width:  image width in texels
 # height: image height in texels
-# ret:    the uploaded Texture handle
-pub fun texture(pixels: *u8, width: i32, height: i32) Texture {
-    var id: u32 = 0;
-    gl.gen_textures(1, ?id);
-    gl.bind_texture(gl.TEXTURE_2D, id);
-    gl.pixel_storei(gl.UNPACK_ALIGNMENT, 1);
+# ret:    the uploaded Texture handle, or an allocation/upload error
+pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32) Result[Texture, Error] {
+    if (!d.ready) {
+        ret err[Texture, Error](error("the upload context is not initialized"));
+    }
+    if (width <= 0 || height <= 0) {
+        ret err[Texture, Error](error("texture dimensions must be positive"));
+    }
 
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR::i32);
-
-    gl.tex_image2d(gl.TEXTURE_2D, 0, gl.RGBA::i32, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels::ptr);
-    gl.generate_mipmap(gl.TEXTURE_2D);
-    gl.bind_texture(gl.TEXTURE_2D, 0);
-
-    ret Texture{id: id, width: width, height: height};
+    var t: Texture;
+    t.width  = width;
+    t.height = height;
+    val r: Result[bool, Error] = image_upload(?t.image, d.vk, d.pool, pixels,
+                                              width::u32, height::u32);
+    if (is_err[bool, Error](r)) {
+        ret err[Texture, Error](unwrap_err[bool, Error](r));
+    }
+    ret ok[Texture, Error](t);
 }
 
 # decode encoded image bytes into a caller-allocated RGBA8 buffer
@@ -138,7 +157,7 @@ fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool
 # data: encoded image bytes (QOI or TGA)
 # len:  length of data in bytes
 # ret:  the uploaded Texture, or a decode error
-pub fun texture_from_bytes(data: *u8, len: usize) Result[Texture, Error] {
+pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
@@ -148,9 +167,9 @@ pub fun texture_from_bytes(data: *u8, len: usize) Result[Texture, Error] {
         ret err[Texture, Error](unwrap_err[bool, Error](r));
     }
 
-    val t: Texture = texture(dec.pixels, dec.width, dec.height);
+    val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height);
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(dec.width::u32, dec.height::u32));
-    ret ok[Texture, Error](t);
+    ret tr;
 }
 
 # load an image file and upload it as a Texture
@@ -160,7 +179,7 @@ pub fun texture_from_bytes(data: *u8, len: usize) Result[Texture, Error] {
 # ---
 # path: filesystem path to a QOI or TGA image
 # ret:  the uploaded Texture, or a read/decode error
-pub fun texture_load(path: str) Result[Texture, Error] {
+pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
@@ -170,31 +189,54 @@ pub fun texture_load(path: str) Result[Texture, Error] {
     }
     var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
-    val res: Result[Texture, Error] = texture_from_bytes(buf.data, buf.len);
+    val res: Result[Texture, Error] = texture_from_bytes(d, buf.data, buf.len);
     vec.dnit[u8](?buf);
     ret res;
 }
 
-# bind a texture to a texture unit
+# the image view a descriptor binds this texture through
+#
+# there is no bind-to-a-unit step in Vulkan: a texture reaches a shader by
+# being written into a descriptor set, which is the renderer's job. this
+# exposes what that write needs without exposing the image.
 # ---
-# t:    texture to bind
-# unit: texture unit index
-pub fun texture_bind(t: *Texture, unit: i32) {
-    gl.active_texture(gl.TEXTURE0 + unit::u32);
-    gl.bind_texture(gl.TEXTURE_2D, t.id);
+# t:   the texture
+# ret: the view, or nil when the texture was never uploaded
+pub fun texture_view(t: *Texture) vk.ImageView {
+    ret t.image.view;
 }
 
-# release the GPU texture backing a handle
+# release the GPU image backing a handle
 # ---
+# d: the upload context the texture was created against
 # t: texture to delete; the handle must not be used afterward
-pub fun texture_delete(t: *Texture) {
-    gl.delete_textures(1, ?t.id);
-    t.id = 0;
+pub fun texture_delete(d: *Device, t: *Texture) {
+    image_dnit(?t.image, d.vk);
+    t.width  = 0;
+    t.height = 0;
 }
 
-test "texture: a fresh handle carries no id" {
+test "texture: a fresh handle carries no image" {
     var t: Texture;
-    if (t.id != 0) { ret 1; }
+    t.image.view = nil;
+    if (texture_view(?t) != nil) { ret 1; }
+    ret 0;
+}
+
+test "texture: creation against an uninitialized context is refused" {
+    var d: Device;
+    d.ready = false;
+    var px: [4]u8 = [4]u8{255, 255, 255, 255};
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, 1))) { ret 1; }
+    ret 0;
+}
+
+test "texture: non-positive dimensions are refused before allocating" {
+    var d: Device;
+    d.ready = true;
+    var px: [4]u8 = [4]u8{255, 255, 255, 255};
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 0, 1)))  { ret 1; }
+    if (!is_err[Texture, Error](texture(?d, ?px[0], 1, -4))) { ret 2; }
     ret 0;
 }
 

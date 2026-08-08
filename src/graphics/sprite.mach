@@ -1,44 +1,31 @@
 # the 2D sprite path: a textured quad the renderer draws in a pass
 #
 # a sprite is a textured quad placed by a pixel-space rectangle. the
-# renderer owns one unit quad and a default sprite shader (built here) and
-# draws them through a 2D orthographic pass. the same mesh machinery that
-# uploads 3D geometry uploads the quad, using a 2D vertex format, which
-# proves the vertex format is not tied to one layout.
+# renderer owns one unit quad and draws it through a 2D orthographic pass
+# with the sprite pipeline. the same mesh machinery that uploads 3D
+# geometry uploads the quad, using a 2D vertex format, which proves the
+# vertex format is not tied to one layout.
 #
-# a custom 2D shader (a post-process effect, say) replaces the default by
-# following its uniform convention: u_projection and u_model (mat4),
-# u_src (vec4, the sub-rectangle in texture space), u_tint (vec4), and
-# u_texture0 (sampler2D).
+# there is no per-sprite shader any more. GL let a draw pick a program and
+# set named uniforms; a Vulkan pipeline bakes both stages and its whole
+# fixed-function state, so the choice of shader is the choice of pipeline
+# and belongs to the renderer. what a sprite still varies per draw -- its
+# rectangle, its atlas sub-rect and its tint -- goes through the uniform
+# slot the renderer takes for it.
 
-use boom.graphics.error.Error;
-use boom.graphics.shader.Shader;
-use boom.graphics.shader.shader;
-use boom.graphics.shader.shader_use;
-use boom.graphics.shader.shader_set_mat4;
-use boom.graphics.shader.shader_set_vec4;
-use boom.graphics.shader.shader_set_texture;
-use boom.graphics.shader.shader_delete;
-use boom.graphics.texture.Texture;
-use boom.graphics.mesh.Mesh;
-use boom.graphics.mesh.mesh;
-use boom.graphics.mesh.mesh_draw;
-use boom.graphics.mesh.mesh_delete;
-use boom.graphics.vertex.VertexFormat;
-use boom.graphics.vertex.vertex_format_sprite;
-use boom.math.vec.Vec4;
-use boom.math.mat.Mat4;
-use boom.math.mat.mat4_mul;
-use boom.math.mat.mat4_scale;
-use boom.math.mat.mat4_translation;
-use boom.math.vec.vec3;
 use std.types.result.Result;
 use std.types.result.ok;
 use std.types.result.err;
 use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
-use std.types.string.str;
+use boom.graphics.error.Error;
+use boom.graphics.device.Device;
+use boom.graphics.mesh.Mesh;
+use boom.graphics.mesh.mesh;
+use boom.graphics.mesh.mesh_delete;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.vertex_format_sprite;
 
 # an axis-aligned rectangle: position and size
 #
@@ -67,32 +54,23 @@ pub fun rect(x: f32, y: f32, w: f32, h: f32) Rect {
     ret Rect{x: x, y: y, w: w, h: h};
 }
 
-# the renderer's sprite resources: the unit quad and the default shader
+# the renderer's sprite resources: the unit quad every sprite is drawn from
 # ---
-# quad:   a unit quad (0 to 1) in the 2D sprite vertex format
-# shader: the default sprite shader
+# quad: a unit quad (0 to 1) in the 2D sprite vertex format
 pub rec SpriteResources {
-    quad:   Mesh;
-    shader: Shader;
+    quad: Mesh;
 }
 
-val SPRITE_VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec2 a_position;\nlayout(location = 1) in vec2 a_uv;\nuniform mat4 u_projection;\nuniform mat4 u_model;\nuniform vec4 u_src;\nout vec2 v_uv;\nvoid main() {\n    v_uv = u_src.xy + a_uv * u_src.zw;\n    gl_Position = u_projection * u_model * vec4(a_position, 0.0, 1.0);\n}\n";
-
-val SPRITE_FRAGMENT_SRC: str = "#version 330 core\nin vec2 v_uv;\nuniform sampler2D u_texture0;\nuniform vec4 u_tint;\nout vec4 frag_color;\nvoid main() {\n    frag_color = texture(u_texture0, v_uv) * u_tint;\n}\n";
-
-# build the unit quad and default sprite shader
+# build the unit quad every sprite draw is scaled from
 #
 # the quad spans (0, 0) to (1, 1) in both position and texture
-# coordinates; a draw scales and translates it into a pixel rectangle.
+# coordinates; a draw scales and translates it into a pixel rectangle, so
+# one buffer serves every sprite and every glyph and the vertex data never
+# changes between draws.
 # ---
-# ret: the sprite resources, or a shader compile error
-pub fun sprite_resources() Result[SpriteResources, Error] {
-    val sr: Result[Shader, Error] = shader(SPRITE_VERTEX_SRC, SPRITE_FRAGMENT_SRC);
-    if (is_err[Shader, Error](sr)) {
-        ret err[SpriteResources, Error](unwrap_err[Shader, Error](sr));
-    }
-    val s: Shader = unwrap_ok[Shader, Error](sr);
-
+# d:   the upload context
+# ret: the sprite resources, or an upload error
+pub fun sprite_resources(d: *Device) Result[SpriteResources, Error] {
     var verts: [16]f32 = [16]f32{
         0.0, 0.0,   0.0, 0.0,
         1.0, 0.0,   1.0, 0.0,
@@ -101,45 +79,20 @@ pub fun sprite_resources() Result[SpriteResources, Error] {
     };
     var idx: [6]u32 = [6]u32{0, 1, 2, 0, 2, 3};
     var fmt: VertexFormat = vertex_format_sprite();
-    val quad: Mesh = mesh((?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
 
-    ret ok[SpriteResources, Error](SpriteResources{quad: quad, shader: s});
+    val mr: Result[Mesh, Error] = mesh(d, (?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
+    if (is_err[Mesh, Error](mr)) {
+        ret err[SpriteResources, Error](unwrap_err[Mesh, Error](mr));
+    }
+    ret ok[SpriteResources, Error](SpriteResources{quad: unwrap_ok[Mesh, Error](mr)});
 }
 
-# release the sprite quad and default shader
+# release the sprite quad
 # ---
+# d: the upload context the quad was created against
 # s: resources to delete; must not be used afterward
-pub fun sprite_resources_delete(s: *SpriteResources) {
-    mesh_delete(?s.quad);
-    shader_delete(?s.shader);
-}
-
-# draw the quad as a textured sprite through a shader
-#
-# scales and translates the unit quad into dest (pixel space under the
-# pass projection), samples src (texture space) of texture, and multiplies
-# by tint. the shader must follow the sprite uniform convention.
-# ---
-# res:        the renderer's sprite resources (for the quad)
-# shdr:       the shader to draw with, the default or a per-pass override
-# projection: the pass's orthographic projection
-# texture:    the texture to sample
-# dest:       destination rectangle in pixels
-# src:        source rectangle in texture space, 0 to 1
-# tint:       color multiplied into the sample
-pub fun sprite_draw(res: *SpriteResources, shdr: *Shader, projection: *Mat4, texture: *Texture, dest: Rect, src: Rect, tint: Vec4) {
-    var scale: Mat4 = mat4_scale(vec3(dest.w, dest.h, 1.0));
-    var move:  Mat4 = mat4_translation(vec3(dest.x, dest.y, 0.0));
-    var model: Mat4 = mat4_mul(?move, ?scale);
-
-    shader_use(shdr);
-    shader_set_mat4(shdr, "u_projection", projection);
-    shader_set_mat4(shdr, "u_model", ?model);
-    shader_set_vec4(shdr, "u_src", Vec4{x: src.x, y: src.y, z: src.w, w: src.h});
-    shader_set_vec4(shdr, "u_tint", tint);
-    shader_set_texture(shdr, "u_texture0", texture, 0);
-
-    mesh_draw(?res.quad);
+pub fun sprite_resources_delete(d: *Device, s: *SpriteResources) {
+    mesh_delete(d, ?s.quad);
 }
 
 test "sprite: rect carries position and size" {

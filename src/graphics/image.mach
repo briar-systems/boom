@@ -33,6 +33,7 @@ use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.pick_memory_type;
+use boom.graphics.buffer.NO_MEMORY_TYPE;
 
 # Bytes per pixel of the one format this module uploads.
 #
@@ -439,5 +440,139 @@ test "image: teardown on an image that was never created is a no-op" {
     v.ready = false;
     image_dnit(?i, ?v);
     if (i.ready) { ret 1; }
+    ret 0;
+}
+
+# The depth format every attachment in boom uses.
+#
+# D32_SFLOAT is the one depth format every Vulkan implementation must support as
+# a depth-stencil attachment, so it needs no query. Everything that owns a depth
+# attachment uses this one, which is also what makes the window's render pass and
+# an offscreen target's compatible: two render passes are compatible when their
+# attachment formats and sample counts match, and a pipeline is only usable in a
+# pass compatible with the one it was built against. A second depth format here
+# would mean a second set of pipelines.
+pub val DEPTH_FORMAT: i32 = vk.FORMAT_D32_SFLOAT;
+
+# A depth attachment: an image, its memory, and its view.
+# ---
+# image: The depth image.
+# mem:   Device-local memory backing it.
+# view:  The view a framebuffer binds.
+pub rec DepthAttachment {
+    image: vk.Image;
+    mem:   vk.DeviceMemory;
+    view:  vk.ImageView;
+}
+
+# Create a depth attachment at a size.
+#
+# Device-local and never mapped: nothing on the host reads a depth buffer, and
+# a host-visible one would be slower for the only thing that does.
+# ---
+# d:      the attachment to fill
+# v:      the device
+# width:  width in pixels
+# height: height in pixels
+# ret:    true on success, or the step that failed
+pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i32) Result[bool, Error] {
+    d.image = nil;
+    d.mem   = nil;
+    d.view  = nil;
+
+    var ci: vk.ImageCreateInfo;
+    ci.sType                 = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.pNext                 = nil;
+    ci.flags                 = 0;
+    ci.imageType             = vk.IMAGE_TYPE_2D;
+    ci.format                = DEPTH_FORMAT;
+    ci.extent.width          = width::u32;
+    ci.extent.height         = height::u32;
+    ci.extent.depth          = 1;
+    ci.mipLevels             = 1;
+    ci.arrayLayers           = 1;
+    ci.samples               = vk.SAMPLE_COUNT_1_BIT::i32;
+    ci.tiling                = vk.IMAGE_TILING_OPTIMAL;
+    ci.usage                 = vk.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    ci.sharingMode           = vk.SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices   = nil;
+    ci.initialLayout         = vk.IMAGE_LAYOUT_UNDEFINED;
+
+    if (vk.vkCreateImage(v.device, ?ci, nil, ?d.image) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not create the depth image"));
+    }
+
+    var req: vk.MemoryRequirements;
+    vk.vkGetImageMemoryRequirements(v.device, d.image, ?req);
+    var props: vk.PhysicalDeviceMemoryProperties;
+    vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
+    val index: u32 = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (index == NO_MEMORY_TYPE) {
+        ret err[bool, Error](error("no device-local memory type for the depth image"));
+    }
+
+    var ai: vk.MemoryAllocateInfo;
+    ai.sType           = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.pNext           = nil;
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = index;
+    if (vk.vkAllocateMemory(v.device, ?ai, nil, ?d.mem) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not allocate depth memory"));
+    }
+    if (vk.vkBindImageMemory(v.device, d.image, d.mem, 0) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not bind depth memory"));
+    }
+
+    var vci: vk.ImageViewCreateInfo;
+    vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.pNext    = nil;
+    vci.flags    = 0;
+    vci.image    = d.image;
+    vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
+    vci.format   = DEPTH_FORMAT;
+    vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.a = vk.COMPONENT_SWIZZLE_IDENTITY;
+    # DEPTH_BIT, not COLOR_BIT. A depth view with a colour aspect is rejected,
+    # and the message names the view rather than the aspect.
+    vci.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.baseMipLevel   = 0;
+    vci.subresourceRange.levelCount     = 1;
+    vci.subresourceRange.baseArrayLayer = 0;
+    vci.subresourceRange.layerCount     = 1;
+    if (vk.vkCreateImageView(v.device, ?vci, nil, ?d.view) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not create the depth view"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# Destroy a depth attachment, in reverse order of creation.
+#
+# Safe on a partially created one: each handle is checked, because the failure
+# path in depth_attachment_init leaves the later handles nil.
+pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
+    if (d.view  != nil) { vk.vkDestroyImageView(v.device, d.view, nil);  d.view  = nil; }
+    if (d.image != nil) { vk.vkDestroyImage(v.device, d.image, nil);     d.image = nil; }
+    if (d.mem   != nil) { vk.vkFreeMemory(v.device, d.mem, nil);         d.mem   = nil; }
+}
+
+test "image: the depth format is the one every implementation must support" {
+    # A format chosen without a query has to be one the spec mandates. It is
+    # also what makes the window pass and an offscreen target's compatible, so
+    # changing it here without changing both breaks every pipeline.
+    if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
+    ret 0;
+}
+
+test "image: teardown of a never-created depth attachment is a no-op" {
+    var d: DepthAttachment;
+    d.image = nil;
+    d.mem   = nil;
+    d.view  = nil;
+    var v: Vk;
+    v.ready = false;
+    depth_attachment_dnit(?d, ?v);
     ret 0;
 }

@@ -32,6 +32,10 @@ use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
 use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.MAX_IMAGES;
+use boom.graphics.image.DEPTH_FORMAT;
+use boom.graphics.image.DepthAttachment;
+use boom.graphics.image.depth_attachment_init;
+use boom.graphics.image.depth_attachment_dnit;
 
 # How far the CPU may run ahead of the GPU.
 #
@@ -57,9 +61,14 @@ rec Frame {
 
 # The frame loop's resources.
 # ---
-# pass:         Render pass, one colour attachment cleared on load.
+# pass:         Render pass: a colour attachment and a depth attachment, both
+#               cleared on load.
+# pass_load:    The same attachments, preserved on load rather than cleared.
+#               Used to resume the window pass after an offscreen excursion,
+#               which would otherwise wipe what the frame has already drawn.
 # pool:         Command pool the frames allocate from.
 # framebuffers: One per swapchain image.
+# depths:       One depth attachment per swapchain image.
 # fb_count:     Number of valid framebuffers.
 # frames:       Per-frame state.
 # current:      Which in-flight frame is next.
@@ -67,8 +76,10 @@ rec Frame {
 # ready:        Whether creation completed.
 pub rec FrameLoop {
     pass:         vk.RenderPass;
+    pass_load:    vk.RenderPass;
     pool:         vk.CommandPool;
     framebuffers: [8]vk.Framebuffer;
+    depths:       [8]DepthAttachment;
     fb_count:     u32;
     frames:       [2]Frame;
     current:      usize;
@@ -143,22 +154,45 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     ret ok[bool, Error](true);
 }
 
-# A single-subpass render pass with one colour attachment.
+# A single-subpass render pass with a colour and a depth attachment.
+#
+# THE WINDOW PASS HAS DEPTH TOO. It would not need one to clear and present, but
+# two things require it. A 3D pass drawn straight to the window needs depth
+# testing or its geometry sorts by submission order. And a pipeline is only
+# usable in a render pass compatible with the one it was built against, where
+# compatible means the same attachment formats and counts, so a window pass with
+# one attachment and an offscreen target's with two would need two sets of
+# pipelines and a draw could not move between them.
 fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
-    var att: vk.AttachmentDescription;
-    att.flags          = 0;
-    att.format         = s.format;
-    att.samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    att.loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
-    att.storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
-    att.stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    att.initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
-    att.finalLayout    = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    var atts: [2]vk.AttachmentDescription;
+    atts[0].flags          = 0;
+    atts[0].format         = s.format;
+    atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+    atts[0].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
+    atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
+    atts[0].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[0].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[0].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
+    atts[0].finalLayout    = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    # Nothing reads the depth buffer after the frame, so it need not be stored.
+    atts[1].flags          = 0;
+    atts[1].format         = DEPTH_FORMAT;
+    atts[1].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+    atts[1].loadOp         = vk.ATTACHMENT_LOAD_OP_CLEAR;
+    atts[1].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[1].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[1].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[1].initialLayout  = vk.IMAGE_LAYOUT_UNDEFINED;
+    atts[1].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     var ref: vk.AttachmentReference;
     ref.attachment = 0;
     ref.layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    var depth_ref: vk.AttachmentReference;
+    depth_ref.attachment = 1;
+    depth_ref.layout     = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     var sub: vk.SubpassDescription;
     sub.flags                   = 0;
@@ -168,7 +202,7 @@ fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     sub.colorAttachmentCount    = 1;
     sub.pColorAttachments       = ?ref;
     sub.pResolveAttachments     = nil;
-    sub.pDepthStencilAttachment = nil;
+    sub.pDepthStencilAttachment = ?depth_ref;
     sub.preserveAttachmentCount = 0;
     sub.pPreserveAttachments    = nil;
 
@@ -178,18 +212,23 @@ fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     var dep: vk.SubpassDependency;
     dep.srcSubpass      = vk.SUBPASS_EXTERNAL;
     dep.dstSubpass      = 0;
-    dep.srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep.dstStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    # The early-fragment-tests stage is included because that is where the depth
+    # attachment's load-time clear happens, and it runs before colour output.
+    dep.srcStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dep.dstStageMask    = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                        | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dep.srcAccessMask   = 0;
-    dep.dstAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dstAccessMask   = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+                        | vk.ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     dep.dependencyFlags = 0;
 
     var rci: vk.RenderPassCreateInfo;
     rci.sType           = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     rci.pNext           = nil;
     rci.flags           = 0;
-    rci.attachmentCount = 1;
-    rci.pAttachments    = ?att;
+    rci.attachmentCount = 2;
+    rci.pAttachments    = ?atts[0];
     rci.subpassCount    = 1;
     rci.pSubpasses      = ?sub;
     rci.dependencyCount = 1;
@@ -198,22 +237,51 @@ fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     if (vk.vkCreateRenderPass(v.device, ?rci, nil, ?f.pass) != vk.SUCCESS) {
         ret err[bool, Error](error("vkCreateRenderPass failed"));
     }
+
+    # The same attachments, preserved rather than cleared. A pass that renders
+    # into an offscreen target has to end the window's render pass and begin
+    # the target's, and resuming through the clearing pass afterwards would
+    # erase everything the frame had already drawn.
+    #
+    # A pipeline built against `pass` is usable here: Vulkan render passes are
+    # compatible when their attachment formats and sample counts match, which
+    # load and store operations do not affect. That is why there is one set of
+    # pipelines rather than one per pass.
+    atts[0].loadOp        = vk.ATTACHMENT_LOAD_OP_LOAD;
+    atts[0].initialLayout = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    atts[1].loadOp        = vk.ATTACHMENT_LOAD_OP_LOAD;
+    atts[1].initialLayout = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    if (vk.vkCreateRenderPass(v.device, ?rci, nil, ?f.pass_load) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateRenderPass failed for the resume pass"));
+    }
     ret ok[bool, Error](true);
 }
 
 # One framebuffer per swapchain image view.
+# One framebuffer and one depth attachment per swapchain image.
+#
+# A DEPTH BUFFER PER IMAGE, NOT ONE SHARED. Two frames are in flight, so two
+# command buffers can be executing at once against different swapchain images.
+# Sharing one depth buffer between them is a write-write hazard with no
+# synchronization expressing it, which shows as geometry from one frame
+# occluding another's and only under load.
 fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     f.fb_count = 0;
     var i: u32 = 0;
     for (i < s.count) {
-        var view: vk.ImageView = s.views[i];
+        val dr: Result[bool, Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
+        if (is_err[bool, Error](dr)) { ret dr; }
+
+        var views: [2]vk.ImageView;
+        views[0] = s.views[i];
+        views[1] = f.depths[i].view;
         var fci: vk.FramebufferCreateInfo;
         fci.sType           = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fci.pNext           = nil;
         fci.flags           = 0;
         fci.renderPass      = f.pass;
-        fci.attachmentCount = 1;
-        fci.pAttachments    = ?view;
+        fci.attachmentCount = 2;
+        fci.pAttachments    = ?views[0];
         fci.width           = s.width;
         fci.height          = s.height;
         fci.layers          = 1;
@@ -264,27 +332,64 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[
         ret err[bool, Error](error("vkBeginCommandBuffer failed"));
     }
 
-    var clear: vk.ClearValue;
-    clear.color.float32[0] = 0.0;
-    clear.color.float32[1] = 0.0;
-    clear.color.float32[2] = 0.0;
-    clear.color.float32[3] = 1.0;
+    frame_begin_pass(f, s, 0.0, 0.0, 0.0, 1.0);
+
+    @out_ok = true;
+    ret ok[bool, Error](true);
+}
+
+# Begin the window render pass, clearing to a colour.
+#
+# Split from frame_begin so an offscreen pass can suspend and resume it. The
+# clear happens here rather than at pass level because a Vulkan render pass
+# clears on load, so it is a property of beginning one.
+pub fun frame_begin_pass(f: *FrameLoop, s: *Swapchain, r: f32, g: f32, b: f32, a: f32) {
+    var clears: [2]vk.ClearValue;
+    clears[0].color.float32[0] = r;
+    clears[0].color.float32[1] = g;
+    clears[0].color.float32[2] = b;
+    clears[0].color.float32[3] = a;
+    # Depth clears to 1.0, the far plane. Clearing to 0 makes every fragment
+    # fail the less-than test and the window come out empty.
+    clears[1].depthStencil.depth   = 1.0;
+    clears[1].depthStencil.stencil = 0;
 
     var rbi: vk.RenderPassBeginInfo;
     rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     rbi.pNext                    = nil;
     rbi.renderPass               = f.pass;
-    rbi.framebuffer              = f.framebuffers[index];
+    rbi.framebuffer              = f.framebuffers[f.image_index];
     rbi.renderArea.offset.x      = 0;
     rbi.renderArea.offset.y      = 0;
     rbi.renderArea.extent.width  = s.width;
     rbi.renderArea.extent.height = s.height;
-    rbi.clearValueCount          = 1;
-    rbi.pClearValues             = ?clear;
-    vk.vkCmdBeginRenderPass(f.frames[i].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+    rbi.clearValueCount          = 2;
+    rbi.pClearValues             = ?clears[0];
+    vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+}
 
-    @out_ok = true;
-    ret ok[bool, Error](true);
+# Suspend the window render pass so another may begin.
+pub fun frame_suspend_pass(f: *FrameLoop) {
+    vk.vkCmdEndRenderPass(f.frames[f.current].command);
+}
+
+# Resume the window render pass, preserving what is already drawn.
+#
+# Uses the load variant rather than the clearing one, so an offscreen
+# excursion does not erase the frame.
+pub fun frame_resume_pass(f: *FrameLoop, s: *Swapchain) {
+    var rbi: vk.RenderPassBeginInfo;
+    rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rbi.pNext                    = nil;
+    rbi.renderPass               = f.pass_load;
+    rbi.framebuffer              = f.framebuffers[f.image_index];
+    rbi.renderArea.offset.x      = 0;
+    rbi.renderArea.offset.y      = 0;
+    rbi.renderArea.extent.width  = s.width;
+    rbi.renderArea.extent.height = s.height;
+    rbi.clearValueCount          = 0;
+    rbi.pClearValues             = nil;
+    vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
 }
 
 # End the render pass, submit, and present.
@@ -350,6 +455,7 @@ pub fun frame_release_targets(f: *FrameLoop, v: *Vk) {
     var i: u32 = 0;
     for (i < f.fb_count) {
         vk.vkDestroyFramebuffer(v.device, f.framebuffers[i], nil);
+        depth_attachment_dnit(?f.depths[i], v);
         i = i + 1;
     }
     f.fb_count = 0;
@@ -375,6 +481,7 @@ pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
     }
     frame_release_targets(f, v);
     vk.vkDestroyCommandPool(v.device, f.pool, nil);
+    vk.vkDestroyRenderPass(v.device, f.pass_load, nil);
     vk.vkDestroyRenderPass(v.device, f.pass, nil);
     f.ready = false;
 }

@@ -1,6 +1,6 @@
 # platform window, GL context, and input source
 #
-# wraps a GLFW window carrying an OpenGL core-profile context and routes
+# wraps a GLFW window created with no client API and routes
 # input into both an event queue and the polled input state. the window's
 # GLFW user pointer holds the Sink, so the C callbacks can reach both. these
 # paths drive real platform and GL calls and cannot run headless; they are
@@ -12,7 +12,6 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use glfw.glfw;
-use gl.gl;
 use boom.event.EventQueue;
 use boom.event.Event;
 use boom.event.queue_push;
@@ -26,11 +25,7 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
 
-# GL context version requested for the window
-val GL_MAJOR: i32 = 3;
-val GL_MINOR: i32 = 3;
-
-# a platform window and its OpenGL context
+# a platform window
 # ---
 # handle: the underlying GLFW window, nil-handled when creation failed
 # width:  requested client-area width in screen coordinates
@@ -39,10 +34,6 @@ pub rec Window {
     handle: glfw.Window;
     width:  i32;
     height: i32;
-}
-
-fun gl_loader(name: *u8) ptr {
-    ret glfw.get_proc_address(name);
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -126,62 +117,21 @@ fun map_button(b: i32) inp.Button {
     ret -1::inp.Button;
 }
 
-# create a window with an OpenGL core-profile context
+# open a window
 #
-# initializes GLFW, requests an OpenGL 3.3 core context, makes it
-# current, enables vsync, loads the GL command table through the
-# context, and installs the key handler. on failure the returned Window
-# carries a nil handle; check with window_is_valid.
+# the client API hint is NO_API: GLFW would create an OpenGL context by
+# default, and a window carrying one cannot back a Vulkan surface.
+#
+# there is no swap interval and no command-table load. presentation is
+# the swapchain's present mode, and Vulkan commands are resolved through
+# the loader in boom.graphics.vk rather than through the window, so there
+# is no buffer swap here either: the renderer presents.
 # ---
 # width:  desired client-area width
 # height: desired client-area height
 # title:  window title, UTF-8
 # ret:    the opened Window, nil-handled on failure
 pub fun window_open(width: i32, height: i32, title: str) Window {
-    if (!glfw.init()) {
-        ret Window{handle: glfw.no_window(), width: 0, height: 0};
-    }
-
-    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR);
-    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR);
-    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
-    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
-
-    val win: glfw.Window = glfw.open_window(width, height, title);
-    if (!glfw.window_is_valid(win)) {
-        glfw.terminate();
-        ret Window{handle: win, width: 0, height: 0};
-    }
-
-    glfw.make_context_current(win);
-    glfw.swap_interval(1);
-    gl.load(gl_loader);
-    glfw.set_key_callback(win, on_key);
-    glfw.set_mouse_button_callback(win, on_mouse_button);
-    glfw.set_cursor_pos_callback(win, on_cursor_pos);
-    glfw.set_scroll_callback(win, on_scroll);
-
-    ret Window{handle: win, width: width, height: height};
-}
-
-# open a window with no client API, for the Vulkan backend
-#
-# a window carrying a GL context cannot back a Vulkan surface, so the
-# client API hint must be NO_API rather than left at its default. this
-# is the whole difference between the two: everything else GLFW does
-# for a window is backend-independent, and the input callbacks are
-# installed identically.
-#
-# there is no swap interval and no command-table load, because
-# presentation is the swapchain's present mode and Vulkan commands are
-# resolved through the loader in boom.graphics.vk, not through the
-# window. calling window_swap on one of these is meaningless.
-# ---
-# width:  desired client-area width
-# height: desired client-area height
-# title:  window title, UTF-8
-# ret:    the opened Window, nil-handled on failure
-pub fun window_open_vulkan(width: i32, height: i32, title: str) Window {
     if (!glfw.init()) {
         ret Window{handle: glfw.no_window(), width: 0, height: 0};
     }
@@ -244,13 +194,6 @@ pub fun window_should_close(w: *Window) bool {
 # process pending platform events, firing input callbacks
 pub fun window_poll() {
     glfw.poll_events();
-}
-
-# present the back buffer
-# ---
-# w: window to present
-pub fun window_swap(w: *Window) {
-    glfw.swap_buffers(w.handle);
 }
 
 # destroy the window and shut down GLFW

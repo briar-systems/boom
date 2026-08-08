@@ -1,15 +1,39 @@
 # Directional-light fragment stage.
 #
-# Ported from the GLSL string in examples/animation. It carries no texture, so
-# it is the shader that proves the pipeline rather than the one that draws a
-# sprite; the textured path is sprite_frag.
+# Samples a texture, multiplies by the material's base colour, and lights the
+# result with one hardcoded directional light. This is the fragment stage for
+# every mesh draw, skinned or not.
+#
+# IT ALWAYS SAMPLES. A material with no texture of its own is drawn against the
+# renderer's 1x1 white texture, so an untextured mesh comes out as its base
+# colour exactly. The alternative, a second untextured program, would double the
+# shader set to remove one multiply by one.
 #
 # The normal is an f32x3 rather than an f32x4 with a zeroed fourth lane, so
 # normalize divides by the length of the three lanes that exist.
 
 use sh: shader.math;
 
-#[input(0)]  var in_normal:  f32x3;
+# Sampling is a SPIR-V instruction, declared here rather than taken from
+# shader.math because a SPIR-V module cannot call a function another module
+# defines (mach#2823). sprite_frag declares the same one.
+#[spirv_op("core", "OpImageSampleImplicitLod")]
+fun sample(s: sampler2d, uv: f32x2) f32x4;
+
+# The material's base colour, multiplied into the sampled texel.
+#
+# At binding 2 rather than 1, matching the sprite stage's tint, so one descriptor
+# write path serves both. See boom.graphics.descriptor.descriptors_bind_slot.
+rec Base {
+    colour: f32x4;
+}
+
+#[sampler(0, 1)] var albedo: sampler2d;
+#[uniform(0, 2)] var base:   Base;
+
+#[input(0)] var in_normal: f32x3;
+#[input(1)] var in_uv:     f32x2;
+
 #[output(0)] var out_colour: f32x4;
 
 #[stage("fragment")]
@@ -21,5 +45,8 @@ fun frag_main() {
     val l: f32x3 = sh.normalize_3(f32x3{0.4, 1.0, 0.6});
     val d: f32   = sh.max(sh.dot_3(n, l), 0.0);
     val k: f32   = 0.25 + 0.75 * d;
-    out_colour = f32x4{0.70 * k, 0.75 * k, 0.92 * k, 1.0};
+
+    # Light multiplies the colour channels only. Applying it to alpha as well
+    # would make a surface fade as it turned away from the light.
+    out_colour = sample(albedo, in_uv) * base.colour * f32x4{k, k, k, 1.0};
 }

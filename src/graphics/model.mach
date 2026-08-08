@@ -18,6 +18,7 @@
 # morph-target (weights) channels are future work.
 
 use boom.graphics.mesh.Mesh;
+use boom.graphics.device.Device;
 use boom.graphics.mesh.MeshData;
 use boom.graphics.mesh.mesh;
 use boom.graphics.mesh.mesh_delete;
@@ -352,7 +353,7 @@ fun build_animations(loaded: *gp.Loaded, skin: *gd.Skin, pa: *allo.Allocator, ou
 # data: the .glb bytes
 # len:  length of data in bytes
 # ret:  the built Model, or a parse/extract error
-pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
+pub fun model_from_glb(d: *Device, data: *u8, len: usize) Result[Model, Error] {
     var tpa: allo.Allocator;
     page.make(?tpa);
     var tar: arena.Arena;
@@ -376,20 +377,26 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
     }
 
     var model: Model;
-    model.mesh       = mesh(md.vertices::ptr, md.vertex_count, ?md.format, md.indices, md.index_count);
+    val mr: Result[Mesh, Error] = mesh(d, md.vertices::ptr, md.vertex_count, ?md.format,
+                                       md.indices, md.index_count);
+    if (is_err[Mesh, Error](mr)) {
+        arena.dnit(?tar);
+        ret err[Model, Error](unwrap_err[Mesh, Error](mr));
+    }
+    model.mesh       = unwrap_ok[Mesh, Error](mr);
     model.clips      = nil;
     model.clip_count = 0;
 
     val skr: Result[bool, Error] = build_skeleton(?loaded, ?taa, ?model.skeleton);
     if (is_err[bool, Error](skr)) {
-        mesh_delete(?model.mesh);
+        mesh_delete(d, ?model.mesh);
         arena.dnit(?tar);
         ret err[Model, Error](unwrap_err[bool, Error](skr));
     }
 
     val pie: Option[str] = arena.init(?model.arena, ?tpa, 4096);
     if (is_some[str](pie)) {
-        mesh_delete(?model.mesh);
+        mesh_delete(d, ?model.mesh);
         arena.dnit(?tar);
         ret err[Model, Error](error("out of memory"));
     }
@@ -403,7 +410,7 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
             val anr: Result[bool, Error] = build_animations(?loaded, skin, ?paa, ?model.clips, ?model.clip_count);
             if (is_err[bool, Error](anr)) {
                 arena.dnit(?model.arena);
-                mesh_delete(?model.mesh);
+                mesh_delete(d, ?model.mesh);
                 arena.dnit(?tar);
                 ret err[Model, Error](unwrap_err[bool, Error](anr));
             }
@@ -418,7 +425,7 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
 # ---
 # path: filesystem path to a .glb file
 # ret:  the built Model, or a read/parse/extract error
-pub fun model_load(path: str) Result[Model, Error] {
+pub fun model_load(d: *Device, path: str) Result[Model, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
@@ -428,7 +435,7 @@ pub fun model_load(path: str) Result[Model, Error] {
     }
     var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
-    val res: Result[Model, Error] = model_from_glb(buf.data, buf.len);
+    val res: Result[Model, Error] = model_from_glb(d, buf.data, buf.len);
     vec.dnit[u8](?buf);
     ret res;
 }
@@ -464,8 +471,8 @@ pub fun model_rest_player(model: *Model) AnimationPlayer {
 # release a model's GPU buffers and clip storage
 # ---
 # m: model to delete; the handle must not be used afterward
-pub fun model_delete(m: *Model) {
-    mesh_delete(?m.mesh);
+pub fun model_delete(d: *Device, m: *Model) {
+    mesh_delete(d, ?m.mesh);
     arena.dnit(?m.arena);
     m.clips      = nil;
     m.clip_count = 0;

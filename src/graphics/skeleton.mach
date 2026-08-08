@@ -26,12 +26,12 @@ use std.types.string.str;
 # the most joints a skeleton and its skinning palette carry
 #
 # also the size of the u_joints uniform array the skinning shader
-# declares; SKINNED_VERTEX_SRC hardcodes this count and a compile-time
+# declares; the skinned vertex shader hardcodes this count and a compile-time
 # guard keeps the two in sync.
 pub val MAX_JOINTS: usize = 128;
 
 $if (MAX_JOINTS != 128) {
-    $error("skeleton: SKINNED_VERTEX_SRC hardcodes u_joints[128]; keep it in sync with MAX_JOINTS");
+    $error("skeleton: shaders/src/skinned_vert.mach declares a 512-column palette; keep it in sync with MAX_JOINTS");
 }
 
 # a skeleton's joints, their hierarchy, and their bind data
@@ -117,17 +117,6 @@ pub fun skeleton_rest_pose(sk: *Skeleton, out: *Pose) {
 pub fun pose_matrices(pose: *Pose) *Mat4 {
     ret ?pose.matrices[0];
 }
-
-# a skinning vertex shader following boom's convention
-#
-# attribute locations 0 a_position (vec3), 1 a_normal (vec3), 2 a_uv
-# (vec2), 5 a_joints (uvec4, an integer attribute), and 6 a_weights
-# (vec4); uniforms u_model, u_view, u_projection (mat4) and u_joints, a
-# MAX_JOINTS-long mat4 palette a skinning draw uploads. each vertex is
-# skinned by its four weighted joint matrices, then placed by the model,
-# view, and projection like the mesh convention. pair it with any
-# fragment shader that reads v_normal and v_uv.
-pub val SKINNED_VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nlayout(location = 5) in uvec4 a_joints;\nlayout(location = 6) in vec4 a_weights;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nuniform mat4 u_joints[128];\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    mat4 skin = a_weights.x * u_joints[a_joints.x]\n              + a_weights.y * u_joints[a_joints.y]\n              + a_weights.z * u_joints[a_joints.z]\n              + a_weights.w * u_joints[a_joints.w];\n    mat4 world = u_model * skin;\n    v_normal = mat3(world) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * world * vec4(a_position, 1.0);\n}\n";
 
 # build a two-joint chain skeleton for tests: root then a child of it
 fun fixture_chain(sk: *Skeleton) {

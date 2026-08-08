@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- graphics: A pipeline cache (`boom.graphics.cache`), keyed by program and vertex layout. Vulkan bakes vertex input into a pipeline, and a glTF primitive decides its own layout, so pipelines are built on demand rather than once at startup.
+- graphics: Skinned draws reach the GPU. `pass_draw_skinned` and `pass_draw_skinned_material` upload the pose's joint matrices into a per-frame storage buffer that `shaders/src/skinned_vert.mach` reads.
+- graphics: `boom.graphics.device.Device`, the upload context every resource constructor now takes, since Vulkan has no implicit current context.
+- graphics: A shared depth attachment helper (`boom.graphics.image.depth_attachment_init`), used by both the frame loop and offscreen targets.
+- shaders: `skinned_vert.mach`, and texturing plus a base colour in `lit_frag.mach`.
+- ci: The examples are built on every pull request. They resolve boom by path, so a change to the public API fails the build that made it rather than the next one.
+
 ### Changed
+- graphics: **The renderer is Vulkan.** The OpenGL backend is gone, along with `boom.graphics.shader` and the `mach-gl` dependency. Shaders are Mach source under `shaders/`, compiled to SPIR-V at build time and embedded, so there is no runtime shader compilation and no shader source in a shipped binary.
+- graphics: One `Renderer` per window, and it presents. A Vulkan frame is bracketed by an acquire and a present around one command buffer, so compositing several sources into a frame is done with passes and render targets rather than with several renderers.
+- graphics: `renderer_begin_frame` reports through an out parameter whether a frame opened. A `false` is an out-of-date swapchain that was rebuilt, which every resize causes.
+- graphics: Resources are created against the `Device` that `renderer_device` returns: `texture`, `texture_load`, `mesh`, `mesh_load`, `model_load`, `render_target`, and their deletes.
+- graphics: `Material` no longer carries a shader; `material()` takes no arguments and `material_texture` replaces `material_bind`.
+- graphics: The window's render pass has a depth attachment, so 3D drawn straight to the window depth-tests and its pipelines are compatible with an offscreen target's pass.
+- graphics: `mesh_load` conforms a glTF primitive to one of two canonical vertex layouts, standard or skinned, filling in attributes the asset omits. A shader input with no vertex attribute behind it is invalid rather than merely unused.
+- math: `mat4_perspective` and `mat4_orthographic` target the Vulkan clip volume: depth in [0, 1] and Y increasing downward. Under the OpenGL forms the near half of every frustum was clipped away and everything rendered vertically mirrored. `frontFace` is CLOCKWISE to match the Y flip.
+- window: `window_open` creates a window with no client API; `window_open_vulkan` and `window_swap` are gone.
+- examples: `cube` and `animation` are ported; `vulkan` is now a renderer-level smoke test rather than a parallel hand-built path. All three resolve boom by path.
 - manifest: Re-touched root and example manifests (`mach.toml`) to RFC-exact totality per mach#1964/mach#1979.
+
+### Removed
+- graphics: `Shader`, `shader`, `shader_delete`, `SKINNED_VERTEX_SRC`, and every GLSL string.
 
 ## [0.2.0] - 2026-07-07
 

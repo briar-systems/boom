@@ -35,6 +35,23 @@ pub rec MeshUniforms {
     model: Mat4;
 }
 
+# The skinned vertex stage's uniform block, matching shaders/src/skinned_vert.mach.
+#
+# WHY THIS IS NOT MeshUniforms WITH A RENAMED FIELD. The unskinned stage gets one
+# premultiplied MVP because nothing sits between the model matrix and the vertex.
+# Skinning does: the vertex is placed by its joints, then by the model, then by
+# view and projection. Folding the model into the first matrix here would apply
+# it before the joints and place every vertex by the wrong matrix, so the two
+# arrive separately. The two records happen to be the same size, which is exactly
+# why they are distinct types rather than one with a comment.
+# ---
+# view_proj: View and projection, applied after the model.
+# model:     Model matrix, applied after the joint palette.
+pub rec SkinnedUniforms {
+    view_proj: Mat4;
+    model:     Mat4;
+}
+
 # The sprite vertex stage's uniform block, matching shaders/src/sprite_vert.mach.
 #
 # The source rect is a vec4 of origin xy and size zw in UV units, not a Rect,
@@ -79,6 +96,18 @@ pub fun src_uv(r: Rect, width: u32, height: u32) Vec4 {
     ret Vec4{x: r.x / fw, y: r.y / fh, z: r.w / fw, w: r.h / fh};
 }
 
+# Convert a source rect already in UV units to the shader's vec4.
+#
+# pass_draw_sprite_uv takes its source rectangle in texture space already, so
+# this is a repack rather than a conversion. It exists so the field order the
+# shader reads is stated once: origin in xy, size in zw.
+# ---
+# r:   the sub-rectangle, in UV units
+# ret: the vec4 the shader reads
+pub fun src_uv_unit(r: Rect) Vec4 {
+    ret Vec4{x: r.x, y: r.y, z: r.w, w: r.h};
+}
+
 # --------------------------------------------------------------------- tests
 #
 # These assert the layout, not behaviour. A wrong size or offset here is read by
@@ -97,6 +126,22 @@ test "uniform: the mesh block is two matrices with no padding" {
     # The shader declares mvp_0..3 then model_0..3, eight consecutive vec4s.
     # Any padding between the two matrices shifts every model column by the gap.
     if ($size_of(MeshUniforms) != 128) { ret 1; }
+    ret 0;
+}
+
+test "uniform: the skinned block is two matrices with no padding" {
+    if ($size_of(SkinnedUniforms) != 128) { ret 1; }
+    ret 0;
+}
+
+test "uniform: the mesh and skinned blocks are the same size" {
+    # boom.graphics.renderer writes the base colour into the slot at one fixed
+    # offset for both programs. If these diverged, the skinned path would read
+    # its colour out of the middle of a matrix and the unskinned path would read
+    # past the end of its own block, neither with any diagnostic.
+    #
+    # A comptime check would be better, but $if does not accept $size_of.
+    if ($size_of(MeshUniforms) != $size_of(SkinnedUniforms)) { ret 1; }
     ret 0;
 }
 
@@ -128,6 +173,15 @@ test "uniform: a sub-rect divides by the atlas, not by itself" {
     if (uv.y != 0.75)  { ret 2; }
     if (uv.z != 0.125) { ret 3; }
     if (uv.w != 0.25)  { ret 4; }
+    ret 0;
+}
+
+test "uniform: a unit-space rect keeps origin in xy and size in zw" {
+    # The shader computes src.xy + uv * src.zw, so swapping the pairs samples
+    # a rectangle of the right size from the wrong place.
+    val v: Vec4 = src_uv_unit(Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.0625});
+    if (v.x != 0.25 || v.y != 0.5)     { ret 1; }
+    if (v.z != 0.125 || v.w != 0.0625) { ret 2; }
     ret 0;
 }
 
