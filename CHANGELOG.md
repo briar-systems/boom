@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-08
+
+### Fixed
+- graphics: The device was created with `pEnabledFeatures = nil`, so the two optional features the skinned vertex stage requires were never enabled and **every skinned draw was invalid usage on every device**. It drew correctly and reported nothing. `vk_init` now checks for `shaderInt64` and `vertexPipelineStoresAndAtomics`, requests them by name, and refuses to start with a message naming the missing one rather than proceeding.
+
+  Neither requirement comes from anything the shaders ask for. The palette index arithmetic is written in `u32` and lowers to 64-bit locals, declaring the `Int64` capability (mach#2878), and a storage buffer that is only ever read is not decorated `NonWritable`, so the driver must assume a vertex stage might write to it (mach#2879). Both requests can go once either is fixed.
+
+### Added
+- ci: `tools/check-uniform-layout.py` asserts which SPIR-V capabilities each module declares. A capability is a hardware requirement, and both of the above arrived from codegen without anyone choosing them; this is the check that catches the next one, and it needs no GPU.
+- examples: The `vulkan` smoke test draws a skinned mesh and checks where it lands. Every vertex is weighted half to an identity joint and half to a translated one, so the cube must land at half the translation. A palette that never arrived, a wrong joint index and a wrong weight all draw a perfectly good cube in the wrong place, which is how the skinned path went unverified through a release.
+
+
 ## [0.3.0] - 2026-08-08
 
 ### Added

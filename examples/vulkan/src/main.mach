@@ -248,6 +248,61 @@ fun project(vp: *gm.Mat4, x: f32, y: f32, z: f32, out_x: *f32, out_y: *f32) {
     @out_y = ((cy / cw) * 0.5 + 0.5) * CHECK_H::f32;
 }
 
+# Write an f32 into a byte buffer at off.
+fun put_f32(b: *u8, off: usize, v: f32) {
+    var q: *f32 = (?b[off]):~*f32;
+    @q = v;
+}
+
+# Write a little-endian u16 into a byte buffer at off.
+fun put_u16(b: *u8, off: usize, v: u16) {
+    b[off]     = (v & 0xFF)::u8;
+    b[off + 1] = ((v >> 8) & 0xFF)::u8;
+}
+
+# The same cube, in the skinned vertex layout, bound half to each of two joints.
+#
+# WHY THE SMOKE TEST DRAWS A SKINNED MESH AT ALL. The skinned pipeline is a
+# different pipeline, a different shader, a different descriptor set layout and
+# an extra storage buffer, and none of it was exercised here. Two defects shipped
+# behind that gap: the emitted SPIR-V needs `shaderInt64` and
+# `vertexPipelineStoresAndAtomics`, and boom created its device with no features
+# enabled at all, so every skinned draw was invalid usage on every device. It
+# drew correctly and reported nothing.
+#
+# Every vertex is weighted 0.5 to joint 0 and 0.5 to joint 1. Joint 0 is posed as
+# the identity and joint 1 as a translation, so the whole cube must move by half
+# of it. A wrong joint index, a wrong weight, a wrong palette stride and a
+# palette that never arrived all give a different displacement, and all of them
+# give a cube that still looks like a cube.
+fun build_skinned_cube(bytes: *u8, verts: *f32) {
+    var v: usize = 0;
+    for (v < 24) {
+        val src: usize = v * 8;
+        val dst: usize = v * 56;
+        put_f32(bytes, dst,      verts[src]);
+        put_f32(bytes, dst + 4,  verts[src + 1]);
+        put_f32(bytes, dst + 8,  verts[src + 2]);
+        put_f32(bytes, dst + 12, verts[src + 3]);
+        put_f32(bytes, dst + 16, verts[src + 4]);
+        put_f32(bytes, dst + 20, verts[src + 5]);
+        put_f32(bytes, dst + 24, verts[src + 6]);
+        put_f32(bytes, dst + 28, verts[src + 7]);
+        # JOINTS_0, four u16 at offset 32.
+        put_u16(bytes, dst + 32, 0);
+        put_u16(bytes, dst + 34, 1);
+        put_u16(bytes, dst + 36, 0);
+        put_u16(bytes, dst + 38, 0);
+        # WEIGHTS_0, four f32 at offset 40. The last two are zero, so a stage
+        # reading past the first two contributes nothing rather than doubling.
+        put_f32(bytes, dst + 40, 0.5);
+        put_f32(bytes, dst + 44, 0.5);
+        put_f32(bytes, dst + 48, 0.0);
+        put_f32(bytes, dst + 52, 0.0);
+        v = v + 1;
+    }
+}
+
 # The area of the convex hull of n points, in square pixels.
 #
 # WHY AN AREA AND NOT A PIXEL COUNT WRITTEN DOWN. The silhouette of a closed
@@ -704,6 +759,137 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     p.println("ok   the nearer of two overlapping cubes wins in both draw orders");
 
+    # ---------------------------------------------------------------- skinning
+    #
+    # The same cube through the skinned pipeline, every vertex weighted half to
+    # an identity joint and half to a translated one, so it must land at half the
+    # translation. Predicting the silhouette from the same translation is what
+    # makes this a check on the palette rather than on the cube still being a
+    # cube: a palette that never arrived, a wrong joint index and a wrong weight
+    # all draw a perfectly good cube in the wrong place.
+    val SKIN_SHIFT: f32 = 0.8;
+
+    var sk: gfx.Skeleton;
+    sk.count      = 2;
+    sk.parents[0] = 0 - 1;
+    sk.parents[1] = 0;
+    sk.order[0]   = 0;
+    sk.order[1]   = 1;
+    sk.rest[0]         = gm.transform_identity();
+    sk.rest[1]         = gm.transform_identity();
+    sk.inverse_bind[0] = gm.mat4_identity();
+    sk.inverse_bind[1] = gm.mat4_identity();
+
+    var locals: [2]gm.Transform;
+    locals[0] = gm.transform_identity();
+    locals[1] = gm.transform_identity();
+    locals[1].position = gm.vec3(SKIN_SHIFT, 0.0, 0.0);
+
+    var pose: gfx.Pose;
+    gfx.skeleton_pose(?sk, ?locals[0], ?pose);
+
+    var sbytes: [1344]u8;
+    build_skinned_cube(?sbytes[0], ?verts[0]);
+    var sfmt: gfx.VertexFormat = gfx.vertex_format_skinned();
+    if (sfmt.stride != 56) {
+        p.printlnf("FAIL skinning: the skinned stride is {}, not the 56 this vertex data assumes", sfmt.stride);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    val smr: Result[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?sbytes[0])::ptr, 24, ?sfmt, ?indices[0], 36);
+    if (is_err[gfx.Mesh, gfx.Error](smr)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](smr);
+        p.printlnf("FAIL skinned mesh: {}", gfx.error_msg(?e));
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    var smesh: gfx.Mesh = unwrap_ok[gfx.Mesh, gfx.Error](smr);
+
+    var sxf: gm.Transform = gm.transform_identity();
+    var sdrew: bool = false;
+    var stry: usize = 0;
+    for (stry < 8 && !sdrew) {
+        window_poll();
+        var opened: bool = false;
+        if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+        if (opened) {
+            var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+            scene.target      = ?check;
+            scene.clear       = 1;
+            scene.clear_color = gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0);
+            var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+            gfx.pass_draw_skinned_material(?sp, ?smesh, ?mat, ?pose, ?sxf);
+            gfx.pass_end(?sp);
+            if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+            sdrew = true;
+        }
+        stry = stry + 1;
+    }
+    if (!sdrew) {
+        p.println("FAIL skinning: the swapchain never came back to draw the skinned frame");
+        gfx.mesh_delete(d, ?smesh);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) { ret 1; }
+
+    var s_min_x: i32 = CHECK_W;
+    var s_max_x: i32 = 0 - 1;
+    var s_covered: usize = 0;
+    var sy: i32 = 0;
+    for (sy < CHECK_H) {
+        var sx_i: i32 = 0;
+        for (sx_i < CHECK_W) {
+            val o: usize = (sy::usize * CHECK_W::usize + sx_i::usize) * 4;
+            if (shot[o + red] > COVERED_R) {
+                s_covered = s_covered + 1;
+                if (sx_i < s_min_x) { s_min_x = sx_i; }
+                if (sx_i > s_max_x) { s_max_x = sx_i; }
+            }
+            sx_i = sx_i + 1;
+        }
+        sy = sy + 1;
+    }
+    if (s_covered == 0) {
+        p.println("FAIL skinning: the skinned draw rasterized nothing");
+        gfx.mesh_delete(d, ?smesh);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+
+    # Half the joint translation, because the weights are half and half.
+    val half: f32 = SKIN_SHIFT * 0.5;
+    var s_want_min: f32 = CHECK_W::f32;
+    var s_want_max: f32 = 0.0;
+    var sc: usize = 0;
+    for (sc < 8) {
+        var cxv: f32 = 0.0 - 0.5;
+        var cyv: f32 = 0.0 - 0.5;
+        var czv: f32 = 0.0 - 0.5;
+        if ((sc & 1) != 0) { cxv = 0.5; }
+        if ((sc & 2) != 0) { cyv = 0.5; }
+        if ((sc & 4) != 0) { czv = 0.5; }
+        var px_f: f32 = 0.0;
+        var py_f: f32 = 0.0;
+        project(?vp, cxv + half, cyv, czv, ?px_f, ?py_f);
+        if (px_f < s_want_min) { s_want_min = px_f; }
+        if (px_f > s_want_max) { s_want_max = px_f; }
+        sc = sc + 1;
+    }
+
+    if (fabs(s_min_x::f32 - s_want_min) > SLACK || fabs(s_max_x::f32 - s_want_max) > SLACK) {
+        p.printlnf("FAIL skinning: the skinned cube spans x {}..{}, expected {}..{}",
+                   s_min_x, s_max_x, s_want_min::i32, s_want_max::i32);
+        p.println("      Landing where an unskinned draw would means the palette never");
+        p.println("      arrived; landing at the full joint translation means the weights");
+        p.println("      were not applied; anywhere else means the joint index is wrong.");
+        gfx.mesh_delete(d, ?smesh);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   the skinned cube lands at half the joint translation, x {}..{}", s_min_x, s_max_x);
+
+    gfx.mesh_delete(d, ?smesh);
     gfx.render_target_delete(d, ?check);
 
     # Teardown order is part of what is being checked: everything created against
