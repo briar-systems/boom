@@ -44,9 +44,13 @@ targets = ["spirv"]
 link    = []
 need    = []
 
-# sprite_frag is written and staged but not built: it needs the sampler
-# binding, which lands in a toolchain release after 4.16.0. Registering it now
-# would fail every build rather than only the textured path.
+# sprite_frag is written, staged under pending/, and proven to build. It
+# compiles and passes spirv-val on a locally built 4.17.0, emitting
+# OpTypeSampledImage and OpImageSampleImplicitLod with the atlas at binding 1
+# and the tint at binding 2, and tools/check-uniform-layout.sh confirms those
+# match set_layout_sprite. It stays unregistered only until a release carries
+# mach#2803, because 4.16.0 cannot parse `sampler2d` and registering it would
+# fail every build rather than only the textured path.
 
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
