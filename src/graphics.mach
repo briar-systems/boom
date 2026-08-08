@@ -251,3 +251,8 @@ fwd boom.graphics.descriptor.descriptors_allocate;
 fwd boom.graphics.descriptor.descriptors_write;
 fwd boom.graphics.descriptor.descriptors_bind;
 fwd boom.graphics.descriptor.descriptors_dnit;
+
+fwd boom.graphics.uniform.MeshUniforms;
+fwd boom.graphics.uniform.SpriteUniforms;
+fwd boom.graphics.uniform.TintUniforms;
+fwd boom.graphics.uniform.src_uv;
