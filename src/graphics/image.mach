@@ -217,7 +217,99 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
         @dst_access = vk.ACCESS_SHADER_READ_BIT;
         ret true;
     }
+    if (old == vk.IMAGE_LAYOUT_UNDEFINED && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        # A render target's colour image, put into a readable layout before
+        # anything has drawn into it. The contents are undefined and that is
+        # fine; what matters is that a game sampling the target before its
+        # first render finds the image in the layout its descriptor claims,
+        # rather than in UNDEFINED.
+        @src_stage  = vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        @src_access = 0;
+        @dst_access = vk.ACCESS_SHADER_READ_BIT;
+        ret true;
+    }
     ret false;
+}
+
+# Allocate and begin a command buffer recorded once and thrown away.
+#
+# Factored out because a transition and an upload need the same six calls
+# around them, and the second copy of a submit-and-wait is where the wait goes
+# missing.
+fun begin_one_shot(v: *Vk, pool: vk.CommandPool, out: *vk.CommandBuffer) Result[bool, Error] {
+    var ai: vk.CommandBufferAllocateInfo;
+    ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.pNext              = nil;
+    ai.commandPool        = pool;
+    ai.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vk.vkAllocateCommandBuffers(v.device, ?ai, out) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not allocate a one-shot command buffer"));
+    }
+
+    var bi: vk.CommandBufferBeginInfo;
+    bi.sType            = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.pNext            = nil;
+    bi.flags            = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    bi.pInheritanceInfo = nil;
+    vk.vkBeginCommandBuffer(@out, ?bi);
+    ret ok[bool, Error](true);
+}
+
+# End, submit, wait for, and free a one-shot command buffer.
+#
+# The wait is not optional: the command buffer and anything it reads are in use
+# until the queue drains, and freeing either first is a use-after-free the
+# validation layers report far from here.
+fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) Result[bool, Error] {
+    vk.vkEndCommandBuffer(cmd);
+
+    var c: vk.CommandBuffer = cmd;
+    var si: vk.SubmitInfo;
+    si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext                = nil;
+    si.waitSemaphoreCount   = 0;
+    si.pWaitSemaphores      = nil;
+    si.pWaitDstStageMask    = nil;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = ?c;
+    si.signalSemaphoreCount = 0;
+    si.pSignalSemaphores    = nil;
+
+    val rc: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, nil);
+    vk.vkQueueWaitIdle(v.graphics_queue);
+    vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
+    if (rc != vk.SUCCESS) {
+        ret err[bool, Error](error("vkQueueSubmit failed for a one-shot command buffer"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# Put an image into a layout with a one-shot command buffer.
+#
+# Used to give a render target's colour image a readable layout at creation, so
+# sampling it before anything has drawn into it is valid rather than a lie about
+# the layout. The contents are undefined, which is the caller's business.
+# ---
+# i:    the image to transition
+# v:    the device
+# pool: a command pool for the one-shot buffer
+# old:  the layout the image is in
+# new:  the layout to leave it in
+# ret:  true on success, or the step that failed
+pub fun image_transition(i: *Image, v: *Vk, pool: vk.CommandPool, old: i32, new: i32) Result[bool, Error] {
+    if (!i.ready) { ret err[bool, Error](error("cannot transition an image that was not created")); }
+
+    var cmd: vk.CommandBuffer;
+    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
+    if (is_err[bool, Error](br)) { ret br; }
+
+    if (!transition(cmd, i.handle, old, new)) {
+        end_one_shot(v, pool, cmd);
+        ret err[bool, Error](error("unhandled image layout transition"));
+    }
+    ret end_one_shot(v, pool, cmd);
 }
 
 # Record a layout transition into a command buffer.
@@ -455,9 +547,28 @@ test "image: an unhandled transition is refused rather than zeroed" {
     if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
-    if (transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
-                         vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    # An arbitrary pair nothing in boom performs. The point is that the table
+    # is a closed set, not that it happens to be missing this one.
+    if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                         vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
                          ?ss, ?ds, ?sa, ?da)) { ret 2; }
+    ret 0;
+}
+
+test "image: a target's colour image can be made readable before anything draws" {
+    # A game may sample a render target before its first render. The image is
+    # in UNDEFINED then, while the descriptor claims SHADER_READ_ONLY_OPTIMAL,
+    # which is a lie about the layout rather than merely undefined contents.
+    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
+    if (!transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
+                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    # Nothing has touched the image, so there is nothing to wait for, but the
+    # fragment stage's read is what must wait for the transition.
+    if (ss != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT)     { ret 2; }
+    if (ds != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
+    if (sa != 0)                                     { ret 4; }
+    if (da != vk.ACCESS_SHADER_READ_BIT)             { ret 5; }
     ret 0;
 }
 

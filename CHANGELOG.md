@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - graphics: `model_load` rejects a model whose vertices reference a joint the skin does not have. The skinned vertex stage indexes a fixed-size palette with whatever `JOINTS_0` holds, so an out-of-range index reads outside it.
 
+- graphics: A render target's colour image is put into a readable layout at creation. A game may sample a target before its first render, at which point the image was in `UNDEFINED` while the descriptor claimed `SHADER_READ_ONLY_OPTIMAL` — a lie about the layout, not merely undefined contents.
+
 ### Removed
 - graphics: `Shader`, `shader`, `shader_delete`, `SKINNED_VERTEX_SRC`, and every GLSL string.
 

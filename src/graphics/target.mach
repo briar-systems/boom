@@ -26,6 +26,7 @@ use std.types.result.Result;
 use std.types.result.ok;
 use std.types.result.err;
 use std.types.result.is_err;
+use std.types.result.unwrap_err;
 use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
@@ -35,6 +36,7 @@ use boom.graphics.texture.Texture;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_init;
 use boom.graphics.image.COLOR_SRGB;
+use boom.graphics.image.image_transition;
 use boom.graphics.image.image_dnit;
 use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.image.DepthAttachment;
@@ -181,6 +183,20 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
     }
     t.color.width  = width;
     t.color.height = height;
+
+    # Put the colour image into a readable layout before anything draws into it.
+    # A game is free to sample a target on the first frame, before its first
+    # render pass has run; without this the image is in UNDEFINED while the
+    # descriptor claims SHADER_READ_ONLY_OPTIMAL, which is a lie about the
+    # layout rather than merely undefined contents. The render pass's own
+    # initialLayout is UNDEFINED, so this costs nothing afterwards.
+    val tir: Result[bool, Error] = image_transition(?t.color.image, d.vk, d.pool,
+                                                    vk.IMAGE_LAYOUT_UNDEFINED,
+                                                    vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (is_err[bool, Error](tir)) {
+        render_target_delete(d, ?t);
+        ret err[RenderTarget, Error](unwrap_err[bool, Error](tir));
+    }
 
     val dr: Result[bool, Error] = depth_attachment_init(?t.depth, d.vk, width, height);
     if (is_err[bool, Error](dr)) {
