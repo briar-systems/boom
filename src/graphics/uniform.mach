@@ -1,0 +1,138 @@
+# The uniform blocks, as the CPU side of what the shaders declare.
+#
+# A uniform block is a contract between two programs compiled separately, and
+# nothing checks that they agree. A field at the wrong offset is not an error at
+# any layer: the shader reads whatever bytes are at the offset it expects, so a
+# mismatch appears as geometry in the wrong place or a colour that is part of a
+# matrix, with no diagnostic anywhere. These records exist so the contract is
+# written once on this side and asserted against std140's rules.
+#
+# WHY A MATRIX IS FOUR VECTORS HERE TOO. Mach has no matrix type, so the shaders
+# take a 4x4 as four f32x4 columns. std140 lays a mat4 out as exactly that, four
+# 16-byte-aligned vec4s, so a boom.math.Mat4 (16 column-major floats) is already
+# byte-identical to the four columns the shader reads. That is why upload is a
+# copy and not a repack, and it is the property the tests below pin down.
+#
+# EVERY MEMBER IS A VEC4 ON PURPOSE. std140 aligns a vec3 to 16 bytes and a
+# scalar to 4, so a block mixing them has padding that is easy to get wrong by
+# hand. Keeping every member 16 bytes wide makes the layout its own declaration:
+# offset is index times 16, with no rule to remember and nothing to compute.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use boom.math.mat.Mat4;
+use boom.math.vec.Vec4;
+use boom.graphics.sprite.Rect;
+
+# The mesh vertex stage's uniform block, matching shaders/src/mesh_vert.mach.
+# ---
+# mvp:   Model-view-projection, applied to the position.
+# model: Model matrix; its upper-left 3x3 is applied to the normal.
+pub rec MeshUniforms {
+    mvp:   Mat4;
+    model: Mat4;
+}
+
+# The sprite vertex stage's uniform block, matching shaders/src/sprite_vert.mach.
+#
+# The source rect is a vec4 of origin xy and size zw in UV units, not a Rect,
+# because the shader reads four consecutive floats and Rect's field order is the
+# same but its identity is a rectangle in pixels. Converting at this boundary is
+# what keeps `Rect` free to change.
+# ---
+# projection: Pixel-space orthographic projection.
+# model:      Places the unit quad at the sprite's position and size.
+# src:        Atlas sub-rectangle as origin xy and size zw, in UV units.
+pub rec SpriteUniforms {
+    projection: Mat4;
+    model:      Mat4;
+    src:        Vec4;
+}
+
+# The sprite fragment stage's tint, matching shaders/pending/sprite_frag.mach.
+#
+# Separate from SpriteUniforms because it belongs to the fragment stage and its
+# binding differs. Text uses the same block: the glyph atlas stores coverage in
+# alpha with RGB left white, so tinting a glyph and tinting a sprite are one
+# operation.
+# ---
+# colour: Multiplied into the sampled texel.
+pub rec TintUniforms {
+    colour: Vec4;
+}
+
+# Convert an atlas rect in pixels to the UV vec4 the shader reads.
+#
+# The shader works in UV because it has no idea how large the atlas is. Doing
+# the division here rather than in the shader also means it happens once per
+# sprite rather than once per fragment.
+# ---
+# r:      The sub-rectangle in atlas pixels.
+# width:  Atlas width in pixels.
+# height: Atlas height in pixels.
+pub fun src_uv(r: Rect, width: u32, height: u32) Vec4 {
+    if (width == 0 || height == 0) { ret Vec4{x: 0.0, y: 0.0, z: 0.0, w: 0.0}; }
+    val fw: f32 = width::f32;
+    val fh: f32 = height::f32;
+    ret Vec4{x: r.x / fw, y: r.y / fh, z: r.w / fw, w: r.h / fh};
+}
+
+# --------------------------------------------------------------------- tests
+#
+# These assert the layout, not behaviour. A wrong size or offset here is read by
+# the shader as whatever happens to be at that address, so it produces no error
+# at any layer and shows up as geometry in the wrong place.
+
+test "uniform: a matrix is four consecutive vec4s" {
+    # std140 lays a mat4 out as four 16-byte-aligned vec4s, which is what the
+    # shaders declare and what makes the upload a copy rather than a repack.
+    if ($size_of(Mat4) != 64) { ret 1; }
+    if ($size_of(Vec4) != 16) { ret 2; }
+    ret 0;
+}
+
+test "uniform: the mesh block is two matrices with no padding" {
+    # The shader declares mvp_0..3 then model_0..3, eight consecutive vec4s.
+    # Any padding between the two matrices shifts every model column by the gap.
+    if ($size_of(MeshUniforms) != 128) { ret 1; }
+    ret 0;
+}
+
+test "uniform: the sprite block is two matrices then the source rect" {
+    # 64 + 64 + 16. A src at any other offset makes every sprite sample the
+    # wrong part of the atlas while still drawing in the right place, which
+    # reads as a texture bug rather than a layout one.
+    if ($size_of(SpriteUniforms) != 144) { ret 1; }
+    ret 0;
+}
+
+test "uniform: the tint block is one vec4" {
+    if ($size_of(TintUniforms) != 16) { ret 1; }
+    ret 0;
+}
+
+test "uniform: a full-atlas rect maps to the whole UV range" {
+    val uv: Vec4 = src_uv(Rect{x: 0.0, y: 0.0, w: 256.0, h: 256.0}, 256, 256);
+    if (uv.x != 0.0 || uv.y != 0.0) { ret 1; }
+    if (uv.z != 1.0 || uv.w != 1.0) { ret 2; }
+    ret 0;
+}
+
+test "uniform: a sub-rect divides by the atlas, not by itself" {
+    # A 32x32 glyph at (64, 96) in a 256x128 atlas. Dividing width and height by
+    # the same number is the mistake, and it is invisible on a square atlas.
+    val uv: Vec4 = src_uv(Rect{x: 64.0, y: 96.0, w: 32.0, h: 32.0}, 256, 128);
+    if (uv.x != 0.25)  { ret 1; }
+    if (uv.y != 0.75)  { ret 2; }
+    if (uv.z != 0.125) { ret 3; }
+    if (uv.w != 0.25)  { ret 4; }
+    ret 0;
+}
+
+test "uniform: a zero-sized atlas yields zeroes rather than dividing" {
+    val uv: Vec4 = src_uv(Rect{x: 1.0, y: 1.0, w: 1.0, h: 1.0}, 0, 64);
+    if (uv.x != 0.0 || uv.z != 0.0) { ret 1; }
+    ret 0;
+}

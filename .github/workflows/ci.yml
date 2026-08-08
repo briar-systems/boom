@@ -37,11 +37,27 @@ jobs:
           sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
             libwayland-dev libxkbcommon-dev wayland-protocols
 
+      - name: Install spirv-tools
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y spirv-tools
+
       - name: Sync dependencies
         run: mach dep pull
 
       - name: Build
         run: mach build .
+
+      # A uniform block is a contract between two separately compiled programs
+      # and nothing at runtime checks it. A member at the wrong offset makes the
+      # shader read whatever bytes are there, with no diagnostic anywhere.
+      - name: Validate the emitted SPIR-V
+        run: |
+          set -euo pipefail
+          for f in res/spv/*.spv; do spirv-val "$f"; done
+
+      - name: Check uniform blocks match their CPU records
+        run: ./tools/check-uniform-layout.sh
 
       - name: Test
         run: mach test .
