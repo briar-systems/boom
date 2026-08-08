@@ -13,6 +13,7 @@
 
 use boom.context.Context;
 use boom.app.App;
+use inp: boom.input;
 use boom.window.window_should_close;
 use boom.window.window_poll;
 use boom.window.window_swap;
@@ -49,6 +50,11 @@ pub fun run(ctx: *Context, app: *App) {
 
         timestep_add(?ctx.step, ctx.clock.delta);
         for (timestep_step(?ctx.step)) {
+            # fold input exactly once per tick, immediately before the tick
+            # sees it. this is what makes an edge belong to one tick: a frame
+            # running three ticks shows the press to the first only, and a
+            # frame running none leaves it pending for whichever tick is next.
+            inp.input_begin_tick(?ctx.input);
             invoke(app.f_tick, ctx);
         }
 

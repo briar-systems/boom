@@ -14,6 +14,7 @@ fwd boom.engine;
 fwd boom.clock;
 fwd boom.timestep;
 fwd boom.event;
+fwd boom.input;
 fwd boom.log;
 fwd boom.window;
 fwd boom.math;
