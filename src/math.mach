@@ -48,6 +48,8 @@ fwd mat.mat4_perspective;
 fwd mat.mat4_orthographic;
 fwd mat.mat4_look_at;
 fwd mat.mat4_ptr;
+fwd mat.mat4_transform_point;
+fwd mat.mat4_transform_dir;
 
 fwd quat.Quat;
 fwd quat.quat_identity;

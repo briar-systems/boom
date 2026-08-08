@@ -36,6 +36,18 @@ targets = ["spirv"]
 link    = []
 need    = []
 
+[artifact.sprite_vert]
+kind    = "bin"
+entry   = "sprite_vert.mach"
+out     = "sprite_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+# sprite_frag is written and staged but not built: it needs the sampler
+# binding, which lands in a toolchain release after 4.16.0. Registering it now
+# would fail every build rather than only the textured path.
+
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
-ref = "branch/main"
+ref = "tag/0.1.0"

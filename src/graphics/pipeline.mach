@@ -1,0 +1,622 @@
+# Graphics pipelines: shader modules, layouts, and pipeline state.
+#
+# A Vulkan pipeline bakes the whole fixed-function state and both shader stages
+# into one immutable object, so everything that GL set with individual calls is
+# decided here at creation time. That is why this module takes a description
+# rather than exposing setters.
+#
+# VERTEX INPUT COMES FROM THE FORMAT. boom.graphics.vertex already describes a
+# mesh's attributes in a backend-neutral way, so the input state is derived from
+# a VertexFormat rather than declared twice. A pipeline built for a format is
+# only valid for meshes uploaded with that same format, and the conversion is
+# the single place that correspondence is enforced.
+#
+# VIEWPORT AND SCISSOR ARE DYNAMIC. Baking them would mean rebuilding every
+# pipeline on every window resize. Declaring them dynamic costs one command per
+# frame and makes a resize touch only the swapchain.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.spirv.VERTEX_ENTRY;
+use boom.graphics.spirv.FRAGMENT_ENTRY;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.VertexAttribute;
+use boom.graphics.vertex.Component;
+use boom.graphics.vertex.COMP_F32;
+use boom.graphics.vertex.COMP_U8;
+use boom.graphics.vertex.COMP_U16;
+use boom.graphics.vertex.COMP_U32;
+use boom.graphics.vertex.COMP_I8;
+use boom.graphics.vertex.COMP_I16;
+
+# The format returned when an attribute cannot be expressed in Vulkan.
+pub val FORMAT_UNSUPPORTED: i32 = 0;
+
+# A pipeline and the layouts it was built against.
+# ---
+# handle:     The pipeline object.
+# layout:     Pipeline layout, owned here.
+# set_layout: Descriptor set layout, owned here; nil when the pipeline binds
+#             no descriptors.
+# ready:      Whether creation completed.
+pub rec Pipeline {
+    handle:     vk.Pipeline;
+    layout:     vk.PipelineLayout;
+    set_layout: vk.DescriptorSetLayout;
+    ready:      bool;
+}
+
+# What a pipeline needs beyond its shaders and vertex format.
+# ---
+# blend:   Alpha blending on the colour attachment. Sprites and text need it;
+#          opaque geometry is cheaper without it.
+# cull:    Back-face culling. Off for 2D, where quads may be wound either way.
+# depth:   Depth test and write. Off for overlays drawn in submission order.
+# topology: Primitive topology, normally a triangle list.
+pub rec PipelineDesc {
+    blend:    bool;
+    cull:     bool;
+    depth:    bool;
+    topology: i32;
+}
+
+# The default description: opaque, culled, depth-tested triangles.
+pub fun pipeline_desc_3d() PipelineDesc {
+    var d: PipelineDesc;
+    d.blend    = false;
+    d.cull     = true;
+    d.depth    = true;
+    d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ret d;
+}
+
+# The 2D description: blended, unculled, no depth.
+pub fun pipeline_desc_2d() PipelineDesc {
+    var d: PipelineDesc;
+    d.blend    = true;
+    d.cull     = false;
+    d.depth    = false;
+    d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ret d;
+}
+
+# The Vulkan format for one vertex attribute.
+#
+# The three axes are the component type, the component count, and whether the
+# attribute is normalized or read as a raw integer. A float attribute is always
+# SFLOAT; an integer attribute is UINT or SINT; a normalized attribute is UNORM
+# or SNORM, which is how a colour packed into four bytes reaches the shader as a
+# vec4 in [0, 1].
+#
+# Returns FORMAT_UNSUPPORTED rather than guessing, because a wrong format is
+# accepted by pipeline creation and produces silently wrong values in the shader.
+pub fun attribute_format(c: Component, count: u32, normalized: u8, integer: u8) i32 {
+    if (count < 1 || count > 4) { ret FORMAT_UNSUPPORTED; }
+
+    if (c == COMP_F32) {
+        if (count == 1) { ret vk.FORMAT_R32_SFLOAT; }
+        if (count == 2) { ret vk.FORMAT_R32G32_SFLOAT; }
+        if (count == 3) { ret vk.FORMAT_R32G32B32_SFLOAT; }
+        ret vk.FORMAT_R32G32B32A32_SFLOAT;
+    }
+
+    # A normalized 32-bit integer attribute has no Vulkan format, and glTF never
+    # produces one. Rejecting is better than silently reading it as raw.
+    if (c == COMP_U32) {
+        if (normalized != 0) { ret FORMAT_UNSUPPORTED; }
+        if (count == 1) { ret vk.FORMAT_R32_UINT; }
+        if (count == 2) { ret vk.FORMAT_R32G32_UINT; }
+        if (count == 3) { ret vk.FORMAT_R32G32B32_UINT; }
+        ret vk.FORMAT_R32G32B32A32_UINT;
+    }
+
+    if (c == COMP_U16) {
+        if (normalized != 0) {
+            if (count == 1) { ret vk.FORMAT_R16_UNORM; }
+            if (count == 2) { ret vk.FORMAT_R16G16_UNORM; }
+            if (count == 3) { ret vk.FORMAT_R16G16B16_UNORM; }
+            ret vk.FORMAT_R16G16B16A16_UNORM;
+        }
+        if (count == 1) { ret vk.FORMAT_R16_UINT; }
+        if (count == 2) { ret vk.FORMAT_R16G16_UINT; }
+        if (count == 3) { ret vk.FORMAT_R16G16B16_UINT; }
+        ret vk.FORMAT_R16G16B16A16_UINT;
+    }
+
+    if (c == COMP_U8) {
+        if (normalized != 0) {
+            if (count == 1) { ret vk.FORMAT_R8_UNORM; }
+            if (count == 2) { ret vk.FORMAT_R8G8_UNORM; }
+            if (count == 3) { ret vk.FORMAT_R8G8B8_UNORM; }
+            ret vk.FORMAT_R8G8B8A8_UNORM;
+        }
+        if (count == 1) { ret vk.FORMAT_R8_UINT; }
+        if (count == 2) { ret vk.FORMAT_R8G8_UINT; }
+        if (count == 3) { ret vk.FORMAT_R8G8B8_UINT; }
+        ret vk.FORMAT_R8G8B8A8_UINT;
+    }
+
+    if (c == COMP_I16) {
+        if (normalized != 0) {
+            if (count == 1) { ret vk.FORMAT_R16_SNORM; }
+            if (count == 2) { ret vk.FORMAT_R16G16_SNORM; }
+            if (count == 3) { ret vk.FORMAT_R16G16B16_SNORM; }
+            ret vk.FORMAT_R16G16B16A16_SNORM;
+        }
+        if (count == 1) { ret vk.FORMAT_R16_SINT; }
+        if (count == 2) { ret vk.FORMAT_R16G16_SINT; }
+        if (count == 3) { ret vk.FORMAT_R16G16B16_SINT; }
+        ret vk.FORMAT_R16G16B16A16_SINT;
+    }
+
+    if (c == COMP_I8) {
+        if (normalized != 0) {
+            if (count == 1) { ret vk.FORMAT_R8_SNORM; }
+            if (count == 2) { ret vk.FORMAT_R8G8_SNORM; }
+            if (count == 3) { ret vk.FORMAT_R8G8B8_SNORM; }
+            ret vk.FORMAT_R8G8B8A8_SNORM;
+        }
+        if (count == 1) { ret vk.FORMAT_R8_SINT; }
+        if (count == 2) { ret vk.FORMAT_R8G8_SINT; }
+        if (count == 3) { ret vk.FORMAT_R8G8B8_SINT; }
+        ret vk.FORMAT_R8G8B8A8_SINT;
+    }
+
+    ret FORMAT_UNSUPPORTED;
+}
+
+# Fill Vulkan attribute descriptions from a vertex format.
+#
+# The location, offset, and stride all come from the format, so the pipeline and
+# the uploaded geometry cannot disagree. Returns the number written, or 0 when
+# any attribute has no Vulkan format.
+pub fun vertex_attributes(f: *VertexFormat, out: *vk.VertexInputAttributeDescription, cap: usize) u32 {
+    if (f.count::usize > cap) { ret 0; }
+    var i: u32 = 0;
+    for (i < f.count) {
+        val a: *VertexAttribute = ?f.attributes[i];
+        val fmt: i32 = attribute_format(a.component, a.count, a.normalized, a.integer);
+        if (fmt == FORMAT_UNSUPPORTED) { ret 0; }
+        out[i].location = a.location;
+        out[i].binding  = 0;
+        out[i].format   = fmt;
+        out[i].offset   = a.offset;
+        i = i + 1;
+    }
+    ret f.count;
+}
+
+# Wrap SPIR-V bytes in a shader module.
+#
+# The length must be a multiple of four: SPIR-V is a word stream, and a byte
+# count that is not word-aligned means the file is truncated or is not SPIR-V.
+pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) Result[bool, Error] {
+    if (len == 0 || (len % 4) != 0) {
+        ret err[bool, Error](error("SPIR-V length is not a whole number of words"));
+    }
+    var ci: vk.ShaderModuleCreateInfo;
+    ci.sType    = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    ci.pNext    = nil;
+    ci.flags    = 0;
+    ci.codeSize = len::u64;
+    ci.pCode    = spv:~*u32;
+    if (vk.vkCreateShaderModule(v.device, ?ci, nil, out) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateShaderModule failed"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# The descriptor set layout a pipeline binds.
+#
+# One uniform buffer at binding 0 and, when `sampled` is set, one combined image
+# sampler at binding 1. This mirrors what the shaders declare, and the two must
+# be changed together; a mismatch is rejected at pipeline creation rather than
+# producing wrong output, which is why it is stated once here.
+fun make_set_layout(v: *Vk, sampled: bool, out: *vk.DescriptorSetLayout) Result[bool, Error] {
+    var bindings: [2]vk.DescriptorSetLayoutBinding;
+    bindings[0].binding            = 0;
+    bindings[0].descriptorType     = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[0].descriptorCount    = 1;
+    bindings[0].stageFlags         = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT;
+    bindings[0].pImmutableSamplers = nil;
+
+    var count: u32 = 1;
+    if (sampled) {
+        bindings[1].binding            = 1;
+        bindings[1].descriptorType     = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[1].descriptorCount    = 1;
+        bindings[1].stageFlags         = vk.SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].pImmutableSamplers = nil;
+        count = 2;
+    }
+
+    var ci: vk.DescriptorSetLayoutCreateInfo;
+    ci.sType        = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.pNext        = nil;
+    ci.flags        = 0;
+    ci.bindingCount = count;
+    ci.pBindings    = ?bindings[0];
+    if (vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateDescriptorSetLayout failed"));
+    }
+    ret ok[bool, Error](true);
+}
+
+# Build a graphics pipeline from two SPIR-V modules and a vertex format.
+pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexFormat, d: *PipelineDesc,
+                      vert: *u8, vlen: usize, frag: *u8, flen: usize, sampled: bool) Result[bool, Error] {
+    p.ready      = false;
+    p.handle     = nil;
+    p.layout     = nil;
+    p.set_layout = nil;
+
+    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+
+    var vmod: vk.ShaderModule;
+    var fmod: vk.ShaderModule;
+    val vr: Result[bool, Error] = shader_module(v, vert, vlen, ?vmod);
+    if (is_err[bool, Error](vr)) { ret vr; }
+    val fr: Result[bool, Error] = shader_module(v, frag, flen, ?fmod);
+    if (is_err[bool, Error](fr)) {
+        vk.vkDestroyShaderModule(v.device, vmod, nil);
+        ret fr;
+    }
+
+    val sr: Result[bool, Error] = make_set_layout(v, sampled, ?p.set_layout);
+    if (is_err[bool, Error](sr)) {
+        vk.vkDestroyShaderModule(v.device, vmod, nil);
+        vk.vkDestroyShaderModule(v.device, fmod, nil);
+        ret sr;
+    }
+
+    var set_layout: vk.DescriptorSetLayout = p.set_layout;
+    var lci: vk.PipelineLayoutCreateInfo;
+    lci.sType                  = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    lci.pNext                  = nil;
+    lci.flags                  = 0;
+    lci.setLayoutCount         = 1;
+    lci.pSetLayouts            = ?set_layout;
+    lci.pushConstantRangeCount = 0;
+    lci.pPushConstantRanges    = nil;
+    if (vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?p.layout) != vk.SUCCESS) {
+        vk.vkDestroyShaderModule(v.device, vmod, nil);
+        vk.vkDestroyShaderModule(v.device, fmod, nil);
+        ret err[bool, Error](error("vkCreatePipelineLayout failed"));
+    }
+
+    var stages: [2]vk.PipelineShaderStageCreateInfo;
+    stages[0].sType               = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].pNext               = nil;
+    stages[0].flags               = 0;
+    stages[0].stage               = vk.SHADER_STAGE_VERTEX_BIT::i32;
+    stages[0].module              = vmod;
+    stages[0].pName               = VERTEX_ENTRY::*u8;
+    stages[0].pSpecializationInfo = nil;
+    stages[1].sType               = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].pNext               = nil;
+    stages[1].flags               = 0;
+    stages[1].stage               = vk.SHADER_STAGE_FRAGMENT_BIT::i32;
+    stages[1].module              = fmod;
+    stages[1].pName               = FRAGMENT_ENTRY::*u8;
+    stages[1].pSpecializationInfo = nil;
+
+    var binding: vk.VertexInputBindingDescription;
+    binding.binding   = 0;
+    binding.stride    = f.stride;
+    binding.inputRate = vk.VERTEX_INPUT_RATE_VERTEX;
+
+    var attrs: [8]vk.VertexInputAttributeDescription;
+    val nattrs: u32 = vertex_attributes(f, ?attrs[0], 8);
+    if (nattrs == 0) {
+        pipeline_dnit(p, v);
+        vk.vkDestroyShaderModule(v.device, vmod, nil);
+        vk.vkDestroyShaderModule(v.device, fmod, nil);
+        ret err[bool, Error](error("vertex format has an attribute Vulkan cannot express"));
+    }
+
+    var vi: vk.PipelineVertexInputStateCreateInfo;
+    vi.sType                           = vk.STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.pNext                           = nil;
+    vi.flags                           = 0;
+    vi.vertexBindingDescriptionCount   = 1;
+    vi.pVertexBindingDescriptions      = ?binding;
+    vi.vertexAttributeDescriptionCount = nattrs;
+    vi.pVertexAttributeDescriptions    = ?attrs[0];
+
+    var ia: vk.PipelineInputAssemblyStateCreateInfo;
+    ia.sType                  = vk.STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia.pNext                  = nil;
+    ia.flags                  = 0;
+    ia.topology               = d.topology;
+    ia.primitiveRestartEnable = vk.FALSE;
+
+    # Counts, not contents: both are dynamic, so the pointers are unused.
+    var vp: vk.PipelineViewportStateCreateInfo;
+    vp.sType         = vk.STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp.pNext         = nil;
+    vp.flags         = 0;
+    vp.viewportCount = 1;
+    vp.pViewports    = nil;
+    vp.scissorCount  = 1;
+    vp.pScissors     = nil;
+
+    var rs: vk.PipelineRasterizationStateCreateInfo;
+    rs.sType                   = vk.STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.pNext                   = nil;
+    rs.flags                   = 0;
+    rs.depthClampEnable        = vk.FALSE;
+    rs.rasterizerDiscardEnable = vk.FALSE;
+    rs.polygonMode             = vk.POLYGON_MODE_FILL;
+    rs.cullMode                = 0;
+    if (d.cull) { rs.cullMode = vk.CULL_MODE_BACK_BIT; }
+    # Counter-clockwise, matching glTF's winding and the projection this engine
+    # builds. Clockwise here silently culls every front face.
+    rs.frontFace               = vk.FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.depthBiasEnable         = vk.FALSE;
+    rs.depthBiasConstantFactor = 0.0;
+    rs.depthBiasClamp          = 0.0;
+    rs.depthBiasSlopeFactor    = 0.0;
+    rs.lineWidth               = 1.0;
+
+    var ms: vk.PipelineMultisampleStateCreateInfo;
+    ms.sType                 = vk.STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms.pNext                 = nil;
+    ms.flags                 = 0;
+    ms.rasterizationSamples  = vk.SAMPLE_COUNT_1_BIT::i32;
+    ms.sampleShadingEnable   = vk.FALSE;
+    ms.minSampleShading      = 1.0;
+    ms.pSampleMask           = nil;
+    ms.alphaToCoverageEnable = vk.FALSE;
+    ms.alphaToOneEnable      = vk.FALSE;
+
+    var ds: vk.PipelineDepthStencilStateCreateInfo;
+    ds.sType                 = vk.STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.pNext                 = nil;
+    ds.flags                 = 0;
+    ds.depthTestEnable       = vk.FALSE;
+    ds.depthWriteEnable      = vk.FALSE;
+    if (d.depth) {
+        ds.depthTestEnable  = vk.TRUE;
+        ds.depthWriteEnable = vk.TRUE;
+    }
+    ds.depthCompareOp        = vk.COMPARE_OP_LESS;
+    ds.depthBoundsTestEnable = vk.FALSE;
+    ds.stencilTestEnable     = vk.FALSE;
+    ds.minDepthBounds        = 0.0;
+    ds.maxDepthBounds        = 1.0;
+
+    var cb: vk.PipelineColorBlendAttachmentState;
+    cb.colorWriteMask      = vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT
+                           | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT;
+    cb.blendEnable         = vk.FALSE;
+    cb.srcColorBlendFactor = vk.BLEND_FACTOR_ONE;
+    cb.dstColorBlendFactor = vk.BLEND_FACTOR_ZERO;
+    cb.colorBlendOp        = vk.BLEND_OP_ADD;
+    cb.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
+    cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ZERO;
+    cb.alphaBlendOp        = vk.BLEND_OP_ADD;
+    if (d.blend) {
+        # Standard source-alpha blending. The alpha channel accumulates as
+        # one minus source alpha so a blended result stays composable when it is
+        # later drawn over something else.
+        cb.blendEnable         = vk.TRUE;
+        cb.srcColorBlendFactor = vk.BLEND_FACTOR_SRC_ALPHA;
+        cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cb.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
+        cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    }
+
+    var bs: vk.PipelineColorBlendStateCreateInfo;
+    bs.sType             = vk.STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    bs.pNext             = nil;
+    bs.flags             = 0;
+    bs.logicOpEnable     = vk.FALSE;
+    bs.logicOp           = vk.LOGIC_OP_COPY;
+    bs.attachmentCount   = 1;
+    bs.pAttachments      = ?cb;
+    bs.blendConstants[0] = 0.0;
+    bs.blendConstants[1] = 0.0;
+    bs.blendConstants[2] = 0.0;
+    bs.blendConstants[3] = 0.0;
+
+    var dyn: [2]i32;
+    dyn[0] = vk.DYNAMIC_STATE_VIEWPORT;
+    dyn[1] = vk.DYNAMIC_STATE_SCISSOR;
+    var dsi: vk.PipelineDynamicStateCreateInfo;
+    dsi.sType             = vk.STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dsi.pNext             = nil;
+    dsi.flags             = 0;
+    dsi.dynamicStateCount = 2;
+    dsi.pDynamicStates    = ?dyn[0];
+
+    var gci: vk.GraphicsPipelineCreateInfo;
+    gci.sType               = vk.STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    gci.pNext               = nil;
+    gci.flags               = 0;
+    gci.stageCount          = 2;
+    gci.pStages             = ?stages[0];
+    gci.pVertexInputState   = ?vi;
+    gci.pInputAssemblyState = ?ia;
+    gci.pTessellationState  = nil;
+    gci.pViewportState      = ?vp;
+    gci.pRasterizationState = ?rs;
+    gci.pMultisampleState   = ?ms;
+    gci.pDepthStencilState  = ?ds;
+    gci.pColorBlendState    = ?bs;
+    gci.pDynamicState       = ?dsi;
+    gci.layout              = p.layout;
+    gci.renderPass          = pass;
+    gci.subpass             = 0;
+    gci.basePipelineHandle  = nil;
+    gci.basePipelineIndex   = -1;
+
+    val rc: i32 = vk.vkCreateGraphicsPipelines(v.device, nil, 1, ?gci, nil, ?p.handle);
+
+    # The modules are consumed by creation and are not referenced afterwards, so
+    # they are destroyed either way rather than kept alive with the pipeline.
+    vk.vkDestroyShaderModule(v.device, vmod, nil);
+    vk.vkDestroyShaderModule(v.device, fmod, nil);
+
+    if (rc != vk.SUCCESS) {
+        pipeline_dnit(p, v);
+        ret err[bool, Error](error("vkCreateGraphicsPipelines failed"));
+    }
+
+    p.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Bind the pipeline and set the viewport and scissor for the current extent.
+#
+# The viewport and scissor are dynamic, so a pipeline bound without them draws
+# nothing. Setting them here keeps the two facts together.
+pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u32) {
+    vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.handle);
+
+    var vpt: vk.Viewport;
+    vpt.x        = 0.0;
+    vpt.y        = 0.0;
+    vpt.width    = width::f32;
+    vpt.height   = height::f32;
+    vpt.minDepth = 0.0;
+    vpt.maxDepth = 1.0;
+    vk.vkCmdSetViewport(cmd, 0, 1, ?vpt);
+
+    var sc: vk.Rect2D;
+    sc.offset.x      = 0;
+    sc.offset.y      = 0;
+    sc.extent.width  = width;
+    sc.extent.height = height;
+    vk.vkCmdSetScissor(cmd, 0, 1, ?sc);
+}
+
+# Destroy the pipeline and its layouts.
+pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
+    if (p.handle != nil)     { vk.vkDestroyPipeline(v.device, p.handle, nil); p.handle = nil; }
+    if (p.layout != nil)     { vk.vkDestroyPipelineLayout(v.device, p.layout, nil); p.layout = nil; }
+    if (p.set_layout != nil) { vk.vkDestroyDescriptorSetLayout(v.device, p.set_layout, nil); p.set_layout = nil; }
+    p.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Pipeline creation needs a device, so these cover the format mapping and the
+# vertex input derivation, which are pure and are where a wrong answer reaches
+# the shader as silently wrong values rather than as an error.
+
+use boom.graphics.vertex.vertex_format;
+use boom.graphics.vertex.vertex_format_add;
+use boom.graphics.vertex.vertex_format_standard;
+use boom.graphics.vertex.vertex_format_sprite;
+use boom.graphics.vertex.SEMANTIC_POSITION;
+use boom.graphics.vertex.SEMANTIC_COLOR_0;
+use boom.graphics.vertex.SEMANTIC_JOINTS_0;
+
+test "pipeline: float attributes map by component count" {
+    if (attribute_format(COMP_F32, 1, 0, 0) != vk.FORMAT_R32_SFLOAT)          { ret 1; }
+    if (attribute_format(COMP_F32, 2, 0, 0) != vk.FORMAT_R32G32_SFLOAT)       { ret 2; }
+    if (attribute_format(COMP_F32, 3, 0, 0) != vk.FORMAT_R32G32B32_SFLOAT)    { ret 3; }
+    if (attribute_format(COMP_F32, 4, 0, 0) != vk.FORMAT_R32G32B32A32_SFLOAT) { ret 4; }
+    ret 0;
+}
+
+test "pipeline: normalized changes the format, not merely the flag" {
+    # A packed byte colour must arrive in the shader as a float in [0, 1]. UINT
+    # here would deliver 0..255 and every colour would clamp to white.
+    if (attribute_format(COMP_U8, 4, 1, 0) != vk.FORMAT_R8G8B8A8_UNORM) { ret 1; }
+    if (attribute_format(COMP_U8, 4, 0, 0) != vk.FORMAT_R8G8B8A8_UINT)  { ret 2; }
+    if (attribute_format(COMP_I8, 4, 1, 0) != vk.FORMAT_R8G8B8A8_SNORM) { ret 3; }
+    if (attribute_format(COMP_I8, 4, 0, 0) != vk.FORMAT_R8G8B8A8_SINT)  { ret 4; }
+    ret 0;
+}
+
+test "pipeline: joint indices map to an unsigned integer format" {
+    # glTF JOINTS_0 is an unnormalized u16 vec4 and must reach the shader as
+    # integers; a normalized format would make every joint index zero.
+    if (attribute_format(COMP_U16, 4, 0, 1) != vk.FORMAT_R16G16B16A16_UINT) { ret 1; }
+    ret 0;
+}
+
+test "pipeline: an out-of-range component count is rejected" {
+    if (attribute_format(COMP_F32, 0, 0, 0) != FORMAT_UNSUPPORTED) { ret 1; }
+    if (attribute_format(COMP_F32, 5, 0, 0) != FORMAT_UNSUPPORTED) { ret 2; }
+    # There is no normalized 32-bit integer vertex format.
+    if (attribute_format(COMP_U32, 4, 1, 0) != FORMAT_UNSUPPORTED) { ret 3; }
+    ret 0;
+}
+
+test "pipeline: vertex input follows the format's locations and offsets" {
+    var f: VertexFormat = vertex_format_standard();
+    var out: [8]vk.VertexInputAttributeDescription;
+    if (vertex_attributes(?f, ?out[0], 8) != 3) { ret 1; }
+
+    # The offsets must be the format's, not a recomputation, or the pipeline and
+    # the uploaded geometry disagree about where each attribute starts.
+    if (out[0].location != 0 || out[0].offset != 0)  { ret 2; }
+    if (out[1].location != 1 || out[1].offset != 12) { ret 3; }
+    if (out[2].location != 2 || out[2].offset != 24) { ret 4; }
+    if (out[2].format != vk.FORMAT_R32G32_SFLOAT)    { ret 5; }
+    # Every attribute reads from the one interleaved buffer.
+    if (out[0].binding != 0 || out[2].binding != 0)  { ret 6; }
+    ret 0;
+}
+
+test "pipeline: the sprite format yields two attributes" {
+    var f: VertexFormat = vertex_format_sprite();
+    var out: [8]vk.VertexInputAttributeDescription;
+    if (vertex_attributes(?f, ?out[0], 8) != 2)       { ret 1; }
+    if (out[0].format != vk.FORMAT_R32G32_SFLOAT)     { ret 2; }
+    if (out[1].location != 1 || out[1].offset != 8)   { ret 3; }
+    ret 0;
+}
+
+test "pipeline: an unrepresentable attribute fails the whole format" {
+    var f: VertexFormat = vertex_format();
+    vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0);
+    vertex_format_add(?f, SEMANTIC_COLOR_0,  1, COMP_U32, 4, 1, 0);
+    var out: [8]vk.VertexInputAttributeDescription;
+    # Writing the first attribute and reporting a partial count would build a
+    # pipeline that silently drops the colour.
+    if (vertex_attributes(?f, ?out[0], 8) != 0) { ret 1; }
+    ret 0;
+}
+
+test "pipeline: a format larger than the output array is refused" {
+    var f: VertexFormat = vertex_format_standard();
+    var out: [8]vk.VertexInputAttributeDescription;
+    if (vertex_attributes(?f, ?out[0], 2) != 0) { ret 1; }
+    ret 0;
+}
+
+test "pipeline: 2D and 3D descriptions differ where it matters" {
+    val a: PipelineDesc = pipeline_desc_3d();
+    val b: PipelineDesc = pipeline_desc_2d();
+    # Sprites and glyphs need blending and must not be culled or depth-tested;
+    # sharing one description would make overlays disappear behind geometry.
+    if (a.blend || !a.cull || !a.depth) { ret 1; }
+    if (!b.blend || b.cull || b.depth)  { ret 2; }
+    ret 0;
+}
+
+test "pipeline: teardown on a pipeline that was never created is a no-op" {
+    var p: Pipeline;
+    p.handle     = nil;
+    p.layout     = nil;
+    p.set_layout = nil;
+    var v: Vk;
+    v.ready = false;
+    pipeline_dnit(?p, ?v);
+    if (p.ready) { ret 1; }
+    ret 0;
+}

@@ -1,20 +1,25 @@
-# Directional-light fragment shader.
+# Directional-light fragment stage.
 #
-# Ported from the GLSL string in examples/animation. It carries no texture
-# because SPIR-V has no sampler binding yet (mach#2794), so this is the shader
-# that proves the pipeline rather than the one that draws a sprite.
+# Ported from the GLSL string in examples/animation. It carries no texture, so
+# it is the shader that proves the pipeline rather than the one that draws a
+# sprite; the textured path is sprite_frag.
+#
+# The normal is an f32x3 rather than an f32x4 with a zeroed fourth lane, so
+# normalize divides by the length of the three lanes that exist.
 
 use sh: shader.math;
 
-#[input(0)]  var in_normal: f32x4;
+#[input(0)]  var in_normal:  f32x3;
 #[output(0)] var out_colour: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {
-    val n: f32x4 = sh.normalize(in_normal);
-    val l: f32x4 = sh.normalize(f32x4{0.4, 1.0, 0.6, 0.0});
-    var d: f32   = sh.dot(n, l);
-    if (d < 0.0) { d = 0.0; }
+    # Renormalized here because interpolation across a triangle does not
+    # preserve length, so a normal that left the vertex stage as a unit vector
+    # does not arrive as one.
+    val n: f32x3 = sh.normalize_3(in_normal);
+    val l: f32x3 = sh.normalize_3(f32x3{0.4, 1.0, 0.6});
+    val d: f32   = sh.max(sh.dot_3(n, l), 0.0);
     val k: f32   = 0.25 + 0.75 * d;
     out_colour = f32x4{0.70 * k, 0.75 * k, 0.92 * k, 1.0};
 }

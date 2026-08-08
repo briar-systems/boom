@@ -1,23 +1,104 @@
-# Mesh vertex shader.
+# Mesh vertex stage.
 #
-# Transforms a position by the model-view-projection carried in a uniform
-# block, and passes the world-space normal to the fragment stage.
+# Transforms a position by a model-view-projection matrix and a normal by the
+# model matrix, passing the result to the fragment stage.
+#
+# Both matrices arrive as four f32x4 columns rather than as a matrix type, which
+# Mach does not have. See mul_point below for why the product is a combination of
+# columns and why multiplying a vector by a single column is not a transform.
 
+# Two 4x4 matrices as their columns.
+#
+# Eight consecutive f32x4 values, which is exactly how std140 lays out two mat4s,
+# so boom uploads two boom.math.Mat4 values into this block unchanged.
 rec Matrices {
-    mvp:   f32x4;
-    model: f32x4;
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
 }
 
 #[uniform(0, 0)] var matrices: Matrices;
 
-#[input(0)]  var in_position: f32x4;
-#[input(1)]  var in_normal:   f32x4;
-#[output(0)] var out_normal:  f32x4;
+#[input(0)]  var in_position: f32x3;
+#[input(1)]  var in_normal:   f32x3;
+#[output(0)] var out_normal:  f32x3;
 
 #[builtin("position")] var position: f32x4;
 
+# Transform a point by a 4x4 matrix given as its four columns.
+#
+# Mach has no matrix type, by design: a matrix is a library over vectors. A 4x4
+# transform therefore arrives as four f32x4 columns in a uniform block, which is
+# byte-identical to how std140 lays out a mat4, so boom uploads a boom.math.Mat4
+# directly with no repacking.
+#
+# THE PRODUCT IS A COMBINATION OF COLUMNS, NOT FOUR DOT PRODUCTS. boom.math.Mat4
+# is column-major, with element (row, col) at index col * 4 + row, so the four
+# consecutive f32x4 values are the columns. For a column vector p:
+#
+#   (M * p).x = m[0]*p.x + m[4]*p.y + m[8]*p.z + m[12]*p.w
+#
+# and m[0], m[4], m[8], m[12] are the first lane of each column. Summing the
+# columns scaled by p's lanes produces every row at once. Writing it as dot
+# products instead would need the rows, which would mean transposing on upload
+# and giving up the direct Mat4 copy.
+#
+# Multiplying a vector by a single column would be the per-lane product, which is
+# not a transform at all.
+#
+# Duplicated in each vertex stage rather than shared, because a SPIR-V shader
+# cannot call a function defined in another module (mach#2823). It collapses back
+# to one shaders.transform module when that lands.
+# ---
+# c0:  Column 0.
+# c1:  Column 1.
+# c2:  Column 2.
+# c3:  Column 3.
+# p:   The point, with w normally 1.0.
+# ret: M * p
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+# Transform a direction by the upper-left 3x3 of a 4x4 matrix.
+#
+# A direction has no position, so the translation column is not applied. Using
+# mul_point on a normal would add the model's translation to it and break
+# lighting on anything not at the origin.
+#
+# Correct for a rotation, and for a uniform scale up to the renormalization the
+# fragment stage performs anyway. Under a non-uniform scale a normal needs the
+# inverse transpose, which the CPU must supply as its own matrix; that is a
+# change to what is uploaded, not to this function.
+# ---
+# c0:  Column 0.
+# c1:  Column 1.
+# c2:  Column 2.
+# v:   The direction.
+# ret: the transformed direction
+fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
+    val r: f32x4 = c0 * f32x4{v[0], v[0], v[0], v[0]}
+                 + c1 * f32x4{v[1], v[1], v[1], v[1]}
+                 + c2 * f32x4{v[2], v[2], v[2], v[2]};
+    ret f32x3{r[0], r[1], r[2]};
+}
+
 #[stage("vertex")]
 fun vert_main() {
-    position   = in_position * matrices.mvp;
-    out_normal = in_normal * matrices.model;
+    position = mul_point(matrices.mvp_0, matrices.mvp_1,
+                         matrices.mvp_2, matrices.mvp_3,
+                         f32x4{in_position[0], in_position[1], in_position[2], 1.0});
+
+    # The normal takes the model matrix without its translation column, so it
+    # rotates with the object but does not move with it.
+    out_normal = mul_dir(matrices.model_0, matrices.model_1,
+                         matrices.model_2, in_normal);
 }
