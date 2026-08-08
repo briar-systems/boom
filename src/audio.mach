@@ -103,6 +103,7 @@ pub rec VoiceId {
 # master:  overall volume applied to every voice
 # frames:  scratch capacity in frames
 # chans:   device channel count
+# rate:    device sample rate, kept so a clip can be conformed to it at load
 pub rec Audio {
     a:       *allo.Allocator;
     device:  audio.Device;
@@ -112,6 +113,7 @@ pub rec Audio {
     master:  f32;
     frames:  usize;
     chans:   usize;
+    rate:    u32;
     ready:   bool;
 }
 
@@ -176,6 +178,7 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
     s.master = 1.0;
     s.ready  = false;
     s.chans  = channels::usize;
+    s.rate   = rate;
 
     var v: usize = 0;
     for (v < MAX_VOICES) {
@@ -248,10 +251,121 @@ pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
         ret err[Sound, str](unwrap_err[audio.Buffer, str](dr));
     }
 
+    var decoded: audio.Buffer = unwrap_ok[audio.Buffer, str](dr);
+
+    # CONFORM THE CLIP TO THE DEVICE, ONCE, HERE. mach-audio's `pull` emits
+    # silence and does not advance its cursor when a stream's channel count
+    # differs from the device's, and it does not look at sample rate at all. So
+    # a mono clip against a stereo device is silent forever and its voice is
+    # never reclaimed, and a 44.1 kHz clip on a 48 kHz device plays sharp. Both
+    # are the common case: sound effects are usually mono and usually 44.1.
+    #
+    # Neither is a bug in `pull`, which is a primitive that says what it does.
+    # It is this layer's job, because this layer is what opened the device at a
+    # chosen format and then accepts arbitrary files against it.
+    #
+    # At load rather than in the render callback, which must not allocate. The
+    # cost is one pass per clip at load time and nothing per frame.
+    val cr: Result[audio.Buffer, str] = conform(s, ?decoded);
+    if (is_err[audio.Buffer, str](cr)) {
+        audio.dnit(?decoded);
+        ret err[Sound, str](unwrap_err[audio.Buffer, str](cr));
+    }
+
     var snd: Sound;
-    snd.buffer = unwrap_ok[audio.Buffer, str](dr);
+    snd.buffer = unwrap_ok[audio.Buffer, str](cr);
     snd.valid  = true;
     ret ok[Sound, str](snd);
+}
+
+# Resample and remix a decoded clip into the device's format.
+#
+# Returns the input unchanged when it already matches, so the common case
+# allocates nothing and copies nothing.
+#
+# Linear interpolation for rate, and for channels: one source channel is copied
+# to every output channel, several are averaged. Neither is the best available
+# method. Both are what a sound effect needs, and the alternative today is
+# silence or the wrong pitch.
+fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
+    val src_rate:  usize = src.format.sample_rate::usize;
+    val src_chans: usize = src.format.channels::usize;
+    val dst_rate:  usize = s.rate::usize;
+    val dst_chans: usize = s.chans;
+
+    if (src_rate == dst_rate && src_chans == dst_chans) {
+        ret ok[audio.Buffer, str](@src);
+    }
+    if (src_rate == 0 || src_chans == 0 || src.frames == 0) {
+        ret err[audio.Buffer, str]("a decoded clip reports no rate, channels, or frames");
+    }
+
+    # Round rather than truncate: truncating drops the final partial frame, and
+    # a clip whose length is a whole number of source frames should stay one.
+    val dst_frames: usize = (src.frames * dst_rate + src_rate / 2) / src_rate;
+    if (dst_frames == 0) {
+        ret err[audio.Buffer, str]("a clip resamples to zero frames");
+    }
+
+    var fmt: audio.Format;
+    fmt.sample_rate = s.rate;
+    fmt.channels    = dst_chans::u16;
+    val br: Result[audio.Buffer, str] = audio.init(s.a, fmt, dst_frames);
+    if (is_err[audio.Buffer, str](br)) { ret br; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+
+    var f: usize = 0;
+    for (f < dst_frames) {
+        # Where this output frame falls in the source, as a whole frame and a
+        # fraction of the way to the next.
+        val pos:   usize = f * src_rate;
+        var  i:    usize = pos / dst_rate;
+        val  rem:  usize = pos - i * dst_rate;
+        val  frac: f32   = rem::f32 / dst_rate::f32;
+        var  j:    usize = i + 1;
+        if (j >= src.frames) { j = src.frames - 1; }
+        if (i >= src.frames) { i = src.frames - 1; }
+
+        # The source frame, mixed down to one value per output channel. A mono
+        # source fans out; a multi-channel source is averaged.
+        var c: usize = 0;
+        for (c < dst_chans) {
+            val sc: usize = c;
+            var a0: f32 = 0.0;
+            var a1: f32 = 0.0;
+            # Fewer outputs than the source has, or an output channel the source
+            # does not have: average all of the source into it. Copying channel
+            # c instead would drop everything the extra channels carry, so a
+            # stereo clip on a mono device would lose its right side entirely and
+            # sound like a bad mix rather than a bug.
+            if (dst_chans < src_chans || sc >= src_chans) {
+                var k: usize = 0;
+                for (k < src_chans) {
+                    a0 = a0 + src.samples[i * src_chans + k];
+                    a1 = a1 + src.samples[j * src_chans + k];
+                    k = k + 1;
+                }
+                a0 = a0 / src_chans::f32;
+                a1 = a1 / src_chans::f32;
+            }
+            # A mono source fans out unchanged to every output channel.
+            or (src_chans == 1) {
+                a0 = src.samples[i * src_chans];
+                a1 = src.samples[j * src_chans];
+            }
+            # Otherwise the source has this channel; take it as it is.
+            or {
+                a0 = src.samples[i * src_chans + sc];
+                a1 = src.samples[j * src_chans + sc];
+            }
+            out.samples[f * dst_chans + c] = a0 + (a1 - a0) * frac;
+            c = c + 1;
+        }
+        f = f + 1;
+    }
+
+    audio.dnit(src);
+    ret ok[audio.Buffer, str](out);
 }
 
 # Release a decoded clip
@@ -543,5 +657,165 @@ test "audio: concurrent claims never hand the same voice to two callers" {
     # non-atomic claim lets two threads leave with the same slot, and the
     # tally of concurrent holders exceeds one.
     if (atomic.load(?race_overlap) != 0) { ret 1; }
+    ret 0;
+}
+
+# Build an Audio that owns nothing but a format, for testing conform.
+#
+# conform reads only the allocator, the rate and the channel count, so this
+# needs no device and the whole conversion is reachable in CI.
+fun conform_fixture(s: *Audio, a: *allo.Allocator, rate: u32, chans: usize) {
+    s.a     = a;
+    s.rate  = rate;
+    s.chans = chans;
+    s.ready = false;
+}
+
+# Build a source buffer of `frames` frames with `chans` channels, filled by
+# `vals` in interleaved order.
+fun conform_source(a: *allo.Allocator, rate: u32, chans: u16, frames: usize, vals: *f32) Result[audio.Buffer, str] {
+    var fmt: audio.Format;
+    fmt.sample_rate = rate;
+    fmt.channels    = chans;
+    val br: Result[audio.Buffer, str] = audio.init(a, fmt, frames);
+    if (is_err[audio.Buffer, str](br)) { ret br; }
+    var b: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+    var i: usize = 0;
+    for (i < frames * chans::usize) {
+        b.samples[i] = vals[i];
+        i = i + 1;
+    }
+    ret ok[audio.Buffer, str](b);
+}
+
+fun near(a: f32, b: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < 0.001;
+}
+
+test "audio: a clip already in the device's format is passed through untouched" {
+    # The common case must not allocate or copy. It is also the case where a
+    # bug would be invisible, since the samples are right either way.
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 48000, 2);
+
+    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val sr: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (is_err[audio.Buffer, str](sr)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+    val before: *f32 = src.samples;
+
+    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
+    if (is_err[audio.Buffer, str](cr)) { ret 2; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+    if (out.samples != before) { ret 3; }
+    if (out.frames != 2)       { ret 4; }
+    audio.dnit(?out);
+    ret 0;
+}
+
+test "audio: a mono clip fans out to every channel of a stereo device" {
+    # THE CASE THAT WAS BROKEN. mach-audio's pull emits silence and does not
+    # advance its cursor when the channel counts differ, so a mono sound effect
+    # against a stereo device was silent forever and its voice was never
+    # reclaimed. Sound effects are usually mono.
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 8000, 2);
+
+    var vals: [3]f32 = [3]f32{0.2, 0.4, 0.6};
+    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 1, 3, ?vals[0]);
+    if (is_err[audio.Buffer, str](sr)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+
+    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
+    if (is_err[audio.Buffer, str](cr)) { ret 2; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+
+    if (out.frames != 3)           { ret 3; }
+    if (out.format.channels != 2)  { ret 4; }
+    if (!near(out.samples[0], 0.2) || !near(out.samples[1], 0.2)) { ret 5; }
+    if (!near(out.samples[2], 0.4) || !near(out.samples[3], 0.4)) { ret 6; }
+    if (!near(out.samples[4], 0.6) || !near(out.samples[5], 0.6)) { ret 7; }
+    audio.dnit(?out);
+    ret 0;
+}
+
+test "audio: a stereo clip is averaged down for a mono device" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 8000, 1);
+
+    var vals: [4]f32 = [4]f32{0.2, 0.6, 0.0, 1.0};
+    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 2, 2, ?vals[0]);
+    if (is_err[audio.Buffer, str](sr)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+
+    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
+    if (is_err[audio.Buffer, str](cr)) { ret 2; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+
+    if (out.frames != 2)          { ret 3; }
+    if (out.format.channels != 1) { ret 4; }
+    if (!near(out.samples[0], 0.4)) { ret 5; }
+    if (!near(out.samples[1], 0.5)) { ret 6; }
+    audio.dnit(?out);
+    ret 0;
+}
+
+test "audio: doubling the rate interpolates a sample between each pair" {
+    # A rate mismatch does not silence a clip, it plays it at the wrong pitch,
+    # which is the harder failure to attribute: it sounds like a bad asset.
+    # mach-audio's pull does not look at sample rate at all, so nothing below
+    # this layer would notice.
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 16000, 1);
+
+    var vals: [2]f32 = [2]f32{0.0, 1.0};
+    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 1, 2, ?vals[0]);
+    if (is_err[audio.Buffer, str](sr)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+
+    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
+    if (is_err[audio.Buffer, str](cr)) { ret 2; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+
+    # Twice the rate is twice the frames, and the new frame between the two
+    # source frames is their midpoint.
+    if (out.frames != 4)                { ret 3; }
+    if (out.format.sample_rate != 16000) { ret 4; }
+    if (!near(out.samples[0], 0.0))     { ret 5; }
+    if (!near(out.samples[1], 0.5))     { ret 6; }
+    if (!near(out.samples[2], 1.0))     { ret 7; }
+    audio.dnit(?out);
+    ret 0;
+}
+
+test "audio: halving the rate halves the frame count" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 8000, 1);
+
+    var vals: [4]f32 = [4]f32{0.0, 0.25, 0.5, 0.75};
+    val sr: Result[audio.Buffer, str] = conform_source(?a, 16000, 1, 4, ?vals[0]);
+    if (is_err[audio.Buffer, str](sr)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+
+    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
+    if (is_err[audio.Buffer, str](cr)) { ret 2; }
+    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+
+    if (out.frames != 2)            { ret 3; }
+    if (!near(out.samples[0], 0.0)) { ret 4; }
+    if (!near(out.samples[1], 0.5)) { ret 5; }
+    audio.dnit(?out);
     ret 0;
 }

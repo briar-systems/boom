@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- audio: A decoded clip is conformed to the device's format at load. mach-audio's `pull` emits silence and does not advance its cursor when a stream's channel count differs from the device's, and it does not look at sample rate at all. So **a mono clip against a stereo device was silent forever and its voice was never reclaimed**, and a 44.1 kHz clip on a 48 kHz device played sharp. Both are the common case: sound effects are usually mono and usually 44.1.
+
+  Neither is a bug below this layer. `pull` is a primitive that says what it does; boom is what opens a device at a chosen format and then accepts arbitrary files against it. The conversion happens at load rather than in the render callback, which must not allocate, so it costs one pass per clip and nothing per frame. Linear interpolation for rate; a mono source fans out, and a source with more channels than the device is averaged rather than truncated to its first.
+
+
 ## [0.3.1] - 2026-08-08
 
 ### Fixed
