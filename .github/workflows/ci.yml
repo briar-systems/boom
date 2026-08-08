@@ -27,13 +27,15 @@ jobs:
           mach info
 
       # mach-glfw's [os.linux].libs cascades "glfw" into every boom link,
-      # so the test dispatcher links libglfw even though no test calls it.
-      # the stock package satisfies the link input; the tests never invoke GLFW.
-      - name: Install GLFW
+      # mach-glfw vendors GLFW 3.4 and builds it from source, so the X11,
+      # Wayland, and xkbcommon development headers must be present. The stock
+      # libglfw3-dev also satisfies the link input for the system fallback.
+      - name: Install GLFW build dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libglfw3-dev
+          sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
+            libwayland-dev libxkbcommon-dev wayland-protocols
 
       - name: Sync dependencies
         run: mach dep pull
