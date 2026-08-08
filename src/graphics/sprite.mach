@@ -13,6 +13,9 @@
 # rectangle, its atlas sub-rect and its tint -- goes through the uniform
 # slot the renderer takes for it.
 
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
 use std.types.result.Result;
 use std.types.result.ok;
 use std.types.result.err;
@@ -98,5 +101,42 @@ pub fun sprite_resources_delete(d: *Device, s: *SpriteResources) {
 test "sprite: rect carries position and size" {
     val r: Rect = rect(10.0, 20.0, 30.0, 40.0);
     if (r.x != 10.0 || r.y != 20.0 || r.w != 30.0 || r.h != 40.0) { ret 1; }
+    ret 0;
+}
+
+# Whether two rectangles share any area.
+#
+# Touching edges do not count as overlapping, which is what keeps a sprite
+# exactly at the edge of the view from being drawn: its rectangle ends where the
+# view begins, so no pixel of it is inside.
+#
+# Written as four separated tests rather than an intersection, because the
+# separating case is the common one when this is used for culling and each test
+# can reject immediately.
+pub fun rect_overlaps(a: Rect, b: Rect) bool {
+    if (a.x + a.w <= b.x) { ret false; }
+    if (b.x + b.w <= a.x) { ret false; }
+    if (a.y + a.h <= b.y) { ret false; }
+    if (b.y + b.h <= a.y) { ret false; }
+    ret true;
+}
+
+test "sprite: rectangles overlap only when they share area" {
+    val view: Rect = rect(0.0, 0.0, 320.0, 180.0);
+
+    # Wholly inside.
+    if (!rect_overlaps(rect(10.0, 10.0, 8.0, 8.0), view)) { ret 1; }
+    # Straddling an edge must count, or things vanish as they leave the view
+    # rather than sliding off it.
+    if (!rect_overlaps(rect(0.0 - 4.0, 10.0, 8.0, 8.0), view)) { ret 2; }
+    # Wholly outside on each side.
+    if (rect_overlaps(rect(0.0 - 20.0, 10.0, 8.0, 8.0), view)) { ret 3; }
+    if (rect_overlaps(rect(400.0, 10.0, 8.0, 8.0), view))      { ret 4; }
+    if (rect_overlaps(rect(10.0, 0.0 - 20.0, 8.0, 8.0), view)) { ret 5; }
+    if (rect_overlaps(rect(10.0, 200.0, 8.0, 8.0), view))      { ret 6; }
+    # Exactly touching the left edge shares no pixel.
+    if (rect_overlaps(rect(0.0 - 8.0, 10.0, 8.0, 8.0), view))  { ret 7; }
+    # A rectangle larger than the view still overlaps it.
+    if (!rect_overlaps(rect(0.0 - 1000.0, 0.0 - 1000.0, 2000.0, 2000.0), view)) { ret 8; }
     ret 0;
 }

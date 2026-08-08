@@ -1,0 +1,346 @@
+# The six planes of what a camera can see, and whether a box is inside them.
+#
+# WHY THE PLANES COME OUT OF THE MATRIX. A frustum could be built from the
+# camera's position, orientation and field of view, and then it would have to be
+# rebuilt correctly for perspective and for orthographic, and kept in step with
+# whatever mat4_perspective and mat4_orthographic actually produce. Extracting
+# from the view-projection instead means there is one description of what is
+# visible, and it is the same one the GPU clips against. A projection this does
+# not understand does not exist: if a matrix maps geometry into the clip volume,
+# these planes bound exactly that geometry.
+#
+# The extraction is the standard Gribb-Hartmann identity. Clip space is the
+# region where -w <= x <= w, -w <= y <= w and 0 <= z <= w, and each of those six
+# inequalities is a plane in world space whose coefficients are a sum or
+# difference of two rows of the view-projection. The z planes use Vulkan's
+# [0, w] depth range rather than OpenGL's [-w, w], which is the same convention
+# mat4_perspective and mat4_orthographic already emit.
+#
+# CONSERVATIVE, NOT EXACT. The test below rejects a box only when it is wholly
+# outside one plane. A box can be outside the frustum while straddling several
+# planes without being wholly outside any of them, and such a box is reported
+# visible. That costs a draw and never deletes one, which is the direction a
+# culling test has to err in: a missing draw is a hole in the picture and an
+# extra draw is a few microseconds.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
+use boom.math.mat.Mat4;
+use boom.math.scalar.sqrtf;
+use boom.math.aabb.Aabb;
+use boom.math.aabb.aabb_is_empty;
+use boom.math.aabb.aabb_center;
+use boom.math.aabb.aabb_extent;
+use boom.math.aabb.aabb_empty;
+use boom.math.aabb.aabb_add;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_project_point;
+use boom.graphics.camera.Camera;
+use boom.graphics.camera.camera_perspective;
+use boom.graphics.camera.camera_orthographic;
+use boom.graphics.camera.camera_view;
+use boom.graphics.camera.camera_projection;
+
+# The six bounding planes, each as (nx, ny, nz, d) with the normal pointing
+# inward, so a point is inside when nx*x + ny*y + nz*z + d >= 0.
+pub rec Frustum {
+    planes: [6]Vec4;
+}
+
+# Extract the planes from a view-projection matrix.
+#
+# The matrix must map world space to clip space, so it is the projection times
+# the view. Passing only the projection yields a frustum in view space, which is
+# valid but then the boxes tested against it must be in view space too.
+pub fun frustum_from_matrix(m: *Mat4) Frustum {
+    var f: Frustum;
+    # Column-major: m.m[col * 4 + row]. Row i of the matrix is
+    # (m[i], m[4+i], m[8+i], m[12+i]).
+    val r0: Vec4 = vec4(m.m[0], m.m[4], m.m[8],  m.m[12]);
+    val r1: Vec4 = vec4(m.m[1], m.m[5], m.m[9],  m.m[13]);
+    val r2: Vec4 = vec4(m.m[2], m.m[6], m.m[10], m.m[14]);
+    val r3: Vec4 = vec4(m.m[3], m.m[7], m.m[11], m.m[15]);
+
+    # x >= -w and x <= w
+    f.planes[0] = normalize_plane(add4(r3, r0));
+    f.planes[1] = normalize_plane(sub4(r3, r0));
+    # y >= -w and y <= w
+    f.planes[2] = normalize_plane(add4(r3, r1));
+    f.planes[3] = normalize_plane(sub4(r3, r1));
+    # z >= 0 and z <= w. The near plane is row 2 alone rather than r3 + r2,
+    # which is what makes this Vulkan's depth range instead of OpenGL's; using
+    # the OpenGL form here culls everything between the near plane and the
+    # midpoint of the depth range.
+    f.planes[4] = normalize_plane(r2);
+    f.planes[5] = normalize_plane(sub4(r3, r2));
+    ret f;
+}
+
+# Whether any part of a box is inside the frustum.
+#
+# The positive-vertex test: for each plane, the corner of the box furthest along
+# the plane's inward normal is the last one that would leave. If even that
+# corner is outside, every corner is, and the box can be rejected. Expressed
+# through the centre and extent so it is three multiplies per plane rather than
+# a search over eight corners.
+#
+# An empty box is reported invisible: a mesh with no geometry has nothing to
+# draw, and reporting it visible would submit a draw of nothing every frame.
+pub fun frustum_contains_aabb(f: *Frustum, b: *Aabb) bool {
+    if (aabb_is_empty(b)) { ret false; }
+
+    val c: Vec3 = aabb_center(b);
+    val e: Vec3 = aabb_extent(b);
+
+    var i: usize = 0;
+    for (i < 6) {
+        val p: Vec4 = f.planes[i];
+        # Distance from the centre to the plane.
+        val d: f32 = p.x * c.x + p.y * c.y + p.z * c.z + p.w;
+        # How far the box reaches toward the plane from its centre. The absolute
+        # values are what make this the *nearest* corner regardless of which way
+        # the normal points.
+        val r: f32 = absf(p.x) * e.x + absf(p.y) * e.y + absf(p.z) * e.z;
+        # Wholly on the outside of this plane.
+        if (d + r < 0.0) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# Whether a point is inside the frustum.
+pub fun frustum_contains_point(f: *Frustum, p: Vec3) bool {
+    var i: usize = 0;
+    for (i < 6) {
+        val q: Vec4 = f.planes[i];
+        if (q.x * p.x + q.y * p.y + q.z * p.z + q.w < 0.0) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# Scale a plane so its normal is unit length.
+#
+# Not needed to answer inside-or-outside, since that is only a sign, but it
+# makes the value of the expression an actual distance. The box test relies on
+# that: it compares the centre's distance against the box's reach, and those are
+# only comparable when the normal is normalized.
+fun normalize_plane(p: Vec4) Vec4 {
+    val n: f32 = sqrtf(p.x * p.x + p.y * p.y + p.z * p.z);
+    if (n == 0.0) { ret p; }
+    ret vec4(p.x / n, p.y / n, p.z / n, p.w / n);
+}
+
+fun add4(a: Vec4, b: Vec4) Vec4 { ret vec4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+fun sub4(a: Vec4, b: Vec4) Vec4 { ret vec4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
+
+fun absf(x: f32) f32 {
+    if (x < 0.0) { ret 0.0 - x; }
+    ret x;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Every check here is against a camera whose view is known by construction, so
+# the expected answers come from the geometry rather than from running the code
+# and recording what it said.
+
+# A camera at (0, 0, 10) looking at the origin down -z, 90 degrees vertical,
+# square aspect, near 1 far 100.
+fun test_frustum() Frustum {
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                       1.5707963, 1.0, 1.0, 100.0);
+    var v: Mat4 = camera_view(?c);
+    var p: Mat4 = camera_projection(?c);
+    var vp: Mat4 = mat4_mul(?p, ?v);
+    ret frustum_from_matrix(?vp);
+}
+
+fun box_at(x: f32, y: f32, z: f32, r: f32) Aabb {
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(x - r, y - r, z - r));
+    aabb_add(?b, vec3(x + r, y + r, z + r));
+    ret b;
+}
+
+test "frustum: a box at the point the camera looks at is visible" {
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(0.0, 0.0, 0.0, 1.0);
+    if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: a box behind the camera is rejected" {
+    # The case that matters most: without a near plane, geometry behind the eye
+    # projects back onto the screen mirrored, so failing to reject it draws
+    # things that are not there.
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(0.0, 0.0, 20.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: a box beyond the far plane is rejected" {
+    # The camera sits at z = 10 with a far plane 100 away, so anything past
+    # z = -90 is outside it.
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: a box off to the side is rejected" {
+    # At 90 degrees vertical the half-extent at the origin equals the distance,
+    # which is 10, so a small box at x = 100 is far outside.
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(100.0, 0.0, 0.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+    var a: Aabb = box_at(0.0, 100.0, 0.0, 1.0);
+    if (frustum_contains_aabb(?f, ?a)) { ret 2; }
+    ret 0;
+}
+
+test "frustum: a box straddling an edge is kept" {
+    # Conservative in the direction that matters. A box mostly off screen but
+    # partly on it must be drawn, or things vanish as they leave the view
+    # instead of sliding off it.
+    var f: Frustum = test_frustum();
+    # At the origin the visible half-width is 10, so a box spanning x from 5 to
+    # 105 crosses the right edge.
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(5.0, 0.0 - 1.0, 0.0 - 1.0));
+    aabb_add(?b, vec3(105.0, 1.0, 1.0));
+    if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: a huge box containing the camera is kept" {
+    # Its centre is outside several planes at once while the box itself fills
+    # the view. A test that rejected on the centre alone would cull the ground.
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(0.0, 0.0, 0.0, 1000.0);
+    if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: an empty box is not visible" {
+    # A mesh with no geometry has nothing to draw, and the sentinel corners an
+    # empty box carries would otherwise be tested as real coordinates.
+    var f: Frustum = test_frustum();
+    var b: Aabb = aabb_empty();
+    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: the planes agree with the projection they came from" {
+    # The cross-check. A point is inside the frustum exactly when the matrix
+    # maps it into the clip volume, and those are two separate derivations: if
+    # they disagree, culling removes things that would have been drawn and
+    # nothing reports it. Swept over a grid rather than spot-checked, since a
+    # single wrong plane is correct everywhere except on one side.
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                       1.5707963, 1.0, 1.0, 100.0);
+    var v: Mat4 = camera_view(?c);
+    var p: Mat4 = camera_projection(?c);
+    var vp: Mat4 = mat4_mul(?p, ?v);
+    var f: Frustum = frustum_from_matrix(?vp);
+
+    var i: i32 = 0;
+    for (i <= 12) {
+        var j: i32 = 0;
+        for (j <= 12) {
+            var k: i32 = 0;
+            for (k <= 12) {
+                val x: f32 = (0.0 - 30.0) + i::f32 * 5.0;
+                val y: f32 = (0.0 - 30.0) + j::f32 * 5.0;
+                val z: f32 = 20.0 - k::f32 * 10.0;
+                val pt: Vec3 = vec3(x, y, z);
+
+                val inside: bool = frustum_contains_point(?f, pt);
+                val cl: Vec3 = mat4_project_point(?vp, pt);
+                # Clip after the divide: x and y in [-1, 1], z in [0, 1].
+                # Points on the eye plane divide by zero and are skipped.
+                val w: f32 = vp.m[3] * x + vp.m[7] * y + vp.m[11] * z + vp.m[15];
+                if (w > 0.001) {
+                    var vis: bool = true;
+                    if (cl.x < 0.0 - 1.0 || cl.x > 1.0) { vis = false; }
+                    if (cl.y < 0.0 - 1.0 || cl.y > 1.0) { vis = false; }
+                    if (cl.z < 0.0 || cl.z > 1.0)       { vis = false; }
+                    if (vis != inside) { ret 1; }
+                }
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "frustum: an orthographic projection culls the same way" {
+    # Orthographic has no eye point, so its side planes are parallel rather
+    # than fanning. A frustum built only against perspective would have the
+    # side planes right by accident and the near plane wrong.
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                        20.0, 1.0, 0.0 - 50.0, 50.0);
+    var v: Mat4 = camera_view(?c);
+    var p: Mat4 = camera_projection(?c);
+    var vp: Mat4 = mat4_mul(?p, ?v);
+    var f: Frustum = frustum_from_matrix(?vp);
+
+    # A 20-unit-tall view is 10 either side of the axis at every depth.
+    var inside: Aabb = box_at(0.0, 0.0, 0.0, 1.0);
+    if (!frustum_contains_aabb(?f, ?inside)) { ret 1; }
+    var outside: Aabb = box_at(50.0, 0.0, 0.0, 1.0);
+    if (frustum_contains_aabb(?f, ?outside)) { ret 2; }
+    # Unlike perspective, a box far off-axis stays outside no matter its depth,
+    # because the sides do not fan out.
+    var deep: Aabb = box_at(50.0, 0.0, 0.0 - 30.0, 1.0);
+    if (frustum_contains_aabb(?f, ?deep)) { ret 3; }
+    ret 0;
+}
+
+test "frustum: the near plane is Vulkan's, not OpenGL's" {
+    # The depth conventions differ only between the eye and the near plane:
+    # Vulkan clips at z_ndc < 0, OpenGL at z_ndc < -1. Everything beyond the
+    # near plane agrees, so a sweep that does not sample that narrow band
+    # cannot tell the two apart, and the grid check above does not.
+    #
+    # The camera sits at z = 10 with near = 1, so the near plane is at z = 9 and
+    # the band is world z in (9, 10). A box at z = 9.5 is in front of the eye
+    # and nearer than the near plane, so it must be rejected.
+    var f: Frustum = test_frustum();
+    var b: Aabb = box_at(0.0, 0.0, 9.5, 0.1);
+    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+
+    # And one just beyond the near plane is kept, so the plane is in the right
+    # place rather than merely rejecting everything nearby.
+    var c: Aabb = box_at(0.0, 0.0, 8.5, 0.1);
+    if (!frustum_contains_aabb(?f, ?c)) { ret 2; }
+    ret 0;
+}
+
+test "frustum: every plane normal is unit length" {
+    # The box test compares a centre distance against a box reach, and both
+    # scale with the plane, so it gives the same answer either way: nothing in
+    # this module fails if the planes are left unnormalized. What breaks is a
+    # caller reading `planes` and treating the value as a distance, which is the
+    # only reason the field is worth exposing. This is what holds that property.
+    var f: Frustum = test_frustum();
+    var i: usize = 0;
+    for (i < 6) {
+        val p: Vec4 = f.planes[i];
+        val n: f32 = sqrtf(p.x * p.x + p.y * p.y + p.z * p.z);
+        var d: f32 = n - 1.0;
+        if (d < 0.0) { d = 0.0 - d; }
+        if (d > 0.0001) { ret 1; }
+        i = i + 1;
+    }
+    ret 0;
+}

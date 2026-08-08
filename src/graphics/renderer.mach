@@ -146,6 +146,15 @@ use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
+use boom.graphics.camera2d.camera2d_visible;
+use boom.math.frustum.Frustum;
+use boom.math.frustum.frustum_from_matrix;
+use boom.math.frustum.frustum_contains_aabb;
+use boom.math.aabb.Aabb;
+use boom.math.aabb.aabb_empty;
+use boom.math.aabb.aabb_union;
+use boom.math.aabb.aabb_transform;
+use boom.graphics.sprite.rect_overlaps;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
@@ -179,6 +188,7 @@ use boom.math.transform.transform_matrix;
 # frame_index: which in-flight frame is being recorded
 # drawing: whether a frame is currently open
 # dropped: draws refused this frame because the ring ran out
+# culled:  draws skipped this frame because they were outside the view
 # draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
@@ -200,6 +210,7 @@ pub rec Renderer {
     frame_index: usize;
     drawing:     bool;
     dropped:     usize;
+    culled:      usize;
     draws:       usize;
     srgb:        bool;
 }
@@ -221,6 +232,7 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.drawing     = false;
     r.frame_index = 0;
     r.dropped     = 0;
+    r.culled      = 0;
     r.draws       = 0;
 
     val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
@@ -382,6 +394,7 @@ pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
 pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     @out_ok = false;
     r.dropped = 0;
+    r.culled  = 0;
     r.draws   = 0;
 
     # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
@@ -469,6 +482,16 @@ pub fun renderer_draws(r: *Renderer) usize {
     ret r.draws;
 }
 
+# Draws skipped in the most recent frame for being outside the view.
+#
+# The number that says whether culling is doing anything. Zero in a large scene
+# means the bounds are wrong or the pass has culling off; a count that equals
+# the submission count means everything is being rejected, which is what a
+# frustum built from the wrong matrix looks like.
+pub fun renderer_culled(r: *Renderer) usize {
+    ret r.culled;
+}
+
 # release everything the renderer owns
 # ---
 # r: renderer to shut down; must not be used afterward
@@ -505,6 +528,17 @@ pub rec PassDesc {
     camera2d:    *Camera2D;
     clear:       u8;
     clear_color: Vec4;
+
+    # Whether the pass skips draws whose bounds are outside its view. Non-zero
+    # by default, because a draw that cannot be seen is not worth submitting and
+    # a game should not have to remember to ask.
+    #
+    # Turned off for a pass whose output is not what the camera sees: a shadow
+    # map rendered from the light's point of view, or a pass deliberately
+    # capturing geometry behind the viewer. Also turned off by a game doing its
+    # own culling upstream, where this second test is redundant rather than
+    # wrong.
+    cull:        u8;
 }
 
 # a 3D scene pass description: perspective camera, depth test, opaque
@@ -519,6 +553,7 @@ pub fun pass_scene(camera: *Camera) PassDesc {
         camera2d:    nil,
         clear:       1,
         clear_color: vec4(0.08, 0.09, 0.12, 1.0),
+        cull:        1,
     };
 }
 
@@ -533,6 +568,7 @@ pub fun pass_overlay() PassDesc {
         camera2d:    nil,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        cull:        1,
     };
 }
 
@@ -556,6 +592,7 @@ pub fun pass_world(camera: *Camera2D) PassDesc {
         camera2d:    camera,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        cull:        1,
     };
 }
 
@@ -581,6 +618,16 @@ pub rec Pass {
     # its vertices were placed for this pass's projection and must be drawn into
     # this pass's render pass, so it cannot survive pass_end.
     batch:      Batch2D;
+
+    # What this pass can see, resolved once when it opens.
+    #
+    # Both are derived from the matrices above, so they are built here rather
+    # than at each draw: a frustum is six planes out of a matrix multiply, and
+    # recomputing it per draw would make culling cost more than the draws it
+    # saves. visible is the 2D equivalent, in world units.
+    cull:       bool;
+    frustum:    Frustum;
+    visible:    Rect;
 }
 
 # begin a pass
@@ -607,6 +654,7 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
     batch_reset(?p.batch);
+    p.cull = d.cull != 0;
 
     p.target = d.target;
     if (d.target != nil) {
@@ -634,6 +682,18 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         or {
             p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
         }
+    }
+
+    # Resolve what this pass can see, once. The frustum serves 3D draws and the
+    # rectangle serves 2D ones; both come out of the matrices just built, so a
+    # pass with no camera still gets a correct answer from its fixed projection.
+    var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
+    p.frustum = frustum_from_matrix(?vp);
+    if (d.camera2d != nil) {
+        p.visible = camera2d_visible(d.camera2d, p.width::f32, p.height::f32);
+    }
+    or {
+        p.visible = rect(0.0, 0.0, p.width::f32, p.height::f32);
     }
 
     if (d.target != nil) {
@@ -682,6 +742,35 @@ pub fun pass_end(p: *Pass) {
     if (p.target == nil) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
     frame_resume_pass(?p.renderer.frame, ?p.renderer.swap);
+}
+
+# The world-space box a skinned mesh actually occupies this frame.
+#
+# A skinned mesh's vertices are placed by its joints, so the box it was authored
+# in describes only its rest pose. Culling against that box makes a character
+# who reaches, lunges or is flung by a ragdoll disappear at the edge of the
+# screen while plainly still on it.
+#
+# The pose's joint matrices are already built for the palette upload, so this
+# reuses them: the rest box is transformed by each joint and the results unioned.
+# That is conservative rather than exact, since a vertex is a weighted blend of
+# several joints and therefore lies inside the union of their transforms rather
+# than at any one of them, so the box always contains the geometry and is never
+# tighter than the truth.
+fun skinned_bounds(m: *Mesh, pose: *Pose, model: *Mat4) Aabb {
+    val n: usize = pose.count;
+    if (n == 0) { ret aabb_transform(?m.bounds, model); }
+    val joints: *Mat4 = pose_matrices(pose);
+
+    var acc: Aabb = aabb_empty();
+    var i: usize = 0;
+    for (i < n) {
+        var world: Mat4 = mat4_mul(model, ?joints[i]);
+        var b: Aabb = aabb_transform(?m.bounds, ?world);
+        aabb_union(?acc, ?b);
+        i = i + 1;
+    }
+    ret acc;
 }
 
 # take a uniform slot for one draw, or report the ring is full
@@ -838,6 +927,25 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     # in order; it cannot defer one past a draw it does not own.
     batch_flush(p);
 
+    var model: Mat4 = transform_matrix(t);
+
+    # OUT OF VIEW, SO NOT SUBMITTED. Done before the slot is taken, since a
+    # culled draw that still consumed a uniform slot would starve the draws that
+    # are visible, which is the failure this renderer already had once.
+    #
+    # A skinned mesh is bounded by its pose rather than by its rest position: a
+    # character reaching up or a ragdoll flung sideways leaves the box the mesh
+    # was authored in, and culling against that box pops it out of view at the
+    # edges of the screen while it is plainly still on them.
+    if (p.cull) {
+        var wb: Aabb = aabb_transform(?m.bounds, ?model);
+        if (pose != nil) { wb = skinned_bounds(m, pose, ?model); }
+        if (!frustum_contains_aabb(?p.frustum, ?wb)) {
+            r.culled = r.culled + 1;
+            ret;
+        }
+    }
+
     val slot: usize = take_slot(p);
     if (slot == MAX_SLOTS) { ret; }
 
@@ -847,7 +955,6 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     # than a mesh that ignores its pose.
     val skinned: bool = pose != nil && vertex_format_is_skinned(?m.format);
 
-    var model: Mat4 = transform_matrix(t);
     var vp:    Mat4 = mat4_mul(?p.projection, ?p.view);
 
     if (skinned) {
@@ -966,6 +1073,15 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
     # A run of sprites sharing a texture becomes one draw and one uniform slot,
     # which is what lets a screenful of them cost what a handful used to. See
     # boom.graphics.batch for why the per-sprite uniform had to go.
+    # Off screen, so not expanded. Checked before sprite_expand rather than
+    # after, because the cost this avoids is the six vertices in the frame's
+    # arena, not the draw: a large world is mostly off screen, and expanding all
+    # of it fills the arena with geometry nothing can see.
+    if (p.cull && !rect_overlaps(dest, p.visible)) {
+        p.renderer.culled = p.renderer.culled + 1;
+        ret;
+    }
+
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
     batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);

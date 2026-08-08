@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: frustum culling. A pass resolves what it can see when it opens and skips draws whose bounds fall outside it. On by default, since a draw that cannot be seen is not worth submitting and a game should not have to remember to ask; `PassDesc.cull = 0` turns it off for a pass whose output is not what the camera sees, such as a shadow map, or for a game culling upstream. `renderer_culled` reports the count.
+
+  `Mesh` gains a local-space `bounds`, computed once at upload from the POSITION attribute, since that is the only moment the vertices are on the CPU. Skinned meshes are bounded by their pose rather than their rest position, by transforming the rest box through each joint matrix and unioning: a character who reaches or is flung leaves the box it was authored in, and culling against that box pops it out of view while it is plainly still on screen. The joint matrices are already built for the palette upload, so this reuses them.
+
+  2D sprites are culled against the camera's visible rectangle before expansion rather than after, because the cost avoided is the six vertices in the frame's arena, not the draw: a large world is mostly off screen and expanding all of it fills the arena with geometry nothing can see.
+
+- math: `boom.math.aabb` and `boom.math.frustum`. Planes are extracted from the view-projection by the Gribb-Hartmann identity rather than rebuilt from camera parameters, so there is one description of what is visible and it is the same one the GPU clips against; a projection the extraction does not understand cannot exist. The box test is conservative: it rejects only a box wholly outside a plane, so it can keep something invisible but never removes something visible.
+- graphics: `rect_overlaps`.
+
+### Added
 - graphics: `camera2d_height`, a camera that holds a fixed world height and lets the horizontal extent follow the viewport's aspect. A wider window then shows more world rather than the same world magnified, and every window shows the same distance vertically, which is what keeps a game fair across differently shaped monitors. All of the camera's conversions route through one `camera2d_scale`, so the projection, both point conversions and the visible rectangle cannot disagree about it.
 - graphics: `boom.graphics.fit`, which computes where a fixed-size image belongs inside a window: stretch, contain, cover and whole-number scaling, plus `fit_scale` and `fit_unproject`. The engine does not pick a policy, because rendering at a fixed low resolution, laying out to the window, and letterboxing are all legitimate and different choices. It provides the arithmetic, because every game that scales needs it and the aspect-correct cases are easy to get subtly wrong in a way nothing reports until a window is an unusual shape.
 - graphics: `renderer_width` and `renderer_height`. The swapchain adopts the surface's extent when it rebuilds, so it can differ from the window's reported size for the frame in which a resize is applied, and anything placed in framebuffer pixels has to use the renderer's.
