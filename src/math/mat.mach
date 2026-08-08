@@ -194,6 +194,44 @@ pub fun mat4_ptr(m: *Mat4) *f32 {
     ret ?m.m[0];
 }
 
+# transform a point, applying the translation column
+#
+# the CPU twin of the mul_point written into each vertex stage. Mat4 is
+# column-major, so the product is the columns scaled by the point's
+# components and summed, and the shader computes it the same way over
+# four f32x4 columns. keeping both here and tested is what pins the
+# convention down: a transposed matrix produces a plausible-looking
+# result that is wrong everywhere off the diagonal.
+# ---
+# m:   the matrix
+# p:   the point
+# ret: m * (p, 1)
+pub fun mat4_transform_point(m: *Mat4, p: Vec3) Vec3 {
+    var r: Vec3;
+    r.x = m.m[0] * p.x + m.m[4] * p.y + m.m[8]  * p.z + m.m[12];
+    r.y = m.m[1] * p.x + m.m[5] * p.y + m.m[9]  * p.z + m.m[13];
+    r.z = m.m[2] * p.x + m.m[6] * p.y + m.m[10] * p.z + m.m[14];
+    ret r;
+}
+
+# transform a direction, ignoring the translation column
+#
+# a direction has no position, so translating one is meaningless and
+# breaks lighting on anything not at the origin. correct for a rotation
+# and for a uniform scale up to renormalization; a non-uniform scale
+# needs the inverse transpose supplied as its own matrix.
+# ---
+# m:   the matrix
+# v:   the direction
+# ret: the upper-left 3x3 of m applied to v
+pub fun mat4_transform_dir(m: *Mat4, v: Vec3) Vec3 {
+    var r: Vec3;
+    r.x = m.m[0] * v.x + m.m[4] * v.y + m.m[8]  * v.z;
+    r.y = m.m[1] * v.x + m.m[5] * v.y + m.m[9]  * v.z;
+    r.z = m.m[2] * v.x + m.m[6] * v.y + m.m[10] * v.z;
+    ret r;
+}
+
 test "mat: identity is the multiplicative unit" {
     var id: Mat4 = mat4_identity();
     var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
@@ -239,5 +277,50 @@ test "mat: look_at from the z axis faces the origin" {
     if (v.m[15] != 1.0) { ret 1; }
     val d: f32 = v.m[14] - (0.0 - 5.0);
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
+    ret 0;
+}
+
+test "mat: a point picks up the translation column" {
+    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
+    val p: Vec3 = mat4_transform_point(?t, Vec3{x: 10.0, y: 20.0, z: 30.0});
+    if (p.x != 11.0 || p.y != 22.0 || p.z != 33.0) { ret 1; }
+    ret 0;
+}
+
+test "mat: a direction ignores the translation column" {
+    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
+    val d: Vec3 = mat4_transform_dir(?t, Vec3{x: 10.0, y: 20.0, z: 30.0});
+    # a normal that picks up a translation points somewhere else entirely
+    # once the object moves, which is the bug this separation prevents.
+    if (d.x != 10.0 || d.y != 20.0 || d.z != 30.0) { ret 1; }
+    ret 0;
+}
+
+test "mat: transform agrees with composing the matrices" {
+    # the check that catches a transposed convention. building T*S and
+    # transforming once must equal scaling then translating, and it does
+    # not if the elements are read row-major.
+    var s: Mat4 = mat4_scale(Vec3{x: 2.0, y: 3.0, z: 4.0});
+    var t: Mat4 = mat4_translation(Vec3{x: 5.0, y: 6.0, z: 7.0});
+    var ts: Mat4 = mat4_mul(?t, ?s);
+
+    val v: Vec3 = Vec3{x: 1.0, y: 1.0, z: 1.0};
+    val once: Vec3 = mat4_transform_point(?ts, v);
+    val twice: Vec3 = mat4_transform_point(?t, mat4_transform_point(?s, v));
+
+    if (once.x != twice.x || once.y != twice.y || once.z != twice.z) { ret 1; }
+    if (once.x != 7.0 || once.y != 9.0 || once.z != 11.0) { ret 2; }
+    ret 0;
+}
+
+test "mat: a rotation moves a point off its axis" {
+    # a transform that only ever reproduced its input would pass the
+    # translation tests above by doing nothing, so this asserts an
+    # actual rotation: 90 degrees about z sends +x to +y.
+    val h: f32 = 0.70710678;
+    var r: Mat4 = mat4_from_quat(Quat{x: 0.0, y: 0.0, z: h, w: h});
+    val p: Vec3 = mat4_transform_point(?r, Vec3{x: 1.0, y: 0.0, z: 0.0});
+    if (p.x > 0.001 || p.x < -0.001) { ret 1; }
+    if (p.y < 0.999 || p.y > 1.001)  { ret 2; }
     ret 0;
 }

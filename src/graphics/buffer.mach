@@ -1,0 +1,340 @@
+# Device memory and buffers.
+#
+# Everything a Vulkan renderer draws from lives in a buffer backed by device
+# memory, so this sits between the device and every later module: vertices,
+# indices, uniforms, and the staging buffers that fill textures all come from
+# here.
+#
+# MEMORY TYPES ARE NOT FIXED. Vulkan exposes a per-device table of memory types
+# with property flags, and the index that satisfies a request varies by vendor
+# and by driver version. A renderer that hardcodes an index works on the machine
+# it was written on and fails elsewhere, so the type is always searched for by
+# required flags against the mask the resource reports.
+#
+# TWO KINDS OF BUFFER. Host-visible memory can be mapped and written directly
+# but is slower for the GPU to read; device-local memory is fast but not
+# mappable. Data written once and read every frame goes device-local through a
+# staging copy; data rewritten every frame stays host-visible, because a staging
+# copy per frame costs more than the slower reads.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use mem: std.memory;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+
+# The index returned when no memory type satisfies a request.
+pub val NO_MEMORY_TYPE: u32 = 0xFFFFFFFF;
+
+# A buffer and the memory backing it.
+# ---
+# handle: The buffer object.
+# memory: Memory allocated for this buffer alone.
+# size:   Requested size in bytes, not the possibly larger allocation.
+# mapped: Host pointer while mapped, nil otherwise.
+pub rec Buffer {
+    handle: vk.Buffer;
+    memory: vk.DeviceMemory;
+    size:   u64;
+    mapped: ptr;
+}
+
+# Find a memory type satisfying both the resource's mask and the wanted flags.
+#
+# `bits` comes from the resource's memory requirements and marks which type
+# indices are legal for it. `want` is the set of properties the caller needs,
+# and a type qualifies only when it carries all of them; carrying more is fine
+# and is common.
+#
+# Split out from allocation because it is the one part of this module that can
+# be tested without a device, and it is where a wrong answer produces memory
+# the GPU cannot address.
+pub fun pick_memory_type(props: *vk.PhysicalDeviceMemoryProperties, bits: u32, want: u32) u32 {
+    var i: u32 = 0;
+    for (i < props.memoryTypeCount) {
+        if ((bits & (1::u32 << i)) != 0) {
+            if ((props.memoryTypes[i].propertyFlags & want) == want) { ret i; }
+        }
+        i = i + 1;
+    }
+    ret NO_MEMORY_TYPE;
+}
+
+# Create a buffer and allocate memory for it.
+#
+# One allocation per buffer. Vulkan implementations bound the total number of
+# allocations, so a shipping game eventually needs a suballocator, but that is a
+# change behind this same interface rather than a different one.
+pub fun buffer_init(b: *Buffer, v: *Vk, size: u64, usage: u32, want: u32) Result[bool, Error] {
+    b.handle = nil;
+    b.memory = nil;
+    b.mapped = nil;
+    b.size   = 0;
+
+    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+    if (size == 0) { ret err[bool, Error](error("cannot create a zero-sized buffer")); }
+
+    var ci: vk.BufferCreateInfo;
+    ci.sType                 = vk.STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    ci.pNext                 = nil;
+    ci.flags                 = 0;
+    ci.size                  = size;
+    ci.usage                 = usage;
+    ci.sharingMode           = vk.SHARING_MODE_EXCLUSIVE;
+    ci.queueFamilyIndexCount = 0;
+    ci.pQueueFamilyIndices   = nil;
+
+    if (vk.vkCreateBuffer(v.device, ?ci, nil, ?b.handle) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateBuffer failed"));
+    }
+
+    var req: vk.MemoryRequirements;
+    vk.vkGetBufferMemoryRequirements(v.device, b.handle, ?req);
+
+    var props: vk.PhysicalDeviceMemoryProperties;
+    vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
+
+    val index: u32 = pick_memory_type(?props, req.memoryTypeBits, want);
+    if (index == NO_MEMORY_TYPE) {
+        ret err[bool, Error](error("no memory type satisfies the requested properties"));
+    }
+
+    var ai: vk.MemoryAllocateInfo;
+    ai.sType           = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.pNext           = nil;
+    # The requirement's size, not the requested size. The driver may need more
+    # for alignment, and binding an allocation smaller than it asked for is
+    # invalid.
+    ai.allocationSize  = req.size;
+    ai.memoryTypeIndex = index;
+
+    if (vk.vkAllocateMemory(v.device, ?ai, nil, ?b.memory) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkAllocateMemory failed"));
+    }
+    if (vk.vkBindBufferMemory(v.device, b.handle, b.memory, 0) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkBindBufferMemory failed"));
+    }
+
+    b.size = size;
+    ret ok[bool, Error](true);
+}
+
+# Map the buffer's memory and return the host pointer.
+#
+# Only valid on host-visible memory. Mapping is left to the caller rather than
+# done at creation because a buffer that stays mapped for its whole life is the
+# right choice for per-frame uniforms and the wrong one for a staging buffer
+# that is filled once.
+pub fun buffer_map(b: *Buffer, v: *Vk) ptr {
+    if (b.mapped != nil) { ret b.mapped; }
+    if (vk.vkMapMemory(v.device, b.memory, 0, b.size, 0, ?b.mapped) != vk.SUCCESS) {
+        b.mapped = nil;
+        ret nil;
+    }
+    ret b.mapped;
+}
+
+# Unmap the buffer's memory.
+pub fun buffer_unmap(b: *Buffer, v: *Vk) {
+    if (b.mapped == nil) { ret; }
+    vk.vkUnmapMemory(v.device, b.memory);
+    b.mapped = nil;
+}
+
+# Copy bytes into a host-visible buffer.
+#
+# Returns false when the memory could not be mapped or the source is larger than
+# the buffer. Writing past the end would corrupt whatever the driver placed
+# after it, so the length is checked rather than trusted.
+pub fun buffer_write(b: *Buffer, v: *Vk, src: *u8, len: u64) bool {
+    if (len > b.size) { ret false; }
+    val dst: ptr = buffer_map(b, v);
+    if (dst == nil) { ret false; }
+    mem.copy[u8](dst:~*u8, src, len::usize);
+    ret true;
+}
+
+# Destroy the buffer and free its memory.
+pub fun buffer_dnit(b: *Buffer, v: *Vk) {
+    if (b.handle == nil) { ret; }
+    buffer_unmap(b, v);
+    vk.vkDestroyBuffer(v.device, b.handle, nil);
+    vk.vkFreeMemory(v.device, b.memory, nil);
+    b.handle = nil;
+    b.memory = nil;
+    b.size   = 0;
+}
+
+# Copy between buffers on the GPU, waiting for the copy to finish.
+#
+# Used to move staged data into device-local memory. A one-shot command buffer
+# with a queue wait is the simplest correct form; batching these into the frame's
+# command buffer is a throughput refinement that matters when uploads happen
+# every frame, which is not the case for assets loaded once.
+pub fun buffer_copy(v: *Vk, pool: vk.CommandPool, src: *Buffer, dst: *Buffer, size: u64) Result[bool, Error] {
+    if (size > src.size || size > dst.size) {
+        ret err[bool, Error](error("copy range exceeds one of the buffers"));
+    }
+
+    var cmd: vk.CommandBuffer;
+    var ai: vk.CommandBufferAllocateInfo;
+    ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.pNext              = nil;
+    ai.commandPool        = pool;
+    ai.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vk.vkAllocateCommandBuffers(v.device, ?ai, ?cmd) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not allocate a transfer command buffer"));
+    }
+
+    var bi: vk.CommandBufferBeginInfo;
+    bi.sType            = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.pNext            = nil;
+    bi.flags            = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    bi.pInheritanceInfo = nil;
+    if (vk.vkBeginCommandBuffer(cmd, ?bi) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkBeginCommandBuffer failed for a transfer"));
+    }
+
+    var region: vk.BufferCopy;
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size      = size;
+    vk.vkCmdCopyBuffer(cmd, src.handle, dst.handle, 1, ?region);
+
+    if (vk.vkEndCommandBuffer(cmd) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkEndCommandBuffer failed for a transfer"));
+    }
+
+    var si: vk.SubmitInfo;
+    si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext                = nil;
+    si.waitSemaphoreCount   = 0;
+    si.pWaitSemaphores      = nil;
+    si.pWaitDstStageMask    = nil;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = ?cmd;
+    si.signalSemaphoreCount = 0;
+    si.pSignalSemaphores    = nil;
+
+    if (vk.vkQueueSubmit(v.graphics_queue, 1, ?si, nil) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkQueueSubmit failed for a transfer"));
+    }
+    # Freeing the command buffer while it is executing is invalid, so the wait
+    # is not optional here even though it stalls the queue.
+    vk.vkQueueWaitIdle(v.graphics_queue);
+    vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
+
+    ret ok[bool, Error](true);
+}
+
+# Create a device-local buffer and fill it through a staging copy.
+#
+# The usual path for geometry: written once at load, read every frame. The
+# staging buffer exists only for the duration of the upload.
+pub fun buffer_upload(b: *Buffer, v: *Vk, pool: vk.CommandPool, src: *u8, len: u64, usage: u32) Result[bool, Error] {
+    var staging: Buffer;
+    val sr: Result[bool, Error] = buffer_init(?staging, v, len,
+        vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](sr)) { ret sr; }
+
+    if (!buffer_write(?staging, v, src, len)) {
+        buffer_dnit(?staging, v);
+        ret err[bool, Error](error("could not write to the staging buffer"));
+    }
+
+    val dr: Result[bool, Error] = buffer_init(b, v, len,
+        usage | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (is_err[bool, Error](dr)) {
+        buffer_dnit(?staging, v);
+        ret dr;
+    }
+
+    val cr: Result[bool, Error] = buffer_copy(v, pool, ?staging, b, len);
+    buffer_dnit(?staging, v);
+    if (is_err[bool, Error](cr)) {
+        buffer_dnit(b, v);
+        ret cr;
+    }
+    ret ok[bool, Error](true);
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Allocation needs a device, so these cover the memory type search, which is
+# pure and is the part that differs between machines.
+
+test "buffer: the search skips types the resource cannot use" {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 3;
+    # Type 0 has the wanted flags but is not in the resource's mask.
+    p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    p.memoryTypes[1].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    p.memoryTypes[2].propertyFlags = vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+    val bits: u32 = 0b110;
+    if (pick_memory_type(?p, bits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 2) { ret 1; }
+    ret 0;
+}
+
+test "buffer: a type must carry every wanted flag, not merely one" {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 2;
+    p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    p.memoryTypes[1].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    val want: u32 = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    # Type 0 carries half the request. Accepting it produces memory that needs
+    # explicit flushing, and every write silently fails to reach the GPU.
+    if (pick_memory_type(?p, 0b11, want) != 1) { ret 1; }
+    ret 0;
+}
+
+test "buffer: extra properties on a type do not disqualify it" {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 1;
+    p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT | vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (pick_memory_type(?p, 0b1, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) { ret 1; }
+    ret 0;
+}
+
+test "buffer: an unsatisfiable request reports no type rather than zero" {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 2;
+    p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    p.memoryTypes[1].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    # Returning 0 here would allocate host-visible memory for a device-local
+    # request and the failure would surface as a performance mystery, not an
+    # error.
+    if (pick_memory_type(?p, 0b11, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != NO_MEMORY_TYPE) { ret 1; }
+    ret 0;
+}
+
+test "buffer: an empty mask matches nothing" {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 4;
+    var i: u32 = 0;
+    for (i < 4) { p.memoryTypes[i].propertyFlags = 0xFFFFFFFF; i = i + 1; }
+    if (pick_memory_type(?p, 0, 0) != NO_MEMORY_TYPE) { ret 1; }
+    ret 0;
+}
+
+test "buffer: teardown on a buffer that was never created is a no-op" {
+    var b: Buffer;
+    b.handle = nil;
+    var v: Vk;
+    v.ready = false;
+    buffer_dnit(?b, ?v);
+    if (b.handle != nil) { ret 1; }
+    ret 0;
+}

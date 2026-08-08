@@ -209,3 +209,26 @@ fwd boom.graphics.frame.frame_begin;
 fwd boom.graphics.frame.frame_end;
 fwd boom.graphics.frame.frame_rebuild_targets;
 fwd boom.graphics.frame.frame_dnit;
+
+fwd boom.graphics.buffer.NO_MEMORY_TYPE;
+fwd boom.graphics.buffer.Buffer;
+fwd boom.graphics.buffer.pick_memory_type;
+fwd boom.graphics.buffer.buffer_init;
+fwd boom.graphics.buffer.buffer_map;
+fwd boom.graphics.buffer.buffer_unmap;
+fwd boom.graphics.buffer.buffer_write;
+fwd boom.graphics.buffer.buffer_copy;
+fwd boom.graphics.buffer.buffer_upload;
+fwd boom.graphics.buffer.buffer_dnit;
+
+fwd boom.graphics.pipeline.FORMAT_UNSUPPORTED;
+fwd boom.graphics.pipeline.Pipeline;
+fwd boom.graphics.pipeline.PipelineDesc;
+fwd boom.graphics.pipeline.pipeline_desc_2d;
+fwd boom.graphics.pipeline.pipeline_desc_3d;
+fwd boom.graphics.pipeline.attribute_format;
+fwd boom.graphics.pipeline.vertex_attributes;
+fwd boom.graphics.pipeline.shader_module;
+fwd boom.graphics.pipeline.pipeline_init;
+fwd boom.graphics.pipeline.pipeline_bind;
+fwd boom.graphics.pipeline.pipeline_dnit;
