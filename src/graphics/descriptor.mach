@@ -42,6 +42,7 @@ use boom.graphics.vk.Vk;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_unmap;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
 
@@ -80,14 +81,31 @@ pub val SLOT_BYTES: usize = 512;
 # serves the sprite tint and the mesh base colour.
 pub val COLOUR_OFFSET: usize = 256;
 
-# The most skinned draws one frame may issue.
+# Palette slots in one block of the palette ring.
 #
-# Far smaller than MAX_SLOTS because a palette is 8 KB where a uniform slot is
-# 256 bytes: sizing the palette ring like the uniform ring would cost 8 MB per
-# frame to serve a case that is a handful of characters, not a screenful of
-# glyphs. A skinned draw past this is dropped and counted, the same as a draw
-# past MAX_SLOTS.
-pub val MAX_PALETTES: usize = 32;
+# THE RING GROWS RATHER THAN CAPPING. A palette is 8 KB where a uniform slot is
+# 256, so reserving palettes the way slots are reserved would cost megabytes per
+# frame to serve a case that is usually a handful of characters. It used to be a
+# flat 32, which made the common case cheap and made the thirty-third skinned
+# draw vanish: refused in submission order, so a crowd lost whichever characters
+# were submitted last, silently. That is the same failure the sprite path had.
+#
+# So the ring starts at one block and adds another when a frame needs it, and
+# blocks are retained rather than freed, because a frame that needed the room
+# will need it again and releasing memory the GPU may still be reading is a
+# race. A game with eight characters pays for 32 palettes forever; a game with a
+# crowd pays for the crowd, once.
+pub val PALETTES_PER_BLOCK: usize = 32;
+
+# How many palette blocks one frame may grow to.
+#
+# Sixteen blocks is 512 skinned draws in a frame, which is far past what any
+# game draws: a skinned mesh costs a palette upload and a draw of its own, so a
+# scene with hundreds is expensive long before it is short of palettes.
+pub val MAX_PALETTE_BLOCKS: usize = 16;
+
+# The most skinned draws one frame may issue.
+pub val MAX_PALETTES: usize = PALETTES_PER_BLOCK * MAX_PALETTE_BLOCKS;
 
 # Bytes reserved per palette slot.
 #
@@ -103,9 +121,10 @@ pub val PALETTE_BYTES: usize = 128 * 64;
 # rings:  One host-visible uniform buffer per frame in flight.
 # mapped: The persistent host pointer for each ring.
 # used:   Slots taken so far in the current frame.
-# pals:   One host-visible storage buffer of joint palettes per frame.
-# pmap:   The persistent host pointer for each palette ring.
-# pused:  Palette slots taken so far in the current frame.
+# pals:   Host-visible storage buffers of joint palettes, per frame then block.
+# pmap:   The persistent host pointer for each palette block.
+# pcount: How many palette blocks each frame has created.
+# pused:  Palette slots taken so far in the current frame, across its blocks.
 # ready:  Whether creation completed.
 pub rec Descriptors {
     pool:   vk.DescriptorPool;
@@ -113,8 +132,9 @@ pub rec Descriptors {
     rings:  [2]Buffer;
     mapped: [2]ptr;
     used:   usize;
-    pals:   [2]Buffer;
-    pmap:   [2]ptr;
+    pals:   [2][16]Buffer;
+    pmap:   [2][16]ptr;
+    pcount: [2]usize;
     pused:  usize;
     ready:  bool;
 }
@@ -132,12 +152,23 @@ pub fun slot_offset(slot: usize) u64 {
     ret (slot * SLOT_BYTES)::u64;
 }
 
-# The byte offset of a palette slot within its frame's palette ring.
+# The byte offset of a palette slot within the block that holds it.
 #
 # PALETTE_BYTES is 8192, so every offset is 8192-aligned and therefore satisfies
 # any minStorageBufferOffsetAlignment a device reports without querying it.
 pub fun palette_offset(slot: usize) u64 {
-    ret (slot * PALETTE_BYTES)::u64;
+    ret ((slot % PALETTES_PER_BLOCK) * PALETTE_BYTES)::u64;
+}
+
+# Which block of the palette ring holds a slot.
+#
+# A descriptor names one buffer, so a palette's block decides which buffer is
+# bound for that draw. Split out and pure because an index that disagrees with
+# the offset above binds the right buffer at the wrong place, or the wrong
+# buffer at a plausible one, and either draws a recognisable character in a pose
+# that belongs to a different one.
+pub fun palette_block(slot: usize) usize {
+    ret slot / PALETTES_PER_BLOCK;
 }
 
 # Create the pool, the sets, and the per-frame rings.
@@ -213,14 +244,14 @@ pub fun descriptors_init(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout
             ret err[bool, Error](error("could not map a uniform ring"));
         }
 
-        val pr: Result[bool, Error] = buffer_init(?d.pals[f], v,
-            (MAX_PALETTES * PALETTE_BYTES)::u64,
-            vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (is_err[bool, Error](pr)) { ret pr; }
-        d.pmap[f] = buffer_map(?d.pals[f], v);
-        if (d.pmap[f] == nil) {
-            ret err[bool, Error](error("could not map a palette ring"));
+        var b: usize = 0;
+        for (b < MAX_PALETTE_BLOCKS) {
+            d.pmap[f][b] = nil;
+            b = b + 1;
+        }
+        d.pcount[f] = 0;
+        if (!palette_block_create(d, v, f)) {
+            ret err[bool, Error](error("could not create a palette ring"));
         }
         f = f + 1;
     }
@@ -264,12 +295,58 @@ pub fun descriptors_take(d: *Descriptors) usize {
     ret s;
 }
 
-# Take the next free palette slot, or MAX_PALETTES when the frame is full.
-pub fun descriptors_take_palette(d: *Descriptors) usize {
-    if (!d.ready || d.pused >= MAX_PALETTES) { ret MAX_PALETTES; }
+# Add one block to a frame's palette ring.
+#
+# Blocks are the same size rather than doubling, unlike the vertex arena: a
+# palette is a fixed 8 KB and a frame needing more of them needs them one
+# character at a time, so a block of 32 is already a coarse enough step.
+fun palette_block_create(d: *Descriptors, v: *Vk, frame: usize) bool {
+    val n: usize = d.pcount[frame];
+    if (n >= MAX_PALETTE_BLOCKS) { ret false; }
+
+    val pr: Result[bool, Error] = buffer_init(?d.pals[frame][n], v,
+        (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64,
+        vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](pr)) { ret false; }
+
+    val m: ptr = buffer_map(?d.pals[frame][n], v);
+    if (m == nil) {
+        buffer_dnit(?d.pals[frame][n], v);
+        ret false;
+    }
+    d.pmap[frame][n] = m;
+    d.pcount[frame]  = n + 1;
+    ret true;
+}
+
+# Take the next free palette slot, growing the ring if this frame has run out.
+pub fun descriptors_take_palette(d: *Descriptors, v: *Vk, frame: usize) usize {
+    if (!d.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret MAX_PALETTES; }
+    if (d.pused >= MAX_PALETTES) { ret MAX_PALETTES; }
+
+    # Every frame's ring has to be able to hold this slot, not just the one
+    # being recorded: the slot index is taken once and used again next frame
+    # from the other ring, and a block that exists in one and not the other
+    # would bind a buffer that was never created.
+    val need: usize = palette_block(d.pused) + 1;
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        for (d.pcount[f] < need) {
+            if (!palette_block_create(d, v, f)) { ret MAX_PALETTES; }
+        }
+        f = f + 1;
+    }
+
     val s: usize = d.pused;
     d.pused = d.pused + 1;
     ret s;
+}
+
+# How many palette blocks a frame has grown to, for reporting.
+pub fun descriptors_palette_blocks(d: *Descriptors, frame: usize) usize {
+    if (!d.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
+    ret d.pcount[frame];
 }
 
 # Copy a joint palette into its slot in the frame's palette ring.
@@ -280,8 +357,10 @@ pub fun descriptors_take_palette(d: *Descriptors) usize {
 pub fun descriptors_write_palette(d: *Descriptors, frame: usize, slot: usize, src: *u8, len: usize) bool {
     if (!d.ready || slot >= MAX_PALETTES || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
     if (len > PALETTE_BYTES) { ret false; }
-    val base: *u8 = d.pmap[frame]:~*u8;
-    mem.copy[u8](?base[slot * PALETTE_BYTES], src, len);
+    val b: usize = palette_block(slot);
+    if (b >= d.pcount[frame] || d.pmap[frame][b] == nil) { ret false; }
+    val base: *u8 = d.pmap[frame][b]:~*u8;
+    mem.copy[u8](?base[palette_offset(slot)::usize], src, len);
     ret true;
 }
 
@@ -295,8 +374,11 @@ pub fun descriptors_bind_palette(d: *Descriptors, v: *Vk, frame: usize, slot: us
     if (!d.ready || slot >= MAX_SLOTS || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
     if (palette >= MAX_PALETTES) { ret false; }
 
+    val pb: usize = palette_block(palette);
+    if (pb >= d.pcount[frame]) { ret false; }
+
     var bi: vk.DescriptorBufferInfo;
-    bi.buffer = d.pals[frame].handle;
+    bi.buffer = d.pals[frame][pb].handle;
     bi.offset = palette_offset(palette);
     bi.range  = PALETTE_BYTES::u64;
 
@@ -444,8 +526,16 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
     for (f < MAX_FRAMES_IN_FLIGHT) {
         buffer_dnit(?d.rings[f], v);
         d.mapped[f] = nil;
-        buffer_dnit(?d.pals[f], v);
-        d.pmap[f] = nil;
+        var pb: usize = 0;
+        for (pb < d.pcount[f]) {
+            if (d.pmap[f][pb] != nil) {
+                buffer_unmap(?d.pals[f][pb], v);
+                d.pmap[f][pb] = nil;
+            }
+            buffer_dnit(?d.pals[f][pb], v);
+            pb = pb + 1;
+        }
+        d.pcount[f] = 0;
         f = f + 1;
     }
     vk.vkDestroyDescriptorPool(v.device, d.pool, nil);
@@ -612,7 +702,7 @@ test "descriptor: an uninitialized pool refuses everything" {
     if (descriptors_write_slot(?d, 0, 0, ?bytes[0], 8))          { ret 2; }
     if (descriptors_bind(?d, nil, nil, 0, 0))                    { ret 3; }
     if (descriptors_bind_slot(?d, ?v, 0, 0, 64, nil, nil, 0, 0)) { ret 4; }
-    if (descriptors_take_palette(?d) != MAX_PALETTES)            { ret 5; }
+    if (descriptors_take_palette(?d, ?v, 0) != MAX_PALETTES)     { ret 5; }
     if (descriptors_write_palette(?d, 0, 0, ?bytes[0], 8))       { ret 6; }
     if (descriptors_bind_palette(?d, ?v, 0, 0, 0))               { ret 7; }
     descriptors_dnit(?d, ?v);
@@ -627,33 +717,64 @@ test "descriptor: a palette slot holds a full joint palette" {
     ret 0;
 }
 
-test "descriptor: palette offsets do not overlap and stay inside the ring" {
-    if (palette_offset(0) != 0)                  { ret 1; }
-    if (palette_offset(1) != PALETTE_BYTES::u64) { ret 2; }
+test "descriptor: a palette slot names a block and an offset within it" {
+    # The two have to agree. An index that disagrees with the offset binds the
+    # right buffer at the wrong place, or the wrong buffer at a plausible one,
+    # and either draws a recognisable character in another character's pose.
+    #
     # 8192 is a multiple of every minStorageBufferOffsetAlignment a device
-    # reports, so the offset needs no device query to be legal.
+    # reports, so no offset here needs a device query to be legal.
+    if (palette_block(0) != 0)                      { ret 1; }
+    if (palette_offset(0) != 0)                     { ret 2; }
+    if (palette_offset(1) != PALETTE_BYTES::u64)    { ret 3; }
+
+    if (palette_block(PALETTES_PER_BLOCK - 1) != 0) { ret 4; }
+    # The first slot of the second block wraps the offset back to zero, which is
+    # the point of splitting: each block is a buffer of its own.
+    if (palette_block(PALETTES_PER_BLOCK) != 1)     { ret 5; }
+    if (palette_offset(PALETTES_PER_BLOCK) != 0)    { ret 6; }
+
+    # And no slot ever addresses past the end of the block holding it.
     var i: usize = 0;
     for (i < MAX_PALETTES) {
-        if ((palette_offset(i) % 256) != 0) { ret 3; }
+        if (palette_offset(i) + PALETTE_BYTES::u64 > (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64) { ret 7; }
+        if (palette_block(i) >= MAX_PALETTE_BLOCKS) { ret 8; }
         i = i + 1;
     }
-    if (palette_offset(MAX_PALETTES - 1) + PALETTE_BYTES::u64
-        != (MAX_PALETTES * PALETTE_BYTES)::u64) { ret 4; }
     ret 0;
 }
 
-test "descriptor: palette slots run out rather than wrapping onto live draws" {
+test "descriptor: palette slots are handed out in order and reset each frame" {
     var d: Descriptors;
+    var v: Vk;
     d.ready = true;
     d.pused = 0;
+    # Pretend every block already exists, so the ring never reaches for the
+    # device. What is under test is the accounting, not buffer creation.
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        d.pcount[f] = MAX_PALETTE_BLOCKS;
+        f = f + 1;
+    }
+
     var i: usize = 0;
     for (i < MAX_PALETTES) {
-        if (descriptors_take_palette(?d) != i) { ret 1; }
+        if (descriptors_take_palette(?d, ?v, 0) != i) { ret 1; }
         i = i + 1;
     }
-    if (descriptors_take_palette(?d) != MAX_PALETTES) { ret 2; }
+    # Full, and reported as full rather than wrapping onto a live palette.
+    if (descriptors_take_palette(?d, ?v, 0) != MAX_PALETTES) { ret 2; }
     descriptors_begin_frame(?d);
-    if (descriptors_take_palette(?d) != 0) { ret 3; }
+    if (descriptors_take_palette(?d, ?v, 0) != 0) { ret 3; }
+    ret 0;
+}
+
+test "descriptor: the palette ring holds more than one block of skinned draws" {
+    # The defect this replaces: the ring was a flat 32, so the thirty-third
+    # skinned draw in a frame was refused. Refusal is in submission order, so a
+    # crowd lost whichever characters were submitted last, and said nothing.
+    if (MAX_PALETTES <= PALETTES_PER_BLOCK) { ret 1; }
+    if (MAX_PALETTES != PALETTES_PER_BLOCK * MAX_PALETTE_BLOCKS) { ret 2; }
     ret 0;
 }
 

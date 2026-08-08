@@ -183,6 +183,7 @@ use boom.math.transform.transform_matrix;
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
 pub rec Renderer {
+    window:      glfw.Window;
     vk:          Vk;
     dev:         Device;
     swap:        Swapchain;
@@ -214,6 +215,7 @@ pub rec Renderer {
 # height: the window framebuffer height in pixels
 # ret:    true on success, or the first step that failed
 pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32) Result[bool, Error] {
+    r.window      = window;
     r.width       = width;
     r.height      = height;
     r.drawing     = false;
@@ -315,6 +317,22 @@ pub fun renderer_device(r: *Renderer) *Device {
     ret ?r.dev;
 }
 
+# The framebuffer width the renderer is currently drawing into, in pixels.
+#
+# THE ONE TO USE FOR ANYTHING IN FRAMEBUFFER PIXELS. It is the size the
+# swapchain images actually have, which is what a full-screen composite has to
+# be laid out against. It tracks the window, but it is adopted from the surface
+# at rebuild time rather than copied from the window, so the two can disagree
+# for the frame in which a resize is being applied.
+pub fun renderer_width(r: *Renderer) i32 {
+    ret r.width;
+}
+
+# The framebuffer height the renderer is currently drawing into, in pixels.
+pub fun renderer_height(r: *Renderer) i32 {
+    ret r.height;
+}
+
 # update the framebuffer size after a window resize
 #
 # rebuilds the swapchain and the frame loop's targets, both of which are
@@ -327,6 +345,11 @@ pub fun renderer_device(r: *Renderer) *Device {
 # height: the new framebuffer height in pixels
 pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
     if (width <= 0 || height <= 0) { ret; }
+
+    # Already the right size, so there is nothing to rebuild. Without this the
+    # per-frame check below would idle the device and recreate every swapchain
+    # image on every frame, which is a rebuild storm rather than a resize.
+    if (width == r.width && height == r.height && r.swap.ready) { ret; }
 
     val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32);
     if (is_err[bool, Error](sr)) { ret; }
@@ -360,6 +383,32 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     @out_ok = false;
     r.dropped = 0;
     r.draws   = 0;
+
+    # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
+    # rebuild only when the presentation engine reported it out of date, which
+    # is not something every driver and compositor does on a resize: the window
+    # would change size and the renderer would go on drawing at the old one
+    # indefinitely, stretched, with no error anywhere. Measured on lavapipe
+    # under Wayland, a window taken from 1280x720 to 640x640 left the renderer
+    # at 1280x720 for as long as it ran.
+    #
+    # A game cannot be expected to drive this. The swapchain has to match the
+    # surface or presentation is undefined, so it is not a policy choice a game
+    # is entitled to make differently, and anything a game must remember to call
+    # every frame is something it will one day forget. Rendering at a lower
+    # resolution on purpose is a separate thing, done with an offscreen target
+    # the game already owns.
+    #
+    # Checked here rather than in a resize callback so the size is stable for
+    # the whole frame, matching how the engine loop refreshes the window's own.
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    glfw.get_framebuffer_size(r.window, ?fw, ?fh);
+    # Zero in either dimension is a minimized window: a legal state, and not one
+    # a swapchain can be built for, so the frame is skipped rather than rebuilt.
+    if (fw > 0 && fh > 0 && (fw != r.width || fh != r.height)) {
+        renderer_resize(r, fw, fh);
+    }
 
     var began: bool = false;
     val br: Result[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap, ?began);
@@ -842,7 +891,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     if (skinned) {
         program = PROGRAM_SKINNED;
 
-        val pal: usize = descriptors_take_palette(?r.desc);
+        val pal: usize = descriptors_take_palette(?r.desc, ?r.vk, r.frame_index);
         if (pal == MAX_PALETTES) {
             r.dropped = r.dropped + 1;
             ret;
