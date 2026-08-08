@@ -47,7 +47,7 @@ need = ["build-shaders"]
 # because #[embed] takes a literal path and {project.out} varies by target
 # and profile; SPIR-V is target-independent, so one copy serves every build.
 [step.build-shaders]
-cmd = "mach build shaders --target spirv --profile release && mkdir -p res/spv && cp shaders/out/obj/shaders/lit_frag.spv shaders/out/obj/shaders/mesh_vert.spv res/spv/"
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && cp shaders/out/obj/shaders/lit_frag.spv shaders/out/obj/shaders/mesh_vert.spv res/spv/"
 in  = ["shaders/src/lit_frag.mach", "shaders/src/mesh_vert.mach", "shaders/mach.toml"]
 out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv"]
 need = []
