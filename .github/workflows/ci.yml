@@ -53,12 +53,19 @@ jobs:
       # shader read whatever bytes are there, with no diagnostic anywhere.
       # A glob over an empty directory makes the loop body run zero times and
       # the step pass, which is exactly the state a failed shader build leaves.
+      # The expected set is DERIVED from shaders/mach.toml, not written down
+      # here. A count restated in this file is a second copy of a fact the
+      # manifest owns: it goes stale on the next shader and fails for the wrong
+      # reason, and worse, a shader that silently stopped building would still
+      # satisfy a number that had been lowered to match.
       - name: Validate the emitted SPIR-V
         run: |
           set -euo pipefail
-          count=$(ls res/spv/*.spv | wc -l)
-          if [ "$count" -ne 5 ]; then
-            echo "expected 5 SPIR-V modules in res/spv, found $count"
+          expected=$(grep -oP '^out\s*=\s*"\K[^"]+\.spv' shaders/mach.toml | sort)
+          actual=$(ls res/spv | sort)
+          if [ "$expected" != "$actual" ]; then
+            echo "res/spv does not match the artifacts shaders/mach.toml declares"
+            diff <(echo "$expected") <(echo "$actual") || true
             exit 1
           fi
           for f in res/spv/*.spv; do spirv-val "$f"; done
