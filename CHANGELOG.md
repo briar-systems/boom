@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- graphics: 2D draws are batched. A sprite used to be a draw of its own holding a uniform slot for its model matrix, tint and source rectangle. The slot ring is a fixed per-frame reservation shared by every draw in the frame, so a few hundred sprites exhausted it, and because draws are refused in submission order the ones lost were whichever came last. In a game that renders its world to an offscreen target and composites it afterwards, the last draws are the composite and the UI, so **a screenful of sprites did not lose some sprites, it lost the picture** and the drop counters that would have explained it were part of the UI that vanished. Measured in the onslaughter testbed: 600 drones submitted 687 draws against 512 slots, refused 175, and rendered a black window.
+
+  A sprite is now expanded to six vertices in the frame's vertex arena and a run of sprites sharing a texture is drawn as one call holding one slot, which is the path `pass_draw_triangles` already used for immediate-mode geometry. This collapses the sprite path into that one rather than adding a third: sprites, text and UI share a buffer, a shader and a pipeline, and geometry from the same atlas coalesces across them. A run breaks on a texture change so submission order is never altered. The same testbed now draws 16000 drones in 6 draw calls with nothing refused, against the 16087 the old path would have submitted: one per sheet, one where the drone run crosses an arena block boundary, plus the composite and the UI.
+
+- graphics: The vertex arena grows. It was a single fixed 1 MiB reservation per frame in flight, which after batching became the next hard ceiling at roughly 5400 sprites with the same failure mode. It is now a chain of blocks that doubles up to a 32 MiB step, so a frame that needs more room gets another block. Blocks are retained rather than freed, since a frame that needed the room will need it again and releasing memory the GPU may still be reading is the race the arena exists to prevent, so growth is paid once in the first frames. `renderer_stream_blocks` and `renderer_stream_reserved` report what it has grown to.
+
+### Added
+- graphics: `renderer_draws` reports the draw calls recorded in the most recent frame, which after batching is the number worth watching: a count that tracks the sprite count means something is breaking the run. `renderer_stream_blocks` and `renderer_stream_reserved` report the arena's growth and what it costs in host-visible memory.
+
 ### Fixed
 - build: The compiled SPIR-V is committed under `res/spv/` instead of being gitignored. **boom could not be consumed as a git dependency at all**: the modules are `#[embed]`ed, an embed is not an edge in the build graph, so nothing ran the `build-shaders` step on a consumer's behalf and every `#[embed]` failed with "no such file or directory" (mach#2887). Every example resolves boom by path into a tree that had already been built locally, so all three passed CI for weeks while the library was unbuildable downstream. The first consumer that pulled it over git found it immediately.
 

@@ -1,0 +1,304 @@
+# The 2D batcher: many sprites, one draw.
+#
+# WHY THIS EXISTS. A sprite used to be a draw of its own: a uniform slot holding
+# its model matrix, tint and source rectangle, a descriptor bind, and a draw of
+# a shared unit quad. That is correct and it does not scale. The slot ring is a
+# fixed per-frame reservation shared by every draw in the frame, so a few
+# hundred sprites exhaust it, and the draws refused are whichever were submitted
+# last. In a game that renders its world to an offscreen target and then
+# composites it, the last draws are the composite and the UI, so a screenful of
+# sprites does not lose some sprites, it loses the picture.
+#
+# Raising the reservation moves that cliff without removing it. The cause is
+# that a sprite consumed a per-draw resource at all, so this removes the per-
+# sprite cost instead: a sprite becomes six vertices in the frame's vertex
+# arena, and a run of sprites sharing a texture becomes one draw with one slot.
+# A thousand drones from one sheet cost what one drone used to.
+#
+# THIS IS THE PATH THE UI ALREADY USED. boom.graphics.stream and the ui program
+# were built so blit could submit a whole draw list as one draw of per-vertex
+# coloured triangles. A sprite is expressible in exactly that form: the model
+# matrix becomes four corner positions, the source rectangle becomes their uvs,
+# and the tint becomes their vertex colour. So this does not add a third 2D
+# path, it collapses the sprite path into the one that already worked, and
+# sprites and UI geometry share a buffer, a shader and a pipeline.
+#
+# ORDER IS PRESERVED, WHICH IS WHY A BATCH BREAKS ON A TEXTURE CHANGE. 2D draw
+# order is submission order: a sprite covers what was drawn before it. Merging
+# every sprite of one texture into a single draw would lift them all to the
+# position of the first, so a sprite drawn from sheet A, then one from sheet B,
+# then another from A would put the third behind the second. A batch therefore
+# accumulates only while the texture stays the same and flushes when it changes,
+# which coalesces the case games actually produce -- runs of sprites from one
+# sheet -- and never reorders anything.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use boom.graphics.texture.Texture;
+use boom.graphics.sprite.Rect;
+use boom.math.vec.Vec4;
+
+# How many vertices one sprite expands to: two triangles, not indexed.
+#
+# Non-indexed because the arena is a bump allocator shared with the UI's draw
+# lists, and an index buffer would need a second arena whose indices are offset
+# by each draw's first vertex. Six vertices against four plus six indices is
+# eight bytes more per sprite and removes that entirely.
+pub val SPRITE_VERTICES: usize = 6;
+
+# f32 per vertex in the shared 2D layout: position, uv, rgba.
+#
+# The same eight floats boom.graphics.vertex.vertex_format_ui describes and blit
+# emits. Named here so the expansion below cannot drift from the format the
+# pipeline was built with without a test noticing.
+pub val VERTEX_FLOATS: usize = 8;
+
+# f32 one sprite writes.
+pub val SPRITE_FLOATS: usize = SPRITE_VERTICES * VERTEX_FLOATS;
+
+# An open run of 2D geometry that has not been drawn yet.
+#
+# Lives on the Pass rather than the Renderer, so a batch cannot outlive the pass
+# whose projection its vertices were placed for, and so two passes cannot
+# accumulate into each other.
+# ---
+# texture: what the open run samples; nil means the renderer's white texel
+# first:   index of the run's first vertex within its block
+# block:   which arena block the run lives in. A draw names one vertex buffer,
+#          so a run cannot span two of them.
+# count:   vertices accumulated so far
+# open:    whether a run has been started at all
+pub rec Batch2D {
+    texture: *Texture;
+    first:   u32;
+    block:   usize;
+    count:   u32;
+    open:    bool;
+}
+
+# Forget any open run, without drawing it.
+pub fun batch_reset(b: *Batch2D) {
+    b.texture = nil;
+    b.first   = 0;
+    b.block   = 0;
+    b.count   = 0;
+    b.open    = false;
+}
+
+# Whether appending geometry for `texture` has to draw the open run first.
+#
+# A run that is not open has nothing to draw. A run sampling a different texture
+# has to be drawn now to keep submission order, since the new geometry must land
+# on top of it rather than beside it.
+pub fun batch_breaks(b: *Batch2D, texture: *Texture) bool {
+    if (!b.open)              { ret false; }
+    if (b.count == 0)         { ret false; }
+    ret b.texture != texture;
+}
+
+# Whether vertices landing at `first` in `block` continue the open run.
+#
+# The arena is a bump allocator, so consecutive pushes into one block are
+# adjacent and a run is just a block, a first index and a count. That holds only
+# while nothing else pushes between two appends and while the arena does not
+# grow into a new block. This is what checks both rather than assuming them: a
+# gap would make the draw cover the intervening geometry as well as its own, and
+# a block change would make it read the right offsets out of the wrong buffer.
+pub fun batch_continues(b: *Batch2D, block: usize, first: u32) bool {
+    if (!b.open || b.count == 0) { ret false; }
+
+    if (b.block != block)        { ret false; }
+    ret b.first + b.count == first;
+}
+
+# Expand a sprite into six vertices in the shared 2D layout.
+#
+# The corners are computed here rather than by a model matrix in the shader,
+# because the whole point is that a sprite carries no per-draw uniform. Four
+# corner positions in pixels are what a model matrix would have produced anyway,
+# and the pass's projection still maps them to clip space, so a sprite in a
+# scene pass is placed in world units and one in an overlay pass in window
+# pixels exactly as before.
+#
+# Winding is not meaningful: the 2D pipeline does not cull. The two triangles
+# are 0-1-2 and 0-2-3 over the corners in clockwise screen order.
+# ---
+# dest: destination rectangle, in the pass's units
+# src:  source rectangle in texture space, 0 to 1
+# tint: colour multiplied into the sample, per vertex
+# out:  where to write SPRITE_FLOATS floats
+pub fun sprite_expand(dest: Rect, src: Rect, tint: Vec4, out: *f32) {
+    val x0: f32 = dest.x;
+    val y0: f32 = dest.y;
+    val x1: f32 = dest.x + dest.w;
+    val y1: f32 = dest.y + dest.h;
+
+    val u0: f32 = src.x;
+    val v0: f32 = src.y;
+    val u1: f32 = src.x + src.w;
+    val v1: f32 = src.y + src.h;
+
+    corner(out, 0, x0, y0, u0, v0, tint);
+    corner(out, 1, x1, y0, u1, v0, tint);
+    corner(out, 2, x1, y1, u1, v1, tint);
+
+    corner(out, 3, x0, y0, u0, v0, tint);
+    corner(out, 4, x1, y1, u1, v1, tint);
+    corner(out, 5, x0, y1, u0, v1, tint);
+}
+
+# Write one vertex of the expansion.
+fun corner(out: *f32, i: usize, x: f32, y: f32, u: f32, v: f32, tint: Vec4) {
+    val o: usize = i * VERTEX_FLOATS;
+    out[o + 0] = x;
+    out[o + 1] = y;
+    out[o + 2] = u;
+    out[o + 3] = v;
+    out[o + 4] = tint.x;
+    out[o + 5] = tint.y;
+    out[o + 6] = tint.z;
+    out[o + 7] = tint.w;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# The expansion and the flush policy are the whole of the batcher's correctness
+# and neither needs a device. What a device would add is whether the draw call
+# is issued, which the renderer's own path covers.
+
+test "batch: a sprite expands to two triangles covering the destination rect" {
+    var out: [48]f32;
+    var i: usize = 0;
+    for (i < 48) { out[i] = -1.0; i = i + 1; }
+
+    sprite_expand(Rect{x: 10.0, y: 20.0, w: 30.0, h: 40.0},
+                  Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
+                  Vec4{x: 1.0, y: 1.0, z: 1.0, w: 1.0}, ?out[0]);
+
+    # Derived from the rectangle, not read off the output: the corners are
+    # (10,20) and (40,60), and every vertex must be one of the four.
+    var v: usize = 0;
+    for (v < SPRITE_VERTICES) {
+        val x: f32 = out[v * VERTEX_FLOATS + 0];
+        val y: f32 = out[v * VERTEX_FLOATS + 1];
+        if (x != 10.0 && x != 40.0) { ret 1; }
+        if (y != 20.0 && y != 60.0) { ret 2; }
+        v = v + 1;
+    }
+
+    # Both triangles must be non-degenerate, or the sprite covers nothing.
+    if (area2(?out[0], 0, 1, 2) == 0.0) { ret 3; }
+    if (area2(?out[0], 3, 4, 5) == 0.0) { ret 4; }
+
+    # Together they must cover the rectangle exactly: 30 * 40 = 1200.
+    val total: f32 = abs_f(area2(?out[0], 0, 1, 2)) * 0.5
+                   + abs_f(area2(?out[0], 3, 4, 5)) * 0.5;
+    if (total != 1200.0) { ret 5; }
+    ret 0;
+}
+
+test "batch: the uvs follow the source rect and match their corners" {
+    var out: [48]f32;
+    sprite_expand(Rect{x: 0.0, y: 0.0, w: 8.0, h: 8.0},
+                  Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.25},
+                  Vec4{x: 1.0, y: 1.0, z: 1.0, w: 1.0}, ?out[0]);
+
+    # A vertex on the left edge samples the source's left edge, and so on for
+    # each side. This is what catches a transposed or offset uv, which renders
+    # as a recognisable sprite from the wrong cell of the sheet.
+    var v: usize = 0;
+    for (v < SPRITE_VERTICES) {
+        val o: usize = v * VERTEX_FLOATS;
+        val left: bool = out[o + 0] == 0.0;
+        val top:  bool = out[o + 1] == 0.0;
+        var want_u: f32 = 0.375;
+        var want_v: f32 = 0.75;
+        if (left) { want_u = 0.25; }
+        if (top)  { want_v = 0.5; }
+        if (out[o + 2] != want_u) { ret 1; }
+        if (out[o + 3] != want_v) { ret 2; }
+        v = v + 1;
+    }
+    ret 0;
+}
+
+test "batch: the tint reaches every vertex" {
+    # The tint is per vertex now rather than a uniform, so a sprite whose
+    # expansion filled only some vertices would render as a colour gradient
+    # instead of a flat tint.
+    var out: [48]f32;
+    sprite_expand(Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
+                  Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
+                  Vec4{x: 0.25, y: 0.5, z: 0.75, w: 0.5}, ?out[0]);
+    var v: usize = 0;
+    for (v < SPRITE_VERTICES) {
+        val o: usize = v * VERTEX_FLOATS;
+        if (out[o + 4] != 0.25) { ret 1; }
+        if (out[o + 5] != 0.5)  { ret 2; }
+        if (out[o + 6] != 0.75) { ret 3; }
+        if (out[o + 7] != 0.5)  { ret 4; }
+        v = v + 1;
+    }
+    ret 0;
+}
+
+test "batch: a run breaks on a texture change and not on a repeat" {
+    var a: Texture;
+    var b: Texture;
+    var t: Batch2D;
+    batch_reset(?t);
+
+    # Nothing accumulated yet, so there is nothing to break.
+    if (batch_breaks(?t, ?a)) { ret 1; }
+
+    t.open    = true;
+    t.texture = ?a;
+    t.count   = 6;
+    if (batch_breaks(?t, ?a))  { ret 2; }
+    if (!batch_breaks(?t, ?b)) { ret 3; }
+    # nil is the white texel, which is a different texture from any other.
+    if (!batch_breaks(?t, nil)) { ret 4; }
+    ret 0;
+}
+
+test "batch: a run only continues when the arena put the vertices next to it" {
+    # A push that did not land immediately after the run means something else
+    # took arena space in between. Extending the run over it would draw that
+    # geometry too, with this run's texture.
+    var t: Batch2D;
+    batch_reset(?t);
+    t.open  = true;
+    t.block = 0;
+    t.first = 12;
+    t.count = 6;
+    if (!batch_continues(?t, 0, 18)) { ret 1; }
+    if (batch_continues(?t, 0, 19))  { ret 2; }
+    if (batch_continues(?t, 0, 17))  { ret 3; }
+
+    # Contiguous offsets in a different block are a different buffer entirely.
+    # Without the block check this draw would read block 0's offsets out of
+    # block 1, which is geometry that exists and is not this run's.
+    if (batch_continues(?t, 1, 18)) { ret 4; }
+
+    batch_reset(?t);
+    if (batch_continues(?t, 0, 0)) { ret 5; }
+    ret 0;
+}
+
+# Twice the signed area of a triangle, for the coverage checks.
+fun area2(v: *f32, a: usize, b: usize, c: usize) f32 {
+    val ax: f32 = v[a * VERTEX_FLOATS + 0];
+    val ay: f32 = v[a * VERTEX_FLOATS + 1];
+    val bx: f32 = v[b * VERTEX_FLOATS + 0];
+    val by: f32 = v[b * VERTEX_FLOATS + 1];
+    val cx: f32 = v[c * VERTEX_FLOATS + 0];
+    val cy: f32 = v[c * VERTEX_FLOATS + 1];
+    ret (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+}
+
+fun abs_f(x: f32) f32 {
+    if (x < 0.0) { ret 0.0 - x; }
+    ret x;
+}
