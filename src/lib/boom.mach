@@ -16,6 +16,7 @@ fwd boom.timestep;
 fwd boom.event;
 fwd boom.input;
 fwd boom.vfs;
+fwd boom.audio;
 fwd boom.log;
 fwd boom.window;
 fwd boom.math;
