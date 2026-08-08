@@ -144,6 +144,8 @@ use boom.graphics.material.material_texture;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
+use boom.graphics.camera2d.Camera2D;
+use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
@@ -448,6 +450,10 @@ pub rec PassDesc {
     target:      *RenderTarget;
     perspective: u8;
     camera:      *Camera;
+    # The 2D view, for a pass that is not perspective. nil is the pixel-space
+    # default: origin at the target's top left, one world unit to one pixel,
+    # which is what a UI overlay wants.
+    camera2d:    *Camera2D;
     clear:       u8;
     clear_color: Vec4;
 }
@@ -461,6 +467,7 @@ pub fun pass_scene(camera: *Camera) PassDesc {
         target:      nil,
         perspective: 1,
         camera:      camera,
+        camera2d:    nil,
         clear:       1,
         clear_color: vec4(0.08, 0.09, 0.12, 1.0),
     };
@@ -474,6 +481,30 @@ pub fun pass_overlay() PassDesc {
         target:      nil,
         perspective: 0,
         camera:      nil,
+        camera2d:    nil,
+        clear:       0,
+        clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+    };
+}
+
+# a 2D world pass seen through a camera: pan, zoom and roll
+#
+# The same pass as pass_overlay in every other respect. The difference is
+# whose coordinates the draws are in: an overlay is placed in the target's
+# pixels, and this is placed in world units the camera maps onto them.
+#
+# A game wants both in the same frame, which is the reason they are separate
+# descriptions rather than one with an optional field: the world moves with the
+# camera and the UI drawn over it does not.
+# ---
+# camera: the view; borrowed for the duration of the pass, not copied
+# ret:    the pass description
+pub fun pass_world(camera: *Camera2D) PassDesc {
+    ret PassDesc{
+        target:      nil,
+        perspective: 0,
+        camera:      nil,
+        camera2d:    camera,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
     };
@@ -543,8 +574,17 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.projection = camera_projection(d.camera);
     }
     or {
-        p.view       = mat4_identity();
-        p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
+        p.view = mat4_identity();
+        if (d.camera2d != nil) {
+            # The camera folds into the projection rather than riding in the
+            # view, because the 2D program takes a single matrix: its vertices
+            # arrive already placed, so there is no model transform to combine
+            # a separate view with.
+            p.projection = camera2d_matrix(d.camera2d, p.width::f32, p.height::f32);
+        }
+        or {
+            p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
+        }
     }
 
     if (d.target != nil) {
