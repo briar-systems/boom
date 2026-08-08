@@ -1,9 +1,9 @@
 # a position, orientation, and scale, and the model matrix it produces
 #
 # a Transform is the game-facing way to place a mesh in the world. a 3D
-# pass takes one per draw and uploads the composed model matrix as
-# u_model. it lives in boom.math because placement is shared vocabulary:
-# physics integrates one, graphics renders through it.
+# pass takes one per draw and uploads the composed model matrix into that
+# draw's uniform slot. it lives in boom.math because placement is shared
+# vocabulary: physics integrates one, graphics renders through it.
 
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;

@@ -1,8 +1,9 @@
 # a viewpoint producing the view and projection matrices for a draw
 #
-# the game configures a Camera and passes it to draw, which uploads its
-# view and projection as u_view and u_projection. the camera is a plain
-# value the game owns and mutates; graphics imposes no scene structure.
+# the game configures a Camera and hands it to pass_scene, which turns it
+# into the view and projection every draw in that pass combines with its own
+# transform. the camera is a plain value the game owns and mutates; graphics
+# imposes no scene structure.
 
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;

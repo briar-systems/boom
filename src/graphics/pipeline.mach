@@ -619,11 +619,19 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
 pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u32) {
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.handle);
 
+    # A POSITIVE HEIGHT, NOT A FLIPPED VIEWPORT. There are two ways to reach
+    # Vulkan's downward Y: negate it in the projection, or give the viewport a
+    # negative height with y at the bottom. boom does the former (see
+    # boom.math.mat). Doing both cancels out, and the result looks correct on
+    # anything symmetrical about the horizontal midline, so it survives the
+    # obvious check and shows up on the first asymmetric scene.
     var vpt: vk.Viewport;
     vpt.x        = 0.0;
     vpt.y        = 0.0;
     vpt.width    = width::f32;
     vpt.height   = height::f32;
+    # Matching the [0, 1] clip depth the projections produce. A [-1, 1] range
+    # here would map the near half of every frustum outside the depth buffer.
     vpt.minDepth = 0.0;
     vpt.maxDepth = 1.0;
     vk.vkCmdSetViewport(cmd, 0, 1, ?vpt);
