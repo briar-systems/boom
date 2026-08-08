@@ -25,7 +25,11 @@
 # what a draw is: a mesh, a skinned mesh, or a sprite. The renderer builds
 # them on demand and keeps them (boom.graphics.cache), keyed by that
 # choice and by the mesh's vertex layout, because Vulkan bakes the vertex
-# input into the pipeline too. The shaders are Mach, compiled to SPIR-V by
+# input into the pipeline too. A game supplies its own stages through
+# boom.graphics.shader instead, which is the supported way to do lighting:
+# boom ships one lit program as a default and does not intend to grow a
+# lighting system, since how a surface responds to light is the game's
+# decision. See examples/shader. The shaders are Mach, compiled to SPIR-V by
 # the build-shaders step and embedded by boom.graphics.spirv; they live in
 # shaders/.
 #
@@ -225,6 +229,20 @@ fwd boom.graphics.renderer.pass_draw_skinned_material;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
 fwd boom.graphics.renderer.pass_draw_triangles;
+
+# A game's own shading. See boom.graphics.shader: a Shader is a pair of SPIR-V
+# modules, and the pipelines it needs are built underneath it, so a game that
+# writes its own lighting never names a pipeline or a render pass.
+fwd boom.graphics.shader.Shader;
+fwd boom.graphics.shader.shader;
+fwd boom.graphics.shader.shader_set_state;
+fwd boom.graphics.shader.shader_pipelines;
+fwd boom.graphics.shader.shader_delete;
+fwd boom.graphics.shader.MAX_SHADER_PIPELINES;
+fwd boom.graphics.renderer.pass_set_user;
+fwd boom.graphics.renderer.pass_draw_shaded;
+fwd boom.graphics.renderer.pass_draw_shaded_skinned;
+fwd boom.graphics.descriptor.USER_BYTES;
 
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;

@@ -1,0 +1,267 @@
+# The escape hatch: a game drawing with its own shader.
+#
+# boom ships one lit program, and that is a default rather than a system. A game
+# that wants its own lighting, its own fog, its own stylised anything supplies a
+# pair of SPIR-V modules and draws with them. This is what that costs the game:
+# a gfx.Shader, a gfx.pass_draw_shaded, and a block of its own parameters. No
+# pipeline, no render pass, no descriptor set, no vk import.
+#
+# Two cubes are drawn side by side. The left one goes through
+# gfx.pass_draw_material and the built-in program; the right one goes through a
+# gfx.Shader. They spin together, and if the hatch is wired correctly they look
+# identical.
+#
+# WHAT THIS PROVES, AND WHAT IT DOES NOT. The shader here is built from boom's
+# own embedded modules, because a game's SPIR-V has to come from somewhere and
+# this example does not compile any. So it proves the plumbing end to end -- that
+# a pipeline is built against the pass in use, bound, and drawn through, and that
+# the descriptor set the engine binds satisfies a shader that did not come from
+# the cache. It does not prove that an arbitrary game shader compiles, which is
+# a question for the shader compiler rather than for this API.
+#
+# It also sets a game uniform block through gfx.pass_set_user. The built-in
+# fragment stage does not read binding 4, so nothing on screen depends on it;
+# what is being checked is that writing it costs a shaded draw nothing and
+# upsets no validation. A game's own fragment stage declares that binding and
+# reads its lighting parameters out of it.
+#
+# The assets are the cube example's, referenced rather than copied: two binary
+# files duplicated in a repository is two files to keep in step. Run it from this
+# directory so the relative paths resolve.
+
+use std.runtime;
+use std.print;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use input: boom.input;
+use gfx: boom.graphics;
+use gm:  boom.math;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+
+# What a game's shader reads at binding 4.
+#
+# Its layout is the game's business: boom copies the bytes and never looks at
+# them. The only rule is that it fits in gfx.USER_BYTES and matches what the
+# shader declares, and the usual std140 rules apply, which is why the direction
+# is a vec4 rather than a vec3.
+rec Light {
+    direction: gm.Vec4;
+    colour:    gm.Vec4;
+}
+
+# ---
+# renderer:  the window's renderer, which owns the device
+# mesh:      the cube geometry
+# texture:   the surface texture
+# material:  the texture binding and base colour both cubes draw with
+# shader:    the game's own program, used for the right-hand cube
+# camera:    the 3D viewpoint
+# left:      the built-in cube's placement
+# right:     the shaded cube's placement
+# light:     the block the game shader would read
+# ready:     whether init succeeded
+# paused:    whether the spin is advancing
+rec Game {
+    renderer: gfx.Renderer;
+    mesh:     gfx.Mesh;
+    texture:  gfx.Texture;
+    material: gfx.Material;
+    shader:   gfx.Shader;
+    camera:   gfx.Camera;
+    left:     gm.Transform;
+    right:    gm.Transform;
+    light:    Light;
+    ready:    u8;
+    paused:   bool;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready  = 0;
+    g.paused = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
+    if (is_err[bool, gfx.Error](ri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
+        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
+    if (is_err[gfx.Mesh, gfx.Error](loaded)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](loaded);
+        print.eprintlnf("mesh load error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](loaded);
+
+    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load(d, "../cube/assets/checker.qoi");
+    if (is_err[gfx.Texture, gfx.Error](tex)) {
+        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tex);
+        print.eprintlnf("texture load error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.texture = unwrap_ok[gfx.Texture, gfx.Error](tex);
+
+    g.material = gfx.material();
+    gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
+
+    # THE WHOLE OF THE HATCH. Two SPIR-V modules in, a Shader out. Nothing is
+    # built yet: the pipelines a shader needs depend on the render pass and the
+    # vertex layout it is drawn with, and neither is known until a draw.
+    #
+    # A game would pass its own compiled modules here, most likely from an
+    # #[embed]. These are boom's, for the reason in the header.
+    val sr: Result[bool, gfx.Error] = gfx.shader(?g.shader,
+                                                 ?gfx.MESH_VERT_SPV[0], $length_of(gfx.MESH_VERT_SPV),
+                                                 ?gfx.LIT_FRAG_SPV[0],  $length_of(gfx.LIT_FRAG_SPV));
+    if (is_err[bool, gfx.Error](sr)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](sr);
+        print.eprintlnf("shader error: {}", gfx.error_msg(?e));
+        ret;
+    }
+
+    g.light.direction = gm.vec4(0.4, 0.8, 0.45, 0.0);
+    g.light.colour    = gm.vec4(1.0, 0.96, 0.88, 1.0);
+
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 1.5, 5.5),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.left  = gm.transform_identity();
+    g.right = gm.transform_identity();
+    g.left.position  = gm.vec3(0.0 - 1.4, 0.0, 0.0);
+    g.right.position = gm.vec3(1.4, 0.0, 0.0);
+    g.ready = 1;
+}
+
+var spin: f32 = 0.0;
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+
+    if (input.key_pressed(?ctx.input, input.KEY_SPACE)) { g.paused = !g.paused; }
+    if (!g.paused) {
+        val steer: f32 = input.axis(?ctx.input, input.KEY_A, input.KEY_D);
+        spin = spin + 0.02 + steer * 0.04;
+        val q: gm.Quat = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), spin);
+        g.left.rotation  = q;
+        g.right.rotation = q;
+    }
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) { ret; }
+    g.camera.aspect = w / h;
+
+    var opened: bool = false;
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    if (!opened) { ret; }
+
+    var desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
+    var p: gfx.Pass = gfx.pass_begin(?g.renderer, ?desc);
+
+    # The engine's program.
+    gfx.pass_draw_material(?p, ?g.mesh, ?g.material, ?g.left);
+
+    # The game's. The block is set once and read by every draw that follows, so
+    # a game with one light sets it here and a game with per-object parameters
+    # sets it again before each draw.
+    if (!gfx.pass_set_user(?p, (?g.light):~*u8, $size_of(Light))) {
+        print.eprintln("the light block does not fit in a uniform slot");
+    }
+    gfx.pass_draw_shaded(?p, ?g.mesh, ?g.material, ?g.right, ?g.shader);
+
+    gfx.pass_end(?p);
+
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    }
+
+    # A shaded draw that could not build its pipeline is dropped and counted, so
+    # the failure is a number rather than a cube that is quietly missing.
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln("warning: draws were dropped");
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+
+    print.printlnf("the shader built {} pipeline(s)", gfx.shader_pipelines(?g.shader));
+
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    gfx.shader_delete(?g.shader, d);
+    gfx.mesh_delete(d, ?g.mesh);
+    gfx.texture_delete(d, ?g.texture);
+    gfx.renderer_dnit(?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "boom.graphics: a game's own shader",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("failed to open window");
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    run(?ctx, ?app);
+    context_shutdown(?ctx);
+    ret 0;
+}

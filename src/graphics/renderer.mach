@@ -27,9 +27,12 @@
 #
 # There is no per-pass or per-material shader. A pipeline bakes both stages
 # and the whole fixed-function state into one immutable object, so choosing
-# a shader is choosing a pipeline. The renderer owns the two the engine
-# needs, and a game that wants a third gets it by building a Pipeline
-# against a pass rather than by handing a program to a draw.
+# a shader is choosing a pipeline. The renderer owns the ones the engine
+# needs, and a game that wants its own supplies a boom.graphics.Shader and
+# draws with pass_draw_shaded. The pipelines that needs are built under the
+# Shader, keyed by the pass and the vertex layout each draw actually uses, so
+# a game never names a Pipeline or a RenderPass. Its shading parameters go in
+# the block set by pass_set_user, which arrives at binding 4.
 #
 # A 3D draw takes a uniform slot. GL set named uniforms on the bound program
 # between draws; a Vulkan draw reads a buffer range that must already hold
@@ -122,6 +125,10 @@ use boom.graphics.descriptor.descriptors_write_palette;
 use boom.graphics.descriptor.descriptors_bind_palette;
 use boom.graphics.descriptor.MAX_PALETTES;
 use boom.graphics.descriptor.COLOUR_OFFSET;
+use boom.graphics.descriptor.USER_OFFSET;
+use boom.graphics.descriptor.USER_BYTES;
+use boom.graphics.shader.Shader;
+use boom.graphics.shader.shader_pipeline;
 use boom.graphics.image.sampler_init;
 use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.sampler_dnit;
@@ -628,6 +635,18 @@ pub rec Pass {
     cull:       bool;
     frustum:    Frustum;
     visible:    Rect;
+
+    # The render pass draws are recorded into: the window's, or an offscreen
+    # target's. Kept here because a game shader builds its pipelines against
+    # whichever pass it is actually drawn in, and that is only known once the
+    # pass is open.
+    pass:       vk.RenderPass;
+
+    # The game's own uniform block, set by pass_set_user, copied into each
+    # draw's slot. Borrowed for the duration of the pass, not copied here, so a
+    # game may change it between draws by calling pass_set_user again.
+    user:       *u8;
+    user_len:   usize;
 }
 
 # begin a pass
@@ -654,16 +673,20 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
     batch_reset(?p.batch);
-    p.cull = d.cull != 0;
+    p.cull     = d.cull != 0;
+    p.user     = nil;
+    p.user_len = 0;
 
     p.target = d.target;
     if (d.target != nil) {
         p.width  = d.target.width;
         p.height = d.target.height;
+        p.pass   = d.target.pass;
     }
     or {
         p.width  = r.width;
         p.height = r.height;
+        p.pass   = r.frame.pass;
     }
 
     if (d.perspective != 0) {
@@ -896,7 +919,7 @@ fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize
 # m: the mesh to draw
 # t: the model transform
 pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), nil);
+    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), nil, nil);
 }
 
 # submit a 3D mesh draw with a material
@@ -909,7 +932,76 @@ pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
 # mat: the material to draw with
 # t:   the model transform
 pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil);
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, nil);
+}
+
+# Set the game's own uniform block for the draws that follow.
+#
+# WHY THIS EXISTS. boom's built-in shading is a default, not a system: a game
+# that wants its own lighting, its own fog, its own anything supplies a Shader,
+# and a shader whose parameters are baked in at compile time is not useful. This
+# is where a light direction, a colour, a time value or whatever else the game's
+# shader reads comes from. It arrives at binding 4.
+#
+# BORROWED UNTIL THE NEXT DRAW, then copied. The bytes are read at each
+# following draw rather than now, so a game may fill one struct, draw, change
+# it, and draw again, and each draw sees what the struct held when it was
+# submitted. The pointer must stay valid until the last draw that uses it.
+#
+# Passing nil clears it, and the following draws read an undefined block if
+# their shader declares binding 4.
+# ---
+# p:   the open pass
+# data: the block's bytes, or nil to clear
+# len:  its length, at most USER_BYTES
+# ret:  false when the block is larger than a slot's user region, in which case
+#       nothing is set and the draws that follow are unaffected
+pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
+    if (data == nil) {
+        p.user     = nil;
+        p.user_len = 0;
+        ret true;
+    }
+    if (len == 0 || len > USER_BYTES) { ret false; }
+    p.user     = data;
+    p.user_len = len;
+    ret true;
+}
+
+# Submit a mesh drawn with the game's own shader.
+#
+# Everything else is as pass_draw_material: the material supplies the texture and
+# the base colour, the transform places the mesh, and the draw is culled against
+# the pass frustum. Only the program differs, and with it whatever the game's
+# fragment stage does with the block set by pass_set_user.
+#
+# The pipeline for this mesh's vertex layout and this pass is built on the first
+# draw that needs it and reused afterwards, so the first frame a shader appears
+# in is more expensive than the rest.
+# ---
+# p:   the open pass
+# m:   the mesh to draw
+# mat: the material to draw with
+# t:   the model transform
+# sh:  the game's shader
+pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, sh);
+}
+
+# Submit a skinned mesh drawn with the game's own shader.
+#
+# The shader's vertex stage must read the joint palette at binding 3 and place
+# the vertex by it, as the built-in skinned stage does; a shader that ignores it
+# draws the mesh in its rest pose rather than failing.
+# ---
+# p:    the open pass
+# m:    the skinned mesh to draw
+# mat:  the material to draw with
+# pose: the pose whose joint matrices place the vertices
+# t:    the model transform
+# sh:   the game's shader
+pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform, sh: *Shader) {
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, sh);
 }
 
 # the shared body of the mesh draws, skinned and not
@@ -918,7 +1010,11 @@ pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
 # what goes in the uniform block, and whether a joint palette is uploaded, but
 # share the texture binding, the base colour, and the slot bookkeeping, so
 # splitting them would duplicate the parts that are easy to get subtly wrong.
-fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose) {
+#
+# a shader of nil draws through the built-in program for the mesh; a shader
+# replaces only the program, so a game's own shading gets the same culling,
+# slot handling, texture binding and palette upload as a built-in draw.
+fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
     val r:    *Renderer = p.renderer;
 
     # Any open 2D run has to be drawn before this mesh, or it would be recorded
@@ -985,6 +1081,14 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
                                    (?basec):~*u8, $size_of(TintUniforms))) { ret; }
 
+    # The game's own block, if this pass has one. Copied per draw rather than
+    # held by reference, so a game may change the struct between draws and each
+    # draw keeps what it was submitted with.
+    if (p.user != nil) {
+        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
+                                       p.user, p.user_len)) { ret; }
+    }
+
     # Every fragment stage samples, so an untextured draw gets the renderer's
     # white texel and comes out as its base colour.
     var src: *Texture = tex;
@@ -1011,7 +1115,17 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
         descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal);
     }
 
-    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, program, ?m.format);
+    var pipe: *Pipeline = nil;
+    if (sh != nil) {
+        # Built against this pass rather than the window's, because a pipeline
+        # is only valid in a render pass compatible with the one it was made
+        # for, and a game shader drawn into an offscreen target would otherwise
+        # be using the window's.
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?m.format);
+    }
+    or {
+        pipe = cache_get(?r.pipes, ?r.vk, program, ?m.format);
+    }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
         ret;
@@ -1037,7 +1151,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), pose);
+    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), pose, nil);
 }
 
 # submit a skinned mesh draw with a material
@@ -1048,7 +1162,7 @@ pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned_material(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose);
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, nil);
 }
 
 # submit a 2D sprite draw covering a whole texture
@@ -1228,5 +1342,28 @@ test "renderer: a full uniform ring drops draws and counts them" {
     # draw's transform, so exhaustion has to be visible instead.
     if (take_slot(?p) != MAX_SLOTS) { ret 1; }
     if (r.dropped != 1)             { ret 2; }
+    ret 0;
+}
+
+test "renderer: a game block larger than a slot's region is refused, not truncated" {
+    # Truncating would hand the shader a struct whose tail is whatever the last
+    # draw left there, which shades wrongly rather than not at all, and does it
+    # only for the fields past the cut. Refusing leaves the previous block in
+    # place and reports it, so the caller finds out at the call that is wrong.
+    var p: Pass;
+    p.user     = nil;
+    p.user_len = 0;
+    var block: [512]u8;
+
+    if (pass_set_user(?p, ?block[0], USER_BYTES + 1)) { ret 1; }
+    if (p.user != nil || p.user_len != 0)             { ret 2; }
+
+    # A block of exactly the advertised size is accepted.
+    if (!pass_set_user(?p, ?block[0], USER_BYTES))    { ret 3; }
+    if (p.user != ?block[0] || p.user_len != USER_BYTES) { ret 4; }
+
+    # And nil clears it rather than being treated as a zero-length block.
+    if (!pass_set_user(?p, nil, 0)) { ret 5; }
+    if (p.user != nil)              { ret 6; }
     ret 0;
 }

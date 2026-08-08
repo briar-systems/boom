@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: **a game can draw with its own shaders.** `boom.graphics.shader` takes a pair of SPIR-V modules and gives back a `Shader`; `pass_draw_shaded` and `pass_draw_shaded_skinned` draw with it. This is the supported way to do lighting: boom ships one lit program as a default and does not intend to grow a lighting system, because how a surface responds to light is the game's decision and an engine that decided it would be wrong for the next game.
+
+  A `Shader` owns its pipelines rather than exposing them, so a game never names a `Pipeline`, a `RenderPass` or a descriptor set, and never imports `vk`. A Vulkan pipeline bakes the stages together with the vertex layout and the render pass it is used in, so one pair of shaders needs a different pipeline for every mesh layout and every target it is drawn into; those are built underneath the `Shader` on first use, keyed by the pass and the layout each draw actually needs. `shader_pipelines` reports how many, which is the cheapest signal that something is generating render targets or vertex layouts per frame. Exhausting the cache drops the draw and counts it rather than evicting a pipeline a command buffer may still be executing.
+
+  Before this, the documented path was "build a `Pipeline` against a pass", which was not callable: there was no way to get a pass handle, `set_layout_full` was not exported, and no draw call took a pipeline. The claim had no executing coverage, which is where every defect found in this engine so far has been.
+
+- graphics: `pass_set_user`, a game-owned uniform block delivered at binding 4. Without it a custom shader can only shade with constants baked in at compile time, which does not cover the case it exists for. The block is copied per draw, so a game may change the struct between draws and each draw keeps what it was submitted with. A uniform slot grew from 512 to 768 bytes to hold it, since a 256-byte alignment leaves only two usable offsets in 512; that is 384 KB of uniform ring across both frames, up from 256 KB.
+
+- examples/shader: two cubes side by side, one through the built-in program and one through a `Shader`, with a light block set through `pass_set_user`.
+
+### Added
 - graphics: frustum culling. A pass resolves what it can see when it opens and skips draws whose bounds fall outside it. On by default, since a draw that cannot be seen is not worth submitting and a game should not have to remember to ask; `PassDesc.cull = 0` turns it off for a pass whose output is not what the camera sees, such as a shadow map, or for a game culling upstream. `renderer_culled` reports the count.
 
   `Mesh` gains a local-space `bounds`, computed once at upload from the POSITION attribute, since that is the only moment the vertices are on the CPU. Skinned meshes are bounded by their pose rather than their rest position, by transforming the rest box through each joint matrix and unioning: a character who reaches or is flung leaves the box it was authored in, and culling against that box pops it out of view while it is plainly still on screen. The joint matrices are already built for the palette upload, so this reuses them.

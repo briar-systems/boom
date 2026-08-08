@@ -73,13 +73,35 @@ pub val UNIFORM_ALIGN: usize = 256;
 # colour at COLOUR_OFFSET. The widest transform block is 144 bytes and the
 # colour is 16, so 240 of the 512 bytes are padding, bought in exchange for a
 # stride that does not depend on the device.
-pub val SLOT_BYTES: usize = 512;
+pub val SLOT_BYTES: usize = 768;
 
 # Where a draw's colour block sits inside its slot.
 #
 # Both stages read from the same slot, which is why one descriptor write path
 # serves the sprite tint and the mesh base colour.
 pub val COLOUR_OFFSET: usize = 256;
+
+# Where a draw's game-supplied uniform block sits within its slot.
+#
+# THE THIRD SUB-SLOT, AND WHY THE SLOT GREW TO HOLD IT. A game writing its own
+# shading needs somewhere to put what that shading is parameterised by: a light
+# direction, an ambient term, a time value. boom's own blocks are the transform
+# and the tint, and neither has room to spare.
+#
+# A uniform binding's buffer offset must satisfy minUniformBufferOffsetAlignment,
+# which is as much as 256 on real devices, so the aligned points inside a slot
+# are 256 bytes apart and a 512-byte slot has exactly two. Adding a third means
+# a 768-byte slot. That is 384 KB across the ring for both frames in flight,
+# against 256 KB before, to make the engine usable by a game that wants its own
+# shading at all.
+pub val USER_OFFSET: usize = 512;
+
+# The most a game may put in that block.
+#
+# One aligned region, so 256 bytes: sixteen vec4s, which is a directional light
+# with room left over. A game needing more than this is describing per-draw data
+# that wants a storage buffer rather than a uniform block.
+pub val USER_BYTES: usize = 256;
 
 # Palette slots in one block of the palette ring.
 #
@@ -461,7 +483,16 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     ii.imageView   = view;
     ii.imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    var writes: [3]vk.WriteDescriptorSet;
+    # The game's own block, always bound. A shader that does not declare
+    # binding 4 simply never reads it, and one that does must not find an
+    # undefined descriptor there, which is what leaving it unwritten would
+    # produce for every draw that did not set user data.
+    var ui: vk.DescriptorBufferInfo;
+    ui.buffer = d.rings[frame].handle;
+    ui.offset = base + USER_OFFSET::u64;
+    ui.range  = USER_BYTES::u64;
+
+    var writes: [4]vk.WriteDescriptorSet;
     var n: u32 = 0;
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -485,6 +516,18 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[n].pImageInfo       = ?ii;
     writes[n].pBufferInfo      = nil;
+    writes[n].pTexelBufferView = nil;
+    n = n + 1;
+
+    writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[n].pNext            = nil;
+    writes[n].dstSet           = set;
+    writes[n].dstBinding       = 4;
+    writes[n].dstArrayElement  = 0;
+    writes[n].descriptorCount  = 1;
+    writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[n].pImageInfo       = nil;
+    writes[n].pBufferInfo      = ?ui;
     writes[n].pTexelBufferView = nil;
     n = n + 1;
 
@@ -620,6 +663,20 @@ test "descriptor: both uniform ranges in a slot are correctly aligned" {
     if (COLOUR_OFFSET == 0)                   { ret 3; }
     # The colour must not run past the end of its slot.
     if (COLOUR_OFFSET + 16 > SLOT_BYTES)      { ret 4; }
+    ret 0;
+}
+
+test "descriptor: the game's own block is aligned and fits inside a slot" {
+    # The same alignment rule as the colour, and the same failure mode: an
+    # unaligned offset is accepted on hardware reporting 16 and rejected on
+    # hardware reporting 256, so it works wherever it was written and fails on
+    # someone else's machine.
+    if ((USER_OFFSET % UNIFORM_ALIGN) != 0) { ret 1; }
+    # It must not overlap the colour block below it.
+    if (USER_OFFSET < COLOUR_OFFSET + 16)   { ret 2; }
+    # And a full-size block must not run past the end of the slot, or a game
+    # writing USER_BYTES would be refused at the draw rather than here.
+    if (USER_OFFSET + USER_BYTES > SLOT_BYTES) { ret 3; }
     ret 0;
 }
 

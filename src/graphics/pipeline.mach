@@ -300,6 +300,10 @@ pub fun set_layout_skinned() SetLayout {
     var l: SetLayout = set_layout();
     set_layout_at(?l, 0, BINDING_UNIFORM);
     set_layout_at(?l, 3, BINDING_STORAGE);
+    # Binding 4 is the game's own uniform block, declared in every layout so a
+    # game shader and a built-in one are interchangeable at the same pipeline
+    # layout. A shader that does not declare it never reads it.
+    set_layout_at(?l, 4, BINDING_UNIFORM);
     ret l;
 }
 
@@ -321,6 +325,10 @@ pub fun set_layout_full() SetLayout {
     set_layout_at(?l, 1, BINDING_SAMPLER);
     set_layout_at(?l, 2, BINDING_UNIFORM);
     set_layout_at(?l, 3, BINDING_STORAGE);
+    # Binding 4 is the game's own uniform block, declared in every layout so a
+    # game shader and a built-in one are interchangeable at the same pipeline
+    # layout. A shader that does not declare it never reads it.
+    set_layout_at(?l, 4, BINDING_UNIFORM);
     ret l;
 }
 

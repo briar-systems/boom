@@ -1,0 +1,330 @@
+# A game's own shading, without a game touching Vulkan.
+#
+# WHAT THIS IS FOR. boom ships one lit program and does not intend to grow a
+# lighting system: how a surface responds to light is a game's decision, and an
+# engine that decided it would be wrong for the next game. So a game must be
+# able to supply its own vertex and fragment stages and have boom draw with
+# them. This is that, and it is the only supported way to do it.
+#
+# WHAT IT DELIBERATELY HIDES. A Vulkan pipeline is not a shader. It bakes the
+# shader stages together with the vertex layout, the blend and depth state, and
+# the render pass it will be used inside, so the same pair of shaders needs a
+# different pipeline for every mesh layout and every target it is drawn into. A
+# game that had to manage that would be writing the bookkeeping this engine
+# exists to have already written, and would get it wrong in a way that surfaces
+# as a validation error rather than as a picture.
+#
+# So a Shader is the pair of SPIR-V modules and nothing else, and the pipelines
+# are built underneath it, on demand, keyed by the render pass and vertex layout
+# each draw actually needs. A game creates one, draws with it, and deletes it.
+# It never names a pipeline, a render pass, or a descriptor set.
+#
+# WHAT A GAME SHADER MUST DECLARE. The descriptor layout is fixed, because a
+# game shader and a built-in one are drawn through the same slots:
+#
+#   binding 0  uniform  the transform block: view-projection and model
+#   binding 1  sampler  the material's first texture
+#   binding 2  uniform  the tint colour
+#   binding 3  storage  the joint palette, for skinned draws
+#   binding 4  uniform  the game's own block, set by pass_set_user
+#
+# A shader declares only what it reads. Binding 4 is where a game's shading
+# parameters go, and it is the reason this is usable for lighting rather than
+# only for shading with constants baked in.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.device.Device;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.vertex_format_eq;
+use boom.graphics.vertex.vertex_format_standard;
+use boom.graphics.vertex.vertex_format_skinned;
+use boom.graphics.pipeline.Pipeline;
+use boom.graphics.pipeline.PipelineDesc;
+use boom.graphics.pipeline.pipeline_desc_3d;
+use boom.graphics.pipeline.pipeline_init;
+use boom.graphics.pipeline.pipeline_dnit;
+use boom.graphics.pipeline.SetLayout;
+use boom.graphics.pipeline.set_layout_full;
+
+# How many pipelines one shader may build.
+#
+# One per combination of render pass and vertex layout the shader is drawn
+# with. A game typically has one or two of each, so four is generous; a shader
+# that exhausts it is being used across more targets than a frame has, which is
+# a mistake worth reporting rather than growing through.
+pub val MAX_SHADER_PIPELINES: usize = 4;
+
+# One built pipeline and the two things it was built for.
+rec ShaderPipeline {
+    pass:     vk.RenderPass;
+    format:   VertexFormat;
+    pipeline: Pipeline;
+    live:     bool;
+}
+
+# A game-supplied vertex and fragment stage.
+#
+# The SPIR-V is borrowed, not copied: it is almost always an `#[embed]`ed
+# constant with the lifetime of the program. A caller passing a buffer it later
+# frees must delete the shader first.
+# ---
+# vert:  the vertex stage's SPIR-V
+# frag:  the fragment stage's SPIR-V
+# desc:  the fixed-function state, from pipeline_desc_3d or pipeline_desc_2d
+# built: pipelines built so far
+pub rec Shader {
+    vert:  *u8;
+    vlen:  usize;
+    frag:  *u8;
+    flen:  usize;
+    desc:  PipelineDesc;
+    built: [4]ShaderPipeline;
+    count: usize;
+    ready: bool;
+}
+
+# Declare a shader from two SPIR-V modules.
+#
+# Nothing is built here: a pipeline needs a render pass and a vertex layout,
+# and neither is known until a draw. This only records what the shader is, so
+# it cannot fail for reasons a caller would have to handle at a distance from
+# the mistake.
+# ---
+# s:    the shader to initialise
+# vert: the vertex stage's SPIR-V bytes
+# vlen: its length in bytes
+# frag: the fragment stage's SPIR-V bytes
+# flen: its length in bytes
+pub fun shader(s: *Shader, vert: *u8, vlen: usize, frag: *u8, flen: usize) Result[bool, Error] {
+    if (vert == nil || frag == nil) {
+        ret err[bool, Error](error("a shader needs both a vertex and a fragment module"));
+    }
+    # SPIR-V is a stream of 32-bit words with a five-word header, so anything
+    # shorter or misaligned is not a module and would be rejected far away from
+    # here, inside pipeline creation, as an unexplained driver failure.
+    if (vlen < 20 || flen < 20 || (vlen % 4) != 0 || (flen % 4) != 0) {
+        ret err[bool, Error](error("a shader module must be a whole number of SPIR-V words"));
+    }
+
+    s.vert  = vert;
+    s.vlen  = vlen;
+    s.frag  = frag;
+    s.flen  = flen;
+    s.desc  = pipeline_desc_3d();
+    s.count = 0;
+    var i: usize = 0;
+    for (i < MAX_SHADER_PIPELINES) {
+        s.built[i].live = false;
+        i = i + 1;
+    }
+    s.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Choose the blend, depth and cull state the shader draws with.
+#
+# Defaults to pipeline_desc_3d: depth tested, opaque, back faces culled. A game
+# drawing transparent or unlit geometry sets its own. Must be called before the
+# first draw, since it is baked into each pipeline as it is built.
+pub fun shader_set_state(s: *Shader, d: PipelineDesc) {
+    s.desc = d;
+}
+
+# The pipeline for a render pass and vertex layout, building it on first use.
+#
+# Internal to the draw path: a game never calls this, which is the point of the
+# type. Returns nil when the shader is full or the pipeline could not be built,
+# and the caller reports that as a dropped draw rather than drawing with a
+# pipeline meant for different geometry.
+pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, f: *VertexFormat) *Pipeline {
+    if (!s.ready || pass == nil) { ret nil; }
+
+    var i: usize = 0;
+    for (i < s.count) {
+        if (s.built[i].live && s.built[i].pass == pass
+            && vertex_format_eq(?s.built[i].format, f)) {
+            ret ?s.built[i].pipeline;
+        }
+        i = i + 1;
+    }
+
+    if (s.count >= MAX_SHADER_PIPELINES) { ret nil; }
+
+    val n: usize = s.count;
+    var lay: SetLayout = set_layout_full();
+    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass, f, ?s.desc,
+                                               s.vert, s.vlen, s.frag, s.flen, ?lay);
+    if (is_err[bool, Error](r)) { ret nil; }
+
+    s.built[n].pass   = pass;
+    s.built[n].format = @f;
+    s.built[n].live   = true;
+    s.count = n + 1;
+    ret ?s.built[n].pipeline;
+}
+
+# How many pipelines a shader has had to build.
+#
+# One per render pass and vertex layout it is drawn with. A number that keeps
+# climbing means a shader is being used against more combinations than expected,
+# which is the cheapest signal that something is rebuilding a render target or
+# generating vertex layouts per frame.
+pub fun shader_pipelines(s: *Shader) usize {
+    ret s.count;
+}
+
+# Destroy every pipeline the shader built.
+#
+# Takes the Device the renderer hands out, like every other resource delete, so
+# a game never names the Vulkan device this is really destroying against.
+#
+# The SPIR-V is not freed: it was borrowed.
+pub fun shader_delete(s: *Shader, d: *Device) {
+    if (d == nil || !d.ready) { ret; }
+    val v: *Vk = d.vk;
+    var i: usize = 0;
+    for (i < s.count) {
+        if (s.built[i].live) {
+            pipeline_dnit(?s.built[i].pipeline, v);
+            s.built[i].live = false;
+        }
+        i = i + 1;
+    }
+    s.count = 0;
+    s.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Building a pipeline needs a device. What is testable without one is the
+# validation and the cache lookup, which is where a mistake either rejects a
+# valid shader or hands a draw a pipeline built for different geometry.
+
+test "shader: a module that is not a whole number of SPIR-V words is refused" {
+    # Rejected here rather than inside pipeline creation, where it surfaces as
+    # an unexplained driver failure a long way from the call that caused it.
+    var s: Shader;
+    var bytes: [64]u8;
+    if (!is_err[bool, Error](shader(?s, ?bytes[0], 21, ?bytes[0], 64))) { ret 1; }
+    if (!is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 21))) { ret 2; }
+    # Too short to hold a SPIR-V header at all.
+    if (!is_err[bool, Error](shader(?s, ?bytes[0], 16, ?bytes[0], 64))) { ret 3; }
+    # And a valid pair is accepted.
+    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64)))  { ret 4; }
+    ret 0;
+}
+
+test "shader: a missing module is refused rather than deferred" {
+    var s: Shader;
+    var bytes: [64]u8;
+    if (!is_err[bool, Error](shader(?s, nil, 64, ?bytes[0], 64)))       { ret 1; }
+    if (!is_err[bool, Error](shader(?s, ?bytes[0], 64, nil, 64)))       { ret 2; }
+    ret 0;
+}
+
+test "shader: a fresh shader has built nothing" {
+    # Creation records what the shader is and builds nothing, because a pipeline
+    # needs a render pass and a vertex layout that are not known until a draw.
+    var s: Shader;
+    var bytes: [64]u8;
+    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+    if (shader_pipelines(?s) != 0) { ret 2; }
+    ret 0;
+}
+
+test "shader: a built pipeline is reused only for its own pass and layout" {
+    # THE DEFECT THIS CATCHES. A pipeline bakes in both the render pass and the
+    # vertex layout, so handing a draw the entry built for a different one is
+    # not a slower picture, it is undefined behaviour that a driver may or may
+    # not report. A lookup keyed on only one of the two would do exactly that,
+    # and would look correct in every scene that has one render target or one
+    # mesh layout, which is most scenes until the one that does not.
+    #
+    # The entry is installed directly rather than built, because building needs
+    # a device. What is under test is the lookup, which is where the mistake is.
+    var s: Shader;
+    var v: Vk;
+    var bytes: [64]u8;
+    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+
+    var pass_a: u32 = 1;
+    var pass_b: u32 = 2;
+    val a: vk.RenderPass = (?pass_a):~vk.RenderPass;
+    val b: vk.RenderPass = (?pass_b):~vk.RenderPass;
+
+    var std_fmt:  VertexFormat = vertex_format_standard();
+    var skin_fmt: VertexFormat = vertex_format_skinned();
+
+    s.built[0].pass   = a;
+    s.built[0].format = std_fmt;
+    s.built[0].live   = true;
+    s.count = 1;
+
+    # The pair it was built for.
+    if (shader_pipeline(?s, ?v, a, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
+
+    # A different pass, same layout: must not reuse it. Building instead fails
+    # here for want of a device, which is the nil.
+    if (shader_pipeline(?s, ?v, b, ?std_fmt) != nil) { ret 3; }
+
+    # Same pass, a different layout: likewise.
+    if (shader_pipeline(?s, ?v, a, ?skin_fmt) != nil) { ret 4; }
+
+    # And a failed build leaves nothing behind to be handed out later.
+    if (shader_pipelines(?s) != 1) { ret 5; }
+    ret 0;
+}
+
+test "shader: a full shader refuses rather than evicting a live pipeline" {
+    # Eviction would destroy a pipeline a command buffer may still be executing,
+    # which is a use-after-free the driver reports at a distance if at all. So
+    # the cache fills and stops, and the draw is dropped and counted.
+    var s: Shader;
+    var v: Vk;
+    var bytes: [64]u8;
+    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+
+    var fmt: VertexFormat = vertex_format_standard();
+    var handles: [4]u32;
+    var i: usize = 0;
+    for (i < MAX_SHADER_PIPELINES) {
+        handles[i] = i::u32;
+        s.built[i].pass   = (?handles[i]):~vk.RenderPass;
+        s.built[i].format = fmt;
+        s.built[i].live   = true;
+        i = i + 1;
+    }
+    s.count = MAX_SHADER_PIPELINES;
+
+    var extra: u32 = 99;
+    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass, ?fmt) != nil) { ret 2; }
+    # Nothing was evicted to make room.
+    if (shader_pipelines(?s) != MAX_SHADER_PIPELINES) { ret 3; }
+    if (!s.built[0].live)                             { ret 4; }
+    ret 0;
+}
+
+test "shader: an unready shader builds nothing" {
+    # A Shader left at its zero value has no modules, and reaching the driver
+    # with a null pointer and a zero length is a crash rather than an error.
+    var s: Shader;
+    var v: Vk;
+    var f: VertexFormat = vertex_format_standard();
+    var pass: u32 = 1;
+    s.ready = false;
+    s.count = 0;
+    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass, ?f) != nil) { ret 1; }
+    ret 0;
+}
