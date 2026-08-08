@@ -1,27 +1,31 @@
 # platform window, GL context, and input source
 #
-# wraps a GLFW window carrying an OpenGL core-profile context and routes
-# keyboard input into an event queue. the window's GLFW user pointer
-# holds the event sink, so the C key callback can reach it. these paths
-# drive real platform and GL calls and cannot run headless; they are
+# wraps a GLFW window created with no client API and routes
+# input into both an event queue and the polled input state. the window's
+# GLFW user pointer holds the Sink, so the C callbacks can reach both. these
+# paths drive real platform and GL calls and cannot run headless; they are
 # built but not covered by tests.
+#
+# THE PLATFORM'S KEY CODES STOP HERE. map_key translates a GLFW code into a
+# boom Key, and nothing above this file sees a GLFW integer. a game naming a
+# key by its platform code would be importing the windowing library through
+# the back door, which is what this engine otherwise avoids everywhere.
 
 use glfw.glfw;
-use gl.gl;
 use boom.event.EventQueue;
 use boom.event.Event;
 use boom.event.queue_push;
 use boom.event.KEY;
+use boom.event.MOUSE_BUTTON;
+use boom.event.MOUSE_MOVE;
+use boom.event.SCROLL;
+use inp: boom.input;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
 
-# GL context version requested for the window
-val GL_MAJOR: i32 = 3;
-val GL_MINOR: i32 = 3;
-
-# a platform window and its OpenGL context
+# a platform window
 # ---
 # handle: the underlying GLFW window, nil-handled when creation failed
 # width:  requested client-area width in screen coordinates
@@ -32,42 +36,113 @@ pub rec Window {
     height: i32;
 }
 
-fun gl_loader(name: *u8) ptr {
-    ret glfw.get_proc_address(name);
-}
-
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
     val w: glfw.Window = glfw.window_from_handle(handle);
     if (action == glfw.PRESS && key == glfw.KEY_ESCAPE) {
         glfw.set_window_should_close(w, true);
     }
-    val sink: ptr = glfw.get_window_user_pointer(w);
-    if (sink != nil) {
-        val q: *EventQueue = sink::*EventQueue;
-        queue_push(q, Event{kind: KEY, a: key::i64, b: action::i64, c: mods::i64, d: 0});
+    val s: *Sink = sink_of(w);
+    if (s == nil) { ret; }
+    val k: inp.Key = map_key(key);
+    # GLFW REPEAT is neither a press nor a release: the key never came up, so
+    # folding it in would fire a spurious edge every autorepeat interval while
+    # a key is simply held. the queue still carries it for text-entry callers.
+    if (action != glfw.REPEAT) {
+        inp.input_key_event(s.input, k, action == glfw.PRESS);
     }
+    queue_push(s.queue, Event{kind: KEY, a: k::i64, b: action::i64, c: mods::i64, d: 0});
 }
 
-# create a window with an OpenGL core-profile context
+fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
+    val s: *Sink = sink_of(glfw.window_from_handle(handle));
+    if (s == nil) { ret; }
+    val b: inp.Button = map_button(button);
+    inp.input_button_event(s.input, b, action == glfw.PRESS);
+    queue_push(s.queue, Event{kind: MOUSE_BUTTON, a: b::i64, b: action::i64, c: mods::i64, d: 0});
+}
+
+fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
+    val s: *Sink = sink_of(glfw.window_from_handle(handle));
+    if (s == nil) { ret; }
+    inp.input_mouse_event(s.input, x, y);
+    queue_push(s.queue, Event{kind: MOUSE_MOVE, a: x::i64, b: y::i64, c: 0, d: 0});
+}
+
+fun on_scroll(handle: ptr, dx: f64, dy: f64) {
+    val s: *Sink = sink_of(glfw.window_from_handle(handle));
+    if (s == nil) { ret; }
+    inp.input_scroll_event(s.input, dx, dy);
+    queue_push(s.queue, Event{kind: SCROLL, a: dx::i64, b: dy::i64, c: 0, d: 0});
+}
+
+# the sink installed on a window, or nil before one is set
+fun sink_of(w: glfw.Window) *Sink {
+    val p: ptr = glfw.get_window_user_pointer(w);
+    if (p == nil) { ret nil; }
+    ret p::*Sink;
+}
+
+# translate a GLFW key code into a boom Key
 #
-# initializes GLFW, requests an OpenGL 3.3 core context, makes it
-# current, enables vsync, loads the GL command table through the
-# context, and installs the key handler. on failure the returned Window
-# carries a nil handle; check with window_is_valid.
+# an unrecognized code becomes KEY_UNKNOWN, which every query reports false
+# for, so an unmapped key is inert rather than aliasing onto a real one.
+fun map_key(k: i32) inp.Key {
+    if (k >= glfw.KEY_A && k <= glfw.KEY_Z) { ret (inp.KEY_A + (k - glfw.KEY_A))::inp.Key; }
+    if (k >= glfw.KEY_0 && k <= glfw.KEY_9) { ret (inp.KEY_0 + (k - glfw.KEY_0))::inp.Key; }
+    if (k >= glfw.KEY_F1 && k <= glfw.KEY_F12) { ret (inp.KEY_F1 + (k - glfw.KEY_F1))::inp.Key; }
+    if (k == glfw.KEY_SPACE)         { ret inp.KEY_SPACE; }
+    if (k == glfw.KEY_ESCAPE)        { ret inp.KEY_ESCAPE; }
+    if (k == glfw.KEY_ENTER)         { ret inp.KEY_ENTER; }
+    if (k == glfw.KEY_TAB)           { ret inp.KEY_TAB; }
+    if (k == glfw.KEY_BACKSPACE)     { ret inp.KEY_BACKSPACE; }
+    if (k == glfw.KEY_DELETE)        { ret inp.KEY_DELETE; }
+    if (k == glfw.KEY_LEFT)          { ret inp.KEY_LEFT; }
+    if (k == glfw.KEY_RIGHT)         { ret inp.KEY_RIGHT; }
+    if (k == glfw.KEY_UP)            { ret inp.KEY_UP; }
+    if (k == glfw.KEY_DOWN)          { ret inp.KEY_DOWN; }
+    if (k == glfw.KEY_LEFT_SHIFT)    { ret inp.KEY_LEFT_SHIFT; }
+    if (k == glfw.KEY_LEFT_CONTROL)  { ret inp.KEY_LEFT_CTRL; }
+    if (k == glfw.KEY_LEFT_ALT)      { ret inp.KEY_LEFT_ALT; }
+    if (k == glfw.KEY_RIGHT_SHIFT)   { ret inp.KEY_RIGHT_SHIFT; }
+    if (k == glfw.KEY_RIGHT_CONTROL) { ret inp.KEY_RIGHT_CTRL; }
+    if (k == glfw.KEY_RIGHT_ALT)     { ret inp.KEY_RIGHT_ALT; }
+    ret inp.KEY_UNKNOWN;
+}
+
+# translate a GLFW mouse button into a boom Button
+fun map_button(b: i32) inp.Button {
+    if (b == glfw.MOUSE_BUTTON_LEFT)   { ret inp.BUTTON_LEFT; }
+    if (b == glfw.MOUSE_BUTTON_RIGHT)  { ret inp.BUTTON_RIGHT; }
+    if (b == glfw.MOUSE_BUTTON_MIDDLE) { ret inp.BUTTON_MIDDLE; }
+    ret -1::inp.Button;
+}
+
+# open a window
+#
+# the client API hint is NO_API: GLFW would create an OpenGL context by
+# default, and a window carrying one cannot back a Vulkan surface.
+#
+# there is no swap interval and no command-table load. presentation is
+# the swapchain's present mode, and Vulkan commands are resolved through
+# the loader in boom.graphics.vk rather than through the window, so there
+# is no buffer swap here either: the renderer presents.
 # ---
-# width:  desired client-area width
-# height: desired client-area height
+# THE RECORDED SIZE IS IN PIXELS, NOT SCREEN COORDINATES. GLFW takes the
+# requested size in screen coordinates, which on a scaled display is not the
+# framebuffer size: a 960x540 request becomes a 1920x1080 framebuffer at 2x.
+# The swapchain, the viewport, and the 2D projection all work in pixels, so
+# the actual framebuffer size is what is recorded, not the request.
+# ---
+# width:  desired client-area width in screen coordinates
+# height: desired client-area height in screen coordinates
 # title:  window title, UTF-8
-# ret:    the opened Window, nil-handled on failure
+# ret:    the opened Window sized in framebuffer pixels, nil-handled on failure
 pub fun window_open(width: i32, height: i32, title: str) Window {
     if (!glfw.init()) {
         ret Window{handle: glfw.no_window(), width: 0, height: 0};
     }
 
-    glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR);
-    glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR);
-    glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE);
-    glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE);
+    glfw.window_hint(glfw.CLIENT_API, glfw.NO_API);
 
     val win: glfw.Window = glfw.open_window(width, height, title);
     if (!glfw.window_is_valid(win)) {
@@ -75,12 +150,35 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
         ret Window{handle: win, width: 0, height: 0};
     }
 
-    glfw.make_context_current(win);
-    glfw.swap_interval(1);
-    gl.load(gl_loader);
     glfw.set_key_callback(win, on_key);
+    glfw.set_mouse_button_callback(win, on_mouse_button);
+    glfw.set_cursor_pos_callback(win, on_cursor_pos);
+    glfw.set_scroll_callback(win, on_scroll);
 
-    ret Window{handle: win, width: width, height: height};
+    var fw: i32 = width;
+    var fh: i32 = height;
+    glfw.get_framebuffer_size(win, ?fw, ?fh);
+    ret Window{handle: win, width: fw, height: fh};
+}
+
+# refresh the recorded size from the platform
+#
+# A window is resizable, so its size is not a property of how it was opened. A
+# game reading w.width after a resize would otherwise lay its interface out
+# against dimensions the window has not had since startup.
+#
+# In pixels, for the same reason window_open records pixels. A minimized window
+# reports zero in at least one dimension, which is a legal state and not a
+# failure, so it is recorded as-is; callers that cannot divide by it check.
+# ---
+# w: window to update in place
+pub fun window_refresh_size(w: *Window) {
+    if (!glfw.window_is_valid(w.handle)) { ret; }
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    glfw.get_framebuffer_size(w.handle, ?fw, ?fh);
+    w.width  = fw;
+    w.height = fh;
 }
 
 # whether the window was created successfully
@@ -93,13 +191,25 @@ pub fun window_is_valid(w: *Window) bool {
 
 # route this window's input into a queue
 #
-# stores the queue as the window's user pointer; the key handler pushes
-# events there. pass a queue that outlives the window.
+# where the platform callbacks deliver input
+#
+# both destinations travel together because every callback feeds both: the
+# queue preserves order for UI and discrete actions, the Input answers held
+# state for movement. pass a Sink that outlives the window.
+# ---
+# queue: receives ordered events
+# input: receives state transitions
+pub rec Sink {
+    queue: *EventQueue;
+    input: *inp.Input;
+}
+
+# route this window's input at the given sink
 # ---
 # w: window to observe
-# q: queue to receive input events
-pub fun window_set_event_sink(w: *Window, q: *EventQueue) {
-    glfw.set_window_user_pointer(w.handle, q::ptr);
+# s: sink to receive input; must outlive the window
+pub fun window_set_event_sink(w: *Window, s: *Sink) {
+    glfw.set_window_user_pointer(w.handle, s::ptr);
 }
 
 # whether the window has been asked to close
@@ -113,13 +223,6 @@ pub fun window_should_close(w: *Window) bool {
 # process pending platform events, firing input callbacks
 pub fun window_poll() {
     glfw.poll_events();
-}
-
-# present the back buffer
-# ---
-# w: window to present
-pub fun window_swap(w: *Window) {
-    glfw.swap_buffers(w.handle);
 }
 
 # destroy the window and shut down GLFW

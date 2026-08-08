@@ -1,101 +1,282 @@
-# the RenderTarget handle: an offscreen framebuffer a pass renders into
+# the RenderTarget handle: an offscreen target a pass renders into
 #
-# a RenderTarget wraps a GL framebuffer with a sampleable color texture
-# and a depth-stencil renderbuffer, so a pass can render a scene to a
-# texture instead of the window. the color attachment is exposed as a
-# Texture for a later pass to sample, which is how post-processing and
-# render-to-texture effects are built. the backing GL ids stay hidden.
+# a RenderTarget owns a colour image, a depth image, a render pass, and a
+# framebuffer, so a pass can render a scene to a texture instead of the
+# window. the colour attachment is exposed as a Texture for a later pass to
+# sample, which is how post-processing and render-to-texture effects are
+# built. the backing Vulkan objects stay hidden.
+#
+# WHY A SEPARATE RENDER PASS. GL let a framebuffer be swapped mid-frame with
+# a bind call. Vulkan bakes the attachment formats and the load and store
+# operations into a render pass object, and a pipeline is created against
+# one, so an offscreen target cannot share the swapchain's. that is why this
+# module owns a render pass rather than borrowing the frame loop's, and why
+# a pipeline drawing into a target must be built against target_pass.
+#
+# THE FINAL LAYOUT IS SHADER_READ_ONLY, NOT PRESENT_SRC. the whole point of
+# an offscreen target is that something samples it afterwards. declaring the
+# transition in the render pass rather than issuing a barrier after it means
+# the driver performs it as part of ending the pass, and it cannot be
+# forgotten at a call site.
 
-use gl.gl;
-use boom.graphics.error.Error;
-use boom.graphics.error.error;
-use boom.graphics.texture.Texture;
+use std.types.bool.bool;
+use std.types.size.usize;
+use std.types.bool.true;
+use std.types.bool.false;
 use std.types.result.Result;
 use std.types.result.ok;
 use std.types.result.err;
+use std.types.result.is_err;
+use std.types.result.unwrap_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
+use boom.graphics.device.Device;
+use boom.graphics.texture.Texture;
+use boom.graphics.image.Image;
+use boom.graphics.image.image_init;
+use boom.graphics.image.USAGE_TARGET;
+use boom.graphics.image.image_transition;
+use boom.graphics.image.image_read;
+use boom.graphics.image.image_dnit;
+use boom.graphics.image.DEPTH_FORMAT;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_clearing;
+use boom.graphics.image.DepthAttachment;
+use boom.graphics.image.depth_attachment_init;
+use boom.graphics.image.depth_attachment_dnit;
+
 
 # an opaque handle to an offscreen render target
 # ---
-# fbo:    the backing framebuffer id, hidden from the game
-# color:  the color attachment, sampleable as a Texture
-# depth:  the depth-stencil renderbuffer id
-# width:  target width in pixels
-# height: target height in pixels
+# color:       the colour attachment, sampleable as a Texture
+# depth:       the depth attachment, shared with the frame loop's
+# pass:        the render pass drawing into this target uses
+# framebuffer: the framebuffer binding the two attachments
+# width:       target width in pixels
+# height:      target height in pixels
+# ready:       whether creation completed
 pub rec RenderTarget {
-    fbo:    u32;
-    color:  Texture;
-    depth:  u32;
-    width:  i32;
-    height: i32;
+    color:       Texture;
+    depth:       DepthAttachment;
+    pass:        vk.RenderPass;
+    framebuffer: vk.Framebuffer;
+    width:       i32;
+    height:      i32;
+    ready:       bool;
+}
+
+# the render pass an offscreen target draws through
+#
+# Built from the same description as the window's, in boom.graphics.pass. That
+# is not tidiness: a pipeline may only be used in a pass compatible with the one
+# it was built against, boom builds one set of pipelines, and compatibility
+# covers the subpass dependencies as well as the attachments. Two hand-written
+# passes agreed on everything obvious and differed in dependency count, which
+# made every draw into a target invalid.
+fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
+    # Ends ready to be sampled, which is what an offscreen target is for.
+    # Declaring the transition in the pass rather than as a barrier after it
+    # means the driver performs it as part of ending the pass, and it cannot be
+    # forgotten at a call site.
+    val o: PassOptions = pass_clearing(t.color.image.format,
+                                       vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ret pass_create(v, ?o, ?t.pass);
 }
 
 # create an offscreen render target of the given size
 #
-# allocates an RGBA8 color texture (linear filtered, clamped) and a
-# combined depth-stencil renderbuffer, attaches both to a fresh
-# framebuffer, and verifies completeness. the default framebuffer is
-# rebound before returning, so this leaves no framebuffer selected.
+# allocates an RGBA8 colour image exposed as a Texture, a depth image, a
+# render pass ending with the colour attachment ready to sample, and a
+# framebuffer binding the two.
 # ---
+# d:      the upload context
 # width:  target width in pixels, positive
 # height: target height in pixels, positive
-# ret:    the render target, or an error if the framebuffer is incomplete
-pub fun render_target(width: i32, height: i32) Result[RenderTarget, Error] {
-    var fbo: u32 = 0;
-    gl.gen_framebuffers(1, ?fbo);
-    gl.bind_framebuffer(gl.FRAMEBUFFER, fbo);
+# ret:    the render target, or a creation error
+pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, Error] {
+    var t: RenderTarget;
+    t.ready  = false;
+    t.width  = width;
+    t.height = height;
 
-    var color: u32 = 0;
-    gl.gen_textures(1, ?color);
-    gl.bind_texture(gl.TEXTURE_2D, color);
-    gl.tex_image2d(gl.TEXTURE_2D, 0, gl.RGBA8::i32, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, nil);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE::i32);
-    gl.tex_parameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE::i32);
-    gl.bind_texture(gl.TEXTURE_2D, 0);
-    gl.framebuffer_texture2d(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
-
-    var depth: u32 = 0;
-    gl.gen_renderbuffers(1, ?depth);
-    gl.bind_renderbuffer(gl.RENDERBUFFER, depth);
-    gl.renderbuffer_storage(gl.RENDERBUFFER, gl.DEPTH24_STENCIL8, width, height);
-    gl.bind_renderbuffer(gl.RENDERBUFFER, 0);
-    gl.framebuffer_renderbuffer(gl.FRAMEBUFFER, gl.DEPTH_STENCIL_ATTACHMENT, gl.RENDERBUFFER, depth);
-
-    val status: u32 = gl.check_framebuffer_status(gl.FRAMEBUFFER);
-    gl.bind_framebuffer(gl.FRAMEBUFFER, 0);
-    if (status != gl.FRAMEBUFFER_COMPLETE) {
-        gl.delete_framebuffers(1, ?fbo);
-        gl.delete_renderbuffers(1, ?depth);
-        gl.delete_textures(1, ?color);
-        ret err[RenderTarget, Error](error("render target framebuffer is incomplete"));
+    if (!d.ready) {
+        ret err[RenderTarget, Error](error("the upload context is not initialized"));
+    }
+    if (width <= 0 || height <= 0) {
+        ret err[RenderTarget, Error](error("render target dimensions must be positive"));
     }
 
-    ret ok[RenderTarget, Error](RenderTarget{
-        fbo:    fbo,
-        color:  Texture{id: color, width: width, height: height},
-        depth:  depth,
-        width:  width,
-        height: height,
-    });
+    # THE TARGET'S FORMAT IS THE SURFACE'S, NOT A CHOICE MADE HERE. Two render
+    # passes are compatible only when their attachment formats and counts match,
+    # and a pipeline may only be used in a pass compatible with the one it was
+    # built against. boom builds one set of pipelines, against the window pass, so
+    # a target that picked its own format could not be drawn into at all. Reading
+    # the surface's answer is what keeps a single pipeline cache correct.
+    #
+    # It is an sRGB format on every driver that offers one, which is also what a
+    # target wants on its own merits: it holds a rendered image that a later pass
+    # samples, so it goes through the same encode on write and decode on read as
+    # a loaded texture, and a linear one would band in the darks at eight bits.
+    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32,
+                                             d.vk.color_format, USAGE_TARGET);
+    if (is_err[bool, Error](cr)) {
+        ret err[RenderTarget, Error](error("could not create the colour attachment"));
+    }
+    t.color.width  = width;
+    t.color.height = height;
+
+    # Put the colour image into a readable layout before anything draws into it.
+    # A game is free to sample a target on the first frame, before its first
+    # render pass has run; without this the image is in UNDEFINED while the
+    # descriptor claims SHADER_READ_ONLY_OPTIMAL, which is a lie about the
+    # layout rather than merely undefined contents. The render pass's own
+    # initialLayout is UNDEFINED, so this costs nothing afterwards.
+    val tir: Result[bool, Error] = image_transition(?t.color.image, d.vk, d.pool,
+                                                    vk.IMAGE_LAYOUT_UNDEFINED,
+                                                    vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (is_err[bool, Error](tir)) {
+        render_target_delete(d, ?t);
+        ret err[RenderTarget, Error](unwrap_err[bool, Error](tir));
+    }
+
+    val dr: Result[bool, Error] = depth_attachment_init(?t.depth, d.vk, width, height);
+    if (is_err[bool, Error](dr)) {
+        render_target_delete(d, ?t);
+        ret err[RenderTarget, Error](error("could not create the depth attachment"));
+    }
+
+    val pr: Result[bool, Error] = make_pass(?t, d.vk);
+    if (is_err[bool, Error](pr)) {
+        render_target_delete(d, ?t);
+        ret err[RenderTarget, Error](error("could not create the offscreen render pass"));
+    }
+
+    var views: [2]vk.ImageView;
+    views[0] = t.color.image.view;
+    views[1] = t.depth.view;
+
+    var fci: vk.FramebufferCreateInfo;
+    fci.sType           = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.pNext           = nil;
+    fci.flags           = 0;
+    fci.renderPass      = t.pass;
+    fci.attachmentCount = 2;
+    fci.pAttachments    = ?views[0];
+    fci.width           = width::u32;
+    fci.height          = height::u32;
+    fci.layers          = 1;
+    if (vk.vkCreateFramebuffer(d.vk.device, ?fci, nil, ?t.framebuffer) != vk.SUCCESS) {
+        render_target_delete(d, ?t);
+        ret err[RenderTarget, Error](error("could not create the offscreen framebuffer"));
+    }
+
+    t.ready = true;
+    ret ok[RenderTarget, Error](t);
 }
 
-# the color attachment of a render target, for a later pass to sample
+# the color attachment, sampleable as a Texture
 # ---
-# t:   render target to read
-# ret: the color texture; valid until the target is deleted
+# t:   the render target
+# ret: pointer to the color texture, valid while the target lives
 pub fun render_target_texture(t: *RenderTarget) *Texture {
     ret ?t.color;
 }
 
-# release the framebuffer, color texture, and depth buffer of a target
+# copy the target's rendered pixels back to host memory, as tightly packed RGBA8
+#
+# The bytes are in the colour attachment's format, which is the surface's, so
+# the channel order is whatever the surface chose: B8G8R8A8 on most drivers,
+# R8G8B8A8 on some. A caller comparing against an authored colour has to account
+# for that; render_target_bgra reports which it is.
 # ---
-# t: render target to delete; the handle must not be used afterward
-pub fun render_target_delete(t: *RenderTarget) {
-    gl.delete_framebuffers(1, ?t.fbo);
-    gl.delete_renderbuffers(1, ?t.depth);
-    gl.delete_textures(1, ?t.color.id);
-    t.fbo      = 0;
-    t.depth    = 0;
-    t.color.id = 0;
+# d:   the upload context the target was created against
+# t:   the target to read
+# out: destination for width * height * 4 bytes
+# len: size of out in bytes
+# ret: true, or a readback error
+pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) Result[bool, Error] {
+    if (!t.ready) {
+        ret err[bool, Error](error("cannot read a target that was never created"));
+    }
+    ret image_read(?t.color.image, d.vk, d.pool, out, len);
+}
+
+# whether a target's pixels come back blue-green-red-alpha rather than RGBA
+#
+# The order follows the surface format, which is the surface's choice and not
+# boom's. Exposed rather than assumed, because a caller that guesses gets a
+# picture with red and blue swapped and no diagnostic.
+pub fun render_target_bgra(t: *RenderTarget) bool {
+    ret t.color.image.format == vk.FORMAT_B8G8R8A8_SRGB
+     || t.color.image.format == vk.FORMAT_B8G8R8A8_UNORM;
+}
+
+# release the target's images, render pass, and framebuffer
+# ---
+# d: the upload context the target was created against
+# t: target to delete; the handle must not be used afterward
+pub fun render_target_delete(d: *Device, t: *RenderTarget) {
+    val v: *Vk = d.vk;
+    vk_wait_idle(v);
+    if (t.framebuffer != nil) { vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil); t.framebuffer = nil; }
+    if (t.pass != nil)        { vk.vkDestroyRenderPass(v.device, t.pass, nil); t.pass = nil; }
+    depth_attachment_dnit(?t.depth, v);
+    image_dnit(?t.color.image, v);
+    t.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# creation needs a device, so these cover the argument checks and the
+# teardown ordering, which is where a mistake destroys an object that is
+# still referenced by another.
+
+test "target: non-positive dimensions are refused before allocating" {
+    var d: Device;
+    d.ready = true;
+    if (!is_err[RenderTarget, Error](render_target(?d, 0, 16)))   { ret 1; }
+    if (!is_err[RenderTarget, Error](render_target(?d, 16, 0)))   { ret 2; }
+    if (!is_err[RenderTarget, Error](render_target(?d, -1, -1)))  { ret 3; }
+    ret 0;
+}
+
+test "target: creation against an uninitialized context is refused" {
+    var d: Device;
+    d.ready = false;
+    if (!is_err[RenderTarget, Error](render_target(?d, 16, 16))) { ret 1; }
+    ret 0;
+}
+
+test "target: teardown on a target that was never created is a no-op" {
+    var t: RenderTarget;
+    t.framebuffer = nil;
+    t.pass        = nil;
+    t.depth.view  = nil;
+    t.depth.image = nil;
+    t.depth.mem   = nil;
+    t.color.image.view   = nil;
+    t.color.image.handle = nil;
+    t.color.image.memory = nil;
+    t.ready = false;
+
+    var v: Vk;
+    v.ready = false;
+    var d: Device;
+    d.vk    = ?v;
+    d.ready = true;
+    render_target_delete(?d, ?t);
+    if (t.ready) { ret 1; }
+    ret 0;
+}
+
+test "target: the depth format is one every implementation must support" {
+    # D32_SFLOAT is mandatory as a depth-stencil attachment, so it needs no
+    # query. A format chosen without checking support is a startup failure on
+    # hardware that is behaving correctly.
+    if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
+    ret 0;
 }

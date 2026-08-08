@@ -1,0 +1,424 @@
+# Polled keyboard and mouse state, sampled at the fixed tick.
+#
+# The event queue answers "what happened, in what order", which is what UI and
+# text entry need. This answers "is W held right now", which is what movement,
+# aiming, and held fire need. Both are required and neither replaces the other,
+# so this sits alongside boom.event rather than superseding it.
+#
+# Edges belong to a tick, not a frame. f_tick runs zero, one, or several times
+# per frame depending on how much time the accumulator holds, while the
+# platform delivers events once per frame. An edge query defined against the
+# frame is therefore wrong in both directions. At a low frame rate a press that
+# should be seen by one tick is seen by three. At a high frame rate a frame
+# with no tick drops the press entirely. Events accumulate into a pending set
+# as they arrive, and the engine folds that set into the live state exactly
+# once per tick, immediately before f_tick.
+#
+# A press and release of the same key between two ticks, meaning a tap faster
+# than the tick rate, reports both edges on the next tick with `down` ending
+# false. Dropping either one silently eats fast input, which is the failure
+# players notice and developers cannot reproduce.
+#
+# Key codes are boom's own. The platform's codes never reach a game, because
+# the window layer maps them at the boundary in boom.window.map_key. A game
+# that had to name a key by its GLFW integer would be importing the windowing
+# library through the back door.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+
+# ---------------------------------------------------------------- key codes
+
+# A boom key identifier: a dense index, not a platform scancode
+pub def Key: i32;
+
+# Not a key this engine names. mapping an unrecognized platform code yields
+# this, and every query on it is false, so an unmapped key is inert rather
+# than aliasing onto a real one.
+pub val KEY_UNKNOWN: Key = 0;
+
+pub val KEY_A: Key = 1;   pub val KEY_B: Key = 2;   pub val KEY_C: Key = 3;
+pub val KEY_D: Key = 4;   pub val KEY_E: Key = 5;   pub val KEY_F: Key = 6;
+pub val KEY_G: Key = 7;   pub val KEY_H: Key = 8;   pub val KEY_I: Key = 9;
+pub val KEY_J: Key = 10;  pub val KEY_K: Key = 11;  pub val KEY_L: Key = 12;
+pub val KEY_M: Key = 13;  pub val KEY_N: Key = 14;  pub val KEY_O: Key = 15;
+pub val KEY_P: Key = 16;  pub val KEY_Q: Key = 17;  pub val KEY_R: Key = 18;
+pub val KEY_S: Key = 19;  pub val KEY_T: Key = 20;  pub val KEY_U: Key = 21;
+pub val KEY_V: Key = 22;  pub val KEY_W: Key = 23;  pub val KEY_X: Key = 24;
+pub val KEY_Y: Key = 25;  pub val KEY_Z: Key = 26;
+
+pub val KEY_0: Key = 27;  pub val KEY_1: Key = 28;  pub val KEY_2: Key = 29;
+pub val KEY_3: Key = 30;  pub val KEY_4: Key = 31;  pub val KEY_5: Key = 32;
+pub val KEY_6: Key = 33;  pub val KEY_7: Key = 34;  pub val KEY_8: Key = 35;
+pub val KEY_9: Key = 36;
+
+pub val KEY_SPACE:     Key = 37;
+pub val KEY_ESCAPE:    Key = 38;
+pub val KEY_ENTER:     Key = 39;
+pub val KEY_TAB:       Key = 40;
+pub val KEY_BACKSPACE: Key = 41;
+pub val KEY_DELETE:    Key = 42;
+
+pub val KEY_LEFT:  Key = 43;
+pub val KEY_RIGHT: Key = 44;
+pub val KEY_UP:    Key = 45;
+pub val KEY_DOWN:  Key = 46;
+
+pub val KEY_LEFT_SHIFT:  Key = 47;
+pub val KEY_LEFT_CTRL:   Key = 48;
+pub val KEY_LEFT_ALT:    Key = 49;
+pub val KEY_RIGHT_SHIFT: Key = 50;
+pub val KEY_RIGHT_CTRL:  Key = 51;
+pub val KEY_RIGHT_ALT:   Key = 52;
+
+pub val KEY_F1:  Key = 53;  pub val KEY_F2:  Key = 54;  pub val KEY_F3:  Key = 55;
+pub val KEY_F4:  Key = 56;  pub val KEY_F5:  Key = 57;  pub val KEY_F6:  Key = 58;
+pub val KEY_F7:  Key = 59;  pub val KEY_F8:  Key = 60;  pub val KEY_F9:  Key = 61;
+pub val KEY_F10: Key = 62;  pub val KEY_F11: Key = 63;  pub val KEY_F12: Key = 64;
+
+# One past the highest key, sizing the state arrays
+pub val KEY_COUNT: usize = 65;
+
+# ------------------------------------------------------------ mouse buttons
+
+# A boom mouse button identifier
+pub def Button: i32;
+
+pub val BUTTON_LEFT:   Button = 0;
+pub val BUTTON_RIGHT:  Button = 1;
+pub val BUTTON_MIDDLE: Button = 2;
+
+# One past the highest button, sizing the state arrays
+pub val BUTTON_COUNT: usize = 3;
+
+# ------------------------------------------------------------------- state
+
+# Polled input state for the current tick
+#
+# `down` is the live held state. `pressed` and `released` are the edges
+# belonging to the current tick and are true for exactly one tick each.
+# The `pend_*` fields accumulate between ticks and are folded in by
+# input_begin_tick; a game never reads them.
+# ---
+# key_down:      held state per key
+# key_pressed:   went down during this tick
+# key_released:  came up during this tick
+# btn_down:      held state per mouse button
+# btn_pressed:   went down during this tick
+# btn_released:  came up during this tick
+# mouse_x:       cursor position in window coordinates
+# mouse_y:       cursor position in window coordinates
+# mouse_dx:      cursor movement accumulated over this tick
+# mouse_dy:      cursor movement accumulated over this tick
+# scroll_x:      horizontal scroll accumulated over this tick
+# scroll_y:      vertical scroll accumulated over this tick
+pub rec Input {
+    key_down:     [65]bool;
+    key_pressed:  [65]bool;
+    key_released: [65]bool;
+    btn_down:     [3]bool;
+    btn_pressed:  [3]bool;
+    btn_released: [3]bool;
+    mouse_x:      f64;
+    mouse_y:      f64;
+    mouse_dx:     f64;
+    mouse_dy:     f64;
+    scroll_x:     f64;
+    scroll_y:     f64;
+
+    pend_key_down:     [65]bool;
+    pend_key_pressed:  [65]bool;
+    pend_key_released: [65]bool;
+    pend_btn_down:     [3]bool;
+    pend_btn_pressed:  [3]bool;
+    pend_btn_released: [3]bool;
+    pend_mouse_x:      f64;
+    pend_mouse_y:      f64;
+    pend_mouse_dx:     f64;
+    pend_mouse_dy:     f64;
+    pend_scroll_x:     f64;
+    pend_scroll_y:     f64;
+}
+
+# A zeroed input state, nothing held and no edges
+pub fun input_new() Input {
+    var i: Input;
+    var k: usize = 0;
+    for (k < KEY_COUNT) {
+        i.key_down[k] = false; i.key_pressed[k] = false; i.key_released[k] = false;
+        i.pend_key_down[k] = false; i.pend_key_pressed[k] = false; i.pend_key_released[k] = false;
+        k = k + 1;
+    }
+    var b: usize = 0;
+    for (b < BUTTON_COUNT) {
+        i.btn_down[b] = false; i.btn_pressed[b] = false; i.btn_released[b] = false;
+        i.pend_btn_down[b] = false; i.pend_btn_pressed[b] = false; i.pend_btn_released[b] = false;
+        b = b + 1;
+    }
+    i.mouse_x = 0.0; i.mouse_y = 0.0; i.mouse_dx = 0.0; i.mouse_dy = 0.0;
+    i.scroll_x = 0.0; i.scroll_y = 0.0;
+    i.pend_mouse_x = 0.0; i.pend_mouse_y = 0.0; i.pend_mouse_dx = 0.0; i.pend_mouse_dy = 0.0;
+    i.pend_scroll_x = 0.0; i.pend_scroll_y = 0.0;
+    ret i;
+}
+
+# ------------------------------------------------- engine-side accumulation
+#
+# Called by the window layer as platform events arrive, and by the engine at
+# each tick boundary. a game calls none of these.
+
+# Record a key transition. `down` is the new state.
+#
+# Both edges are latched independently of the resulting state, so a press and
+# release arriving between the same two ticks reports both rather than
+# cancelling out.
+pub fun input_key_event(i: *Input, k: Key, down: bool) {
+    if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret; }
+    if (down) { i.pend_key_pressed[k::usize] = true; }
+    or        { i.pend_key_released[k::usize] = true; }
+    i.pend_key_down[k::usize] = down;
+}
+
+# Record a mouse button transition. `down` is the new state.
+pub fun input_button_event(i: *Input, b: Button, down: bool) {
+    if (b < 0 || b::usize >= BUTTON_COUNT) { ret; }
+    if (down) { i.pend_btn_pressed[b::usize] = true; }
+    or        { i.pend_btn_released[b::usize] = true; }
+    i.pend_btn_down[b::usize] = down;
+}
+
+# Record an absolute cursor position, accumulating the movement since the
+# last tick rather than the last event, so a game reading delta sees the whole
+# tick's motion regardless of how many move events composed it
+pub fun input_mouse_event(i: *Input, x: f64, y: f64) {
+    i.pend_mouse_dx = i.pend_mouse_dx + (x - i.pend_mouse_x);
+    i.pend_mouse_dy = i.pend_mouse_dy + (y - i.pend_mouse_y);
+    i.pend_mouse_x = x;
+    i.pend_mouse_y = y;
+}
+
+# Record a scroll increment, accumulated over the tick
+pub fun input_scroll_event(i: *Input, dx: f64, dy: f64) {
+    i.pend_scroll_x = i.pend_scroll_x + dx;
+    i.pend_scroll_y = i.pend_scroll_y + dy;
+}
+
+# Fold everything accumulated since the last tick into the live state
+#
+# Called by the engine immediately before each f_tick. this is what makes an
+# edge belong to exactly one tick: the pending edges become this tick's edges
+# and are then cleared, so a second tick in the same frame sees held state and
+# no edges, and a frame that ticks zero times leaves the pending set intact for
+# whichever tick comes next.
+pub fun input_begin_tick(i: *Input) {
+    var k: usize = 0;
+    for (k < KEY_COUNT) {
+        i.key_down[k]     = i.pend_key_down[k];
+        i.key_pressed[k]  = i.pend_key_pressed[k];
+        i.key_released[k] = i.pend_key_released[k];
+        i.pend_key_pressed[k]  = false;
+        i.pend_key_released[k] = false;
+        k = k + 1;
+    }
+    var b: usize = 0;
+    for (b < BUTTON_COUNT) {
+        i.btn_down[b]     = i.pend_btn_down[b];
+        i.btn_pressed[b]  = i.pend_btn_pressed[b];
+        i.btn_released[b] = i.pend_btn_released[b];
+        i.pend_btn_pressed[b]  = false;
+        i.pend_btn_released[b] = false;
+        b = b + 1;
+    }
+    i.mouse_x  = i.pend_mouse_x;
+    i.mouse_y  = i.pend_mouse_y;
+    i.mouse_dx = i.pend_mouse_dx;
+    i.mouse_dy = i.pend_mouse_dy;
+    i.scroll_x = i.pend_scroll_x;
+    i.scroll_y = i.pend_scroll_y;
+    i.pend_mouse_dx  = 0.0;
+    i.pend_mouse_dy  = 0.0;
+    i.pend_scroll_x  = 0.0;
+    i.pend_scroll_y  = 0.0;
+}
+
+# ------------------------------------------------------------ game queries
+
+# Whether a key is held as of this tick
+pub fun key_down(i: *Input, k: Key) bool {
+    if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
+    ret i.key_down[k::usize];
+}
+
+# Whether a key went down during this tick, true for exactly one tick per press
+pub fun key_pressed(i: *Input, k: Key) bool {
+    if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
+    ret i.key_pressed[k::usize];
+}
+
+# Whether a key came up during this tick, true for exactly one tick per release
+pub fun key_released(i: *Input, k: Key) bool {
+    if (k <= KEY_UNKNOWN || k::usize >= KEY_COUNT) { ret false; }
+    ret i.key_released[k::usize];
+}
+
+# Whether a mouse button is held as of this tick
+pub fun button_down(i: *Input, b: Button) bool {
+    if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
+    ret i.btn_down[b::usize];
+}
+
+# Whether a mouse button went down during this tick
+pub fun button_pressed(i: *Input, b: Button) bool {
+    if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
+    ret i.btn_pressed[b::usize];
+}
+
+# Whether a mouse button came up during this tick
+pub fun button_released(i: *Input, b: Button) bool {
+    if (b < 0 || b::usize >= BUTTON_COUNT) { ret false; }
+    ret i.btn_released[b::usize];
+}
+
+# An axis from two keys, -1.0, 0.0, or 1.0
+#
+# The shape movement code actually wants: `axis(inp, KEY_A, KEY_D)` rather than
+# two queries and a subtraction at every call site. both held cancels to zero,
+# which is what a player pressing left and right together expects.
+pub fun axis(i: *Input, negative: Key, positive: Key) f32 {
+    var v: f32 = 0.0;
+    if (key_down(i, positive)) { v = v + 1.0; }
+    if (key_down(i, negative)) { v = v - 1.0; }
+    ret v;
+}
+
+# --------------------------------------------------------------------- tests
+
+test "input: a press is observed by exactly one tick" {
+    var i: Input = input_new();
+    input_key_event(?i, KEY_W, true);
+
+    input_begin_tick(?i);
+    if (!key_pressed(?i, KEY_W)) { ret 1; }
+    if (!key_down(?i, KEY_W))    { ret 1; }
+
+    # The second tick of the same frame sees the key held, but the edge is
+    # spent. a frame-scoped implementation fires it again here.
+    input_begin_tick(?i);
+    if (key_pressed(?i, KEY_W)) { ret 1; }
+    if (!key_down(?i, KEY_W))   { ret 1; }
+    ret 0;
+}
+
+test "input: a press during a frame that ticks zero times is not lost" {
+    var i: Input = input_new();
+    input_key_event(?i, KEY_SPACE, true);
+    # No tick ran this frame: the accumulator held less than one step.
+    # Nothing is folded, so nothing may be discarded either.
+    input_begin_tick(?i);
+    if (!key_pressed(?i, KEY_SPACE)) { ret 1; }
+    ret 0;
+}
+
+test "input: a tap faster than the tick reports both edges" {
+    var i: Input = input_new();
+    input_key_event(?i, KEY_SPACE, true);
+    input_key_event(?i, KEY_SPACE, false);
+
+    input_begin_tick(?i);
+    # Both edges, and the key ends up. collapsing this to the net state eats
+    # the tap entirely, which is the bug a player feels and a developer cannot
+    # reproduce.
+    if (!key_pressed(?i, KEY_SPACE))  { ret 1; }
+    if (!key_released(?i, KEY_SPACE)) { ret 1; }
+    if (key_down(?i, KEY_SPACE))      { ret 1; }
+    ret 0;
+}
+
+test "input: edges clear but held state persists across ticks" {
+    var i: Input = input_new();
+    input_key_event(?i, KEY_A, true);
+    input_begin_tick(?i);
+    input_begin_tick(?i);
+    input_begin_tick(?i);
+    if (key_pressed(?i, KEY_A)) { ret 1; }
+    if (!key_down(?i, KEY_A))   { ret 1; }
+
+    input_key_event(?i, KEY_A, false);
+    input_begin_tick(?i);
+    if (!key_released(?i, KEY_A)) { ret 1; }
+    if (key_down(?i, KEY_A))      { ret 1; }
+    ret 0;
+}
+
+test "input: mouse delta accumulates over the whole tick, not the last event" {
+    var i: Input = input_new();
+    input_mouse_event(?i, 10.0, 0.0);
+    input_mouse_event(?i, 20.0, 0.0);
+    input_mouse_event(?i, 25.0, 5.0);
+
+    input_begin_tick(?i);
+    if (i.mouse_x != 25.0 || i.mouse_y != 5.0) { ret 1; }
+    # 25 total, not the 5 of the final event
+    if (i.mouse_dx != 25.0 || i.mouse_dy != 5.0) { ret 1; }
+
+    # Delta resets per tick; position does not
+    input_begin_tick(?i);
+    if (i.mouse_dx != 0.0)  { ret 1; }
+    if (i.mouse_x != 25.0)  { ret 1; }
+    ret 0;
+}
+
+test "input: scroll accumulates per tick and resets" {
+    var i: Input = input_new();
+    input_scroll_event(?i, 0.0, 1.0);
+    input_scroll_event(?i, 0.0, 2.0);
+    input_begin_tick(?i);
+    if (i.scroll_y != 3.0) { ret 1; }
+    input_begin_tick(?i);
+    if (i.scroll_y != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "input: an unmapped key is inert rather than aliasing" {
+    var i: Input = input_new();
+    input_key_event(?i, KEY_UNKNOWN, true);
+    input_begin_tick(?i);
+    if (key_down(?i, KEY_UNKNOWN))    { ret 1; }
+    if (key_pressed(?i, KEY_UNKNOWN)) { ret 1; }
+    # And no real key was disturbed
+    if (key_down(?i, KEY_A)) { ret 1; }
+    ret 0;
+}
+
+test "input: axis is -1, 0, or 1 and opposites cancel" {
+    var i: Input = input_new();
+    if (axis(?i, KEY_A, KEY_D) != 0.0) { ret 1; }
+
+    input_key_event(?i, KEY_D, true);
+    input_begin_tick(?i);
+    if (axis(?i, KEY_A, KEY_D) != 1.0) { ret 1; }
+
+    input_key_event(?i, KEY_A, true);
+    input_begin_tick(?i);
+    if (axis(?i, KEY_A, KEY_D) != 0.0) { ret 1; }
+
+    input_key_event(?i, KEY_D, false);
+    input_begin_tick(?i);
+    if (axis(?i, KEY_A, KEY_D) != -1.0) { ret 1; }
+    ret 0;
+}
+
+test "input: buttons carry the same edge semantics as keys" {
+    var i: Input = input_new();
+    input_button_event(?i, BUTTON_LEFT, true);
+    input_begin_tick(?i);
+    if (!button_pressed(?i, BUTTON_LEFT)) { ret 1; }
+    if (!button_down(?i, BUTTON_LEFT))    { ret 1; }
+    input_begin_tick(?i);
+    if (button_pressed(?i, BUTTON_LEFT)) { ret 1; }
+    if (!button_down(?i, BUTTON_LEFT))   { ret 1; }
+    ret 0;
+}

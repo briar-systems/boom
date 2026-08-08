@@ -18,10 +18,12 @@
 # morph-target (weights) channels are future work.
 
 use boom.graphics.mesh.Mesh;
+use boom.graphics.device.Device;
 use boom.graphics.mesh.MeshData;
 use boom.graphics.mesh.mesh;
 use boom.graphics.mesh.mesh_delete;
 use boom.graphics.mesh.extract_loaded;
+use boom.graphics.mesh.mesh_data_max_joint;
 use boom.graphics.mesh.read_floats;
 use boom.graphics.skeleton.Skeleton;
 use boom.graphics.skeleton.MAX_JOINTS;
@@ -50,6 +52,7 @@ use allo:  std.allocator;
 use page:  std.allocator.page;
 use arena: std.allocator.arena;
 use fs:    std.filesystem;
+use vec:     std.collections.vector;
 use std.types.option.Option;
 use std.types.option.is_some;
 use std.types.result.Result;
@@ -65,7 +68,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
 use std.types.string.str_equals;
-use std.types.string.StrView;
+use text:  std.text.string;
 
 # an opaque handle to a skinned, animated model
 # ---
@@ -218,18 +221,15 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) Result
     ret ok[bool, Error](true);
 }
 
-# copy a borrowed name view into a boom-owned null-terminated string
-fun dup_name(v: StrView, pa: *allo.Allocator, out: *str) Result[bool, Error] {
-    val r: Result[*u8, str] = allo.allocate[u8](pa, v.len + 1);
-    if (is_err[*u8, str](r)) { ret err[bool, Error](error(unwrap_err[*u8, str](r))); }
-    val buf: *u8 = unwrap_ok[*u8, str](r);
-    var i: usize = 0;
-    for (i < v.len) {
-        buf[i] = v.data[i];
-        i = i + 1;
-    }
-    buf[v.len] = 0;
-    @out = buf:~str;
+# copy a glTF name into a boom-owned string
+#
+# glTF names are owned null-terminated strings as of mach-gltf 0.3.0, so this
+# is a plain dup. it was a hand-rolled byte loop while they were borrowed views
+# into the JSON buffer, which is the copy boom had to make to outlive it.
+fun dup_name(v: str, pa: *allo.Allocator, out: *str) Result[bool, Error] {
+    val r: Result[str, str] = text.str_dup(pa, v);
+    if (is_err[str, str](r)) { ret err[bool, Error](error(unwrap_err[str, str](r))); }
+    @out = unwrap_ok[str, str](r);
     ret ok[bool, Error](true);
 }
 
@@ -354,7 +354,7 @@ fun build_animations(loaded: *gp.Loaded, skin: *gd.Skin, pa: *allo.Allocator, ou
 # data: the .glb bytes
 # len:  length of data in bytes
 # ret:  the built Model, or a parse/extract error
-pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
+pub fun model_from_glb(d: *Device, data: *u8, len: usize) Result[Model, Error] {
     var tpa: allo.Allocator;
     page.make(?tpa);
     var tar: arena.Arena;
@@ -378,20 +378,36 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
     }
 
     var model: Model;
-    model.mesh       = mesh(md.vertices::ptr, md.vertex_count, ?md.format, md.indices, md.index_count);
+    val mr: Result[Mesh, Error] = mesh(d, md.vertices::ptr, md.vertex_count, ?md.format,
+                                       md.indices, md.index_count);
+    if (is_err[Mesh, Error](mr)) {
+        arena.dnit(?tar);
+        ret err[Model, Error](unwrap_err[Mesh, Error](mr));
+    }
+    model.mesh       = unwrap_ok[Mesh, Error](mr);
     model.clips      = nil;
     model.clip_count = 0;
 
     val skr: Result[bool, Error] = build_skeleton(?loaded, ?taa, ?model.skeleton);
     if (is_err[bool, Error](skr)) {
-        mesh_delete(?model.mesh);
+        mesh_delete(d, ?model.mesh);
         arena.dnit(?tar);
         ret err[Model, Error](unwrap_err[bool, Error](skr));
     }
 
+    # A joint index past the skeleton's joints reads outside the palette the
+    # skinned vertex stage is handed. Checked here, where both the geometry and
+    # the joint count are known, rather than clamped per vertex in the shader.
+    val max_joint: i64 = mesh_data_max_joint(?md);
+    if (max_joint >= model.skeleton.count::i64) {
+        mesh_delete(d, ?model.mesh);
+        arena.dnit(?tar);
+        ret err[Model, Error](error("a vertex references a joint the skin does not have"));
+    }
+
     val pie: Option[str] = arena.init(?model.arena, ?tpa, 4096);
     if (is_some[str](pie)) {
-        mesh_delete(?model.mesh);
+        mesh_delete(d, ?model.mesh);
         arena.dnit(?tar);
         ret err[Model, Error](error("out of memory"));
     }
@@ -405,7 +421,7 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
             val anr: Result[bool, Error] = build_animations(?loaded, skin, ?paa, ?model.clips, ?model.clip_count);
             if (is_err[bool, Error](anr)) {
                 arena.dnit(?model.arena);
-                mesh_delete(?model.mesh);
+                mesh_delete(d, ?model.mesh);
                 arena.dnit(?tar);
                 ret err[Model, Error](unwrap_err[bool, Error](anr));
             }
@@ -420,18 +436,18 @@ pub fun model_from_glb(data: *u8, len: usize) Result[Model, Error] {
 # ---
 # path: filesystem path to a .glb file
 # ret:  the built Model, or a read/parse/extract error
-pub fun model_load(path: str) Result[Model, Error] {
+pub fun model_load(d: *Device, path: str) Result[Model, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[fs.Buffer, str] = fs.read_all_sized(?pa, path);
-    if (is_err[fs.Buffer, str](br)) {
-        ret err[Model, Error](error(unwrap_err[fs.Buffer, str](br)));
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    if (is_err[vec.Vector[u8], str](br)) {
+        ret err[Model, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }
-    val buf: fs.Buffer = unwrap_ok[fs.Buffer, str](br);
+    var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
-    val res: Result[Model, Error] = model_from_glb(buf.data, buf.len);
-    allo.deallocate[u8](?pa, buf.data, buf.len + 1);
+    val res: Result[Model, Error] = model_from_glb(d, buf.data, buf.len);
+    vec.dnit[u8](?buf);
     ret res;
 }
 
@@ -466,8 +482,8 @@ pub fun model_rest_player(model: *Model) AnimationPlayer {
 # release a model's GPU buffers and clip storage
 # ---
 # m: model to delete; the handle must not be used afterward
-pub fun model_delete(m: *Model) {
-    mesh_delete(?m.mesh);
+pub fun model_delete(d: *Device, m: *Model) {
+    mesh_delete(d, ?m.mesh);
     arena.dnit(?m.arena);
     m.clips      = nil;
     m.clip_count = 0;

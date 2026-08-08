@@ -21,6 +21,10 @@ use boom.timestep.Timestep;
 use boom.timestep.timestep_new;
 use boom.event.EventQueue;
 use boom.event.queue_new;
+use window: boom.window;
+use inp: boom.input;
+use phy: boom.physics;
+use boom.math.vec.vec3;
 use std.chrono.duration.Duration;
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -48,6 +52,9 @@ pub rec Config {
 # clock:   per-frame timing
 # step:    fixed-timestep accumulator
 # events:  input event queue, fed by the window
+# input:   polled key and mouse state, sampled at each fixed tick
+# physics: rigid body simulation, stepped once per fixed tick
+# sink:    where the window delivers input; points into this Context
 # alpha:   render interpolation factor in [0, 1), set each frame
 # running: cleared to stop the loop
 # user:    opaque game-state pointer, nil until set; hooks reach it
@@ -57,6 +64,9 @@ pub rec Context {
     clock:   Clock;
     step:    Timestep;
     events:  EventQueue;
+    input:   inp.Input;
+    physics: phy.Physics;
+    sink:    window.Sink;
     alpha:   f64;
     running: bool;
     user:    ptr;
@@ -64,7 +74,7 @@ pub rec Context {
 
 # bring the engine subsystems up
 #
-# opens the window and GL context, attaches the input queue as its event
+# opens the window, attaches the input queue as its event
 # sink, starts the clock, and arms the fixed-timestep accumulator.
 # returns false if the window could not be opened, in which case the
 # subsystems are already torn down and context_shutdown must not be
@@ -75,11 +85,18 @@ pub rec Context {
 # ret: true on success, false if the window could not be opened
 pub fun context_init(ctx: *Context, cfg: Config) bool {
     ctx.events = queue_new();
+    ctx.input   = inp.input_new();
+    ctx.physics = phy.physics_new(vec3(0.0, -9.81, 0.0));
     ctx.window = window_open(cfg.width, cfg.height, cfg.title);
     if (!window_is_valid(?ctx.window)) {
         ret false;
     }
-    window_set_event_sink(?ctx.window, ?ctx.events);
+    # the sink lives in the Context so it outlives the window, which the
+    # platform callbacks require: they reach it through the GLFW user pointer
+    # long after context_init has returned.
+    ctx.sink.queue = ?ctx.events;
+    ctx.sink.input = ?ctx.input;
+    window_set_event_sink(?ctx.window, ?ctx.sink);
     ctx.clock   = clock_new();
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.alpha   = 0.0;

@@ -1,16 +1,17 @@
-# the boom skeletal-animation example: load an animated glTF and play it
+# The boom skeletal-animation example: load an animated glTF and play it.
 #
-# a standalone consumer of boom that shows the ergonomic animation surface:
-# model_load returns a Model (a skinned mesh, its skeleton, and named clips)
-# with mach-gltf fully hidden, model_player binds a player to a named clip,
-# and each frame advances the player and draws it with pass_draw_skinned.
-# the asset is a two-bone bar (assets/bar.glb) whose "bend" clip rocks the
-# top half back and forth; the whole model turns slowly so the bend reads
-# in 3D. run it from this directory so the relative asset path resolves.
+# A standalone consumer of boom that shows the animation surface: model_load
+# returns a Model (a skinned mesh, its skeleton, and named clips) with mach-gltf
+# fully hidden, model_player binds a player to a named clip, and each frame
+# advances the player and draws it with pass_draw_skinned. The asset is a
+# two-bone bar (assets/bar.glb) whose "bend" clip rocks the top half back and
+# forth; the whole model turns slowly so the bend reads in 3D. Run it from this
+# directory so the relative asset path resolves.
 #
-# the game authors no glTF and no skinning matrices: it uses boom's
-# ready-made skinning vertex shader (gfx.SKINNED_VERTEX_SRC) and a plain
-# lit fragment shader, and never imports mach-gl, mach-glfw, or mach-gltf.
+# The game authors no glTF, no skinning matrices, and no shaders. Passing a Pose
+# to pass_draw_skinned is what selects the skinned pipeline; the renderer
+# uploads the pose's joint matrices to the storage buffer its vertex stage
+# reads. Nothing here imports vk, mach-glfw, or mach-gltf.
 
 use std.runtime;
 use std.print;
@@ -31,31 +32,30 @@ use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use std.types.bool.bool;
+use std.types.bool.false;
 use std.types.string.str;
 
-# the game's own state, carried through ctx.user
+# The game's own state, carried through ctx.user.
 # ---
-# renderer:  the renderer that draws the animated model
-# shader:    the skinning program, boom's skinning vertex shader plus a lit fragment
+# renderer:  the window's renderer, which owns the device the model was loaded
+#            against
 # model:     the loaded model: skinned mesh, skeleton, and the "bend" clip
 # player:    playback of the "bend" clip, advanced each tick
+# material:  the base colour the model draws with
 # camera:    the 3D viewpoint
 # transform: the model's placement, turned slowly each tick
 # ready:     whether init succeeded; draw is skipped if not
 rec Game {
     renderer:  gfx.Renderer;
-    shader:    gfx.Shader;
     model:     gfx.Model;
     player:    gfx.AnimationPlayer;
+    material:  gfx.Material;
     camera:    gfx.Camera;
     transform: gm.Transform;
     ready:     u8;
 }
 
-# a plain directional-light fragment shader over the skinned normal
-val FRAGMENT_SRC: str = "#version 330 core\nin vec3 v_normal;\nin vec2 v_uv;\nout vec4 frag_color;\nvoid main() {\n    vec3 n = normalize(v_normal);\n    vec3 light = normalize(vec3(0.4, 1.0, 0.6));\n    float d = max(dot(n, light), 0.0);\n    vec3 base = vec3(0.70, 0.75, 0.92);\n    frag_color = vec4(base * (0.25 + 0.75 * d), 1.0);\n}\n";
-
-# the fixed update step in seconds, matching the 60 Hz config below
+# The fixed update step in seconds, matching the 60 Hz config below.
 val DT: f32 = 0.0166667;
 
 fun on_init(ctx: *Context) {
@@ -65,22 +65,16 @@ fun on_init(ctx: *Context) {
     val w: i32 = ctx.window.width;
     val h: i32 = ctx.window.height;
 
-    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, w, h);
+    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
     if (is_err[bool, gfx.Error](ri)) {
         var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
         print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
         ret;
     }
 
-    val compiled: Result[gfx.Shader, gfx.Error] = gfx.shader(gfx.SKINNED_VERTEX_SRC, FRAGMENT_SRC);
-    if (is_err[gfx.Shader, gfx.Error](compiled)) {
-        var e: gfx.Error = unwrap_err[gfx.Shader, gfx.Error](compiled);
-        print.eprintlnf("shader error: {}", gfx.error_msg(?e));
-        ret;
-    }
-    g.shader = unwrap_ok[gfx.Shader, gfx.Error](compiled);
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
-    val loaded: Result[gfx.Model, gfx.Error] = gfx.model_load("assets/bar.glb");
+    val loaded: Result[gfx.Model, gfx.Error] = gfx.model_load(d, "assets/bar.glb");
     if (is_err[gfx.Model, gfx.Error](loaded)) {
         var e: gfx.Error = unwrap_err[gfx.Model, gfx.Error](loaded);
         print.eprintlnf("model load error: {}", gfx.error_msg(?e));
@@ -96,6 +90,11 @@ fun on_init(ctx: *Context) {
     }
     g.player = unwrap_ok[gfx.AnimationPlayer, gfx.Error](pl);
 
+    # No texture, so the renderer's white texel is bound and the model comes out
+    # as this colour under the directional light.
+    g.material = gfx.material();
+    gfx.material_set_color(?g.material, gm.vec4(0.70, 0.75, 0.92, 1.0));
+
     val aspect: f32 = w::f32 / h::f32;
     g.camera = gfx.camera_perspective(
         gm.vec3(2.6, 1.8, 3.6),
@@ -110,7 +109,7 @@ fun on_init(ctx: *Context) {
     g.ready = 1;
 }
 
-# accumulated turn angle in radians, advanced each fixed tick
+# Accumulated turn angle in radians, advanced each fixed tick.
 var turn: f32 = 0.0;
 
 fun on_tick(ctx: *Context) {
@@ -129,12 +128,39 @@ fun on_draw(ctx: *Context) {
         ret;
     }
 
-    gfx.renderer_begin_frame(?g.renderer);
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        # Minimized: nothing to draw into, and the aspect would divide by zero.
+        ret;
+    }
+    # The window is resizable, so the aspect ratio is not fixed at init.
+    g.camera.aspect = w / h;
+
+    # A frame that did not open is a swapchain that went out of date and was
+    # rebuilt, which happens on every resize. Skipping the frame is the correct
+    # response; drawing into it is not possible.
+    var opened: bool = false;
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    if (!opened) {
+        ret;
+    }
+
     var scene: gfx.PassDesc = gfx.pass_scene(?g.camera);
     var pass:  gfx.Pass = gfx.pass_begin(?g.renderer, ?scene);
-    gfx.pass_draw_skinned(?pass, ?g.model.mesh, ?g.player.pose, ?g.shader, ?g.transform);
+    gfx.pass_draw_skinned_material(?pass, ?g.model.mesh, ?g.material, ?g.player.pose, ?g.transform);
     gfx.pass_end(?pass);
-    gfx.renderer_end_frame(?g.renderer);
+
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    }
 }
 
 fun on_dnit(ctx: *Context) {
@@ -142,8 +168,7 @@ fun on_dnit(ctx: *Context) {
     if (g.ready == 0) {
         ret;
     }
-    gfx.model_delete(?g.model);
-    gfx.shader_delete(?g.shader);
+    gfx.model_delete(gfx.renderer_device(?g.renderer), ?g.model);
     gfx.renderer_dnit(?g.renderer);
 }
 

@@ -8,9 +8,9 @@
 # by, laid out contiguously so the whole palette uploads in one call.
 #
 # joint storage is fixed at MAX_JOINTS so a Skeleton and Pose are plain
-# values with no backing allocation, and MAX_JOINTS also sizes the
-# u_joints uniform array the skinning shader declares. the composition is
-# pure boom.math, so it is unit-tested with no GL context.
+# values with no backing allocation, and MAX_JOINTS also sizes the joint
+# palette the skinning shader reads. the composition is pure boom.math, so
+# it is unit-tested with no device.
 
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_mul;
@@ -25,13 +25,13 @@ use std.types.string.str;
 
 # the most joints a skeleton and its skinning palette carry
 #
-# also the size of the u_joints uniform array the skinning shader
-# declares; SKINNED_VERTEX_SRC hardcodes this count and a compile-time
-# guard keeps the two in sync.
+# also the size of the joint palette the skinning shader declares as a
+# storage block; shaders/src/skinned_vert.mach hardcodes the resulting column
+# count and the guard below keeps the two in sync.
 pub val MAX_JOINTS: usize = 128;
 
 $if (MAX_JOINTS != 128) {
-    $error("skeleton: SKINNED_VERTEX_SRC hardcodes u_joints[128]; keep it in sync with MAX_JOINTS");
+    $error("skeleton: shaders/src/skinned_vert.mach declares a 512-column palette; keep it in sync with MAX_JOINTS");
 }
 
 # a skeleton's joints, their hierarchy, and their bind data
@@ -56,8 +56,9 @@ pub rec Skeleton {
 
 # a posed skeleton: the skinning matrix palette ready to upload
 # ---
-# count:    number of valid joint matrices
-# matrices: per-joint skinning matrix, joint j at index j
+# count:    number of joints the skeleton actually has
+# matrices: per-joint skinning matrix, joint j at index j; entries at or past
+#           `count` are identity rather than undefined
 pub rec Pose {
     count:    usize;
     matrices: [128]Mat4;
@@ -96,6 +97,20 @@ pub fun skeleton_pose(sk: *Skeleton, locals: *Transform, out: *Pose) {
         out.matrices[k] = mat4_mul(?globals[k], ?sk.inverse_bind[k]);
         k = k + 1;
     }
+
+    # THE TAIL IS FILLED, NOT LEFT ALONE. A skinned draw uploads the whole
+    # MAX_JOINTS-matrix palette, because that is what the shader's storage
+    # block declares and the upload is one copy rather than a per-joint loop.
+    # Leaving the joints past `count` at whatever was on the stack means a
+    # vertex referencing an out-of-range joint reads a matrix of garbage
+    # floats and is flung somewhere unbounded, which stretches the whole mesh
+    # into a spike. Identity leaves such a vertex where it already is, which
+    # is visible as a piece of the model not moving rather than as the model
+    # being destroyed.
+    for (k < MAX_JOINTS) {
+        out.matrices[k] = mat4_identity();
+        k = k + 1;
+    }
     out.count = sk.count;
 }
 
@@ -110,24 +125,16 @@ pub fun skeleton_rest_pose(sk: *Skeleton, out: *Pose) {
     skeleton_pose(sk, ?sk.rest[0], out);
 }
 
-# a pointer to the palette's first matrix, for upload as a uniform array
+# a pointer to the palette's first matrix, for upload as a storage buffer
+#
+# All MAX_JOINTS matrices are contiguous and all are defined, so the upload is
+# one copy of a fixed size rather than a per-joint loop bounded by `count`.
 # ---
 # pose: the pose to expose
-# ret:  pointer to the first of count contiguous column-major matrices
+# ret:  pointer to the first of MAX_JOINTS contiguous column-major matrices
 pub fun pose_matrices(pose: *Pose) *Mat4 {
     ret ?pose.matrices[0];
 }
-
-# a skinning vertex shader following boom's convention
-#
-# attribute locations 0 a_position (vec3), 1 a_normal (vec3), 2 a_uv
-# (vec2), 5 a_joints (uvec4, an integer attribute), and 6 a_weights
-# (vec4); uniforms u_model, u_view, u_projection (mat4) and u_joints, a
-# MAX_JOINTS-long mat4 palette a skinning draw uploads. each vertex is
-# skinned by its four weighted joint matrices, then placed by the model,
-# view, and projection like the mesh convention. pair it with any
-# fragment shader that reads v_normal and v_uv.
-pub val SKINNED_VERTEX_SRC: str = "#version 330 core\nlayout(location = 0) in vec3 a_position;\nlayout(location = 1) in vec3 a_normal;\nlayout(location = 2) in vec2 a_uv;\nlayout(location = 5) in uvec4 a_joints;\nlayout(location = 6) in vec4 a_weights;\nuniform mat4 u_model;\nuniform mat4 u_view;\nuniform mat4 u_projection;\nuniform mat4 u_joints[128];\nout vec3 v_normal;\nout vec2 v_uv;\nvoid main() {\n    mat4 skin = a_weights.x * u_joints[a_joints.x]\n              + a_weights.y * u_joints[a_joints.y]\n              + a_weights.z * u_joints[a_joints.z]\n              + a_weights.w * u_joints[a_joints.w];\n    mat4 world = u_model * skin;\n    v_normal = mat3(world) * a_normal;\n    v_uv = a_uv;\n    gl_Position = u_projection * u_view * world * vec4(a_position, 1.0);\n}\n";
 
 # build a two-joint chain skeleton for tests: root then a child of it
 fun fixture_chain(sk: *Skeleton) {
@@ -163,6 +170,46 @@ test "skeleton: composition propagates a parent transform to its child" {
     if (pose.count != 2) { ret 1; }
     if (pose.matrices[0].m[12] != 2.0) { ret 2; }
     if (pose.matrices[1].m[12] != 3.0) { ret 3; }
+    ret 0;
+}
+
+test "skeleton: the palette tail is identity, not whatever was on the stack" {
+    # A skinned draw uploads all MAX_JOINTS matrices, because that is the size
+    # of the storage block the shader declares. A vertex referencing a joint
+    # past `count` would otherwise be transformed by uninitialized floats and
+    # flung somewhere unbounded, stretching the whole mesh into a spike.
+    var sk: Skeleton;
+    fixture_chain(?sk);
+
+    var pose: Pose;
+    # Dirty the tail first, so the fill is what is being observed rather than
+    # a zeroed stack that happens to look right.
+    var i: usize = 0;
+    for (i < MAX_JOINTS) {
+        pose.matrices[i] = mat4_translation(Vec3{x: 99.0, y: 99.0, z: 99.0});
+        i = i + 1;
+    }
+
+    skeleton_rest_pose(?sk, ?pose);
+    if (pose.count != 2) { ret 1; }
+
+    val last: *Mat4 = ?pose.matrices[MAX_JOINTS - 1];
+    if (last.m[0] != 1.0 || last.m[5] != 1.0 || last.m[10] != 1.0 || last.m[15] != 1.0) { ret 2; }
+    if (last.m[12] != 0.0 || last.m[13] != 0.0 || last.m[14] != 0.0) { ret 3; }
+
+    # The first joint past the real ones, which is the index an out-of-range
+    # JOINTS_0 value most often lands on.
+    val next: *Mat4 = ?pose.matrices[2];
+    if (next.m[12] != 0.0 || next.m[15] != 1.0) { ret 4; }
+    ret 0;
+}
+
+test "skeleton: the palette is exactly what the shader's storage block holds" {
+    # boom.graphics.renderer uploads $size_of(Mat4) * MAX_JOINTS bytes in one
+    # copy. A palette narrower than that reads past the Pose; wider, and the
+    # last joints come from the next draw's palette.
+    if ($size_of(Mat4) != 64)                 { ret 1; }
+    if ($size_of(Mat4) * MAX_JOINTS != 8192)  { ret 2; }
     ret 0;
 }
 

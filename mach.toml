@@ -1,8 +1,6 @@
 [project]
 id = "boom"
-name = "Boom Engine"
-description = "Boom game engine"
-version = "0.2.0"
+version = "0.3.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -23,15 +21,36 @@ abi = "sysv64"
 
 [profile.debug]
 opt = 0
+debug = true
+simd = "scalarize"
 
 [profile.release]
 opt = 2
+debug = false
+simd = "scalarize"
 
 [artifact.boom]
 kind = "static"
 entry = "lib/boom.mach"
 out = "lib/boom"
 targets = ["*"]
+link = []
+need = ["build-shaders"]
+
+# Shaders are a separate project targeting spirv, built by this step and
+# embedded into the library. They cannot be an artifact of this project because
+# a project builds for one target and boom builds for the host.
+#
+# The output lands in res/ by project convention: game assets, including
+# compiled shaders, live under a project root's res/. That is also what
+# vfs.res_root points at by default. It cannot live under {project.out}
+# because #[embed] takes a literal path and {project.out} varies by target
+# and profile; SPIR-V is target-independent, so one copy serves every build.
+[step.build-shaders]
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && cp shaders/out/obj/shaders/*.spv res/spv/"
+in  = ["shaders/src/*.mach", "shaders/mach.toml"]
+out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/sprite_vert.spv", "res/spv/sprite_frag.spv"]
+need = []
 
 [dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
@@ -41,22 +60,26 @@ ref = "branch/main"
 git = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 
-[dep.mach-gl]
-git = "https://github.com/briar-systems/mach-gl"
-ref = "branch/dev"
-
 [dep.mach-audio]
 git = "https://github.com/briar-systems/mach-audio"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "branch/dev"
+ref = "branch/main"
+
+[dep.mach-phys]
+git = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+
+[dep.mach-vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"
 
 [dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/dev"
+ref = "branch/main"

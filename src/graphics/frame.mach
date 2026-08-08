@@ -1,0 +1,533 @@
+# The frame loop: render pass, framebuffers, command buffers, and synchronization.
+#
+# Third and last of the shader-independent steps of the Vulkan migration. With
+# this, a frame can be acquired, cleared, and presented without any shader
+# existing, which is what makes the whole path verifiable before the sampler
+# binding lands.
+#
+# FRAMES IN FLIGHT. The CPU runs ahead of the GPU by up to MAX_FRAMES_IN_FLIGHT
+# frames. Each in-flight frame owns its own command buffer, its own semaphores,
+# and its own fence, because reusing any of them while the GPU still reads them
+# is a data race the validation layers catch and a driver does not.
+#
+# The fence is waited on before reusing a frame's command buffer, which is what
+# bounds the CPU's lead. Without it the CPU would queue frames without limit
+# and latency would grow until memory ran out.
+#
+# TWO SEMAPHORES, not one. `available` orders acquire before render; `finished`
+# orders render before present. They guard different handoffs and collapsing them
+# to one lets presentation begin before rendering completes.
+#
+# THEY ARE INDEXED DIFFERENTLY, AND THAT IS NOT AN INCONSISTENCY. `available` is
+# waited on by vkAcquireNextImageKHR, which is called before an image index
+# exists, so it can only be per in-flight frame. `finished` is signalled by the
+# submit and waited on by the present of one specific image, and a present is
+# only known to be finished when that image is acquired again. With two frames in
+# flight and three swapchain images the two counts do not divide, so a per-frame
+# `finished` is reused for image 2 while image 0's present still holds it. That
+# is a real race: the second wait may observe the first signal. Per image, the
+# acquire that returns the image is itself the proof its last present retired.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.swapchain.Swapchain;
+use boom.graphics.swapchain.MAX_IMAGES;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_clearing;
+use boom.graphics.pass.pass_loading;
+use boom.graphics.image.DepthAttachment;
+use boom.graphics.image.depth_attachment_init;
+use boom.graphics.image.depth_attachment_dnit;
+
+# How far the CPU may run ahead of the GPU.
+#
+# Two is the usual choice: one frame being recorded while another is executing.
+# Three trades latency for throughput and is not what a game wants by default.
+pub val MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+# Nanoseconds to wait on a fence before treating the GPU as hung.
+val FENCE_TIMEOUT: u64 = 1000000000;
+
+# Per-frame state, one set per in-flight frame.
+# ---
+# command:   Command buffer recorded this frame.
+# available: Signalled when the acquired image is ready to render into.
+# in_flight: Signalled when this frame's command buffer is reusable.
+rec Frame {
+    command:   vk.CommandBuffer;
+    available: vk.Semaphore;
+    in_flight: vk.Fence;
+}
+
+# The frame loop's resources.
+# ---
+# pass:         Render pass: a colour attachment and a depth attachment, both
+#               cleared on load.
+# pass_load:    The same attachments, preserved on load rather than cleared.
+#               Used to resume the window pass after an offscreen excursion,
+#               which would otherwise wipe what the frame has already drawn.
+# pool:         Command pool the frames allocate from.
+# framebuffers: One per swapchain image.
+# depths:       One depth attachment per swapchain image.
+# fb_count:     Number of valid framebuffers.
+# finished:     One render-finished semaphore per swapchain image, not per
+#               in-flight frame. Allocated for MAX_IMAGES once, so a swapchain
+#               rebuild that changes the image count does not recreate them.
+# frames:       Per-frame state.
+# current:      Which in-flight frame is next.
+# image_index:  Swapchain image acquired this frame.
+# ready:        Whether creation completed.
+pub rec FrameLoop {
+    pass:         vk.RenderPass;
+    pass_load:    vk.RenderPass;
+    pool:         vk.CommandPool;
+    framebuffers: [8]vk.Framebuffer;
+    depths:       [8]DepthAttachment;
+    fb_count:     u32;
+    finished:     [8]vk.Semaphore;
+    frames:       [2]Frame;
+    current:      usize;
+    image_index:  u32;
+    ready:        bool;
+}
+
+# Create the render pass, pool, framebuffers, and per-frame objects.
+pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+    f.ready   = false;
+    f.current = 0;
+
+    if (!v.ready || !s.ready) {
+        ret err[bool, Error](error("device or swapchain is not initialized"));
+    }
+
+    val pr: Result[bool, Error] = make_pass(f, v, s);
+    if (is_err[bool, Error](pr)) { ret pr; }
+
+    var pci: vk.CommandPoolCreateInfo;
+    pci.sType            = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.pNext            = nil;
+    # Buffers are re-recorded every frame, so they must be individually
+    # resettable. Without this flag a buffer can only be reset by resetting the
+    # whole pool, which would clobber the other in-flight frame.
+    pci.flags            = vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.queueFamilyIndex = v.graphics_family;
+    if (vk.vkCreateCommandPool(v.device, ?pci, nil, ?f.pool) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateCommandPool failed"));
+    }
+
+    val fr: Result[bool, Error] = make_framebuffers(f, v, s);
+    if (is_err[bool, Error](fr)) { ret fr; }
+
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        var abi: vk.CommandBufferAllocateInfo;
+        abi.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        abi.pNext              = nil;
+        abi.commandPool        = f.pool;
+        abi.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
+        abi.commandBufferCount = 1;
+        if (vk.vkAllocateCommandBuffers(v.device, ?abi, ?f.frames[i].command) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkAllocateCommandBuffers failed"));
+        }
+
+        var sci: vk.SemaphoreCreateInfo;
+        sci.sType = vk.STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        sci.pNext = nil;
+        sci.flags = 0;
+        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.frames[i].available) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkCreateSemaphore failed"));
+        }
+
+        var fci: vk.FenceCreateInfo;
+        fci.sType = vk.STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fci.pNext = nil;
+        # Created signalled, so the first frame's wait returns immediately.
+        # Unsignalled, the first frame would block forever on a fence nothing
+        # has submitted work against.
+        fci.flags = vk.FENCE_CREATE_SIGNALED_BIT;
+        if (vk.vkCreateFence(v.device, ?fci, nil, ?f.frames[i].in_flight) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkCreateFence failed"));
+        }
+        i = i + 1;
+    }
+
+    # One render-finished semaphore per swapchain image. MAX_IMAGES of them
+    # rather than s.count, so a rebuild to a different image count neither
+    # recreates them nor leaves an index without one.
+    var sci: vk.SemaphoreCreateInfo;
+    sci.sType = vk.STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    sci.pNext = nil;
+    sci.flags = 0;
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.finished[k]) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkCreateSemaphore failed for a swapchain image"));
+        }
+        k = k + 1;
+    }
+
+    f.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# The window's two render passes.
+#
+# THE WINDOW PASS HAS DEPTH TOO. It would not need one to clear and present, but
+# two things require it. A 3D pass drawn straight to the window needs depth
+# testing or its geometry sorts by submission order. And a pipeline is only
+# usable in a render pass compatible with the one it was built against, so a
+# window pass with one attachment and an offscreen target's with two would need
+# two sets of pipelines and a draw could not move between them.
+#
+# NEITHER ENDS IN PRESENT_SRC_KHR. A frame runs one pass or three, depending on
+# whether the game renders into an offscreen target part way through, so no
+# single pass knows whether it is the last one. Both leave the image
+# colour-attachment-optimal and frame_end issues the transition to presentable,
+# which is the only place that does know. Declaring it on the clearing pass, as
+# this did, made the resume pass illegal on every frame that used it: its
+# initialLayout said colour-attachment-optimal and the image was in present-src.
+fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+    val clearing: PassOptions = pass_clearing(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    val cr: Result[bool, Error] = pass_create(v, ?clearing, ?f.pass);
+    if (is_err[bool, Error](cr)) { ret cr; }
+
+    # The same attachments, preserved rather than cleared. A pass that renders
+    # into an offscreen target has to end the window's render pass and begin the
+    # target's, and resuming through the clearing pass afterwards would erase
+    # everything the frame had already drawn.
+    val loading: PassOptions = pass_loading(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    ret pass_create(v, ?loading, ?f.pass_load);
+}
+
+# One framebuffer per swapchain image view.
+# One framebuffer and one depth attachment per swapchain image.
+#
+# A DEPTH BUFFER PER IMAGE, NOT ONE SHARED. Two frames are in flight, so two
+# command buffers can be executing at once against different swapchain images.
+# Sharing one depth buffer between them is a write-write hazard with no
+# synchronization expressing it, which shows as geometry from one frame
+# occluding another's and only under load.
+fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+    f.fb_count = 0;
+    var i: u32 = 0;
+    for (i < s.count) {
+        val dr: Result[bool, Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
+        if (is_err[bool, Error](dr)) { ret dr; }
+
+        var views: [2]vk.ImageView;
+        views[0] = s.views[i];
+        views[1] = f.depths[i].view;
+        var fci: vk.FramebufferCreateInfo;
+        fci.sType           = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fci.pNext           = nil;
+        fci.flags           = 0;
+        fci.renderPass      = f.pass;
+        fci.attachmentCount = 2;
+        fci.pAttachments    = ?views[0];
+        fci.width           = s.width;
+        fci.height          = s.height;
+        fci.layers          = 1;
+        if (vk.vkCreateFramebuffer(v.device, ?fci, nil, ?f.framebuffers[i]) != vk.SUCCESS) {
+            ret err[bool, Error](error("vkCreateFramebuffer failed"));
+        }
+        f.fb_count = f.fb_count + 1;
+        i = i + 1;
+    }
+    ret ok[bool, Error](true);
+}
+
+# Begin a frame: wait for its fence, acquire an image, and start recording.
+#
+# Returns false when the swapchain is out of date, which is not an error: the
+# caller rebuilds and tries again next frame. Treating it as a failure would
+# make every window resize look like a crash.
+pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bool, Error] {
+    @out_ok = false;
+    if (!f.ready) { ret err[bool, Error](error("frame loop is not initialized")); }
+
+    val i: usize = f.current;
+
+    # Bounds the CPU's lead over the GPU. Without it frames queue without limit.
+    vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
+
+    var index: u32 = 0;
+    val ar: i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
+                                           f.frames[i].available, nil, ?index);
+    if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret ok[bool, Error](true); }
+    if (ar != vk.SUCCESS && ar != vk.SUBOPTIMAL_KHR) {
+        ret err[bool, Error](error("vkAcquireNextImageKHR failed"));
+    }
+    f.image_index = index;
+
+    # Reset only after the acquire succeeds. Resetting first would leave the
+    # fence unsignalled with no submission to signal it, deadlocking the next
+    # wait when the swapchain is out of date.
+    vk.vkResetFences(v.device, 1, ?f.frames[i].in_flight);
+    vk.vkResetCommandBuffer(f.frames[i].command, 0);
+
+    var bi: vk.CommandBufferBeginInfo;
+    bi.sType            = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.pNext            = nil;
+    bi.flags            = 0;
+    bi.pInheritanceInfo = nil;
+    if (vk.vkBeginCommandBuffer(f.frames[i].command, ?bi) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkBeginCommandBuffer failed"));
+    }
+
+    frame_begin_pass(f, s, 0.0, 0.0, 0.0, 1.0);
+
+    @out_ok = true;
+    ret ok[bool, Error](true);
+}
+
+# Begin the window render pass, clearing to a colour.
+#
+# Split from frame_begin so an offscreen pass can suspend and resume it. The
+# clear happens here rather than at pass level because a Vulkan render pass
+# clears on load, so it is a property of beginning one.
+pub fun frame_begin_pass(f: *FrameLoop, s: *Swapchain, r: f32, g: f32, b: f32, a: f32) {
+    var clears: [2]vk.ClearValue;
+    clears[0].color.float32[0] = r;
+    clears[0].color.float32[1] = g;
+    clears[0].color.float32[2] = b;
+    clears[0].color.float32[3] = a;
+    # Depth clears to 1.0, the far plane. Clearing to 0 makes every fragment
+    # fail the less-than test and the window come out empty.
+    clears[1].depthStencil.depth   = 1.0;
+    clears[1].depthStencil.stencil = 0;
+
+    var rbi: vk.RenderPassBeginInfo;
+    rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rbi.pNext                    = nil;
+    rbi.renderPass               = f.pass;
+    rbi.framebuffer              = f.framebuffers[f.image_index];
+    rbi.renderArea.offset.x      = 0;
+    rbi.renderArea.offset.y      = 0;
+    rbi.renderArea.extent.width  = s.width;
+    rbi.renderArea.extent.height = s.height;
+    rbi.clearValueCount          = 2;
+    rbi.pClearValues             = ?clears[0];
+    vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+}
+
+# Suspend the window render pass so another may begin.
+pub fun frame_suspend_pass(f: *FrameLoop) {
+    vk.vkCmdEndRenderPass(f.frames[f.current].command);
+}
+
+# Resume the window render pass, preserving what is already drawn.
+#
+# Uses the load variant rather than the clearing one, so an offscreen
+# excursion does not erase the frame.
+pub fun frame_resume_pass(f: *FrameLoop, s: *Swapchain) {
+    var rbi: vk.RenderPassBeginInfo;
+    rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rbi.pNext                    = nil;
+    rbi.renderPass               = f.pass_load;
+    rbi.framebuffer              = f.framebuffers[f.image_index];
+    rbi.renderArea.offset.x      = 0;
+    rbi.renderArea.offset.y      = 0;
+    rbi.renderArea.extent.width  = s.width;
+    rbi.renderArea.extent.height = s.height;
+    rbi.clearValueCount          = 0;
+    rbi.pClearValues             = nil;
+    vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+}
+
+# End the render pass, submit, and present.
+#
+# Returns false in out_ok when the swapchain needs rebuilding.
+pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bool, Error] {
+    @out_ok = false;
+    if (!f.ready) { ret err[bool, Error](error("frame loop is not initialized")); }
+
+    val i: usize = f.current;
+    vk.vkCmdEndRenderPass(f.frames[i].command);
+
+    # THE TRANSITION TO PRESENTABLE BELONGS HERE, NOT TO A RENDER PASS. A frame
+    # is one pass, or three when the game renders into an offscreen target part
+    # way through, and no pass knows whether it is the last. This is the point
+    # that does.
+    var b: vk.ImageMemoryBarrier;
+    b.sType               = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.pNext               = nil;
+    b.srcAccessMask       = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    # A present is not a memory read the barrier has to name; the semaphore the
+    # submit signals is what orders it. Zero here is what the spec asks for.
+    b.dstAccessMask       = 0;
+    b.oldLayout           = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout           = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    b.image               = s.images[f.image_index];
+    b.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.baseMipLevel   = 0;
+    b.subresourceRange.levelCount     = 1;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount     = 1;
+    vk.vkCmdPipelineBarrier(f.frames[i].command,
+                            vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                            vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            0, 0, nil, 0, nil, 1, ?b);
+
+    if (vk.vkEndCommandBuffer(f.frames[i].command) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkEndCommandBuffer failed"));
+    }
+
+    var wait_stage: u32 = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    var si: vk.SubmitInfo;
+    si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext                = nil;
+    si.waitSemaphoreCount   = 1;
+    si.pWaitSemaphores      = ?f.frames[i].available;
+    si.pWaitDstStageMask    = ?wait_stage;
+    si.commandBufferCount   = 1;
+    si.pCommandBuffers      = ?f.frames[i].command;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores    = ?f.finished[f.image_index];
+
+    if (vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkQueueSubmit failed"));
+    }
+
+    var index: u32 = f.image_index;
+    var chain: vk.SwapchainKHR = s.handle;
+    var pi: vk.PresentInfoKHR;
+    pi.sType              = vk.STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.pNext              = nil;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores    = ?f.finished[f.image_index];
+    pi.swapchainCount     = 1;
+    pi.pSwapchains        = ?chain;
+    pi.pImageIndices      = ?index;
+    pi.pResults           = nil;
+
+    val prr: i32 = vk.vkQueuePresentKHR(v.present_queue, ?pi);
+
+    # Advance regardless of the present result, so a rebuild does not leave two
+    # frames sharing one set of synchronization objects.
+    f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    if (prr == vk.ERROR_OUT_OF_DATE_KHR || prr == vk.SUBOPTIMAL_KHR) {
+        ret ok[bool, Error](true);
+    }
+    if (prr != vk.SUCCESS) { ret err[bool, Error](error("vkQueuePresentKHR failed")); }
+
+    @out_ok = true;
+    ret ok[bool, Error](true);
+}
+
+# Destroy the framebuffers and render pass, keeping the pool and frames.
+#
+# Split out because a swapchain rebuild invalidates these and nothing else.
+pub fun frame_release_targets(f: *FrameLoop, v: *Vk) {
+    var i: u32 = 0;
+    for (i < f.fb_count) {
+        vk.vkDestroyFramebuffer(v.device, f.framebuffers[i], nil);
+        depth_attachment_dnit(?f.depths[i], v);
+        i = i + 1;
+    }
+    f.fb_count = 0;
+}
+
+# Rebuild the framebuffers against a resized swapchain.
+pub fun frame_rebuild_targets(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+    frame_release_targets(f, v);
+    ret make_framebuffers(f, v, s);
+}
+
+# Destroy everything, in reverse order of creation.
+pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
+    if (!f.ready) { ret; }
+    vk.vkDeviceWaitIdle(v.device);
+
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        vk.vkDestroySemaphore(v.device, f.frames[i].available, nil);
+        vk.vkDestroyFence(v.device, f.frames[i].in_flight, nil);
+        i = i + 1;
+    }
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        vk.vkDestroySemaphore(v.device, f.finished[k], nil);
+        k = k + 1;
+    }
+    frame_release_targets(f, v);
+    vk.vkDestroyCommandPool(v.device, f.pool, nil);
+    vk.vkDestroyRenderPass(v.device, f.pass_load, nil);
+    vk.vkDestroyRenderPass(v.device, f.pass, nil);
+    f.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# The loop needs a device, a surface, and a swapchain, so it is not reachable
+# in CI. These cover the frame-index rotation, which is pure and is where an
+# error makes two frames share one set of synchronization objects.
+
+test "frame: the frame index rotates and wraps" {
+    var f: FrameLoop;
+    f.current = 0;
+    var seen: [4]usize;
+    var i: usize = 0;
+    for (i < 4) {
+        seen[i] = f.current;
+        f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
+        i = i + 1;
+    }
+    # Two frames in flight, so the sequence is 0,1,0,1. A wrap that skipped or
+    # repeated would let two frames share a command buffer and fence.
+    if (seen[0] != 0 || seen[1] != 1) { ret 1; }
+    if (seen[2] != 0 || seen[3] != 1) { ret 1; }
+    ret 0;
+}
+
+test "frame: every in-flight frame has its own slot" {
+    # One command buffer, one acquire semaphore, and a fence per frame. Sharing
+    # any of them across frames is the race this indexing exists to prevent.
+    if (MAX_FRAMES_IN_FLIGHT < 2) { ret 1; }
+    var f: FrameLoop;
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        f.frames[i].command = nil;
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "frame: there is a render-finished semaphore for every swapchain image" {
+    # Not MAX_FRAMES_IN_FLIGHT of them. The signal is waited on by the present of
+    # one image and is only known to have retired when that image is acquired
+    # again, so the count that matters is the swapchain's, and the two do not
+    # divide: two frames in flight against three images reuses a per-frame
+    # semaphore while a previous present still holds it.
+    var f: FrameLoop;
+    var k: usize = 0;
+    for (k < MAX_IMAGES) {
+        f.finished[k] = nil;
+        k = k + 1;
+    }
+    if (MAX_IMAGES <= MAX_FRAMES_IN_FLIGHT) { ret 1; }
+    ret 0;
+}
+
+test "frame: teardown on an uninitialized loop is a no-op" {
+    var f: FrameLoop;
+    f.ready = false;
+    var v: Vk;
+    v.ready = false;
+    frame_dnit(?f, ?v);
+    if (f.ready) { ret 1; }
+    ret 0;
+}

@@ -1,0 +1,76 @@
+# SPIR-V shader modules, compiled from Mach.
+#
+# Boom's shaders are written in Mach, compiled to SPIR-V by the build-shaders
+# step, and embedded here, so a shipped binary carries them and a game needs
+# no shader files beside it.
+#
+# These five modules are the whole shader surface of the engine. There is no
+# runtime shader compilation and no shader source in a shipped build.
+
+use std.types.size.usize;
+use std.types.string.str;
+
+# Directional-light fragment stage.
+#[embed("../../res/spv/lit_frag.spv")]
+pub val LIT_FRAG_SPV: [_]u8;
+
+# Mesh vertex stage: model-view-projection from a uniform block.
+#[embed("../../res/spv/mesh_vert.spv")]
+pub val MESH_VERT_SPV: [_]u8;
+
+# Skinned mesh vertex stage: the view-projection and model matrices from a
+# uniform block, and the joint palette from a storage buffer at binding 3.
+#[embed("../../res/spv/skinned_vert.spv")]
+pub val SKINNED_VERT_SPV: [_]u8;
+
+# Sprite vertex stage: projection and model from a uniform block, with the
+# atlas sub-rectangle applied to the unit quad's UVs.
+#[embed("../../res/spv/sprite_vert.spv")]
+pub val SPRITE_VERT_SPV: [_]u8;
+
+# Sprite fragment stage: samples the atlas at binding 1 and multiplies by the
+# tint at binding 2. Text goes through this too, because a glyph atlas stores
+# coverage in alpha with RGB left white.
+#[embed("../../res/spv/sprite_frag.spv")]
+pub val SPRITE_FRAG_SPV: [_]u8;
+
+# The entry point name every boom vertex stage uses.
+pub val VERTEX_ENTRY: str = "vert_main";
+# The entry point name every boom fragment stage uses.
+pub val FRAGMENT_ENTRY: str = "frag_main";
+
+test "spirv: every embedded module is a SPIR-V module of whole words" {
+    # The magic number, little-endian. A module that failed to build leaves a
+    # stale or empty file, and #[embed] carries whatever is there without
+    # complaint, so the bytes are checked rather than assumed.
+    var mods: [5]*u8;
+    var lens: [5]usize;
+    mods[0] = ?LIT_FRAG_SPV[0];     lens[0] = $length_of(LIT_FRAG_SPV);
+    mods[1] = ?MESH_VERT_SPV[0];    lens[1] = $length_of(MESH_VERT_SPV);
+    mods[2] = ?SPRITE_VERT_SPV[0];  lens[2] = $length_of(SPRITE_VERT_SPV);
+    mods[3] = ?SPRITE_FRAG_SPV[0];  lens[3] = $length_of(SPRITE_FRAG_SPV);
+    mods[4] = ?SKINNED_VERT_SPV[0]; lens[4] = $length_of(SKINNED_VERT_SPV);
+
+    var i: usize = 0;
+    for (i < 5) {
+        if (lens[i] == 0)       { ret 1; }
+        if ((lens[i] % 4) != 0) { ret 2; }
+        val m: *u8 = mods[i];
+        # 0x07230203
+        if (m[0] != 0x03) { ret 3; }
+        if (m[1] != 0x02) { ret 4; }
+        if (m[2] != 0x23) { ret 5; }
+        if (m[3] != 0x07) { ret 6; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "spirv: the sprite modules are distinct from the mesh ones" {
+    # A copy-paste in the embed paths would silently make the sprite pipeline
+    # draw with the mesh shader, which fails at pipeline creation with a vertex
+    # input mismatch rather than saying the path was wrong.
+    if ($length_of(SPRITE_VERT_SPV) == $length_of(MESH_VERT_SPV)
+        && $length_of(SPRITE_FRAG_SPV) == $length_of(LIT_FRAG_SPV)) { ret 1; }
+    ret 0;
+}

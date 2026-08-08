@@ -1,0 +1,121 @@
+# Skinned mesh vertex stage.
+#
+# Places a vertex by four weighted joint matrices before applying the model,
+# view, and projection. The joint palette is a storage buffer rather than a
+# uniform block: at 128 joints it is 8 KB, which exceeds the 16 KB uniform
+# block guarantee once anything else shares the set, and std430 gives the
+# array of columns its natural 16-byte stride so a boom.math.Mat4 palette
+# uploads unchanged.
+#
+# WHY view_proj IS SEPARATE FROM model HERE. The unskinned stage receives one
+# premultiplied MVP because nothing sits between the model matrix and the
+# vertex. Skinning does sit between them: the vertex is transformed by its
+# joints, then by the model, then by view and projection. Premultiplying would
+# apply the model before the joints and place every vertex by the wrong
+# matrix, so the two arrive separately and are applied in order.
+
+# The view-projection and model matrices, each as four f32x4 columns.
+rec Matrices {
+    view_proj_0: f32x4;
+    view_proj_1: f32x4;
+    view_proj_2: f32x4;
+    view_proj_3: f32x4;
+    model_0:     f32x4;
+    model_1:     f32x4;
+    model_2:     f32x4;
+    model_3:     f32x4;
+}
+
+# The joint palette: 128 matrices as 512 consecutive columns.
+#
+# The count matches boom.graphics.skeleton.MAX_JOINTS, which asserts the two
+# agree at compile time. Column k of joint j is at index j * 4 + k.
+rec Palette {
+    columns: [512]f32x4;
+}
+
+#[uniform(0, 0)] var matrices: Matrices;
+#[storage(0, 3)] var palette:  Palette;
+
+#[input(0)] var in_position: f32x3;
+#[input(1)] var in_normal:   f32x3;
+#[input(2)] var in_uv:       f32x2;
+#[input(5)] var in_joints:   u32x4;
+#[input(6)] var in_weights:  f32x4;
+
+#[output(0)] var out_normal: f32x3;
+#[output(1)] var out_uv:     f32x2;
+
+#[builtin("position")] var position: f32x4;
+
+# Transform a point by a 4x4 matrix given as its four columns.
+#
+# See shaders/src/mesh_vert.mach for why the product is a combination of
+# columns rather than four dot products. Duplicated here rather than shared
+# because a SPIR-V shader cannot call a function defined in another module
+# (mach#2823).
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+# Transform a direction by the upper-left 3x3 of a 4x4 matrix.
+fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
+    val r: f32x4 = c0 * f32x4{v[0], v[0], v[0], v[0]}
+                 + c1 * f32x4{v[1], v[1], v[1], v[1]}
+                 + c2 * f32x4{v[2], v[2], v[2], v[2]};
+    ret f32x3{r[0], r[1], r[2]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    # Skinning is applied to the point, not to the matrices. Blending the four
+    # joint matrices and then transforming once would be the same result, since
+    # a matrix-vector product is linear in the matrix, but it costs four times
+    # the work: this way each joint contributes one transformed point.
+    val p: f32x4 = f32x4{in_position[0], in_position[1], in_position[2], 1.0};
+
+    val j0: u32 = in_joints[0] * 4;
+    val j1: u32 = in_joints[1] * 4;
+    val j2: u32 = in_joints[2] * 4;
+    val j3: u32 = in_joints[3] * 4;
+
+    val w0: f32x4 = f32x4{in_weights[0], in_weights[0], in_weights[0], in_weights[0]};
+    val w1: f32x4 = f32x4{in_weights[1], in_weights[1], in_weights[1], in_weights[1]};
+    val w2: f32x4 = f32x4{in_weights[2], in_weights[2], in_weights[2], in_weights[2]};
+    val w3: f32x4 = f32x4{in_weights[3], in_weights[3], in_weights[3], in_weights[3]};
+
+    val skinned: f32x4 =
+        mul_point(palette.columns[j0], palette.columns[j0 + 1],
+                  palette.columns[j0 + 2], palette.columns[j0 + 3], p) * w0
+      + mul_point(palette.columns[j1], palette.columns[j1 + 1],
+                  palette.columns[j1 + 2], palette.columns[j1 + 3], p) * w1
+      + mul_point(palette.columns[j2], palette.columns[j2 + 1],
+                  palette.columns[j2 + 2], palette.columns[j2 + 3], p) * w2
+      + mul_point(palette.columns[j3], palette.columns[j3 + 1],
+                  palette.columns[j3 + 2], palette.columns[j3 + 3], p) * w3;
+
+    val world: f32x4 = mul_point(matrices.model_0, matrices.model_1,
+                                 matrices.model_2, matrices.model_3, skinned);
+
+    position = mul_point(matrices.view_proj_0, matrices.view_proj_1,
+                         matrices.view_proj_2, matrices.view_proj_3, world);
+
+    # The normal is skinned by the same weights, then rotated by the model.
+    # Only the rotational part of each joint applies, for the same reason
+    # mul_dir drops the translation column in the unskinned stage.
+    val n: f32x3 =
+        mul_dir(palette.columns[j0], palette.columns[j0 + 1],
+                palette.columns[j0 + 2], in_normal) * f32x3{in_weights[0], in_weights[0], in_weights[0]}
+      + mul_dir(palette.columns[j1], palette.columns[j1 + 1],
+                palette.columns[j1 + 2], in_normal) * f32x3{in_weights[1], in_weights[1], in_weights[1]}
+      + mul_dir(palette.columns[j2], palette.columns[j2 + 1],
+                palette.columns[j2 + 2], in_normal) * f32x3{in_weights[2], in_weights[2], in_weights[2]}
+      + mul_dir(palette.columns[j3], palette.columns[j3 + 1],
+                palette.columns[j3 + 2], in_normal) * f32x3{in_weights[3], in_weights[3], in_weights[3]};
+
+    out_normal = mul_dir(matrices.model_0, matrices.model_1, matrices.model_2, n);
+    out_uv = in_uv;
+}

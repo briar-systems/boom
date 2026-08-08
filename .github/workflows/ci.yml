@@ -27,13 +27,20 @@ jobs:
           mach info
 
       # mach-glfw's [os.linux].libs cascades "glfw" into every boom link,
-      # so the test dispatcher links libglfw even though no test calls it.
-      # the stock package satisfies the link input; the tests never invoke GLFW.
-      - name: Install GLFW
+      # mach-glfw vendors GLFW 3.4 and builds it from source, so the X11,
+      # Wayland, and xkbcommon development headers must be present. The stock
+      # libglfw3-dev also satisfies the link input for the system fallback.
+      - name: Install GLFW build dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libglfw3-dev
+          sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
+            libwayland-dev libxkbcommon-dev wayland-protocols
+
+      - name: Install spirv-tools
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y spirv-tools
 
       - name: Sync dependencies
         run: mach dep pull
@@ -41,5 +48,36 @@ jobs:
       - name: Build
         run: mach build .
 
+      # A uniform block is a contract between two separately compiled programs
+      # and nothing at runtime checks it. A member at the wrong offset makes the
+      # shader read whatever bytes are there, with no diagnostic anywhere.
+      # A glob over an empty directory makes the loop body run zero times and
+      # the step pass, which is exactly the state a failed shader build leaves.
+      - name: Validate the emitted SPIR-V
+        run: |
+          set -euo pipefail
+          count=$(ls res/spv/*.spv | wc -l)
+          if [ "$count" -ne 5 ]; then
+            echo "expected 5 SPIR-V modules in res/spv, found $count"
+            exit 1
+          fi
+          for f in res/spv/*.spv; do spirv-val "$f"; done
+
+      - name: Check uniform blocks match their CPU records
+        run: python3 ./tools/check-uniform-layout.py
+
       - name: Test
         run: mach test .
+
+      # The examples are the only check on the shape of the public API: nothing
+      # inside boom calls renderer_init or pass_draw_material the way a game
+      # does. They resolve boom by path, so this builds them against the branch
+      # rather than against what is already pushed.
+      - name: Build the examples
+        run: |
+          set -euo pipefail
+          for e in examples/*/; do
+            echo "::group::$e"
+            (cd "$e" && mach dep pull . && mach build .)
+            echo "::endgroup::"
+          done

@@ -168,6 +168,25 @@ pub fun vertex_format_standard() VertexFormat {
     ret f;
 }
 
+# the standard skinned 3D vertex format
+#
+# the standard format followed by JOINTS_0 (uvec4 of u16, location 5, bound as
+# a true integer attribute) and WEIGHTS_0 (vec4, location 6): a 56-byte vertex
+# matching shaders/src/skinned_vert.mach.
+#
+# the locations skip 3 and 4 because SEMANTIC_COLOR_0 and SEMANTIC_TANGENT own
+# them by convention. leaving the gap costs nothing and means adding either one
+# later does not renumber the skinning attributes, which would silently
+# reinterpret every skinned mesh already built against the old numbering.
+# ---
+# ret: the standard skinned format
+pub fun vertex_format_skinned() VertexFormat {
+    var f: VertexFormat = vertex_format_standard();
+    vertex_format_add(?f, SEMANTIC_JOINTS_0,  5, COMP_U16, 4, 0, 1);
+    vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 6, COMP_F32, 4, 0, 0);
+    ret f;
+}
+
 # the 2D sprite vertex format
 #
 # POSITION (vec2, location 0) and TEXCOORD_0 (vec2, location 1): a
@@ -180,6 +199,59 @@ pub fun vertex_format_sprite() VertexFormat {
     vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
     vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
     ret f;
+}
+
+# whether two formats describe the same interleaved bytes
+#
+# structural, not by identity: a format loaded from a .glb is built attribute
+# by attribute and is never the same value as one a constructor returned, but
+# it may describe exactly the same vertex. this is what lets the pipeline
+# cache reuse a pipeline for a second mesh with the same layout instead of
+# building a duplicate, and what makes a mismatch detectable at all.
+#
+# every field participates. two formats agreeing on everything but `integer`
+# would bind joint indices as floats, which reads a bit pattern as a number
+# and skins each vertex by a joint several billion positions away.
+# ---
+# a:   the first format
+# b:   the second format
+# ret: true when the two describe an identical vertex
+pub fun vertex_format_eq(a: *VertexFormat, b: *VertexFormat) bool {
+    if (a.count != b.count || a.stride != b.stride) { ret false; }
+    var i: u32 = 0;
+    for (i < a.count) {
+        val x: *VertexAttribute = ?a.attributes[i];
+        val y: *VertexAttribute = ?b.attributes[i];
+        if (x.semantic   != y.semantic)   { ret false; }
+        if (x.location   != y.location)   { ret false; }
+        if (x.component  != y.component)  { ret false; }
+        if (x.count      != y.count)      { ret false; }
+        if (x.normalized != y.normalized) { ret false; }
+        if (x.integer    != y.integer)    { ret false; }
+        if (x.offset     != y.offset)     { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# whether a format carries the attributes a skinned draw needs
+#
+# a skinned pipeline reads JOINTS_0 and WEIGHTS_0. drawing a mesh without them
+# through it leaves those attributes undefined, which places every vertex by a
+# joint matrix chosen from whatever was in the vertex buffer.
+# ---
+# f:   the format to test
+# ret: true when both skinning attributes are present
+pub fun vertex_format_is_skinned(f: *VertexFormat) bool {
+    var joints:  bool = false;
+    var weights: bool = false;
+    var i: u32 = 0;
+    for (i < f.count) {
+        if (f.attributes[i].semantic == SEMANTIC_JOINTS_0)  { joints  = true; }
+        if (f.attributes[i].semantic == SEMANTIC_WEIGHTS_0) { weights = true; }
+        i = i + 1;
+    }
+    ret joints && weights;
 }
 
 test "vertex: standard format packs to a 32-byte stride" {

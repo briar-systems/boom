@@ -1,0 +1,85 @@
+# Sprite vertex stage.
+#
+# Places a quad through a projection and computes its atlas UV from a source
+# rect, so one texture backs many sprites and every glyph of a font.
+#
+# The quad's vertices are the unit square, so a sprite's size and position live
+# entirely in the model matrix and the vertex buffer never changes. That is what
+# lets every sprite and every glyph share one buffer.
+
+# The projection and model matrices as their columns, then the source rect.
+#
+# src is the atlas sub-rectangle as origin xy and size zw, in UV units.
+rec Sprite {
+    projection_0: f32x4;
+    projection_1: f32x4;
+    projection_2: f32x4;
+    projection_3: f32x4;
+    model_0:      f32x4;
+    model_1:      f32x4;
+    model_2:      f32x4;
+    model_3:      f32x4;
+    src:          f32x4;
+}
+
+#[uniform(0, 0)] var sprite: Sprite;
+
+#[input(0)]  var in_position: f32x2;
+#[input(1)]  var in_uv:       f32x2;
+#[output(0)] var out_uv:      f32x2;
+
+#[builtin("position")] var position: f32x4;
+
+# Transform a point by a 4x4 matrix given as its four columns.
+#
+# Mach has no matrix type, by design: a matrix is a library over vectors. A 4x4
+# transform therefore arrives as four f32x4 columns in a uniform block, which is
+# byte-identical to how std140 lays out a mat4, so boom uploads a boom.math.Mat4
+# directly with no repacking.
+#
+# THE PRODUCT IS A COMBINATION OF COLUMNS, NOT FOUR DOT PRODUCTS. boom.math.Mat4
+# is column-major, with element (row, col) at index col * 4 + row, so the four
+# consecutive f32x4 values are the columns. For a column vector p:
+#
+#   (M * p).x = m[0]*p.x + m[4]*p.y + m[8]*p.z + m[12]*p.w
+#
+# and m[0], m[4], m[8], m[12] are the first lane of each column. Summing the
+# columns scaled by p's lanes produces every row at once. Writing it as dot
+# products instead would need the rows, which would mean transposing on upload
+# and giving up the direct Mat4 copy.
+#
+# Multiplying a vector by a single column would be the per-lane product, which is
+# not a transform at all.
+#
+# Duplicated in each vertex stage rather than shared, because a SPIR-V shader
+# cannot call a function defined in another module (mach#2823). It collapses back
+# to one shaders.transform module when that lands.
+# ---
+# c0:  Column 0.
+# c1:  Column 1.
+# c2:  Column 2.
+# c3:  Column 3.
+# p:   The point, with w normally 1.0.
+# ret: M * p
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    # A sub-rect of the atlas maps onto the full quad, so the vertex UVs stay
+    # the unit square and only the uniform changes between sprites.
+    out_uv = f32x2{
+        sprite.src[0] + in_uv[0] * sprite.src[2],
+        sprite.src[1] + in_uv[1] * sprite.src[3],
+    };
+
+    val world: f32x4 = mul_point(sprite.model_0, sprite.model_1,
+                                 sprite.model_2, sprite.model_3,
+                                 f32x4{in_position[0], in_position[1], 0.0, 1.0});
+    position = mul_point(sprite.projection_0, sprite.projection_1,
+                         sprite.projection_2, sprite.projection_3, world);
+}

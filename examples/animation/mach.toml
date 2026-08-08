@@ -1,8 +1,6 @@
 [project]
 id = "animation"
-name = "Animation Example"
-description = "Animation example for Boom Engine"
-version = "0.2.0"
+version = "0.3.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -23,19 +21,28 @@ abi = "sysv64"
 
 [profile.debug]
 opt = 0
+debug = true
+simd = "scalarize"
 
 [profile.release]
 opt = 2
+debug = false
+simd = "scalarize"
 
 [artifact.animation]
 kind = "bin"
 entry = "main.mach"
 out = "bin/animation"
 targets = ["*"]
+link = []
+need = []
 
+# A path dep, not a branch pin: the example is a standalone consumer of boom,
+# but resolving boom from a branch would build what is already pushed rather
+# than what is being changed, so a break in the API would only surface after a
+# merge. The path keeps it a real consumer and a real check at the same time.
 [dep.boom]
-git = "https://github.com/briar-systems/boom"
-ref = "branch/dev"
+path = "../.."
 
 [dep.mach-std]
 git = "https://github.com/briar-systems/mach-std"
@@ -45,14 +52,28 @@ ref = "branch/main"
 git = "https://github.com/briar-systems/mach-glfw"
 ref = "branch/main"
 
-[dep.mach-gl]
-git = "https://github.com/briar-systems/mach-gl"
-ref = "branch/dev"
-
 [dep.mach-image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "branch/dev"
+ref = "branch/main"
 
 [dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/dev"
+ref = "branch/main"
+
+# boom links these transitively, but a consumer must still name every dep it
+# shares with a path dependency and match its ref exactly.
+[dep.mach-audio]
+git = "https://github.com/briar-systems/mach-audio"
+ref = "branch/main"
+
+[dep.mach-font]
+git = "https://github.com/briar-systems/mach-font"
+ref = "branch/main"
+
+[dep.mach-phys]
+git = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+
+[dep.mach-vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"

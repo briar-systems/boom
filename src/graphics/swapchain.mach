@@ -1,0 +1,275 @@
+# The swapchain: the images a frame is presented through.
+#
+# Second of the three shader-independent steps of the Vulkan migration. Builds
+# on the instance, surface, and device from boom.graphics.vk.
+#
+# A swapchain is bound to a surface size, so it is invalidated by a resize and
+# must be rebuilt rather than adjusted. That is why creation takes the extent
+# and why `swapchain_rebuild` exists as a distinct operation rather than being
+# folded into a setter.
+#
+# Format and present mode are chosen from what the surface reports, never
+# assumed. A driver is free to offer neither B8G8R8A8_SRGB nor MAILBOX, and a
+# renderer that assumes either fails on hardware that is behaving correctly.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.vk.enumerated;
+use boom.graphics.vk.format_is_srgb;
+
+# Most images a swapchain may hold.
+pub val MAX_IMAGES: usize = 8;
+
+# The swapchain and the images it owns.
+# ---
+# handle: The swapchain object.
+# images: Images owned by the swapchain, not by this record.
+# views:  One view per image, created and destroyed here.
+# count:  Number of valid images and views.
+# format: The chosen surface format.
+# width:  Current extent width.
+# height: Current extent height.
+# ready:  Whether creation completed.
+pub rec Swapchain {
+    handle: vk.SwapchainKHR;
+    images: [8]vk.Image;
+    views:  [8]vk.ImageView;
+    count:  u32;
+    format: i32;
+    width:  u32;
+    height: u32;
+    ready:  bool;
+}
+
+# Clamp a requested extent into what the surface allows.
+#
+# The surface's current extent is authoritative unless it is the sentinel
+# 0xFFFFFFFF, which means the surface defers to the swapchain. Ignoring the
+# clamp produces a swapchain the driver rejects at creation.
+fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
+    if (caps.currentExtent.width != 0xFFFFFFFF) {
+        @w = caps.currentExtent.width;
+        @h = caps.currentExtent.height;
+        ret;
+    }
+    if (@w < caps.minImageExtent.width)  { @w = caps.minImageExtent.width; }
+    if (@w > caps.maxImageExtent.width)  { @w = caps.maxImageExtent.width; }
+    if (@h < caps.minImageExtent.height) { @h = caps.minImageExtent.height; }
+    if (@h > caps.maxImageExtent.height) { @h = caps.maxImageExtent.height; }
+}
+
+# Create a swapchain and its image views for the given extent.
+pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bool, Error] {
+    s.ready = false;
+    s.count = 0;
+
+    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+
+    var caps: vk.SurfaceCapabilitiesKHR;
+    if (vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.physical, v.surface, ?caps) != vk.SUCCESS) {
+        ret err[bool, Error](error("could not query surface capabilities"));
+    }
+
+    # The format is the surface's and was chosen once, at device bring-up. It is
+    # not re-queried here: a target created before the first swapchain rebuild
+    # would then be built against a different answer than the one the window pass
+    # holds, and the two render passes would stop being compatible.
+    if (v.color_format == 0) {
+        ret err[bool, Error](error("no surface format was chosen at device bring-up"));
+    }
+
+    var w: u32 = width;
+    var h: u32 = height;
+    clamp_extent(?caps, ?w, ?h);
+    if (w == 0 || h == 0) {
+        ret err[bool, Error](error("surface extent is zero; window is minimized"));
+    }
+
+    # One more than the minimum, so the application is not forced to wait on
+    # the driver for an image every frame. maxImageCount 0 means no limit.
+    var want: u32 = caps.minImageCount + 1;
+    if (caps.maxImageCount != 0 && want > caps.maxImageCount) { want = caps.maxImageCount; }
+    if (want::usize > MAX_IMAGES) { want = MAX_IMAGES::u32; }
+
+    var ci: vk.SwapchainCreateInfoKHR;
+    ci.sType            = vk.STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    ci.pNext            = nil;
+    ci.flags            = 0;
+    ci.surface          = v.surface;
+    ci.minImageCount    = want;
+    ci.imageFormat      = v.color_format;
+    ci.imageColorSpace  = v.color_space;
+    ci.imageExtent.width  = w;
+    ci.imageExtent.height = h;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage       = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ci.preTransform     = caps.currentTransform;
+    ci.compositeAlpha   = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
+    # FIFO is the only present mode required to be supported, so it needs no
+    # query. Preferring MAILBOX is a latency refinement, not a correctness one.
+    ci.presentMode      = vk.PRESENT_MODE_FIFO_KHR;
+    ci.clipped          = vk.TRUE;
+    ci.oldSwapchain     = nil;
+
+    # When graphics and present are different families the images must be
+    # shareable, and both family indices must be named. On the common case of
+    # one family, exclusive is correct and faster.
+    var families: [2]u32;
+    families[0] = v.graphics_family;
+    families[1] = v.present_family;
+    if (v.graphics_family != v.present_family) {
+        ci.imageSharingMode      = vk.SHARING_MODE_CONCURRENT;
+        ci.queueFamilyIndexCount = 2;
+        ci.pQueueFamilyIndices   = ?families[0];
+    }
+    or {
+        ci.imageSharingMode      = vk.SHARING_MODE_EXCLUSIVE;
+        ci.queueFamilyIndexCount = 0;
+        ci.pQueueFamilyIndices   = nil;
+    }
+
+    if (vk.vkCreateSwapchainKHR(v.device, ?ci, nil, ?s.handle) != vk.SUCCESS) {
+        ret err[bool, Error](error("vkCreateSwapchainKHR failed"));
+    }
+
+    var got: u32 = 0;
+    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil))) {
+        ret err[bool, Error](error("could not count swapchain images"));
+    }
+    if (got::usize > MAX_IMAGES) { got = MAX_IMAGES::u32; }
+    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]))) {
+        ret err[bool, Error](error("could not fetch swapchain images"));
+    }
+
+    s.count  = got;
+    s.format = v.color_format;
+    s.width  = w;
+    s.height = h;
+
+    var i: u32 = 0;
+    for (i < got) {
+        var vci: vk.ImageViewCreateInfo;
+        vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.pNext    = nil;
+        vci.flags    = 0;
+        vci.image    = s.images[i];
+        vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
+        vci.format   = v.color_format;
+        vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.a = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+        vci.subresourceRange.baseMipLevel   = 0;
+        vci.subresourceRange.levelCount     = 1;
+        vci.subresourceRange.baseArrayLayer = 0;
+        vci.subresourceRange.layerCount     = 1;
+
+        if (vk.vkCreateImageView(v.device, ?vci, nil, ?s.views[i]) != vk.SUCCESS) {
+            ret err[bool, Error](error("could not create a swapchain image view"));
+        }
+        i = i + 1;
+    }
+
+    s.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Destroy the views and the swapchain.
+#
+# The images are owned by the swapchain and must not be destroyed here; the
+# views are ours and must be destroyed first.
+pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
+    if (!s.ready) { ret; }
+    var i: u32 = 0;
+    for (i < s.count) {
+        vk.vkDestroyImageView(v.device, s.views[i], nil);
+        i = i + 1;
+    }
+    vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
+    s.count = 0;
+    s.ready = false;
+}
+
+# Rebuild for a new extent.
+#
+# A swapchain is bound to a surface size, so a resize invalidates it. The
+# device must be idle first: rebuilding while a frame is in flight destroys
+# images the GPU is still reading.
+pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bool, Error] {
+    vk.vkDeviceWaitIdle(v.device);
+    swapchain_dnit(s, v);
+    ret swapchain_init(s, v, width, height);
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Creation needs a device and a surface, so these cover the extent clamp, which
+# is pure and is where a wrong answer produces a swapchain the driver rejects.
+
+test "swapchain: both sRGB surface formats are recognized" {
+    # Textures are sampled through sRGB image formats, so the shader works in
+    # linear light and the surface is what encodes on write. Recognizing only
+    # one of the two variants would silently pick a UNORM format on a driver
+    # that offers the other, and every colour would come out dark.
+    if (!format_is_srgb(vk.FORMAT_B8G8R8A8_SRGB))  { ret 1; }
+    if (!format_is_srgb(vk.FORMAT_R8G8B8A8_SRGB))  { ret 2; }
+    if (format_is_srgb(vk.FORMAT_B8G8R8A8_UNORM))  { ret 3; }
+    if (format_is_srgb(vk.FORMAT_R8G8B8A8_UNORM))  { ret 4; }
+    ret 0;
+}
+
+test "swapchain: a surface with a fixed extent overrides the request" {
+    var caps: vk.SurfaceCapabilitiesKHR;
+    caps.currentExtent.width  = 800;
+    caps.currentExtent.height = 600;
+    var w: u32 = 1920;
+    var h: u32 = 1080;
+    clamp_extent(?caps, ?w, ?h);
+    # The surface's own extent is authoritative when it is not the sentinel.
+    if (w != 800 || h != 600) { ret 1; }
+    ret 0;
+}
+
+test "swapchain: the sentinel extent clamps the request into range" {
+    var caps: vk.SurfaceCapabilitiesKHR;
+    caps.currentExtent.width  = 0xFFFFFFFF;
+    caps.currentExtent.height = 0xFFFFFFFF;
+    caps.minImageExtent.width  = 640;
+    caps.minImageExtent.height = 480;
+    caps.maxImageExtent.width  = 1280;
+    caps.maxImageExtent.height = 720;
+
+    var w: u32 = 1920;
+    var h: u32 = 1080;
+    clamp_extent(?caps, ?w, ?h);
+    if (w != 1280 || h != 720) { ret 1; }
+
+    w = 100; h = 100;
+    clamp_extent(?caps, ?w, ?h);
+    if (w != 640 || h != 480) { ret 1; }
+
+    w = 800; h = 600;
+    clamp_extent(?caps, ?w, ?h);
+    if (w != 800 || h != 600) { ret 1; }
+    ret 0;
+}
+
+test "swapchain: teardown on an uninitialized handle is a no-op" {
+    var s: Swapchain;
+    s.ready = false;
+    var v: Vk;
+    v.ready = false;
+    swapchain_dnit(?s, ?v);
+    if (s.ready) { ret 1; }
+    ret 0;
+}
