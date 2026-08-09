@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-09
+
+### Fixed
+- graphics: `texture_load` and `texture_from_bytes` now decode PNG. mach-image
+  0.3.0 shipped a PNG decoder and boom's dispatch never called it, so loading a
+  `.png` failed with "unsupported image format" while the decoder sat in the
+  dependency. PNG is what art tools export, which made the gap a conversion step
+  in every consumer.
+- deps: refreshed `mach.lock`, which still pinned mach-image 0.2.0 despite
+  tracking `branch/main`. A `branch/*` ref is resolved at update time, not at
+  build time, so a pin that reads as current can still build against an old
+  commit.
+
 ## [0.4.0] - 2026-08-09
 
 ### Added
