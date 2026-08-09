@@ -1,0 +1,199 @@
+# The forward reference: the whole design, in one pass, from one atlas.
+#
+# WHY THIS EXISTS BESIDE THE DEFERRED PATH. The deferred path cannot reach its
+# composite step on boom v0.7.0, because `albedo * (ambient + light) + emissive`
+# needs three attachments in one draw and a draw binds one texture. This stage
+# does the same arithmetic with all four sheets in hand, because a sprite's own
+# draw can sample its own packed atlas, and it produces the picture the deferred
+# path was meant to produce. It is the honest measure of what the art direction
+# looks like on this engine today.
+#
+# The lighting is line for line the same as light_frag's, with two differences
+# that only a forward pass can have: the specular is tinted toward the metal's
+# own albedo, and ambient occlusion multiplies the ambient term. Both need
+# albedo and material beside the normal, which is exactly what the deferred
+# lighting stage cannot see.
+#
+# It is duplicated rather than shared because a SPIR-V module cannot call a
+# function in another module (mach#2823), so two stages that light the same way
+# are two copies.
+
+use sh:  shader.math;
+use tex: shader.texture;
+
+rec Scene {
+    view:    f32x4;
+    ambient: f32x4;
+    l0_pos:  f32x4;
+    l0_col:  f32x4;
+    l1_pos:  f32x4;
+    l1_col:  f32x4;
+    wall0:   f32x4;
+    wall1:   f32x4;
+    wall2:   f32x4;
+    counts:  f32x4;
+}
+
+#[sampler(0, 1)] var atlas: tex.Sampler2D;
+#[uniform(0, 4)] var scene: Scene;
+
+#[input(0)] var in_uv:    f32x2;
+#[input(1)] var in_world: f32x3;
+
+#[output(0)] var out_colour: f32x4;
+
+fun seg_block(px: f32, py: f32, lx: f32, ly: f32,
+              ax: f32, ay: f32, bx: f32, by: f32, short: f32) f32 {
+    val rx: f32 = lx - px;
+    val ry: f32 = ly - py;
+    val sx: f32 = bx - ax;
+    val sy: f32 = by - ay;
+
+    val denom: f32 = rx * sy - ry * sx;
+    val ok: f32 = sh.step(0.0001, sh.abs(denom));
+    val safe: f32 = denom + (1.0 - ok);
+
+    val qx: f32 = ax - px;
+    val qy: f32 = ay - py;
+    val t: f32 = (qx * sy - qy * sx) / safe;
+    val u: f32 = (qx * ry - qy * rx) / safe;
+
+    val inside: f32 = sh.step(0.0, t) * sh.step(t, 1.0)
+                    * sh.step(0.0, u) * sh.step(u, 1.0);
+
+    val hit: f32 = t * sh.sqrt(rx * rx + ry * ry);
+    val near: f32 = 1.0 - sh.smooth_step(short * 0.35, short, hit);
+
+    ret ok * inside * near;
+}
+
+fun walls_block(px: f32, py: f32, lx: f32, ly: f32, n: f32, short: f32) f32 {
+    val w0: f32 = seg_block(px, py, lx, ly, scene.wall0[0], scene.wall0[1],
+                            scene.wall0[2], scene.wall0[3], short) * sh.step(0.5, n);
+    val w1: f32 = seg_block(px, py, lx, ly, scene.wall1[0], scene.wall1[1],
+                            scene.wall1[2], scene.wall1[3], short) * sh.step(1.5, n);
+    val w2: f32 = seg_block(px, py, lx, ly, scene.wall2[0], scene.wall2[1],
+                            scene.wall2[2], scene.wall2[3], short) * sh.step(2.5, n);
+    ret sh.max(w0, sh.max(w1, w2));
+}
+
+fun soft_block(px: f32, py: f32, lx: f32, ly: f32, width: f32, n: f32, short: f32) f32 {
+    val dx: f32 = lx - px;
+    val dy: f32 = ly - py;
+    val len: f32 = sh.max(sh.sqrt(dx * dx + dy * dy), 0.0001);
+
+    val ox: f32 = (0.0 - dy) / len * width;
+    val oy: f32 = dx / len * width;
+
+    val a: f32 = walls_block(px, py, lx - ox, ly - oy, n, short);
+    val b: f32 = walls_block(px, py, lx - ox * 0.5, ly - oy * 0.5, n, short);
+    val c: f32 = walls_block(px, py, lx, ly, n, short);
+    val d: f32 = walls_block(px, py, lx + ox * 0.5, ly + oy * 0.5, n, short);
+    val e: f32 = walls_block(px, py, lx + ox, ly + oy, n, short);
+    ret (a + b + c + d + e) * 0.2;
+}
+
+# One light's contribution, with the diffuse and the specular kept apart.
+#
+# XYZ IS DIFFUSE AND W IS THE SPECULAR LOBE, and they are separated because the
+# composite multiplies diffuse light by albedo and must not multiply specular by
+# it. Folding them together and multiplying once is the first thing this
+# prototype got wrong: it made a polished steel plate directly under a light
+# read as a slightly brighter plate, because the highlight was being attenuated
+# by the very albedo it is supposed to sit on top of. The measurement caught it,
+# reading a peak only 1.7 times the plate's mean.
+#
+# It is also what the deferred path cannot do. Its light target is one image, so
+# diffuse and specular arrive at the composite added together and the composite
+# has no way to multiply one by albedo and not the other.
+fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32, base: f32x3,
+             pos: f32x4, col: f32x4, nwalls: f32, floor: f32, short: f32) f32x4 {
+    val dx: f32 = pos[0] - px;
+    val dy: f32 = pos[1] - py;
+    val dz: f32 = pos[2];
+    val dist: f32 = sh.max(sh.sqrt(dx * dx + dy * dy + dz * dz), 0.0001);
+
+    val lx: f32 = dx / dist;
+    val ly: f32 = dy / dist;
+    val lz: f32 = dz / dist;
+
+    val fall: f32 = sh.clamp(1.0 - dist / sh.max(pos[3], 0.0001), 0.0, 1.0);
+    val att: f32 = fall * fall * col[3];
+
+    val ndl: f32 = sh.max(n[0] * lx + n[1] * ly + n[2] * lz, 0.0);
+
+    val hx: f32 = lx;
+    val hy: f32 = ly;
+    val hz: f32 = lz + 1.0;
+    val hl: f32 = sh.max(sh.sqrt(hx * hx + hy * hy + hz * hz), 0.0001);
+    val ndh: f32 = sh.max((n[0] * hx + n[1] * hy + n[2] * hz) / hl, 0.0);
+
+    val gloss: f32 = 1.0 - rough;
+    val power: f32 = sh.mix(8.0, 220.0, gloss * gloss);
+    val lobe: f32 = sh.pow(ndh, power) * ndl;
+
+    val occ: f32 = soft_block(px, py, pos[0], pos[1], sh.max(pos[3] * 0.06, 1.0),
+                              nwalls, short);
+    val shade: f32 = sh.mix(1.0, floor, occ);
+
+    val diff: f32 = ndl * (1.0 - metal * 0.9) * att * shade;
+    val s: f32 = lobe * att * shade;
+
+    ret f32x4{col[0] * diff, col[1] * diff, col[2] * diff, s};
+}
+
+#[stage("fragment")]
+fun frag_main() {
+    val h: f32x2 = f32x2{in_uv[0] * 0.5, in_uv[1] * 0.5};
+
+    val albedo:   f32x4 = tex.sample_2d(atlas, h);
+    val normal:   f32x4 = tex.sample_2d(atlas, f32x2{h[0] + 0.5, h[1]});
+    val material: f32x4 = tex.sample_2d(atlas, f32x2{h[0], h[1] + 0.5});
+    val emissive: f32x4 = tex.sample_2d(atlas, f32x2{h[0] + 0.5, h[1] + 0.5});
+
+    val nx: f32 = normal[0] * 2.0 - 1.0;
+    val ny: f32 = normal[1] * 2.0 - 1.0;
+    val nz: f32 = sh.sqrt(sh.max(1.0 - nx * nx - ny * ny, 0.0));
+    val n: f32x3 = sh.normalize_3(f32x3{nx, ny, nz});
+
+    val rough: f32 = sh.clamp(material[0], 0.02, 1.0);
+    val metal: f32 = sh.clamp(material[1], 0.0, 1.0);
+    val ao: f32 = material[2];
+
+    val base: f32x3 = f32x3{albedo[0], albedo[1], albedo[2]};
+
+    val px: f32 = in_world[0];
+    val py: f32 = in_world[1];
+    val nwalls: f32 = scene.counts[0];
+    val short: f32 = scene.counts[1];
+    val floor: f32 = scene.ambient[3];
+
+    val a: f32x4 = light_at(px, py, n, rough, metal, base,
+                            scene.l0_pos, scene.l0_col, nwalls, floor, short);
+    val gate: f32 = sh.step(1.5, scene.view[3]);
+    val b: f32x4 = light_at(px, py, n, rough, metal, base,
+                            scene.l1_pos, scene.l1_col, nwalls, floor, short)
+                 * f32x4{gate, gate, gate, gate};
+
+    # A dielectric reflects white, a metal reflects its own colour. That is the
+    # whole difference the metallic mask makes and it is why a plate reads as
+    # steel rather than as painted board.
+    val fr: f32 = sh.mix(0.04, base[0], metal);
+    val fg: f32 = sh.mix(0.04, base[1], metal);
+    val fb: f32 = sh.mix(0.04, base[2], metal);
+
+    val sr: f32 = fr * (a[3] * scene.l0_col[0] + b[3] * scene.l1_col[0]);
+    val sg: f32 = fg * (a[3] * scene.l0_col[1] + b[3] * scene.l1_col[1]);
+    val sb: f32 = fb * (a[3] * scene.l0_col[2] + b[3] * scene.l1_col[2]);
+
+    # The design's composite, done forward: albedo times ambient plus diffuse
+    # light, with specular and emissive added on top rather than lit.
+    val ar: f32 = scene.ambient[0] * ao;
+    val ag: f32 = scene.ambient[1] * ao;
+    val ab: f32 = scene.ambient[2] * ao;
+
+    out_colour = f32x4{base[0] * (ar + a[0] + b[0]) + sr + emissive[0],
+                       base[1] * (ag + a[1] + b[1]) + sg + emissive[1],
+                       base[2] * (ab + a[2] + b[2]) + sb + emissive[2],
+                       albedo[3]};
+}

@@ -1,0 +1,1083 @@
+# A throwaway prototype of the deferred 2D lighting pipeline in Onslaughter's
+# design, built to find out which parts of it boom v0.7.0 can actually express.
+#
+# WHAT IT DRAWS, PER FRAME.
+#
+#   1. Geometry.  Sprites into a four-attachment target through a game Shader
+#      writing four outputs: albedo, a packed normal-and-material, the material
+#      sheet, emissive. Nothing had ever written four outputs through boom's
+#      Shader hatch before this.
+#   2. Lighting.  A full-target quad into a light target, sampling the packed
+#      attachment, accumulating diffuse and specular for every light and
+#      attenuating by soft short-range shadows cast by wall segments.
+#   3. Forward.   The same scene and the same lighting again, this time with
+#      every sheet in hand, into a scene target. This is the reference picture,
+#      and it exists because the deferred path CANNOT reach its composite step.
+#   4. Bloom.     Threshold the scene, blur it twice, and blend it back.
+#   5. Present.   The scene target to the window at integer scale.
+#
+# WHY THERE ARE TWO LIGHTING PATHS. boom's descriptor set declares exactly one
+# combined image sampler, at binding 1, filled from the drawn material's first
+# texture. Every deferred step past the G-buffer needs more than one: lighting
+# wants normal and material, composite wants albedo and light and emissive,
+# bloom's add-back wants scene and bloom. One sampler is enough for exactly one
+# of those, and only by packing what it needs into a single attachment first.
+# The forward path is what the same arithmetic looks like when the sheets are
+# reachable, and it is the only path here that produces the design's picture.
+#
+# WHAT IT ASSERTS. Frames drawn and an exit code prove nothing appeared, so
+# every claim this example makes about a picture is a readback. It reads the
+# G-buffer's albedo, copies attachments 1, 2 and 3 into probe targets to read
+# those too, and reads the light and scene targets to check that a shadowed
+# floor texel is measurably dimmer than an unshadowed one at the same distance
+# from the same light, and still lit enough to fight in. Each check reaches the
+# exit code.
+
+use std.runtime;
+use std.print;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use boom.app.App;
+use input: boom.input;
+use gfx: boom.graphics;
+use gm:  boom.math;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+
+#[embed("../res/spv/quad_vert.spv")]
+val QUAD_VERT_SPV: [_]u8;
+#[embed("../res/spv/gbuf_frag.spv")]
+val GBUF_FRAG_SPV: [_]u8;
+#[embed("../res/spv/light_frag.spv")]
+val LIGHT_FRAG_SPV: [_]u8;
+#[embed("../res/spv/fwd_frag.spv")]
+val FWD_FRAG_SPV: [_]u8;
+#[embed("../res/spv/copy_frag.spv")]
+val COPY_FRAG_SPV: [_]u8;
+#[embed("../res/spv/bloom_frag.spv")]
+val BLOOM_FRAG_SPV: [_]u8;
+#[embed("../res/spv/two_frag.spv")]
+val TWO_FRAG_SPV: [_]u8;
+
+# The G-buffer's size. The design says 960x540 targets presented at integer
+# scale; this is half that and presented at two, which keeps the readback
+# buffers at half a megabyte and does not change any answer here except how
+# many pixels a specular highlight covers, which the report says outright.
+val GW: i32 = 480;
+val GH: i32 = 270;
+
+# Bloom runs at half the G-buffer, which is what makes the blur wide without
+# widening the tap count.
+val BW: i32 = 240;
+val BH: i32 = 135;
+
+# Every sheet of one material is a quadrant of one 128x128 atlas: albedo top
+# left, normal top right, material bottom left, emissive bottom right. That is
+# the one-sampler workaround, and it is safe from filtering bleed only because
+# boom creates its single sampler with nearest filtering.
+val AW: i32 = 128;
+val QS: i32 = 64;
+
+# How far a shadow reaches from its occluder, in world units, which are
+# G-buffer pixels here. About four tiles of 32, which is the design's "a few".
+val SHADOW_REACH: f32 = 140.0;
+
+# The game's block, matching `rec Scene` in the light and forward stages.
+#
+# Ten vec4s, 160 bytes, against boom's 256-byte user block. Two lights and three
+# wall segments is what fits with a header, and that ceiling is the reason this
+# arrangement does not survive contact with a real stage.
+rec Scene {
+    view:    gm.Vec4;
+    ambient: gm.Vec4;
+    l0_pos:  gm.Vec4;
+    l0_col:  gm.Vec4;
+    l1_pos:  gm.Vec4;
+    l1_col:  gm.Vec4;
+    wall0:   gm.Vec4;
+    wall1:   gm.Vec4;
+    wall2:   gm.Vec4;
+    counts:  gm.Vec4;
+}
+
+# What the bloom stage reads: the texel step for this direction, the threshold,
+# and which half of the stage to run.
+rec BloomArgs {
+    step: gm.Vec4;
+    tint: gm.Vec4;
+}
+
+# One drawn quad: where it is, how big, and which atlas it wears.
+rec Piece {
+    x: f32;
+    y: f32;
+    w: f32;
+    h: f32;
+    atlas: usize;
+}
+
+val PIECE_COUNT: usize = 9;
+
+# The atlases, built procedurally so the example carries no binary assets. Four
+# materials: floor, steel plating, wall panel, and an emissive lamp bar.
+var atlas_pixels: [4][65536]u8;
+
+# One readback buffer, reused for each target in turn at shutdown.
+var readback: [518400]u8;
+
+# ---
+# renderer:   the window's renderer, which owns the device
+# quad:       a unit quad in XY, drawn for every sprite and every full-target pass
+# gbuf:       albedo, packed normal and material, material, emissive
+# light:      the deferred lighting accumulation
+# scene:      the forward reference picture, which is what reaches the window
+# bloom_a/b:  threshold and blur, at half the G-buffer
+# probe1/2/3: copies of G-buffer attachments 1, 2 and 3, so they can be read
+rec Game {
+    renderer: gfx.Renderer;
+    quad:     gfx.Mesh;
+
+    mats:     [4]gfx.Material;
+    texes:    [4]gfx.Texture;
+
+    gbuf:     gfx.RenderTarget;
+    light:    gfx.RenderTarget;
+    scene:    gfx.RenderTarget;
+    bloom_a:  gfx.RenderTarget;
+    bloom_b:  gfx.RenderTarget;
+    probe1:   gfx.RenderTarget;
+    probe2:   gfx.RenderTarget;
+    probe3:   gfx.RenderTarget;
+
+    sh_gbuf:  gfx.Shader;
+    sh_light: gfx.Shader;
+    sh_fwd:   gfx.Shader;
+    sh_copy:  gfx.Shader;
+    sh_bloom: gfx.Shader;
+    sh_two:   gfx.Shader;
+
+    pieces:   [9]Piece;
+    block:    Scene;
+
+    ready:    u8;
+    budget:   usize;
+    drawn:    usize;
+    probe_two: bool;
+    two_built: usize;
+    failures: usize;
+}
+
+# --------------------------------------------------------------- atlas art
+#
+# Programmer art, deliberately crude, generated rather than loaded so the
+# example has no binary assets to keep in step with anything.
+
+fun put(a: usize, qx: i32, qy: i32, x: i32, y: i32, r: f32, g: f32, b: f32, al: f32) {
+    val px: i32 = qx * QS + x;
+    val py: i32 = qy * QS + y;
+    val i: usize = ((py * AW + px) * 4)::usize;
+    atlas_pixels[a][i]     = clamp_byte(r);
+    atlas_pixels[a][i + 1] = clamp_byte(g);
+    atlas_pixels[a][i + 2] = clamp_byte(b);
+    atlas_pixels[a][i + 3] = clamp_byte(al);
+}
+
+fun clamp_byte(v: f32) u8 {
+    var x: f32 = v * 255.0;
+    if (x < 0.0)   { x = 0.0; }
+    if (x > 255.0) { x = 255.0; }
+    ret x::u8;
+}
+
+# A cheap value hash on the texel coordinate, for grain. Deterministic, so two
+# runs produce the same picture and a readback assertion means something.
+fun grain(x: i32, y: i32, seed: i32) f32 {
+    val n: i32 = x * 374761393 + y * 668265263 + seed * 1442695040;
+    val m: i32 = (n ^ (n >> 13)) * 1274126177;
+    val u: u32 = (m ^ (m >> 16))::u32;
+    ret (u % 1024)::f32 / 1024.0;
+}
+
+# Write one texel's tangent-space normal in the 0 to 1 encoding, with Z implied.
+fun put_normal(a: usize, x: i32, y: i32, nx: f32, ny: f32) {
+    put(a, 1, 0, x, y, nx * 0.5 + 0.5, ny * 0.5 + 0.5, 1.0, 1.0);
+}
+
+# The floor: rough concrete, flat, non-metallic, unlit by itself.
+fun build_floor(a: usize) {
+    var y: i32 = 0;
+    for (y < QS) {
+        var x: i32 = 0;
+        for (x < QS) {
+            val n: f32 = grain(x, y, 1);
+            val v: f32 = 0.11 + n * 0.03;
+            put(a, 0, 0, x, y, v, v * 1.02, v * 1.1, 1.0);
+
+            # Almost flat, with just enough tilt that a grazing light picks out
+            # the aggregate rather than lighting the floor as a single plane.
+            put_normal(a, x, y, (grain(x, y, 2) - 0.5) * 0.10,
+                                (grain(x, y, 3) - 0.5) * 0.10);
+
+            put(a, 0, 1, x, y, 0.92, 0.0, 1.0, 1.0);
+            put(a, 1, 1, x, y, 0.0, 0.0, 0.0, 1.0);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+# Steel plating: a bevelled panel with a rivet in each corner, polished enough
+# to hold a highlight. This is the piece the design's claim rests on.
+fun build_plate(a: usize) {
+    var y: i32 = 0;
+    for (y < QS) {
+        var x: i32 = 0;
+        for (x < QS) {
+            val n: f32 = grain(x, y, 11);
+            val base: f32 = 0.34 + n * 0.03;
+            put(a, 0, 0, x, y, base, base * 1.02, base * 1.08, 1.0);
+
+            # The panel bevel: the normal tilts outward within six texels of an
+            # edge and is flat in the middle.
+            var nx: f32 = edge_slope(x, QS);
+            var ny: f32 = edge_slope(y, QS);
+
+            # Four rivets, each a hemisphere that catches the light before the
+            # flat of the plate does.
+            var rx: f32 = 0.0;
+            var ry: f32 = 0.0;
+            rivet(x, y, 14, 14, ?rx, ?ry);
+            rivet(x, y, 50, 14, ?rx, ?ry);
+            rivet(x, y, 14, 50, ?rx, ?ry);
+            rivet(x, y, 50, 50, ?rx, ?ry);
+            nx = nx + rx;
+            ny = ny + ry;
+            put_normal(a, x, y, nx, ny);
+
+            # Brushed, so roughness varies along one axis and the highlight
+            # smears rather than sitting as a dot.
+            val rough: f32 = 0.16 + grain(x / 1, y, 12) * 0.10;
+            put(a, 0, 1, x, y, rough, 1.0, 1.0, 1.0);
+            put(a, 1, 1, x, y, 0.0, 0.0, 0.0, 1.0);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+# How far a texel within six of an edge tilts, and which way.
+fun edge_slope(v: i32, size: i32) f32 {
+    if (v < 6)            { ret 0.0 - (6 - v)::f32 * 0.12; }
+    if (v >= size - 6)    { ret (v - (size - 7))::f32 * 0.12; }
+    ret 0.0;
+}
+
+# Add a hemispherical bump centred at cx, cy with a radius of five.
+fun rivet(x: i32, y: i32, cx: i32, cy: i32, nx: *f32, ny: *f32) {
+    val dx: f32 = (x - cx)::f32;
+    val dy: f32 = (y - cy)::f32;
+    val d2: f32 = dx * dx + dy * dy;
+    if (d2 > 25.0) { ret; }
+    @nx = @nx + dx * 0.17;
+    @ny = @ny + dy * 0.17;
+}
+
+# A wall panel: lighter, vertically grooved, half rough. Its job is to cast.
+fun build_wall(a: usize) {
+    var y: i32 = 0;
+    for (y < QS) {
+        var x: i32 = 0;
+        for (x < QS) {
+            val n: f32 = grain(x, y, 21);
+            val base: f32 = 0.20 + n * 0.03;
+            put(a, 0, 0, x, y, base * 1.05, base, base * 0.92, 1.0);
+
+            # Grooves every eight texels, as a sawtooth in the normal's X.
+            val phase: i32 = x % 8;
+            var nx: f32 = 0.0;
+            if (phase == 0) { nx = 0.0 - 0.6; }
+            if (phase == 7) { nx = 0.6; }
+            put_normal(a, x, y, nx, (grain(x, y, 22) - 0.5) * 0.08);
+
+            put(a, 0, 1, x, y, 0.62, 0.15, 1.0, 1.0);
+            put(a, 1, 1, x, y, 0.0, 0.0, 0.0, 1.0);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+# A lamp housing with an emissive bar down its middle. Emissive is additive and
+# never lit, so its albedo stays dark and the bar lives in the fourth quadrant.
+fun build_lamp(a: usize) {
+    var y: i32 = 0;
+    for (y < QS) {
+        var x: i32 = 0;
+        for (x < QS) {
+            put(a, 0, 0, x, y, 0.05, 0.05, 0.06, 1.0);
+            put_normal(a, x, y, 0.0, 0.0);
+            put(a, 0, 1, x, y, 0.45, 0.0, 1.0, 1.0);
+
+            var e: f32 = 0.0;
+            if (y >= 20 && y < 44) { e = 1.0; }
+            put(a, 1, 1, x, y, e * 1.0, e * 0.62, e * 0.24, 1.0);
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+}
+
+# ------------------------------------------------------------------ startup
+
+fun make_target(g: *Game, d: *gfx.Device, out: *gfx.RenderTarget,
+                w: i32, h: i32, count: usize, name: str) bool {
+    val r: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_mrt(d, w, h, count);
+    if (is_err[gfx.RenderTarget, gfx.Error](r)) {
+        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](r);
+        print.eprintlnf("{} target error: {}", name, gfx.error_msg(?e));
+        ret false;
+    }
+    @out = unwrap_ok[gfx.RenderTarget, gfx.Error](r);
+    ret true;
+}
+
+fun make_shader(out: *gfx.Shader, frag: *u8, flen: usize, name: str) bool {
+    val r: Result[bool, gfx.Error] = gfx.shader(out,
+                                                ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV),
+                                                frag, flen);
+    if (is_err[bool, gfx.Error](r)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](r);
+        print.eprintlnf("{} shader error: {}", name, gfx.error_msg(?e));
+        ret false;
+    }
+
+    # Every pass here is 2D quads written straight into a target: no depth, no
+    # face culling, and no blending, because a G-buffer attachment holds data
+    # rather than colour and blending it would be meaningless. That leaves the
+    # lighting accumulation with nothing to accumulate into, which is the point
+    # made in the report.
+    var desc: gfx.PipelineDesc = gfx.pipeline_desc_2d();
+    desc.blend = false;
+    gfx.shader_set_state(out, desc);
+    ret true;
+}
+
+fun piece(g: *Game, i: usize, x: f32, y: f32, w: f32, h: f32, atlas: usize) {
+    g.pieces[i].x     = x;
+    g.pieces[i].y     = y;
+    g.pieces[i].w     = w;
+    g.pieces[i].h     = h;
+    g.pieces[i].atlas = atlas;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = 0;
+    g.failures = 0;
+    g.two_built = 0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
+    if (is_err[bool, gfx.Error](ri)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
+        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    if (!make_target(g, d, ?g.gbuf,    GW, GH, 4, "gbuf"))    { ret; }
+    if (!make_target(g, d, ?g.light,   GW, GH, 1, "light"))   { ret; }
+    if (!make_target(g, d, ?g.scene,   GW, GH, 1, "scene"))   { ret; }
+    if (!make_target(g, d, ?g.bloom_a, BW, BH, 1, "bloom_a")) { ret; }
+    if (!make_target(g, d, ?g.bloom_b, BW, BH, 1, "bloom_b")) { ret; }
+    if (!make_target(g, d, ?g.probe1,  GW, GH, 1, "probe1"))  { ret; }
+    if (!make_target(g, d, ?g.probe2,  GW, GH, 1, "probe2"))  { ret; }
+    if (!make_target(g, d, ?g.probe3,  GW, GH, 1, "probe3"))  { ret; }
+    print.printlnf("gbuf: {} attachments at {}x{}",
+                   gfx.render_target_count(?g.gbuf), GW, GH);
+
+    # A unit quad in XY with a +Z normal and UV equal to position, in boom's
+    # standard vertex layout. Every draw in this example is this one mesh under
+    # a different transform.
+    var verts: [32]f32;
+    quad_vertex(?verts[0],  0.0, 0.0);
+    quad_vertex(?verts[8],  1.0, 0.0);
+    quad_vertex(?verts[16], 1.0, 1.0);
+    quad_vertex(?verts[24], 0.0, 1.0);
+    var idx: [6]u32;
+    idx[0] = 0; idx[1] = 1; idx[2] = 2;
+    idx[3] = 0; idx[4] = 2; idx[5] = 3;
+
+    var fmt: gfx.VertexFormat = gfx.vertex_format_standard();
+    val mr: Result[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
+    if (is_err[gfx.Mesh, gfx.Error](mr)) {
+        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](mr);
+        print.eprintlnf("quad mesh error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    g.quad = unwrap_ok[gfx.Mesh, gfx.Error](mr);
+
+    build_floor(0);
+    build_plate(1);
+    build_wall(2);
+    build_lamp(3);
+
+    # LINEAR, NOT SRGB, FOR THE WHOLE ATLAS. Three of the four quadrants hold
+    # data rather than colour: a normal and a roughness put through an sRGB
+    # decode are simply wrong numbers. One atlas can carry one colour space, so
+    # the albedo quadrant is authored linear to match, which is the price of
+    # packing four sheets into one texture.
+    var ti: usize = 0;
+    for (ti < 4) {
+        val tr: Result[gfx.Texture, gfx.Error] = gfx.texture(d, ?atlas_pixels[ti][0],
+                                                             AW, AW, gfx.COLOR_LINEAR);
+        if (is_err[gfx.Texture, gfx.Error](tr)) {
+            var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tr);
+            print.eprintlnf("atlas texture error: {}", gfx.error_msg(?e));
+            ret;
+        }
+        g.texes[ti] = unwrap_ok[gfx.Texture, gfx.Error](tr);
+        g.mats[ti] = gfx.material();
+        gfx.material_add_texture(?g.mats[ti], "u_atlas", ?g.texes[ti]);
+        ti = ti + 1;
+    }
+
+    if (!make_shader(?g.sh_gbuf,  ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  "gbuf"))  { ret; }
+    if (!make_shader(?g.sh_light, ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), "light")) { ret; }
+    if (!make_shader(?g.sh_fwd,   ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   "fwd"))   { ret; }
+    if (!make_shader(?g.sh_copy,  ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  "copy"))  { ret; }
+    if (!make_shader(?g.sh_bloom, ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), "bloom")) { ret; }
+    if (g.probe_two) {
+        if (!make_shader(?g.sh_two, ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), "two")) { ret; }
+    }
+
+    # The scene: a floor, three steel plates, two walls, a crate and a lamp.
+    piece(g, 0, 0.0,   0.0,   480.0, 270.0, 0);
+    piece(g, 1, 70.0,  80.0,  80.0,  80.0,  1);
+    piece(g, 2, 330.0, 40.0,  80.0,  80.0,  1);
+    piece(g, 3, 40.0,  190.0, 80.0,  80.0,  1);
+    piece(g, 4, 210.0, 40.0,  40.0,  160.0, 2);
+    piece(g, 5, 300.0, 190.0, 120.0, 30.0,  2);
+    piece(g, 6, 90.0,  165.0, 50.0,  30.0,  2);
+    piece(g, 7, 400.0, 20.0,  60.0,  36.0,  3);
+    piece(g, 8, 150.0, 230.0, 60.0,  36.0,  3);
+
+    # The occluders, as the centre line of each wall piece. Three is what the
+    # user block has room for beside two lights.
+    g.block.wall0 = gm.vec4(230.0, 40.0, 230.0, 200.0);
+    g.block.wall1 = gm.vec4(300.0, 205.0, 420.0, 205.0);
+    g.block.wall2 = gm.vec4(90.0, 180.0, 140.0, 180.0);
+    g.block.counts = gm.vec4(3.0, SHADOW_REACH, 0.0, 0.0);
+
+    # Ambient is enough to navigate by, and its fourth component is the floor a
+    # fully shadowed region is scaled to rather than being taken to black.
+    g.block.ambient = gm.vec4(0.14, 0.15, 0.19, 0.30);
+    g.block.view    = gm.vec4(GW::f32, GH::f32, 0.0, 2.0);
+
+    # The static light, whose position the shadow assertion is computed against.
+    g.block.l1_pos = gm.vec4(110.0, 120.0, 40.0, 320.0);
+    g.block.l1_col = gm.vec4(0.42, 0.60, 1.0, 2.6);
+
+    g.ready = 1;
+}
+
+# One vertex of the unit quad: position, normal, uv.
+fun quad_vertex(out: *f32, x: f32, y: f32) {
+    out[0] = x;   out[1] = y;   out[2] = 0.0;
+    out[3] = 0.0; out[4] = 0.0; out[5] = 1.0;
+    out[6] = x;   out[7] = y;
+}
+
+# ------------------------------------------------------------------- update
+
+var clock: f32 = 0.0;
+var paused: bool = false;
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+    if (input.key_pressed(?ctx.input, input.KEY_SPACE)) { paused = !paused; }
+    if (!paused) { clock = clock + 0.02; }
+}
+
+# ---------------------------------------------------------------------- draw
+
+# Place the unit quad over a rectangle in world units.
+fun place(t: *gm.Transform, x: f32, y: f32, w: f32, h: f32) {
+    @t = gm.transform_identity();
+    t.position = gm.vec3(x, y, 0.0);
+    t.scale    = gm.vec3(w, h, 1.0);
+}
+
+# A pass over a whole target, in that target's own pixels, never culled.
+fun target_pass(t: *gfx.RenderTarget, clear: u8) gfx.PassDesc {
+    var d: gfx.PassDesc = gfx.pass_overlay();
+    d.target      = t;
+    d.clear       = clear;
+    d.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+    d.cull        = 0;
+    ret d;
+}
+
+# Draw the full-target quad with one shader and one source texture.
+fun full_quad(p: *gfx.Pass, g: *Game, w: f32, h: f32, mat: *gfx.Material, sh: *gfx.Shader) {
+    var t: gm.Transform;
+    place(?t, 0.0, 0.0, w, h);
+    gfx.pass_draw_shaded(p, ?g.quad, mat, ?t, sh);
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+
+    var opened: bool = false;
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+        ret;
+    }
+    if (!opened) { ret; }
+
+    # The moving light, which is what makes the specular sweep rather than sit.
+    val cx: f32 = 240.0 + gm.cosf(clock) * 150.0;
+    val cy: f32 = 135.0 + gm.sinf(clock * 0.7) * 90.0;
+    g.block.l0_pos = gm.vec4(cx, cy, 45.0, 300.0);
+    g.block.l0_col = gm.vec4(1.0, 0.72, 0.42, 1.7);
+    g.block.view   = gm.vec4(GW::f32, GH::f32, clock, 2.0);
+
+    # THE AUDIT FRAME. Every pixel assertion at shutdown is made about whatever
+    # the last frame left in the targets, and a light that moves with the clock
+    # makes each of them depend on which frame that was. The final frame of a
+    # counted run therefore extinguishes the moving light, so the shadow and
+    # specular numbers are about the static one and are the same on every run.
+    # The first attempt at this compared two floor texels while a second light
+    # was sweeping across them, and reported that a wall brightens what is
+    # behind it.
+    if (g.budget != 0 && g.drawn + 1 == g.budget) {
+        g.block.l0_col = gm.vec4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    # 1. GEOMETRY. Four attachments, one draw per piece, a game shader writing
+    # four outputs. A built-in program would be refused here by design.
+    var gd: gfx.PassDesc = target_pass(?g.gbuf, 1);
+    var gp: gfx.Pass = gfx.pass_begin(?g.renderer, ?gd);
+    var pi: usize = 0;
+    for (pi < PIECE_COUNT) {
+        var t: gm.Transform;
+        place(?t, g.pieces[pi].x, g.pieces[pi].y, g.pieces[pi].w, g.pieces[pi].h);
+        gfx.pass_draw_shaded(?gp, ?g.quad, ?g.mats[g.pieces[pi].atlas], ?t, ?g.sh_gbuf);
+        pi = pi + 1;
+    }
+    gfx.pass_end(?gp);
+
+    # 2. LIGHTING. Reads attachment 1 of the target the pass above just wrote
+    # and writes somewhere else entirely. This is the question about whether an
+    # attachment can be sampled while a later pass writes elsewhere.
+    var lmat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?lmat, "u_packed", gfx.render_target_texture_at(?g.gbuf, 1));
+    var ld: gfx.PassDesc = target_pass(?g.light, 1);
+    var lp: gfx.Pass = gfx.pass_begin(?g.renderer, ?ld);
+    if (!gfx.pass_set_user(?lp, (?g.block):~*u8, $size_of(Scene))) {
+        print.eprintln("the scene block does not fit in a uniform slot");
+    }
+    full_quad(?lp, g, GW::f32, GH::f32, ?lmat, ?g.sh_light);
+    gfx.pass_end(?lp);
+
+    # 3. FORWARD. The same scene lit again with every sheet reachable, because
+    # the composite the deferred path wants cannot be written.
+    var fd: gfx.PassDesc = target_pass(?g.scene, 1);
+    var fp: gfx.Pass = gfx.pass_begin(?g.renderer, ?fd);
+    gfx.pass_set_user(?fp, (?g.block):~*u8, $size_of(Scene));
+    var fi: usize = 0;
+    for (fi < PIECE_COUNT) {
+        var t: gm.Transform;
+        place(?t, g.pieces[fi].x, g.pieces[fi].y, g.pieces[fi].w, g.pieces[fi].h);
+        gfx.pass_draw_shaded(?fp, ?g.quad, ?g.mats[g.pieces[fi].atlas], ?t, ?g.sh_fwd);
+        fi = fi + 1;
+    }
+    gfx.pass_end(?fp);
+
+    # 4. BLOOM. Threshold the scene, then blur across and down.
+    var ba: BloomArgs;
+    ba.step = gm.vec4(0.0, 0.0, 0.35, 0.0);
+    ba.tint = gm.vec4(1.0, 1.0, 1.0, 1.0);
+    var smat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?smat, "u_scene", gfx.render_target_texture(?g.scene));
+    var td: gfx.PassDesc = target_pass(?g.bloom_a, 1);
+    var tp: gfx.Pass = gfx.pass_begin(?g.renderer, ?td);
+    gfx.pass_set_user(?tp, (?ba):~*u8, $size_of(BloomArgs));
+    full_quad(?tp, g, BW::f32, BH::f32, ?smat, ?g.sh_bloom);
+    gfx.pass_end(?tp);
+
+    ba.step = gm.vec4(2.0 / BW::f32, 0.0, 0.35, 1.0);
+    var amat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?amat, "u_bloom", gfx.render_target_texture(?g.bloom_a));
+    var hd: gfx.PassDesc = target_pass(?g.bloom_b, 1);
+    var hp: gfx.Pass = gfx.pass_begin(?g.renderer, ?hd);
+    gfx.pass_set_user(?hp, (?ba):~*u8, $size_of(BloomArgs));
+    full_quad(?hp, g, BW::f32, BH::f32, ?amat, ?g.sh_bloom);
+    gfx.pass_end(?hp);
+
+    ba.step = gm.vec4(0.0, 2.0 / BH::f32, 0.35, 1.0);
+    var bmat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?bmat, "u_bloom", gfx.render_target_texture(?g.bloom_b));
+    var vd: gfx.PassDesc = target_pass(?g.bloom_a, 1);
+    var vp: gfx.Pass = gfx.pass_begin(?g.renderer, ?vd);
+    gfx.pass_set_user(?vp, (?ba):~*u8, $size_of(BloomArgs));
+    full_quad(?vp, g, BW::f32, BH::f32, ?bmat, ?g.sh_bloom);
+    gfx.pass_end(?vp);
+
+    # The attachment probes, so the outputs boom cannot read are readable.
+    copy_into(g, ?g.probe1, gfx.render_target_texture_at(?g.gbuf, 1));
+    copy_into(g, ?g.probe2, gfx.render_target_texture_at(?g.gbuf, 2));
+    copy_into(g, ?g.probe3, gfx.render_target_texture_at(?g.gbuf, 3));
+
+    # The two-sampler measurement, once, before anything else can be blamed for
+    # the validation output it produces.
+    if (g.probe_two && g.drawn == 0) {
+        var xd: gfx.PassDesc = target_pass(?g.probe1, 1);
+        var xp: gfx.Pass = gfx.pass_begin(?g.renderer, ?xd);
+        full_quad(?xp, g, GW::f32, GH::f32, ?smat, ?g.sh_two);
+        gfx.pass_end(?xp);
+        g.two_built = gfx.shader_pipelines(?g.sh_two);
+    }
+
+    # 5. PRESENT. The scene at two, with the bloom blended over it, because
+    # there is no additive blend to add it with.
+    var wd: gfx.PassDesc = gfx.pass_overlay();
+    var wp: gfx.Pass = gfx.pass_begin(?g.renderer, ?wd);
+    gfx.pass_draw_sprite(?wp, gfx.render_target_texture(?g.scene),
+                         gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
+                         gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_draw_sprite(?wp, gfx.render_target_texture(?g.bloom_a),
+                         gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
+                         gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?wp);
+
+    g.drawn = g.drawn + 1;
+    if (g.budget != 0 && g.drawn >= g.budget) { ctx.running = false; }
+
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    }
+}
+
+# Draw one texture into a single-attachment target, unchanged.
+fun copy_into(g: *Game, dst: *gfx.RenderTarget, src: *gfx.Texture) {
+    var m: gfx.Material = gfx.material();
+    gfx.material_add_texture(?m, "u_source", src);
+    var d: gfx.PassDesc = target_pass(dst, 1);
+    var p: gfx.Pass = gfx.pass_begin(?g.renderer, ?d);
+    full_quad(?p, g, dst.width::f32, dst.height::f32, ?m, ?g.sh_copy);
+    gfx.pass_end(?p);
+}
+
+# ------------------------------------------------------------------ readback
+
+# The mean of one channel over a five-by-five block, as a byte.
+#
+# A block rather than a texel because the floor carries grain and a single
+# sample would make a threshold a coin toss between runs on different drivers.
+fun patch(w: i32, x: i32, y: i32, channel: usize) f32 {
+    var sum: f32 = 0.0;
+    var j: i32 = 0 - 2;
+    for (j <= 2) {
+        var i: i32 = 0 - 2;
+        for (i <= 2) {
+            val o: usize = (((y + j) * w + (x + i)) * 4)::usize + channel;
+            sum = sum + readback[o]::f32;
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    ret sum / 25.0;
+}
+
+# The mean and the peak of one channel over a rectangle, and how many texels
+# sit well above the mean.
+#
+# This is how the prototype answers whether a specular highlight is actually
+# visible rather than merely computed. A diffuse-only surface under a point
+# light has a peak barely above its mean; a highlight is a small number of
+# texels several times brighter than the surface around them, and the count is
+# how many pixels of screen the effect is actually worth.
+# THE NUMBERS ARE LINEARISED FIRST. A target's format is sRGB, so a byte read
+# back is a display encoding and a ratio taken between two of them understates
+# the ratio between the light that produced them by roughly its own power. A
+# highlight measured at 1.7 times its surroundings in bytes is about three and a
+# half times in light, which is the difference between "no highlight" and "a
+# clear one". Squaring is a gamma of two rather than sRGB's two-point-two, which
+# is close enough to compare two numbers from the same image and is written out
+# rather than hidden behind a call.
+fun linear_of(v: u8) f32 {
+    val f: f32 = v::f32 / 255.0;
+    ret f * f;
+}
+
+fun region_stats(w: i32, x0: i32, y0: i32, x1: i32, y1: i32, channel: usize,
+                 out_mean: *f32, out_max: *f32, out_hot: *usize) {
+    var sum: f32 = 0.0;
+    var peak: f32 = 0.0;
+    var n: usize = 0;
+    var y: i32 = y0;
+    for (y < y1) {
+        var x: i32 = x0;
+        for (x < x1) {
+            val v: f32 = linear_of(readback[((y * w + x) * 4)::usize + channel]);
+            sum = sum + v;
+            if (v > peak) { peak = v; }
+            n = n + 1;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    val mean: f32 = sum / n::f32;
+
+    var hot: usize = 0;
+    var hy: i32 = y0;
+    for (hy < y1) {
+        var hx: i32 = x0;
+        for (hx < x1) {
+            val v: f32 = linear_of(readback[((hy * w + hx) * 4)::usize + channel]);
+            if (v > mean * 1.8) { hot = hot + 1; }
+            hx = hx + 1;
+        }
+        hy = hy + 1;
+    }
+
+    @out_mean = mean;
+    @out_max  = peak;
+    @out_hot  = hot;
+}
+
+# Read a target into the shared buffer, reporting a failure rather than
+# asserting on whatever the buffer held from the last one.
+fun read(g: *Game, d: *gfx.Device, t: *gfx.RenderTarget, name: str) bool {
+    val bytes: usize = (t.width * t.height * 4)::usize;
+    val r: Result[bool, gfx.Error] = gfx.render_target_read(d, t, ?readback[0], bytes);
+    if (is_err[bool, gfx.Error](r)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](r);
+        print.eprintlnf("{} readback error: {}", name, gfx.error_msg(?e));
+        g.failures = g.failures + 1;
+        ret false;
+    }
+    ret true;
+}
+
+# Whether the segment ab lies between p and l, on the CPU.
+#
+# The same intersection the shadow stages compute, written once here so the
+# example can check its own premise. See the block above the shadow assertions
+# for why that matters.
+fun seg_crosses(px: f32, py: f32, lx: f32, ly: f32,
+                ax: f32, ay: f32, bx: f32, by: f32) bool {
+    val rx: f32 = lx - px;
+    val ry: f32 = ly - py;
+    val sx: f32 = bx - ax;
+    val sy: f32 = by - ay;
+    val denom: f32 = rx * sy - ry * sx;
+    if (denom > 0.0 - 0.0001 && denom < 0.0001) { ret false; }
+    val qx: f32 = ax - px;
+    val qy: f32 = ay - py;
+    val t: f32 = (qx * sy - qy * sx) / denom;
+    val u: f32 = (qx * ry - qy * rx) / denom;
+    ret t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0;
+}
+
+fun dist2(ax: f32, ay: f32, bx: f32, by: f32) f32 {
+    val dx: f32 = ax - bx;
+    val dy: f32 = ay - by;
+    ret dx * dx + dy * dy;
+}
+
+fun check(g: *Game, ok: bool, name: str) {
+    if (ok) { print.printlnf("  OK   {}", name); ret; }
+    print.printlnf("  FAIL {}", name);
+    g.failures = g.failures + 1;
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) { ret; }
+
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    val bgra: bool = gfx.render_target_bgra(?g.gbuf);
+
+    # Channel indices into the readback, which follows the surface format
+    # rather than RGBA. render_target_bgra is what says which.
+    var cr: usize = 0;
+    var cb: usize = 2;
+    if (bgra) { cr = 2; cb = 0; }
+    val cg: usize = 1;
+
+    print.printlnf("drew {} frames, {} draws, {} dropped",
+                   g.drawn, gfx.renderer_draws(?g.renderer),
+                   gfx.renderer_dropped(?g.renderer));
+    print.printlnf("pipelines: gbuf {} light {} fwd {} copy {} bloom {}",
+                   gfx.shader_pipelines(?g.sh_gbuf), gfx.shader_pipelines(?g.sh_light),
+                   gfx.shader_pipelines(?g.sh_fwd), gfx.shader_pipelines(?g.sh_copy),
+                   gfx.shader_pipelines(?g.sh_bloom));
+    if (g.probe_two) {
+        print.printlnf("two-sampler probe: the shader built {} pipeline(s)", g.two_built);
+    }
+    print.printlnf("readback channel order: bgra={}", bgra);
+
+    # The two floor texels the shadow claim is made about. Both are 170 world
+    # units from the static light, so their attenuation and their angle to it
+    # are identical and the only thing that differs is the wall between them.
+    val ax: i32 = 280;
+    val ay: i32 = 120;
+    val bx: i32 = 212;
+    val by: i32 = 256;
+
+    print.println("geometry:");
+    if (read(g, d, ?g.gbuf, "gbuf")) {
+        # Attachment 0, albedo. The plate is markedly brighter than the floor,
+        # which is the cheapest proof that a sprite reached the first output at
+        # all and that the atlas quadrants are not swapped.
+        val floor_v: f32 = patch(GW, 280, 120, cr);
+        val plate_v: f32 = patch(GW, 110, 120, cr);
+        print.printlnf("  albedo: floor {} plate {}", floor_v::i64, plate_v::i64);
+        check(g, plate_v > floor_v + 30.0, "attachment 0 carries albedo");
+    }
+
+    if (read(g, d, ?g.probe1, "probe1")) {
+        # Attachment 1, the packed normal and material. The floor is nearly
+        # flat, so its encoded XY should sit near the middle of the range.
+        #
+        # IT DOES NOT COME BACK AT 128. The attachment's format is the
+        # surface's, which is sRGB, so a shader writing 0.5 has it encoded on
+        # the way in and decoded on the way out. The sampler sees the right
+        # number and the readback sees about 188. That is measurable evidence
+        # that a G-buffer is being stored through a transfer function it should
+        # not be, and it costs precision in the upper half of every data
+        # channel.
+        val nxv: f32 = patch(GW, 280, 120, cr);
+        val nyv: f32 = patch(GW, 280, 120, cg);
+        val metal: f32 = patch(GW, 110, 120, 3);
+        print.printlnf("  packed: floor normal x {} y {}, plate metallic {}",
+                       nxv::i64, nyv::i64, metal::i64);
+        check(g, nxv > 175.0 && nxv < 200.0 && nyv > 175.0 && nyv < 200.0,
+              "attachment 1 carries a flat normal, sRGB encoded");
+        check(g, metal > 200.0, "attachment 1 carries metallic");
+    }
+
+    if (read(g, d, ?g.probe2, "probe2")) {
+        val plate_metal: f32 = patch(GW, 110, 120, cg);
+        val floor_metal: f32 = patch(GW, 280, 120, cg);
+        print.printlnf("  material: plate metallic {} floor metallic {}",
+                       plate_metal::i64, floor_metal::i64);
+        check(g, plate_metal > 200.0 && floor_metal < 40.0,
+              "attachment 2 carries the material sheet");
+    }
+
+    if (read(g, d, ?g.probe3, "probe3")) {
+        val lamp_e: f32 = patch(GW, 430, 40, cr);
+        val floor_e: f32 = patch(GW, 280, 120, cr);
+        print.printlnf("  emissive: lamp {} floor {}", lamp_e::i64, floor_e::i64);
+        check(g, lamp_e > 150.0 && floor_e < 20.0,
+              "attachment 3 carries emissive");
+    }
+
+    # THE SHADOW ASSERTION'S OWN PREMISE, CHECKED BEFORE IT IS TRUSTED.
+    #
+    # Comparing two texels only says something about shadowing if one of them is
+    # genuinely behind a wall from the light, the other genuinely is not, and
+    # both are the same distance from it so their attenuation cancels. Move a
+    # light, a wall or a probe point and any of the three quietly stops being
+    # true, and the pixel comparison goes on passing while measuring nothing.
+    # So the geometry is checked here rather than asserted in a comment.
+    print.println("shadow probe geometry:");
+    val lx: f32 = g.block.l1_pos.x;
+    val ly: f32 = g.block.l1_pos.y;
+    val da: f32 = dist2(ax::f32, ay::f32, lx, ly);
+    val db: f32 = dist2(bx::f32, by::f32, lx, ly);
+    print.printlnf("  distances to the static light: {} and {}",
+                   gm.sqrtf(da)::i64, gm.sqrtf(db)::i64);
+    check(g, da > db * 0.94 && da < db * 1.06,
+          "both probe points are the same distance from the light");
+    check(g, seg_crosses(ax::f32, ay::f32, lx, ly,
+                         g.block.wall0.x, g.block.wall0.y,
+                         g.block.wall0.z, g.block.wall0.w),
+          "a wall is between the light and the shadowed point");
+    check(g, !seg_crosses(bx::f32, by::f32, lx, ly,
+                          g.block.wall0.x, g.block.wall0.y,
+                          g.block.wall0.z, g.block.wall0.w)
+          && !seg_crosses(bx::f32, by::f32, lx, ly,
+                          g.block.wall1.x, g.block.wall1.y,
+                          g.block.wall1.z, g.block.wall1.w)
+          && !seg_crosses(bx::f32, by::f32, lx, ly,
+                          g.block.wall2.x, g.block.wall2.y,
+                          g.block.wall2.z, g.block.wall2.w),
+          "no wall is between the light and the open point");
+
+    print.println("lighting and shadow:");
+    if (read(g, d, ?g.light, "light")) {
+        val shadowed: f32 = patch(GW, ax, ay, cb);
+        val open: f32 = patch(GW, bx, by, cb);
+        print.printlnf("  light: shadowed {} open {}", shadowed::i64, open::i64);
+        check(g, open > 20.0, "the static light reaches the open floor");
+        check(g, shadowed < open * 0.75, "a wall darkens the light behind it");
+    }
+
+    if (read(g, d, ?g.scene, "scene")) {
+        val shadowed: f32 = patch(GW, ax, ay, cb);
+        val open: f32 = patch(GW, bx, by, cb);
+        val lamp: f32 = patch(GW, 430, 40, cr);
+        print.printlnf("  scene: shadowed {} open {} lamp {}",
+                       shadowed::i64, open::i64, lamp::i64);
+
+        # Both claims the design makes about a shadow, as one ratio. Darkening
+        # is the upper bound and not occluding is the lower, and an absolute
+        # byte threshold would satisfy neither: a scene that is uniformly bright
+        # passes "above 25" while showing no shadow at all.
+        check(g, shadowed < open * 0.92, "the shadow darkens the composite");
+        check(g, shadowed > open * 0.45, "the shadow does not occlude");
+        check(g, lamp > 150.0, "emissive survives the composite");
+
+        # THE SPECULAR CLAIM, AS A NUMBER. The plate nearest the static light,
+        # in the green channel, which is where a blue-white light puts most of
+        # its highlight. A surface with no working specular has a peak close to
+        # its mean and no hot texels at all.
+        var mean: f32 = 0.0;
+        var peak: f32 = 0.0;
+        var hot: usize = 0;
+        region_stats(GW, 70, 80, 150, 160, cg, ?mean, ?peak, ?hot);
+        print.printlnf("  plate, linear per mille: mean {} peak {}, texels above 1.8x mean {}",
+                       (mean * 1000.0)::i64, (peak * 1000.0)::i64, hot);
+        check(g, peak > mean * 2.0, "the plate carries a specular highlight");
+        check(g, hot > 30, "the highlight covers enough texels to be seen");
+    }
+
+    print.println("bloom:");
+    if (read(g, d, ?g.bloom_a, "bloom_a")) {
+        # The blurred bloom must have spread beyond the lamp that produced it.
+        # A threshold that produced nothing, or a blur that did not run, both
+        # leave the second of these at zero. The lamp occupies rows 10 to 28 of
+        # the bloom target, and the kernel reaches eight texels, so a sample
+        # four rows past its edge is inside the spread and one at the far corner
+        # is outside it.
+        val on: f32 = patch(BW, 215, 20, cr);
+        val beside: f32 = patch(BW, 215, 32, cr);
+        val far: f32 = patch(BW, 120, 100, cr);
+        print.printlnf("  bloom: on lamp {} four texels past it {} far {}",
+                       on::i64, beside::i64, far::i64);
+        check(g, on > 20.0, "the threshold kept the lamp");
+        check(g, beside > 4.0, "the blur spread it past the lamp");
+        check(g, far < beside, "the blur did not flood the frame");
+    }
+
+    gfx.render_target_delete(d, ?g.gbuf);
+    gfx.render_target_delete(d, ?g.light);
+    gfx.render_target_delete(d, ?g.scene);
+    gfx.render_target_delete(d, ?g.bloom_a);
+    gfx.render_target_delete(d, ?g.bloom_b);
+    gfx.render_target_delete(d, ?g.probe1);
+    gfx.render_target_delete(d, ?g.probe2);
+    gfx.render_target_delete(d, ?g.probe3);
+
+    gfx.shader_delete(?g.sh_gbuf, d);
+    gfx.shader_delete(?g.sh_light, d);
+    gfx.shader_delete(?g.sh_fwd, d);
+    gfx.shader_delete(?g.sh_copy, d);
+    gfx.shader_delete(?g.sh_bloom, d);
+    if (g.probe_two) { gfx.shader_delete(?g.sh_two, d); }
+
+    var di: usize = 0;
+    for (di < 4) { gfx.texture_delete(d, ?g.texes[di]); di = di + 1; }
+    gfx.mesh_delete(d, ?g.quad);
+    gfx.renderer_dnit(?g.renderer);
+}
+
+fun parse_usize(s: str) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    for (s[i] != 0) {
+        val c: u8 = s[i];
+        if (c < 48 || c > 57) { ret n; }
+        n = n * 10 + (c - 48)::usize;
+        i = i + 1;
+    }
+    ret n;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+    game.budget    = 0;
+    game.drawn     = 0;
+    game.failures  = 0;
+    game.probe_two = false;
+
+    var argi: i64 = 1;
+    for (argi < argc) {
+        if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
+            game.budget = parse_usize(argv[argi + 1]:~str);
+            argi = argi + 1;
+        }
+        if (str_equals(argv[argi]:~str, "--probe-two-samplers")) {
+            game.probe_two = true;
+        }
+        argi = argi + 1;
+    }
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "boom.graphics: deferred 2D lighting prototype",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+    };
+
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("failed to open window");
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    run(?ctx, ?app);
+    context_shutdown(?ctx);
+
+    # Startup, frame count and every pixel assertion all reach the exit code. A
+    # check that prints FAIL and exits 0 is a check nothing can act on.
+    if (game.ready == 0) {
+        print.eprintln("FAIL: startup did not complete");
+        ret 1;
+    }
+    if (game.budget != 0 && game.drawn < game.budget) {
+        print.printlnf("FAIL frames: drew {} of {}", game.drawn, game.budget);
+        ret 1;
+    }
+    if (game.failures != 0) {
+        print.printlnf("FAIL: {} check(s) did not pass", game.failures);
+        ret 1;
+    }
+    print.println("all checks passed");
+    ret 0;
+}

@@ -1,0 +1,27 @@
+# The measurement, not a stage anything draws with.
+#
+# A deferred composite needs albedo, light and emissive in one draw. boom's
+# descriptor set layout declares one combined image sampler, at binding 1, and a
+# uniform buffer at binding 2. This stage declares a second sampler at binding 2
+# anyway, so the prototype can report what actually happens rather than what the
+# layout code reads as if it would: whether the pipeline is built, whether the
+# validation layers name the mismatch, and whether a game finds out at build
+# time or at the draw.
+#
+# It is behind --probe-two-samplers and is not part of a normal run, because a
+# deliberate layout mismatch is exactly the kind of thing that should not be in
+# the frame loop of an example someone runs to look at the picture.
+
+use tex: shader.texture;
+
+#[sampler(0, 1)] var first:  tex.Sampler2D;
+#[sampler(0, 2)] var second: tex.Sampler2D;
+
+#[input(0)] var in_uv: f32x2;
+
+#[output(0)] var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    out_colour = tex.sample_2d(first, in_uv) + tex.sample_2d(second, in_uv);
+}

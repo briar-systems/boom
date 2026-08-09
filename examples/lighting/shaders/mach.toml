@@ -1,0 +1,91 @@
+# The prototype's own shaders.
+#
+# A separate project because it targets spirv while the example targets the
+# host, and a project builds for one target. Same shape as examples/shader.
+#
+# One vertex stage serves every fragment stage: every pass here draws quads
+# through boom's fixed transform block, and boom.graphics.shader takes the two
+# modules separately, so the same compiled vertex module is handed to each
+# Shader the example builds.
+
+[project]
+id      = "lightshaders"
+version = "0.1.0"
+src     = "src"
+out     = "out"
+
+[target.spirv]
+isa = "spirv"
+os  = "freestanding"
+abi = "spirv"
+of  = "spv"
+
+[profile.debug]
+opt   = 0
+debug = false
+simd  = "scalarize"
+
+[profile.release]
+opt   = 2
+debug = false
+simd  = "scalarize"
+
+[artifact.quad_vert]
+kind    = "bin"
+entry   = "quad_vert.mach"
+out     = "quad_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.gbuf_frag]
+kind    = "bin"
+entry   = "gbuf_frag.mach"
+out     = "gbuf_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.light_frag]
+kind    = "bin"
+entry   = "light_frag.mach"
+out     = "light_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.fwd_frag]
+kind    = "bin"
+entry   = "fwd_frag.mach"
+out     = "fwd_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.copy_frag]
+kind    = "bin"
+entry   = "copy_frag.mach"
+out     = "copy_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.bloom_frag]
+kind    = "bin"
+entry   = "bloom_frag.mach"
+out     = "bloom_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.two_frag]
+kind    = "bin"
+entry   = "two_frag.mach"
+out     = "two_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[dep.mach-shader]
+git = "https://github.com/briar-systems/mach-shader"
+ref = "branch/main"

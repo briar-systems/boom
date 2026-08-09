@@ -1,0 +1,54 @@
+# The geometry stage: one sprite, four attachments.
+#
+# THIS IS THE STAGE THE PROTOTYPE EXISTS TO TEST. boom's built-in programs
+# declare one colour output and are refused in a multi-attachment pass by
+# design, so a deferred geometry pass has to come from a game's own Shader and
+# nothing had ever written four outputs through that hatch.
+#
+# ONE SAMPLER, FOUR SHEETS. boom's descriptor set declares exactly one combined
+# image sampler, at binding 1, fed by the material's first texture. The design's
+# material stack is four sister sheets, and four sheets cannot be four samplers
+# here. So they are packed into one atlas as a 2x2 grid of quadrants and sampled
+# four times at different offsets. That is a workaround, not the shape the
+# design asks for, and it costs two things: every sheet shares one colour space
+# when albedo wants sRGB and normal wants linear, and bilinear filtering bleeds
+# each quadrant into its neighbour at the seam because a sub-rect cannot carry
+# its own clamp.
+#
+# ATTACHMENT 1 IS PACKED ON PURPOSE. The lighting pass can also only bind one
+# sampler, so everything it needs has to be in one attachment: the normal's XY
+# and the roughness and metallic it shades with. Attachment 2 carries the
+# material sheet the way the design describes it, and is written here to prove
+# a fourth output lands, not because anything downstream can reach it.
+
+use sh:  shader.math;
+use tex: shader.texture;
+
+#[sampler(0, 1)] var atlas: tex.Sampler2D;
+
+#[input(0)] var in_uv: f32x2;
+
+#[output(0)] var out_albedo:   f32x4;
+#[output(1)] var out_packed:   f32x4;
+#[output(2)] var out_material: f32x4;
+#[output(3)] var out_emissive: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    val h: f32x2 = f32x2{in_uv[0] * 0.5, in_uv[1] * 0.5};
+
+    val albedo:   f32x4 = tex.sample_2d(atlas, h);
+    val normal:   f32x4 = tex.sample_2d(atlas, f32x2{h[0] + 0.5, h[1]});
+    val material: f32x4 = tex.sample_2d(atlas, f32x2{h[0], h[1] + 0.5});
+    val emissive: f32x4 = tex.sample_2d(atlas, f32x2{h[0] + 0.5, h[1] + 0.5});
+
+    out_albedo   = f32x4{albedo[0], albedo[1], albedo[2], 1.0};
+    out_material = f32x4{material[0], material[1], material[2], 1.0};
+    out_emissive = f32x4{emissive[0], emissive[1], emissive[2], 1.0};
+
+    # The normal's XY straight through in its 0 to 1 encoding, with roughness
+    # and metallic beside it. Z is not stored: it is recovered downstream from
+    # the other two, which is exact for a unit normal in the upper hemisphere
+    # and is what every tangent-space normal in a top-down 2D scene is.
+    out_packed = f32x4{normal[0], normal[1], material[0], material[1]};
+}

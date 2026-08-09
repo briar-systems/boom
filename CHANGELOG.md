@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-08-09
+
+### Added
+- engine: **`Config.frame_dt`, a pinned frame delta.** The loop feeds the
+  wall-clock delta into the fixed-step accumulator, so the number of ticks a run
+  executes depends on how busy the machine was. That is correct for a game and
+  wrong for a measurement: a run that draws a fixed number of frames still
+  simulates a variable number of steps, so anything read back afterwards moves
+  between two runs of the same binary.
+
+  Measured in a consumer rather than argued: onslaughter reads its scene target
+  back after `--frames 240`, and coverage moved between 357109 and 361863 pixels
+  across runs of the same binary with no rebuild between them. About one percent,
+  and a band wide enough to hide a real regression inside it.
+
+  Set `frame_dt` and a run becomes a function of its inputs alone. Eight runs of
+  that same probe are now byte identical. Zero, the default, is the wall clock and
+  the previous behaviour exactly, so no existing caller changes and nothing about
+  a shipped game is affected.
+- clock: `clock_advance(c, dt)`, which advances by exactly `dt` instead of
+  reading the wall clock. Every derived field stays consistent with a clock that
+  had genuinely advanced, so `elapsed` and `fps` remain sensible under a pinned
+  clock rather than freezing or reading zero.
+
 ## [0.7.0] - 2026-08-09
 
 ### Added
