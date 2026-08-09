@@ -670,7 +670,11 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     if (d.target != nil) {
         p.width  = d.target.width;
         p.height = d.target.height;
+        # PassDesc.clear selects the pass, and until now it did not: the target
+        # path always began the clearing pass, so a game asking to preserve
+        # what was there had its target wiped and nothing said so.
         p.pass    = d.target.pass;
+        if (d.clear == 0) { p.pass = d.target.pass_load; }
         p.targets = render_target_count(d.target);
     }
     or {
@@ -733,14 +737,20 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         var rbi: vk.RenderPassBeginInfo;
         rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rbi.pNext                    = nil;
-        rbi.renderPass               = d.target.pass;
+        rbi.renderPass               = p.pass;
         rbi.framebuffer              = d.target.framebuffer;
         rbi.renderArea.offset.x      = 0;
         rbi.renderArea.offset.y      = 0;
         rbi.renderArea.extent.width  = d.target.width::u32;
         rbi.renderArea.extent.height = d.target.height::u32;
-        rbi.clearValueCount          = (p.targets + 1)::u32;
-        rbi.pClearValues             = ?clears[0];
+        # A loading pass declares no clear, and passing values for one is both
+        # meaningless and a validation error.
+        rbi.clearValueCount          = 0;
+        rbi.pClearValues             = nil;
+        if (d.clear != 0) {
+            rbi.clearValueCount = (p.targets + 1)::u32;
+            rbi.pClearValues    = ?clears[0];
+        }
         vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
     }
     ret p;
