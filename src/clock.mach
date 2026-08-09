@@ -10,8 +10,10 @@
 use std.chrono.time.Time;
 use std.chrono.time.monotonic;
 use std.chrono.time.time_sub;
+use std.chrono.time.time_add;
 use std.chrono.duration.Duration;
 use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
 
 # smoothing factor for the exponential moving average of the fps estimate
 val FPS_SMOOTHING: f64 = 0.1;
@@ -91,6 +93,20 @@ pub fun clock_tick(c: *Clock) {
     clock_sample(c, monotonic());
 }
 
+# advance the clock by exactly `dt`, ignoring the wall clock
+#
+# For a run that has to be reproducible. Every derived field stays consistent
+# with a clock that had genuinely advanced by that much, so nothing downstream
+# can tell the difference, which is the property that makes it usable: a game
+# reading elapsed or fps under a pinned clock reads sensible values rather than
+# zeroes or a frozen instant.
+# ---
+# c:  clock to advance
+# dt: how long this frame is to be told it took
+pub fun clock_advance(c: *Clock, dt: Duration) {
+    clock_sample(c, time_add(c.last, dt));
+}
+
 test "clock: fresh clock has zeroed derived fields" {
     val c: Clock = clock_at(Time{sec: 100, nsec: 0});
     if (c.frame != 0) { ret 1; }
@@ -145,5 +161,34 @@ test "clock: zero delta leaves fps unchanged" {
     clock_sample(?c, Time{sec: 0, nsec: 10000000});
     if (c.fps != before) { ret 1; }
     if (c.delta != 0) { ret 2; }
+    ret 0;
+}
+
+test "clock: an advanced clock is a function of its deltas alone" {
+    var c: Clock = clock_at(Time{sec: 500, nsec: 0});
+    var i: i64 = 0;
+    for (i < 240) {
+        clock_advance(?c, SECOND / 60);
+        i = i + 1;
+    }
+    # Exactly 240 of whatever the delta was, however long the test took to run.
+    # Not four seconds: SECOND / 60 truncates, so a 60 Hz frame is 16666666ns
+    # and 240 of them fall 160ns short. That is harmless for determinism and
+    # worth stating rather than rounding away.
+    if (c.frame != 240) { ret 1; }
+    if (c.elapsed != 240 * (SECOND / 60)) { ret 2; }
+    if (c.delta != SECOND / 60) { ret 3; }
+    ret 0;
+}
+
+test "clock: advancing agrees with sampling the same instants" {
+    var a: Clock = clock_at(Time{sec: 7, nsec: 0});
+    var b: Clock = clock_at(Time{sec: 7, nsec: 0});
+    clock_advance(?a, 16 * MILLISECOND);
+    clock_sample(?b, Time{sec: 7, nsec: 16000000});
+    if (a.delta != b.delta)     { ret 1; }
+    if (a.elapsed != b.elapsed) { ret 2; }
+    if (a.frame != b.frame)     { ret 3; }
+    if (a.fps != b.fps)         { ret 4; }
     ret 0;
 }

@@ -20,6 +20,7 @@ use boom.window.window_poll;
 use boom.gamepad.gamepad_poll;
 use boom.window.window_refresh_size;
 use boom.clock.clock_tick;
+use boom.clock.clock_advance;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
 use boom.timestep.timestep_alpha;
@@ -59,7 +60,11 @@ pub fun run(ctx: *Context, app: *App) {
         # during a tick or a draw sees one value for the whole frame, instead
         # of one that can change between two draws in the same frame.
         window_refresh_size(?ctx.window);
-        clock_tick(?ctx.clock);
+        # A pinned frame delta makes the run a function of its inputs rather
+        # than of how busy the machine was. Everything downstream reads the
+        # clock the same way either side of this.
+        if (ctx.frame_dt != 0) { clock_advance(?ctx.clock, ctx.frame_dt); }
+        or { clock_tick(?ctx.clock); }
 
         timestep_add(?ctx.step, ctx.clock.delta);
         for (timestep_step(?ctx.step)) {
