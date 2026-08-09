@@ -317,7 +317,31 @@ pub fun set_layout_full() SetLayout {
     # game shader and a built-in one are interchangeable at the same pipeline
     # layout. A shader that does not declare it never reads it.
     set_layout_at(?l, 4, BINDING_UNIFORM);
+    # Bindings 5, 6 and 7 are a Material's second, third and fourth textures.
+    #
+    # A Material has always held MAX_TEXTURES of them and a draw has always bound
+    # the first. A deferred pipeline needs an albedo, a normal, a material and an
+    # emissive sheet reachable from one fragment stage, and a composite needs the
+    # albedo, the light target and the emissive at once, so one sampler is not a
+    # tight fit for that work, it is a wall.
+    #
+    # THE OLD LIMIT DID NOT ANNOUNCE ITSELF. A shader declaring a sampler at a
+    # binding the layout called a uniform buffer built a pipeline the driver
+    # returned success for, and read the uniform's bytes as an image. Only the
+    # validation layers said anything.
+    set_layout_at(?l, 5, BINDING_SAMPLER);
+    set_layout_at(?l, 6, BINDING_SAMPLER);
+    set_layout_at(?l, 7, BINDING_SAMPLER);
     ret l;
+}
+
+# The binding number a material's texture index occupies.
+#
+# Index 0 stays at binding 1 because every shader boom already ships declares it
+# there, and moving it would mean rewriting all of them to gain nothing.
+pub fun sampler_binding(index: usize) u32 {
+    if (index == 0) { ret 1; }
+    ret (index + 4)::u32;
 }
 
 # How many bindings of a given kind a layout declares.
@@ -792,16 +816,21 @@ test "pipeline: teardown on a pipeline that was never created is a no-op" {
 
 test "pipeline: the full layout declares every binding a stage may read" {
     var l: SetLayout = set_layout_full();
-    # The vertex stage's transforms at 0, the sampler at 1, the tint at 2, the
-    # joint palette at 3, the game's own block at 4. A layout stopping short
+    # The vertex stage's transforms at 0, a material's first texture at 1, the
+    # tint at 2, the joint palette at 3, the game's own block at 4, and a
+    # material's remaining three textures at 5, 6 and 7. A layout stopping short
     # does not fail loudly: the shader reads a descriptor that was never
-    # written.
-    if (l.count != 5)                     { ret 1; }
+    # written, and before this covered four samplers it read a uniform buffer's
+    # bytes as an image with only the validation layers saying so.
+    if (l.count != 8)                     { ret 1; }
     if (l.kinds[0] != BINDING_UNIFORM)    { ret 2; }
     if (l.kinds[1] != BINDING_SAMPLER)    { ret 3; }
     if (l.kinds[2] != BINDING_UNIFORM)    { ret 4; }
     if (l.kinds[3] != BINDING_STORAGE)    { ret 5; }
     if (l.kinds[4] != BINDING_UNIFORM)    { ret 6; }
+    if (l.kinds[5] != BINDING_SAMPLER)    { ret 7; }
+    if (l.kinds[6] != BINDING_SAMPLER)    { ret 8; }
+    if (l.kinds[7] != BINDING_SAMPLER)    { ret 9; }
     ret 0;
 }
 
@@ -813,11 +842,13 @@ test "pipeline: the mesh layout declares only its one uniform" {
 }
 
 test "pipeline: a layout counts descriptors per kind, not per set" {
-    # What the pool has to be sized by. The full set holds three uniforms, so a
-    # pool sized at one per set runs out at the first draw.
+    # What the pool has to be sized by. The full set holds three uniforms and
+    # four samplers, so a pool sized at one of each per set runs out at the
+    # first draw. descriptor.mach's pool sizes are derived from these numbers
+    # and must move when they do.
     var sp: SetLayout = set_layout_full();
     if (set_layout_count(?sp, BINDING_UNIFORM) != 3) { ret 1; }
-    if (set_layout_count(?sp, BINDING_SAMPLER) != 1) { ret 2; }
+    if (set_layout_count(?sp, BINDING_SAMPLER) != 4) { ret 2; }
 
     var me: SetLayout = set_layout_mesh();
     if (set_layout_count(?me, BINDING_UNIFORM) != 1) { ret 3; }
@@ -843,5 +874,26 @@ test "pipeline: a binding past the table is refused" {
     var l: SetLayout = set_layout();
     if (set_layout_at(?l, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 1; }
     if (l.count != 0) { ret 2; }
+    ret 0;
+}
+
+test "pipeline: a material's texture index maps to its binding" {
+    # Index 0 stays at binding 1 because every shader boom ships declares it
+    # there. The rest follow the uniform and storage bindings rather than
+    # displacing them.
+    if (sampler_binding(0) != 1) { ret 1; }
+    if (sampler_binding(1) != 5) { ret 2; }
+    if (sampler_binding(2) != 6) { ret 3; }
+    if (sampler_binding(3) != 7) { ret 4; }
+
+    # Every one of them is a sampler in the layout it indexes into, which is the
+    # property that made the old second-sampler probe read a uniform buffer as
+    # an image.
+    var l: SetLayout = set_layout_full();
+    var i: usize = 0;
+    for (i < 4) {
+        if (l.kinds[sampler_binding(i)::usize] != BINDING_SAMPLER) { ret 5; }
+        i = i + 1;
+    }
     ret 0;
 }

@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-09
+
+### Fixed
+- graphics: **a draw binds a material's four textures, not only its first.**
+  Closes #71. `set_layout_full` declared one combined image sampler; a `Material`
+  has always held `MAX_TEXTURES` of them and `material_texture` returned
+  `textures[0]`. A deferred pipeline needs albedo, normal, material and emissive
+  reachable from one fragment stage, and a composite needs albedo, light and
+  emissive at once, so one sampler was not a tight fit for that work, it was a
+  wall.
+
+  Bindings 5, 6 and 7 now carry a material's second, third and fourth textures.
+  Index 0 stays at binding 1 so every shader boom already ships is unchanged.
+
+  **The old limit did not announce itself.** A shader declaring a sampler at a
+  binding the layout called a uniform buffer built a pipeline the driver returned
+  success for, was not dropped, and read the uniform's bytes as an image. Only
+  the validation layers said anything.
+
+  Unfilled slots are written with the renderer's white texel rather than left
+  alone, so a shader sampling a texture the material never set reads a known
+  value instead of whatever the previous draw left in that descriptor set.
+
+  Proven in `examples/lighting --probe-two-samplers`, which was written to
+  demonstrate the failure and now demonstrates the fix: two distinct G-buffer
+  attachments bound to one material, added by the stage, read back as
+  **lamp 255, floor 93** — the emissive attachment's own values — with **zero
+  validation errors**. Sabotaged by filling only slot 0: both texels saturate to
+  255 as the second sampler falls back to white, and both checks go red.
+
+- graphics: the descriptor pool was sized at two uniform buffers per set and the
+  full layout has declared three since the game's own block was added at binding
+  4. A pool is sized by what a set's *layout* declares, not by what a draw
+  writes. Every driver this has run on allocated the sets anyway; a stricter one
+  would have failed with an out-of-pool-memory error naming the pool rather than
+  the layout that caused it.
+
 ## [0.8.0] - 2026-08-09
 
 ### Added

@@ -121,6 +121,7 @@ use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
 use boom.graphics.descriptor.MAX_SLOTS;
+use boom.graphics.descriptor.MAX_SAMPLERS;
 use boom.graphics.descriptor.descriptors_init;
 use boom.graphics.descriptor.descriptors_dnit;
 use boom.graphics.descriptor.descriptors_begin_frame;
@@ -870,8 +871,10 @@ pub fun batch_flush(p: *Pass) {
 
     # No tint block: the colour is per vertex. Passing 0 for its size is what
     # tells the descriptor layer binding 2 is not part of this draw.
+    var views2d: [4]vk.ImageView;
+    fill_views(r, ?views2d[0], tex);
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(ScreenUniforms)::u64, texture_view(tex), r.sampler,
+                          $size_of(ScreenUniforms)::u64, ?views2d[0], r.sampler,
                           0, 0);
 
     val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
@@ -947,7 +950,7 @@ fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize
 # m: the mesh to draw
 # t: the model transform
 pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), nil, nil);
+    pass_draw_textured(p, m, t, nil, nil, vec4(1.0, 1.0, 1.0, 1.0), nil, nil);
 }
 
 # submit a 3D mesh draw with a material
@@ -960,7 +963,45 @@ pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
 # mat: the material to draw with
 # t:   the model transform
 pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, nil);
+    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, nil);
+}
+
+# Fill a draw's sampler views from a single texture: slot 0 is it, the rest are
+# the renderer's white texel.
+fun fill_views(r: *Renderer, out: *vk.ImageView, tex: *Texture) {
+    var src: *Texture = tex;
+    if (src == nil) { src = ?r.white; }
+    out[0] = texture_view(src);
+    var i: usize = 1;
+    for (i < MAX_SAMPLERS) { out[i] = texture_view(?r.white); i = i + 1; }
+}
+
+# Fill a draw's sampler views from a material.
+#
+# An unfilled slot gets the renderer's white texel rather than being left unwritten,
+# so a shader sampling a texture the material never set reads a known value
+# instead of whatever the previous draw put in that descriptor set.
+fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *Texture) {
+    var i: usize = 0;
+    for (i < MAX_SAMPLERS) { out[i] = texture_view(?r.white); i = i + 1; }
+    if (mat == nil) {
+        var src: *Texture = fallback;
+        if (src == nil) { src = ?r.white; }
+        out[0] = texture_view(src);
+        ret;
+    }
+    var n: usize = mat.texture_count::usize;
+    if (n > MAX_SAMPLERS) { n = MAX_SAMPLERS; }
+    i = 0;
+    for (i < n) {
+        if (mat.textures[i].texture != nil) { out[i] = texture_view(mat.textures[i].texture); }
+        i = i + 1;
+    }
+    if (n == 0) {
+        var src2: *Texture = fallback;
+        if (src2 == nil) { src2 = ?r.white; }
+        out[0] = texture_view(src2);
+    }
 }
 
 # Set the game's own uniform block for the draws that follow.
@@ -1013,7 +1054,7 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
 # t:   the model transform
 # sh:  the game's shader
 pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, sh);
+    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, sh);
 }
 
 # Submit a skinned mesh drawn with the game's own shader.
@@ -1029,7 +1070,7 @@ pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: 
 # t:    the model transform
 # sh:   the game's shader
 pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform, sh: *Shader) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, sh);
+    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, pose, sh);
 }
 
 # the shared body of the mesh draws, skinned and not
@@ -1042,7 +1083,7 @@ pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose
 # a shader of nil draws through the built-in program for the mesh; a shader
 # replaces only the program, so a game's own shading gets the same culling,
 # slot handling, texture binding and palette upload as a built-in draw.
-fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
+fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
     # See batch_flush: only a game's own Shader can write a multi-attachment
     # pass, because the built-in programs declare one output.
     if (p.targets != 1 && sh == nil) {
@@ -1128,8 +1169,13 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     var src: *Texture = tex;
     if (src == nil) { src = ?r.white; }
 
+    # Every texture the material carries, not only the first. A shader that
+    # samples one reads binding 1 exactly as before; one that samples four reads
+    # 1, 5, 6 and 7.
+    var views: [4]vk.ImageView;
+    fill_views_mat(r, ?views[0], mat, src);
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(SkinnedUniforms)::u64, texture_view(src), r.sampler,
+                          $size_of(SkinnedUniforms)::u64, ?views[0], r.sampler,
                           base_off::u64, $size_of(TintUniforms)::u64);
 
     var program: Program = PROGRAM_MESH;
@@ -1185,7 +1231,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), pose, nil);
+    pass_draw_textured(p, m, t, nil, nil, vec4(1.0, 1.0, 1.0, 1.0), pose, nil);
 }
 
 # submit a skinned mesh draw with a material
@@ -1196,7 +1242,7 @@ pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned_material(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, nil);
+    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, pose, nil);
 }
 
 # submit a 2D sprite draw covering a whole texture
