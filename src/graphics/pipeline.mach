@@ -221,9 +221,9 @@ pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) Resul
 #
 # NOT A BOOLEAN. The first version of this took `sampled: bool` and emitted a
 # uniform at binding 0 plus, optionally, a sampler at binding 1. That was shaped
-# around the mesh pipeline, which is the easy case, and the sprite pipeline
-# breaks it: sprite_vert declares a uniform at binding 0, sprite_frag declares
-# the atlas sampler at binding 1 and its tint uniform at binding 2. A boolean
+# around the mesh pipeline, which is the easy case, and the lit pipeline breaks
+# it: the vertex stage declares a uniform at binding 0 while the fragment stage
+# declares the sampler at binding 1 and its tint uniform at binding 2. A boolean
 # cannot describe that, and a layout missing binding 2 does not fail loudly; the
 # shader reads a descriptor that was never written.
 #
@@ -279,19 +279,6 @@ pub fun set_layout_at(l: *SetLayout, binding: u32, kind: Binding) bool {
 pub fun set_layout_mesh() SetLayout {
     var l: SetLayout = set_layout();
     set_layout_at(?l, 0, BINDING_UNIFORM);
-    ret l;
-}
-
-# The layout sprite_vert and sprite_frag declare.
-#
-# Binding 0 is sprite_vert's projection, model and source rect; binding 1 is the
-# atlas sampler; binding 2 is the fragment stage's tint. Verified against the
-# emitted SPIR-V by tools/check-uniform-layout.sh.
-pub fun set_layout_sprite() SetLayout {
-    var l: SetLayout = set_layout();
-    set_layout_at(?l, 0, BINDING_UNIFORM);
-    set_layout_at(?l, 1, BINDING_SAMPLER);
-    set_layout_at(?l, 2, BINDING_UNIFORM);
     ret l;
 }
 
@@ -677,8 +664,8 @@ pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
 use boom.graphics.vertex.vertex_format;
 use boom.graphics.vertex.vertex_format_add;
 use boom.graphics.vertex.vertex_format_standard;
-use boom.graphics.vertex.vertex_format_sprite;
 use boom.graphics.vertex.SEMANTIC_POSITION;
+use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
 use boom.graphics.vertex.SEMANTIC_JOINTS_0;
 
@@ -731,8 +718,14 @@ test "pipeline: vertex input follows the format's locations and offsets" {
     ret 0;
 }
 
-test "pipeline: the sprite format yields two attributes" {
-    var f: VertexFormat = vertex_format_sprite();
+test "pipeline: a two-component attribute is described as a two-component format" {
+    # A vec2 has to reach Vulkan as R32G32, not as the R32G32B32 a position
+    # usually is. Getting the component count from the semantic rather than the
+    # attribute would read a third float per vertex out of the next one's
+    # bytes, which skews the whole buffer by a growing amount.
+    var f: VertexFormat = vertex_format();
+    vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
+    vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
     var out: [8]vk.VertexInputAttributeDescription;
     if (vertex_attributes(?f, ?out[0], 8) != 2)       { ret 1; }
     if (out[0].format != vk.FORMAT_R32G32_SFLOAT)     { ret 2; }
@@ -780,15 +773,18 @@ test "pipeline: teardown on a pipeline that was never created is a no-op" {
     ret 0;
 }
 
-test "pipeline: the sprite layout declares all three bindings the shaders use" {
-    var l: SetLayout = set_layout_sprite();
-    # sprite_vert binds a uniform at 0, sprite_frag the atlas at 1 and its tint
-    # at 2. A layout stopping at binding 1 does not fail loudly: the shader
-    # reads a descriptor that was never written.
-    if (l.count != 3)                     { ret 1; }
+test "pipeline: the full layout declares every binding a stage may read" {
+    var l: SetLayout = set_layout_full();
+    # The vertex stage's transforms at 0, the sampler at 1, the tint at 2, the
+    # joint palette at 3, the game's own block at 4. A layout stopping short
+    # does not fail loudly: the shader reads a descriptor that was never
+    # written.
+    if (l.count != 5)                     { ret 1; }
     if (l.kinds[0] != BINDING_UNIFORM)    { ret 2; }
     if (l.kinds[1] != BINDING_SAMPLER)    { ret 3; }
     if (l.kinds[2] != BINDING_UNIFORM)    { ret 4; }
+    if (l.kinds[3] != BINDING_STORAGE)    { ret 5; }
+    if (l.kinds[4] != BINDING_UNIFORM)    { ret 6; }
     ret 0;
 }
 
@@ -800,10 +796,10 @@ test "pipeline: the mesh layout declares only its one uniform" {
 }
 
 test "pipeline: a layout counts descriptors per kind, not per set" {
-    # What the pool has to be sized by. The sprite set holds two uniforms, so a
-    # pool sized at one per set runs out at the first sprite material.
-    var sp: SetLayout = set_layout_sprite();
-    if (set_layout_count(?sp, BINDING_UNIFORM) != 2) { ret 1; }
+    # What the pool has to be sized by. The full set holds three uniforms, so a
+    # pool sized at one per set runs out at the first draw.
+    var sp: SetLayout = set_layout_full();
+    if (set_layout_count(?sp, BINDING_UNIFORM) != 3) { ret 1; }
     if (set_layout_count(?sp, BINDING_SAMPLER) != 1) { ret 2; }
 
     var me: SetLayout = set_layout_mesh();

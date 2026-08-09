@@ -17,18 +17,6 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
-use boom.graphics.error.Error;
-use boom.graphics.device.Device;
-use boom.graphics.mesh.Mesh;
-use boom.graphics.mesh.mesh;
-use boom.graphics.mesh.mesh_delete;
-use boom.graphics.vertex.VertexFormat;
-use boom.graphics.vertex.vertex_format_sprite;
 
 # an axis-aligned rectangle: position and size
 #
@@ -55,47 +43,6 @@ pub rec Rect {
 # ret: the rectangle
 pub fun rect(x: f32, y: f32, w: f32, h: f32) Rect {
     ret Rect{x: x, y: y, w: w, h: h};
-}
-
-# the renderer's sprite resources: the unit quad every sprite is drawn from
-# ---
-# quad: a unit quad (0 to 1) in the 2D sprite vertex format
-pub rec SpriteResources {
-    quad: Mesh;
-}
-
-# build the unit quad every sprite draw is scaled from
-#
-# the quad spans (0, 0) to (1, 1) in both position and texture
-# coordinates; a draw scales and translates it into a pixel rectangle, so
-# one buffer serves every sprite and every glyph and the vertex data never
-# changes between draws.
-# ---
-# d:   the upload context
-# ret: the sprite resources, or an upload error
-pub fun sprite_resources(d: *Device) Result[SpriteResources, Error] {
-    var verts: [16]f32 = [16]f32{
-        0.0, 0.0,   0.0, 0.0,
-        1.0, 0.0,   1.0, 0.0,
-        1.0, 1.0,   1.0, 1.0,
-        0.0, 1.0,   0.0, 1.0,
-    };
-    var idx: [6]u32 = [6]u32{0, 1, 2, 0, 2, 3};
-    var fmt: VertexFormat = vertex_format_sprite();
-
-    val mr: Result[Mesh, Error] = mesh(d, (?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
-    if (is_err[Mesh, Error](mr)) {
-        ret err[SpriteResources, Error](unwrap_err[Mesh, Error](mr));
-    }
-    ret ok[SpriteResources, Error](SpriteResources{quad: unwrap_ok[Mesh, Error](mr)});
-}
-
-# release the sprite quad
-# ---
-# d: the upload context the quad was created against
-# s: resources to delete; must not be used afterward
-pub fun sprite_resources_delete(d: *Device, s: *SpriteResources) {
-    mesh_delete(d, ?s.quad);
 }
 
 test "sprite: rect carries position and size" {

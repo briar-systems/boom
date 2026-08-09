@@ -16,7 +16,7 @@ use sh: shader.math;
 
 # Sampling is a SPIR-V instruction, declared here rather than taken from
 # shader.math because a SPIR-V module cannot call a function another module
-# defines (mach#2823). sprite_frag declares the same one.
+# defines (mach#2823).
 #[spirv_op("core", "OpImageSampleImplicitLod")]
 fun sample(s: sampler2d, uv: f32x2) f32x4;
 

@@ -98,7 +98,6 @@ fwd boom.graphics.vertex.vertex_format;
 fwd boom.graphics.vertex.vertex_format_add;
 fwd boom.graphics.vertex.vertex_format_standard;
 fwd boom.graphics.vertex.vertex_format_skinned;
-fwd boom.graphics.vertex.vertex_format_sprite;
 fwd boom.graphics.vertex.vertex_format_ui;
 fwd boom.graphics.vertex.vertex_format_is_skinned;
 
@@ -266,8 +265,6 @@ fwd boom.graphics.text.text_draw;
 
 fwd boom.graphics.spirv.LIT_FRAG_SPV;
 fwd boom.graphics.spirv.MESH_VERT_SPV;
-fwd boom.graphics.spirv.SPRITE_VERT_SPV;
-fwd boom.graphics.spirv.SPRITE_FRAG_SPV;
 fwd boom.graphics.spirv.VERTEX_ENTRY;
 fwd boom.graphics.spirv.FRAGMENT_ENTRY;
 
@@ -321,7 +318,6 @@ fwd boom.graphics.pipeline.SetLayout;
 fwd boom.graphics.pipeline.set_layout;
 fwd boom.graphics.pipeline.set_layout_at;
 fwd boom.graphics.pipeline.set_layout_mesh;
-fwd boom.graphics.pipeline.set_layout_sprite;
 fwd boom.graphics.pipeline.set_layout_count;
 
 fwd boom.graphics.image.RGBA_BYTES;
@@ -349,7 +345,5 @@ fwd boom.graphics.descriptor.descriptors_bind;
 fwd boom.graphics.descriptor.descriptors_dnit;
 
 fwd boom.graphics.uniform.MeshUniforms;
-fwd boom.graphics.uniform.SpriteUniforms;
 fwd boom.graphics.uniform.TintUniforms;
 fwd boom.graphics.uniform.src_uv;
-fwd boom.graphics.uniform.src_uv_unit;

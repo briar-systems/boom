@@ -41,7 +41,7 @@ use boom.graphics.vk.Vk;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vertex.vertex_format_eq;
 use boom.graphics.vertex.vertex_format_standard;
-use boom.graphics.vertex.vertex_format_sprite;
+use boom.graphics.vertex.vertex_format_ui;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.PipelineDesc;
 use boom.graphics.pipeline.SetLayout;
@@ -53,8 +53,6 @@ use boom.graphics.pipeline.set_layout_full;
 use boom.graphics.spirv.LIT_FRAG_SPV;
 use boom.graphics.spirv.MESH_VERT_SPV;
 use boom.graphics.spirv.SKINNED_VERT_SPV;
-use boom.graphics.spirv.SPRITE_VERT_SPV;
-use boom.graphics.spirv.SPRITE_FRAG_SPV;
 use boom.graphics.spirv.UI_VERT_SPV;
 use boom.graphics.spirv.UI_FRAG_SPV;
 
@@ -65,12 +63,10 @@ pub def Program: u8;
 pub val PROGRAM_MESH:    Program = 0;
 # skinned_vert plus lit_frag: geometry placed by a joint palette.
 pub val PROGRAM_SKINNED: Program = 1;
-# sprite_vert plus sprite_frag: a textured, tinted quad in pixel space.
-pub val PROGRAM_SPRITE:  Program = 2;
-# Already-placed, per-vertex-coloured triangles: an immediate-mode UI draw list,
-# a particle system, a debug overlay. No model matrix and no tint, because one
-# draw covers the whole list.
-pub val PROGRAM_UI:      Program = 3;
+# Already-placed, per-vertex-coloured triangles: every 2D draw boom makes, which
+# after batching is sprites, text and immediate-mode geometry alike. No model
+# matrix and no tint, because one draw covers a whole run.
+pub val PROGRAM_UI:      Program = 2;
 
 # The most distinct program-and-layout combinations one renderer keeps.
 #
@@ -140,7 +136,7 @@ fun program_desc(program: Program) PipelineDesc {
     # UI shares the 2D description: blended, unculled, no depth. A draw list is
     # emitted back to front and its triangles are wound however the emitter
     # happened to, so culling it would drop half of them.
-    if (program == PROGRAM_SPRITE || program == PROGRAM_UI) { ret pipeline_desc_2d(); }
+    if (program == PROGRAM_UI) { ret pipeline_desc_2d(); }
     ret pipeline_desc_3d();
 }
 
@@ -159,12 +155,6 @@ fun cache_add(c: *PipelineCache, v: *Vk, program: Program, f: *VertexFormat) Res
     if (program == PROGRAM_SKINNED) {
         vert = ?SKINNED_VERT_SPV[0];
         vlen = $length_of(SKINNED_VERT_SPV);
-    }
-    or (program == PROGRAM_SPRITE) {
-        vert = ?SPRITE_VERT_SPV[0];
-        vlen = $length_of(SPRITE_VERT_SPV);
-        frag = ?SPRITE_FRAG_SPV[0];
-        flen = $length_of(SPRITE_FRAG_SPV);
     }
     or (program == PROGRAM_UI) {
         vert = ?UI_VERT_SPV[0];
@@ -256,8 +246,8 @@ test "cache: an entry matches only its own program and format" {
 
     # Same program, different layout. Matching here is the bug this cache
     # exists to prevent.
-    var spr_fmt: VertexFormat = vertex_format_sprite();
-    if (cache_find(?c, PROGRAM_MESH, ?spr_fmt) != MAX_PIPELINES) { ret 3; }
+    var ui_fmt: VertexFormat = vertex_format_ui();
+    if (cache_find(?c, PROGRAM_MESH, ?ui_fmt) != MAX_PIPELINES) { ret 3; }
     ret 0;
 }
 

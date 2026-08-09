@@ -86,7 +86,6 @@ use boom.graphics.cache.PipelineCache;
 use boom.graphics.cache.Program;
 use boom.graphics.cache.PROGRAM_MESH;
 use boom.graphics.cache.PROGRAM_SKINNED;
-use boom.graphics.cache.PROGRAM_SPRITE;
 use boom.graphics.cache.cache_init;
 use boom.graphics.cache.PROGRAM_UI;
 use boom.graphics.stream.VertexStream;
@@ -142,7 +141,6 @@ use boom.graphics.texture.texture_delete;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
 use boom.graphics.vertex.vertex_format_is_skinned;
-use boom.graphics.vertex.vertex_format_sprite;
 use boom.graphics.skeleton.Pose;
 use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.pose_matrices;
@@ -165,9 +163,6 @@ use boom.graphics.sprite.rect_overlaps;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
-use boom.graphics.sprite.SpriteResources;
-use boom.graphics.sprite.sprite_resources;
-use boom.graphics.sprite.sprite_resources_delete;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use boom.math.vec.vec3;
@@ -189,7 +184,6 @@ use boom.math.transform.transform_matrix;
 # pipes:   the pipeline cache, keyed by program and vertex layout
 # white:   a 1x1 opaque white texture, bound when a draw has no texture of
 #          its own, since every fragment stage samples
-# sprite:  the unit quad every sprite draw is scaled from
 # width:   the target width in pixels
 # height:  the target height in pixels
 # frame_index: which in-flight frame is being recorded
@@ -209,7 +203,6 @@ pub rec Renderer {
     sampler:     vk.Sampler;
     pipes:       PipelineCache;
     white:       Texture;
-    sprite:      SpriteResources;
     stream:      VertexStream;
     ui_format:   VertexFormat;
     width:       i32;
@@ -271,16 +264,16 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.ui_format = vertex_format_ui();
 
     # The descriptor pool needs a set layout before any pipeline exists, so the
-    # sprite pipeline is built first and its layout is what the pool allocates
+    # 2D pipeline is built first and its layout is what the pool allocates
     # against. Every pipeline shares one set layout, so any of them would do;
-    # building one up front just means there is one to ask.
-    var spr_fmt: VertexFormat = vertex_format_sprite();
-    val spr: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_SPRITE, ?spr_fmt);
-    if (spr == nil) {
-        ret err[bool, Error](error("could not build the sprite pipeline"));
+    # building one up front just means there is one to ask. This one, because it
+    # is the pipeline every frame uses.
+    val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    if (two_d == nil) {
+        ret err[bool, Error](error("could not build the 2D pipeline"));
     }
 
-    val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, spr.set_layout);
+    val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, two_d.set_layout);
     if (is_err[bool, Error](der)) { ret der; }
 
     # Every fragment stage samples, so a draw with no texture of its own needs
@@ -297,17 +290,10 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     }
     r.white = unwrap_ok[Texture, Error](wr);
 
-    # The per-frame arena for geometry that is rebuilt every frame. Created
-    # before the sprite quad only so a failure here is reported before anything
-    # depends on it.
+    # The per-frame arena for geometry that is rebuilt every frame: every 2D
+    # draw boom makes goes through it.
     val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
     if (is_err[bool, Error](str_r)) { ret str_r; }
-
-    val qr: Result[SpriteResources, Error] = sprite_resources(?r.dev);
-    if (is_err[SpriteResources, Error](qr)) {
-        ret err[bool, Error](unwrap_err[SpriteResources, Error](qr));
-    }
-    r.sprite = unwrap_ok[SpriteResources, Error](qr);
 
     ret ok[bool, Error](true);
 }
@@ -507,7 +493,6 @@ pub fun renderer_dnit(r: *Renderer) {
     # shutdown a frame is usually still in flight.
     vk.vkDeviceWaitIdle(r.vk.device);
     stream_dnit(?r.stream, ?r.vk);
-    sprite_resources_delete(?r.dev, ?r.sprite);
     texture_delete(?r.dev, ?r.white);
     descriptors_dnit(?r.desc, ?r.vk);
     cache_dnit(?r.pipes, ?r.vk);

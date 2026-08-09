@@ -191,7 +191,7 @@ def check_bindings(name, module, want):
     A missing binding in the CPU's set layout does not fail loudly: the shader
     reads a descriptor that was never written. This is the check that catches it,
     and it is the one that caught the set layout stopping at binding 1 while
-    sprite_frag declared a tint at binding 2.
+    the fragment stage declared a tint at binding 2.
     """
     text = disassemble(f"{SPV_DIR}/{module}.spv")
     if text is None:
@@ -240,15 +240,11 @@ check_block("mesh_vert / MeshUniforms", "mesh_vert", 0, 128, 8)
 # slot at one fixed offset for both programs.
 check_block("skinned_vert / SkinnedUniforms", "skinned_vert", 0, 128, 8)
 
-# SpriteUniforms: projection, model, then the source rect.
-check_block("sprite_vert / SpriteUniforms", "sprite_vert", 0, 144, 9)
-
 # ScreenUniforms: just the projection. The immediate-mode stage has no model
 # matrix, because its vertices arrive already placed.
 check_block("ui_vert / ScreenUniforms", "ui_vert", 0, 64, 4)
 
-# TintUniforms, read by both fragment stages at binding 2.
-check_block("sprite_frag / TintUniforms", "sprite_frag", 2, 16, 1)
+# TintUniforms at binding 2.
 check_block("lit_frag / base colour", "lit_frag", 2, 16, 1)
 
 # set_layout_full is what every pipeline is built against: uniform 0, sampler 1,
@@ -256,8 +252,6 @@ check_block("lit_frag / base colour", "lit_frag", 2, 16, 1)
 # subset it reads, and the union is what the descriptor pool allocates.
 check_bindings("mesh_vert / set_layout_full", "mesh_vert", [0])
 check_bindings("skinned_vert / set_layout_full", "skinned_vert", [0, 3])
-check_bindings("sprite_vert / set_layout_full", "sprite_vert", [0])
-check_bindings("sprite_frag / set_layout_full", "sprite_frag", [1, 2])
 check_bindings("lit_frag / set_layout_full", "lit_frag", [1, 2])
 # The immediate-mode stages take a projection and a sampler and nothing else.
 # A binding 2 appearing here would be a tint block, which is the thing this
@@ -274,8 +268,7 @@ check_stride("skinned_vert / palette", "skinned_vert", 16)
 
 # Every module's capabilities. This is the check that would have caught the two
 # device features 0.3.0 required without enabling, and it needs no GPU.
-for module in ("mesh_vert", "skinned_vert", "sprite_vert", "sprite_frag", "lit_frag",
-               "ui_vert", "ui_frag"):
+for module in ("mesh_vert", "skinned_vert", "lit_frag", "ui_vert", "ui_frag"):
     check_capabilities(module)
 
 # A skip is not a pass. Say so rather than letting a green line count stand in

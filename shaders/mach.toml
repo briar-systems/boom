@@ -36,19 +36,11 @@ targets = ["spirv"]
 link    = []
 need    = []
 
-[artifact.sprite_vert]
-kind    = "bin"
-entry   = "sprite_vert.mach"
-out     = "sprite_vert.spv"
-targets = ["spirv"]
+["spirv"]
 link    = []
 need    = []
 
-[artifact.sprite_frag]
-kind    = "bin"
-entry   = "sprite_frag.mach"
-out     = "sprite_frag.spv"
-targets = ["spirv"]
+["spirv"]
 link    = []
 need    = []
 

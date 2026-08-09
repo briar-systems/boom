@@ -45,6 +45,10 @@ use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_unmap;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.uniform.MeshUniforms;
+use boom.graphics.uniform.SkinnedUniforms;
+use boom.graphics.uniform.ScreenUniforms;
+use boom.graphics.uniform.TintUniforms;
 
 # The most draws one frame may issue.
 #
@@ -645,9 +649,13 @@ test "descriptor: slot offsets do not overlap and are 256-aligned" {
 }
 
 test "descriptor: a slot is wide enough for the widest uniform block" {
-    # SpriteUniforms is 144 bytes. A slot narrower than the block would make a
-    # draw's uniforms run into the next draw's.
-    if (SLOT_BYTES < 144) { ret 1; }
+    # Written against the blocks themselves rather than a literal, because the
+    # widest one has already changed once and a number left behind outlives the
+    # reason for it. A slot narrower than the block would make a draw's uniforms
+    # run into the next draw's.
+    if (SLOT_BYTES < $size_of(SkinnedUniforms)) { ret 1; }
+    if (SLOT_BYTES < $size_of(MeshUniforms))    { ret 2; }
+    if (SLOT_BYTES < $size_of(ScreenUniforms))  { ret 3; }
     ret 0;
 }
 
@@ -655,7 +663,7 @@ test "descriptor: both uniform ranges in a slot are correctly aligned" {
     # A uniform descriptor's buffer offset must be a multiple of
     # minUniformBufferOffsetAlignment, which is up to 256. This applies to the
     # colour block at COLOUR_OFFSET as much as to the slot itself: an offset of
-    # 144 into an aligned slot is accepted on hardware reporting 16 and rejected
+    # 128 into an aligned slot is accepted on hardware reporting 16 and rejected
     # on hardware reporting 256, so it passes wherever it was written and fails
     # on someone else's machine.
     if ((SLOT_BYTES % UNIFORM_ALIGN) != 0)    { ret 1; }
@@ -681,10 +689,11 @@ test "descriptor: the game's own block is aligned and fits inside a slot" {
 }
 
 test "descriptor: the transform block fits before the colour" {
-    # SpriteUniforms is 144 bytes and is the widest. A colour offset below it
-    # would place the fragment stage's colour inside the vertex stage's source
-    # rect, which mis-samples every sprite while still drawing it in place.
-    if (COLOUR_OFFSET < 144) { ret 1; }
+    # A colour offset below the transform block would place the fragment stage's
+    # colour inside the vertex stage's matrices, which draws the geometry
+    # somewhere else entirely while the colour still looks right.
+    if (COLOUR_OFFSET < $size_of(SkinnedUniforms)) { ret 1; }
+    if (COLOUR_OFFSET < $size_of(MeshUniforms))    { ret 2; }
     ret 0;
 }
 
@@ -722,17 +731,17 @@ test "descriptor: an offset write must fit inside its slot" {
     d.ready = true;
     var bytes: [8]u8;
     # A tint written past the slot lands in the next draw's transform, which
-    # moves an unrelated sprite rather than mis-colouring this one.
+    # moves an unrelated draw rather than mis-colouring this one.
     if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES - 4, ?bytes[0], 8)) { ret 1; }
     if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES, ?bytes[0], 1))     { ret 2; }
     ret 0;
 }
 
-test "descriptor: a slot holds the sprite block and its tint together" {
-    # 144 for SpriteUniforms at offset 0 and 16 for TintUniforms at
-    # COLOUR_OFFSET. If they did not both fit, the tint would need a slot of its
-    # own and the two would drift.
-    if (COLOUR_OFFSET + 16 > SLOT_BYTES) { ret 1; }
+test "descriptor: a slot holds a transform block and its tint together" {
+    # The transform block at offset 0 and TintUniforms at COLOUR_OFFSET. If they
+    # did not both fit, the tint would need a slot of its own and the two would
+    # drift.
+    if (COLOUR_OFFSET + $size_of(TintUniforms) > SLOT_BYTES) { ret 1; }
     ret 0;
 }
 
