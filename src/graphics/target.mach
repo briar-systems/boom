@@ -44,6 +44,8 @@ use boom.graphics.image.image_dnit;
 use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.pass.PassOptions;
 use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_clearing_mrt;
+use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.pass.pass_clearing;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.depth_attachment_init;
@@ -52,7 +54,8 @@ use boom.graphics.image.depth_attachment_dnit;
 
 # an opaque handle to an offscreen render target
 # ---
-# color:       the colour attachment, sampleable as a Texture
+# colors:      the colour attachments, each sampleable as a Texture
+# color_count: how many of colors this target writes
 # depth:       the depth attachment, shared with the frame loop's
 # pass:        the render pass drawing into this target uses
 # framebuffer: the framebuffer binding the two attachments
@@ -60,7 +63,8 @@ use boom.graphics.image.depth_attachment_dnit;
 # height:      target height in pixels
 # ready:       whether creation completed
 pub rec RenderTarget {
-    color:       Texture;
+    colors:      [4]Texture;
+    color_count: usize;
     depth:       DepthAttachment;
     pass:        vk.RenderPass;
     framebuffer: vk.Framebuffer;
@@ -82,8 +86,11 @@ fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
     # Declaring the transition in the pass rather than as a barrier after it
     # means the driver performs it as part of ending the pass, and it cannot be
     # forgotten at a call site.
-    val o: PassOptions = pass_clearing(t.color.image.format,
-                                       vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    var fmts: [4]i32;
+    var i: usize = 0;
+    for (i < t.color_count) { fmts[i] = t.colors[i].image.format; i = i + 1; }
+    val o: PassOptions = pass_clearing_mrt(?fmts[0], t.color_count,
+                                           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     ret pass_create(v, ?o, ?t.pass);
 }
 
@@ -98,10 +105,33 @@ fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
 # height: target height in pixels, positive
 # ret:    the render target, or a creation error
 pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, Error] {
+    ret render_target_mrt(d, width, height, 1);
+}
+
+# create an offscreen target with several colour attachments
+#
+# What a deferred pipeline needs: one geometry pass writing albedo, normal,
+# material and emissive together, rather than four passes each resubmitting the
+# same geometry. Every attachment shares the target's size and format and is
+# cleared and transitioned with the rest, because they are written together.
+#
+# A fragment shader drawing into this must declare an output per attachment.
+# One that writes fewer leaves the rest undefined, which is legal and is what
+# the built-in programs do when they are drawn into a multi-attachment target.
+# ---
+# d:      the upload context
+# width:  target width in pixels, positive
+# height: target height in pixels, positive
+# count:  colour attachments, 1 to MAX_COLOR_ATTACHMENTS
+# ret:    the render target, or a creation error
+pub fun render_target_mrt(d: *Device, width: i32, height: i32, count: usize) Result[RenderTarget, Error] {
     var t: RenderTarget;
-    t.ready  = false;
-    t.width  = width;
-    t.height = height;
+    t.ready       = false;
+    t.width       = width;
+    t.height      = height;
+    t.color_count = count;
+    if (t.color_count == 0) { t.color_count = 1; }
+    if (t.color_count > MAX_COLOR_ATTACHMENTS) { t.color_count = MAX_COLOR_ATTACHMENTS; }
 
     if (!d.ready) {
         ret err[RenderTarget, Error](error("the upload context is not initialized"));
@@ -121,13 +151,18 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
     # target wants on its own merits: it holds a rendered image that a later pass
     # samples, so it goes through the same encode on write and decode on read as
     # a loaded texture, and a linear one would band in the darks at eight bits.
-    val cr: Result[bool, Error] = image_init(?t.color.image, d.vk, width::u32, height::u32,
-                                             d.vk.color_format, USAGE_TARGET);
-    if (is_err[bool, Error](cr)) {
-        ret err[RenderTarget, Error](error("could not create the colour attachment"));
+    var ci: usize = 0;
+    for (ci < t.color_count) {
+        val cr: Result[bool, Error] = image_init(?t.colors[ci].image, d.vk, width::u32, height::u32,
+                                                 d.vk.color_format, USAGE_TARGET);
+        if (is_err[bool, Error](cr)) {
+            render_target_delete(d, ?t);
+            ret err[RenderTarget, Error](error("could not create a colour attachment"));
+        }
+        t.colors[ci].width  = width;
+        t.colors[ci].height = height;
+        ci = ci + 1;
     }
-    t.color.width  = width;
-    t.color.height = height;
 
     # Put the colour image into a readable layout before anything draws into it.
     # A game is free to sample a target on the first frame, before its first
@@ -135,12 +170,16 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
     # descriptor claims SHADER_READ_ONLY_OPTIMAL, which is a lie about the
     # layout rather than merely undefined contents. The render pass's own
     # initialLayout is UNDEFINED, so this costs nothing afterwards.
-    val tir: Result[bool, Error] = image_transition(?t.color.image, d.vk, d.pool,
-                                                    vk.IMAGE_LAYOUT_UNDEFINED,
-                                                    vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (is_err[bool, Error](tir)) {
-        render_target_delete(d, ?t);
-        ret err[RenderTarget, Error](unwrap_err[bool, Error](tir));
+    var ti: usize = 0;
+    for (ti < t.color_count) {
+        val tir: Result[bool, Error] = image_transition(?t.colors[ti].image, d.vk, d.pool,
+                                                        vk.IMAGE_LAYOUT_UNDEFINED,
+                                                        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (is_err[bool, Error](tir)) {
+            render_target_delete(d, ?t);
+            ret err[RenderTarget, Error](unwrap_err[bool, Error](tir));
+        }
+        ti = ti + 1;
     }
 
     val dr: Result[bool, Error] = depth_attachment_init(?t.depth, d.vk, width, height);
@@ -155,16 +194,20 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
         ret err[RenderTarget, Error](error("could not create the offscreen render pass"));
     }
 
-    var views: [2]vk.ImageView;
-    views[0] = t.color.image.view;
-    views[1] = t.depth.view;
+    # DEPTH LAST, matching pass_create's attachment ordering. A framebuffer
+    # whose views are in a different order than its render pass's attachments
+    # binds the depth image as a colour target and renders nothing visible.
+    var views: [5]vk.ImageView;
+    var vi: usize = 0;
+    for (vi < t.color_count) { views[vi] = t.colors[vi].image.view; vi = vi + 1; }
+    views[t.color_count] = t.depth.view;
 
     var fci: vk.FramebufferCreateInfo;
     fci.sType           = vk.STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fci.pNext           = nil;
     fci.flags           = 0;
     fci.renderPass      = t.pass;
-    fci.attachmentCount = 2;
+    fci.attachmentCount = (t.color_count + 1)::u32;
     fci.pAttachments    = ?views[0];
     fci.width           = width::u32;
     fci.height          = height::u32;
@@ -183,7 +226,26 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
 # t:   the render target
 # ret: pointer to the color texture, valid while the target lives
 pub fun render_target_texture(t: *RenderTarget) *Texture {
-    ret ?t.color;
+    ret ?t.colors[0];
+}
+
+# one of several colour attachments, sampleable as a Texture
+#
+# An index past the target's count returns the first attachment rather than
+# addressing whatever is next in memory, so a caller that miscounts samples the
+# wrong picture instead of reading past the record.
+# ---
+# t:   the render target
+# i:   the attachment index, below the target's count
+# ret: pointer to that colour texture, valid while the target lives
+pub fun render_target_texture_at(t: *RenderTarget, i: usize) *Texture {
+    if (i >= t.color_count) { ret ?t.colors[0]; }
+    ret ?t.colors[i];
+}
+
+# how many colour attachments this target writes
+pub fun render_target_count(t: *RenderTarget) usize {
+    ret t.color_count;
 }
 
 # copy the target's rendered pixels back to host memory, as tightly packed RGBA8
@@ -202,7 +264,7 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) R
     if (!t.ready) {
         ret err[bool, Error](error("cannot read a target that was never created"));
     }
-    ret image_read(?t.color.image, d.vk, d.pool, out, len);
+    ret image_read(?t.colors[0].image, d.vk, d.pool, out, len);
 }
 
 # whether a target's pixels come back blue-green-red-alpha rather than RGBA
@@ -211,8 +273,8 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) R
 # boom's. Exposed rather than assumed, because a caller that guesses gets a
 # picture with red and blue swapped and no diagnostic.
 pub fun render_target_bgra(t: *RenderTarget) bool {
-    ret t.color.image.format == vk.FORMAT_B8G8R8A8_SRGB
-     || t.color.image.format == vk.FORMAT_B8G8R8A8_UNORM;
+    ret t.colors[0].image.format == vk.FORMAT_B8G8R8A8_SRGB
+     || t.colors[0].image.format == vk.FORMAT_B8G8R8A8_UNORM;
 }
 
 # release the target's images, render pass, and framebuffer
@@ -225,7 +287,8 @@ pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     if (t.framebuffer != nil) { vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil); t.framebuffer = nil; }
     if (t.pass != nil)        { vk.vkDestroyRenderPass(v.device, t.pass, nil); t.pass = nil; }
     depth_attachment_dnit(?t.depth, v);
-    image_dnit(?t.color.image, v);
+    var di: usize = 0;
+    for (di < MAX_COLOR_ATTACHMENTS) { image_dnit(?t.colors[di].image, v); di = di + 1; }
     t.ready = false;
 }
 
@@ -258,9 +321,13 @@ test "target: teardown on a target that was never created is a no-op" {
     t.depth.view  = nil;
     t.depth.image = nil;
     t.depth.mem   = nil;
-    t.color.image.view   = nil;
-    t.color.image.handle = nil;
-    t.color.image.memory = nil;
+    var zi: usize = 0;
+    for (zi < MAX_COLOR_ATTACHMENTS) {
+        t.colors[zi].image.view   = nil;
+        t.colors[zi].image.handle = nil;
+        t.colors[zi].image.memory = nil;
+        zi = zi + 1;
+    }
     t.ready = false;
 
     var v: Vk;
@@ -278,5 +345,37 @@ test "target: the depth format is one every implementation must support" {
     # query. A format chosen without checking support is a startup failure on
     # hardware that is behaving correctly.
     if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
+    ret 0;
+}
+
+test "target: a fresh multi-attachment target reports its count" {
+    # render_target_count is what the renderer uses to size clear values and to
+    # decide a pipeline's blend attachments, so a wrong count here is a
+    # validation failure at the first draw rather than anything visible.
+    var t: RenderTarget;
+    t.color_count = 4;
+    if (render_target_count(?t) != 4) { ret 1; }
+    t.color_count = 1;
+    if (render_target_count(?t) != 1) { ret 2; }
+    ret 0;
+}
+
+test "target: an attachment index past the count returns the first" {
+    # Reading past color_count would address whatever follows the array in the
+    # record and hand back a Texture built from adjacent fields, which samples
+    # as garbage rather than failing.
+    var t: RenderTarget;
+    t.color_count = 2;
+    t.colors[0].width = 11;
+    t.colors[1].width = 22;
+    t.colors[2].width = 33;
+
+    if (render_target_texture_at(?t, 0).width != 11) { ret 1; }
+    if (render_target_texture_at(?t, 1).width != 22) { ret 2; }
+    if (render_target_texture_at(?t, 2).width != 11) { ret 3; }
+    if (render_target_texture_at(?t, 99).width != 11) { ret 4; }
+
+    # And the single-attachment accessor is the first one.
+    if (render_target_texture(?t) != render_target_texture_at(?t, 0)) { ret 5; }
     ret 0;
 }

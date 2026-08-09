@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-09
+
+### Added
+- graphics: **multiple render targets.** `render_target_mrt` creates a target
+  with up to four colour attachments, which is what a deferred pipeline needs:
+  albedo, normal, material and emissive written by one geometry pass instead of
+  four passes resubmitting the same geometry. Four is Vulkan's guaranteed
+  minimum for `maxColorAttachments`, so a target built to this limit works
+  everywhere without querying a device.
+- graphics: `render_target_texture_at` and `render_target_count`. An index past
+  the count returns the first attachment rather than addressing past the
+  record, so a caller that miscounts samples the wrong picture instead of
+  reading memory that is not a Texture.
+- graphics: `pass_clearing_mrt`. An attachment count of zero or above the limit
+  is clamped, because both are caller errors that Vulkan would otherwise turn
+  into a pass that does not exist.
+
+### Changed
+- graphics: `pipeline_init` takes the colour attachment count of the pass it is
+  built against. A pipeline's blend state needs one entry per attachment or it
+  is invalid in that pass, and the count cannot be recovered from a
+  `vk.RenderPass` handle, so it travels beside it. `shader_pipeline` likewise.
+- graphics: the built-in programs are **refused** in a multi-attachment pass and
+  the draw is counted, because they declare one colour output and their
+  pipelines are built for one attachment. A deferred geometry pass belongs to a
+  game's own `Shader`. Submitting an incompatible pipeline instead would be a
+  device loss rather than a reported drop.
+
 ## [0.5.0] - 2026-08-09
 
 ### Added

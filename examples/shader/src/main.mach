@@ -102,6 +102,8 @@ rec Game {
     # someone watching it: the exit code says whether it managed to, and a run
     # under the validation layers says whether it did so legally.
     budget:   usize;
+    gbuf:     gfx.RenderTarget;
+    gbuf_ok:  bool;
     drawn:    usize;
 }
 
@@ -121,6 +123,24 @@ fun on_init(ctx: *Context) {
     }
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    # A four-attachment target, which is the shape a deferred pipeline wants:
+    # albedo, normal, material and emissive written by one geometry pass. This
+    # example does not shade from it. It exists so the render pass, the
+    # framebuffer and the per-attachment clear values are exercised against a
+    # real driver, because those are the parts that fail at object creation
+    # rather than anywhere a test without a GPU can see.
+    g.gbuf_ok = false;
+    val gb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_mrt(d, 320, 180, 4);
+    if (is_err[gfx.RenderTarget, gfx.Error](gb)) {
+        var ge: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](gb);
+        print.eprintlnf("mrt target error: {}", gfx.error_msg(?ge));
+        ret;
+    }
+    g.gbuf = unwrap_ok[gfx.RenderTarget, gfx.Error](gb);
+    g.gbuf_ok = true;
+    print.printlnf("mrt target: {} attachments at 320x180",
+                   gfx.render_target_count(?g.gbuf));
 
     val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
     if (is_err[gfx.Mesh, gfx.Error](loaded)) {
@@ -207,6 +227,26 @@ fun on_draw(ctx: *Context) {
     }
     if (!opened) { ret; }
 
+    # Open and close a pass into the four-attachment target every frame. This
+    # is what puts the multi-attachment render pass, its framebuffer and its
+    # five clear values in front of the driver. The sprite draw is expected to
+    # be refused and counted, because the built-in programs declare one colour
+    # output and are not valid here.
+    if (g.gbuf_ok) {
+        var gd: gfx.PassDesc = gfx.pass_overlay();
+        gd.target      = ?g.gbuf;
+        gd.clear       = 1;
+        gd.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+        var gp: gfx.Pass = gfx.pass_begin(?g.renderer, ?gd);
+        # Once, not every frame: one refusal is the evidence, 120 of them is
+        # noise that buries the rest of the output.
+        if (g.drawn == 0) {
+            gfx.pass_draw_sprite(?gp, nil, gfx.rect(0.0, 0.0, 32.0, 32.0),
+                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+        }
+        gfx.pass_end(?gp);
+    }
+
     g.drawn = g.drawn + 1;
     if (g.budget != 0 && g.drawn >= g.budget) { ctx.running = false; }
 
@@ -250,6 +290,7 @@ fun on_dnit(ctx: *Context) {
                    g.drawn, gfx.shader_pipelines(?g.shader));
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    if (g.gbuf_ok) { gfx.render_target_delete(d, ?g.gbuf); }
     gfx.shader_delete(?g.shader, d);
     gfx.mesh_delete(d, ?g.mesh);
     gfx.texture_delete(d, ?g.texture);

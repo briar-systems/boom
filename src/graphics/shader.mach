@@ -149,7 +149,7 @@ pub fun shader_set_state(s: *Shader, d: PipelineDesc) {
 # type. Returns nil when the shader is full or the pipeline could not be built,
 # and the caller reports that as a dropped draw rather than drawing with a
 # pipeline meant for different geometry.
-pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, f: *VertexFormat) *Pipeline {
+pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, targets: usize, f: *VertexFormat) *Pipeline {
     if (!s.ready || pass == nil) { ret nil; }
 
     var i: usize = 0;
@@ -165,7 +165,7 @@ pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, f: *VertexForma
 
     val n: usize = s.count;
     var lay: SetLayout = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass, f, ?s.desc,
+    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass, targets, f, ?s.desc,
                                                s.vert, s.vlen, s.frag, s.flen, ?lay);
     if (is_err[bool, Error](r)) { ret nil; }
 
@@ -279,14 +279,14 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
     s.count = 1;
 
     # The pair it was built for.
-    if (shader_pipeline(?s, ?v, a, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
+    if (shader_pipeline(?s, ?v, a, 1, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
 
     # A different pass, same layout: must not reuse it. Building instead fails
     # here for want of a device, which is the nil.
-    if (shader_pipeline(?s, ?v, b, ?std_fmt) != nil) { ret 3; }
+    if (shader_pipeline(?s, ?v, b, 1, ?std_fmt) != nil) { ret 3; }
 
     # Same pass, a different layout: likewise.
-    if (shader_pipeline(?s, ?v, a, ?skin_fmt) != nil) { ret 4; }
+    if (shader_pipeline(?s, ?v, a, 1, ?skin_fmt) != nil) { ret 4; }
 
     # And a failed build leaves nothing behind to be handed out later.
     if (shader_pipelines(?s) != 1) { ret 5; }
@@ -315,7 +315,7 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     s.count = MAX_SHADER_PIPELINES;
 
     var extra: u32 = 99;
-    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass, ?fmt) != nil) { ret 2; }
+    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass, 1, ?fmt) != nil) { ret 2; }
     # Nothing was evicted to make room.
     if (shader_pipelines(?s) != MAX_SHADER_PIPELINES) { ret 3; }
     if (!s.built[0].live)                             { ret 4; }
@@ -331,6 +331,6 @@ test "shader: an unready shader builds nothing" {
     var pass: u32 = 1;
     s.ready = false;
     s.count = 0;
-    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass, ?f) != nil) { ret 1; }
+    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass, 1, ?f) != nil) { ret 1; }
     ret 0;
 }
