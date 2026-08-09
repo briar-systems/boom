@@ -1,0 +1,587 @@
+# The tile grid: a field of sprites whose placement the grid already knows.
+#
+# WHY THIS EXISTS. A game with a tile field can draw it today: a loop over the
+# grid calling pass_draw_sprite_uv per cell. That is correct and it pays for
+# every cell of the world on every frame. A 128x128 field is 16384 cells, of
+# which a camera sees a few hundred, so the loop spends its time building a
+# destination rectangle for a cell, handing it to the sprite path, and having
+# the sprite path reject it against the visible rectangle. The rejection is
+# cheap; doing it sixteen thousand times is not, and it is work the grid's own
+# structure makes unnecessary.
+#
+# A GRID IS NOT A BAG OF SPRITES, AND THAT IS THE WHOLE POINT. Where a sprite is
+# an arbitrary rectangle that has to be tested against the view, a cell's
+# position is implied by its index, so the view can be turned into a column and
+# a row range once and the loop bounded by that instead. Nothing off screen is
+# visited at all, and the per-cell test disappears with it. That is the only
+# thing this module does that the sprite path could not: everything after the
+# span is the same expansion into the same batch.
+#
+# SO IT EMITS INTO THE 2D BATCH RATHER THAN OPENING A PATH OF ITS OWN. A tile
+# field is a run of quads from one sheet, which is exactly the case
+# boom.graphics.batch coalesces, and going through it means the field shares a
+# texture bind and a draw with the sprites drawn around it. A separate path
+# would break the run at both ends and cost two draws to save none.
+#
+# THE SPAN IS PURE AND LIVES HERE, THE DRAW LIVES IN THE RENDERER. Turning a
+# visible rectangle into a range of cells is arithmetic with edge cases at the
+# grid's borders, at a camera that has left the field entirely, and at a rolled
+# camera whose visible rectangle is a bounding box rather than the view. None of
+# that needs a device, so none of it is written where a device is needed to test
+# it.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use boom.graphics.sprite.Rect;
+use boom.graphics.sprite.rect;
+use boom.graphics.texture.Texture;
+use boom.graphics.batch.sprite_expand;
+use boom.graphics.batch.SPRITE_FLOATS;
+use boom.math.vec.Vec2;
+use boom.math.vec.vec2;
+use boom.math.vec.Vec4;
+
+# The tile index meaning "nothing here".
+#
+# Zero, matching boom.graphics.assets, where slot zero is the handle no resource
+# ever has. A grid arrives from an editor or a generator as plain integers and
+# the overwhelmingly common convention in both is that zero is the hole, so any
+# other sentinel would be a conversion pass over every map boom ever loads.
+#
+# The consequence is that a tile index addresses the frame array directly and
+# frames[0] is never sampled. An off-by-one mapping would use that slot, at the
+# cost of every exporter, every debugger and every hand-written map having to
+# know about the shift. The wasted Rect is cheaper than the confusion.
+pub val TILE_EMPTY: u16 = 0;
+
+# How many tiles are expanded before the batch is handed a chunk.
+#
+# Not one, because a per-cell append is a push into the vertex arena and a run
+# check per tile, which is the per-sprite overhead the batcher exists to amortise
+# and the grid lets us amortise further. Not the whole span either: the staging
+# buffer is a stack array, so it has to be a fixed size, and a span can be any
+# size at all.
+#
+# Thirty-two tiles is 6 KiB of stack and covers a typical row of a visible span
+# in one push.
+pub val TILEMAP_CHUNK: usize = 32;
+
+# A sheet of tile frames: the texture, and where each index lands in it.
+#
+# Separate from the grid because one sheet serves many layers. A game with a
+# floor, a wall and a decoration layer over the same terrain set has three grids
+# and one of these.
+# ---
+# texture: the sheet every frame is cut from, or nil for the white texel
+# frames:  frame_count source rectangles in texture space, 0 to 1, indexed by
+#          the tile value itself. Entry zero is never read: see TILE_EMPTY.
+# count:   how many entries frames has, including the unread zeroth
+pub rec TileSheet {
+    texture: *Texture;
+    frames:  *Rect;
+    count:   usize;
+}
+
+# One grid of tile indices placed in the world.
+#
+# The tiles are borrowed, not copied, and are read at each draw, so a game may
+# edit its map between frames and does not need to tell boom it has.
+# ---
+# tiles:     cols * rows indices in row-major order, TILE_EMPTY for a hole
+# cols:      cells across
+# rows:      cells down
+# tile_size: the side of one cell, in the pass's units
+# origin:    where the top-left corner of cell (0, 0) sits, in the pass's units
+pub rec TileLayer {
+    tiles:     *u16;
+    cols:      usize;
+    rows:      usize;
+    tile_size: f32;
+    origin:    Vec2;
+}
+
+# The half-open range of cells a draw has to visit.
+#
+# Half-open because that is the form the loops want and because it makes "sees
+# nothing" expressible without a flag: an empty range is one whose ends meet,
+# which is what every case off the edge of the grid collapses to.
+# ---
+# col0: first column, inclusive
+# col1: one past the last column
+# row0: first row, inclusive
+# row1: one past the last row
+pub rec TileSpan {
+    col0: usize;
+    col1: usize;
+    row0: usize;
+    row1: usize;
+}
+
+# Build a TileSheet.
+# ---
+# texture: the sheet, or nil for the white texel
+# frames:  count source rectangles, indexed by tile value
+# count:   how many entries frames has
+pub fun tile_sheet(texture: *Texture, frames: *Rect, count: usize) TileSheet {
+    ret TileSheet{texture: texture, frames: frames, count: count};
+}
+
+# Build a TileLayer.
+# ---
+# tiles:     cols * rows indices, row-major
+# cols:      cells across
+# rows:      cells down
+# tile_size: the side of one cell
+# origin:    where cell (0, 0) begins
+pub fun tile_layer(tiles: *u16, cols: usize, rows: usize, tile_size: f32, origin: Vec2) TileLayer {
+    ret TileLayer{tiles: tiles, cols: cols, rows: rows, tile_size: tile_size, origin: origin};
+}
+
+# The cells of a layer that a view rectangle touches.
+#
+# THE EDGE RULE MATCHES boom.graphics.sprite.rect_overlaps: a cell whose far edge
+# lands exactly on the view's near edge shares no pixel with it and is not in the
+# span. Disagreeing with the sprite path here would make a tile field and a
+# sprite at the same place pop in on different frames, which reads as the tiles
+# being misaligned rather than as a rounding difference.
+#
+# Every degenerate case collapses to an empty span rather than to a guess: an
+# empty grid, a non-positive tile size, a view with no area, and a view wholly
+# off the field.
+# ---
+# layer: the grid
+# view:  the rectangle to cull against, in the same units as the layer
+# ret:   the half-open cell range, possibly empty
+pub fun tilemap_span(layer: *TileLayer, view: Rect) TileSpan {
+    var s: TileSpan = TileSpan{col0: 0, col1: 0, row0: 0, row1: 0};
+    if (layer == nil)                    { ret s; }
+    if (layer.cols == 0 || layer.rows == 0) { ret s; }
+    # Both would divide by zero or invert the range below, and both are states a
+    # half-built layer or a minimized window produces rather than caller bugs.
+    if (layer.tile_size <= 0.0)          { ret s; }
+    if (view.w <= 0.0 || view.h <= 0.0)  { ret s; }
+
+    val ts: f32 = layer.tile_size;
+    s.col0 = span_lo((view.x - layer.origin.x) / ts, layer.cols);
+    s.col1 = span_hi((view.x + view.w - layer.origin.x) / ts, layer.cols);
+    s.row0 = span_lo((view.y - layer.origin.y) / ts, layer.rows);
+    s.row1 = span_hi((view.y + view.h - layer.origin.y) / ts, layer.rows);
+    ret s;
+}
+
+# Every cell of a layer, for a pass that is not culling.
+pub fun tilemap_all(layer: *TileLayer) TileSpan {
+    if (layer == nil) { ret TileSpan{col0: 0, col1: 0, row0: 0, row1: 0}; }
+    ret TileSpan{col0: 0, col1: layer.cols, row0: 0, row1: layer.rows};
+}
+
+# How many cells a span covers.
+#
+# What the culling is measured in, and what a game reads to see how much of its
+# field a frame actually looked at.
+pub fun tilemap_span_cells(s: *TileSpan) usize {
+    if (s.col1 <= s.col0 || s.row1 <= s.row0) { ret 0; }
+    ret (s.col1 - s.col0) * (s.row1 - s.row0);
+}
+
+# The index stored at a cell, or TILE_EMPTY for a cell outside the grid.
+#
+# Out of range reads as a hole rather than as a wrapped or clamped cell, because
+# a caller asking for a cell that does not exist wants nothing drawn, not
+# whatever the opposite edge of the map holds.
+pub fun tilemap_at(layer: *TileLayer, col: usize, row: usize) u16 {
+    if (layer == nil || layer.tiles == nil) { ret TILE_EMPTY; }
+    if (col >= layer.cols || row >= layer.rows) { ret TILE_EMPTY; }
+    ret layer.tiles[row * layer.cols + col];
+}
+
+# Where a cell is drawn, in the pass's units.
+pub fun tilemap_cell_rect(layer: *TileLayer, col: usize, row: usize) Rect {
+    val ts: f32 = layer.tile_size;
+    ret rect(layer.origin.x + col::f32 * ts, layer.origin.y + row::f32 * ts, ts, ts);
+}
+
+# The source rectangle a tile index samples.
+#
+# THE BOUNDS CHECK IS HERE AND IT IS NOT AN ASSERT. A map is data: it comes from
+# an editor, a generator, or a file that may not match the sheet it is drawn
+# with. An index past the frame array would read whatever follows it in memory
+# and hand the result to the shader as texture coordinates, which draws a
+# plausible-looking wrong tile or a stretched smear of the sheet. Refusing the
+# cell draws the hole the malformed map actually describes.
+# ---
+# sheet: the frames
+# tile:  the index stored in the cell
+# out:   set to the frame's source rectangle when this returns true
+# ret:   false when the cell draws nothing, whether empty or out of range
+pub fun tilemap_frame(sheet: *TileSheet, tile: u16, out: *Rect) bool {
+    if (tile == TILE_EMPTY)                 { ret false; }
+    if (sheet == nil || sheet.frames == nil) { ret false; }
+    val i: usize = tile::usize;
+    if (i >= sheet.count)                   { ret false; }
+    @out = sheet.frames[i];
+    ret true;
+}
+
+# How far through a span an expansion has got.
+#
+# The expansion is chunked, because it writes into a caller's buffer and a span
+# can be any size, so it has to be able to stop in the middle of a row and be
+# resumed. Making that position an explicit value rather than a pair of loop
+# variables inside the draw is what lets the whole of the loop be tested without
+# a device: the chunk boundary is where a hand-written version goes wrong, by
+# repeating or dropping the cell it stopped on.
+# ---
+# col: the column the next tile comes from
+# row: the row it comes from
+pub rec TileCursor {
+    col: usize;
+    row: usize;
+}
+
+# A cursor at the start of a span.
+pub fun tile_cursor(s: *TileSpan) TileCursor {
+    ret TileCursor{col: s.col0, row: s.row0};
+}
+
+# Whether a cursor has passed the end of its span.
+pub fun tilemap_done(c: *TileCursor, s: *TileSpan) bool {
+    ret c.row >= s.row1;
+}
+
+# Expand up to max tiles of a span into a caller's buffer.
+#
+# Writes SPRITE_FLOATS floats per tile in the shared 2D layout, in the same form
+# boom.graphics.batch.sprite_expand produces for a sprite, so a chunk can be
+# handed straight to the batcher. Empty cells and cells naming a frame the sheet
+# does not have are skipped and take no room, which is why the count is returned
+# rather than derived from the span.
+#
+# The cursor is advanced past every cell examined, including the skipped ones, so
+# repeated calls walk the span exactly once. max has to be at least one: a
+# capacity of zero writes nothing and cannot advance, and a caller looping on
+# tilemap_done would not terminate.
+# ---
+# layer: the grid
+# sheet: the frames the indices address
+# s:     the span to walk
+# c:     where to resume, advanced to where this stopped
+# tint:  the colour written into every vertex
+# out:   at least max * SPRITE_FLOATS floats
+# max:   how many tiles out can hold, at least one
+# ret:   how many tiles were written
+pub fun tilemap_expand(layer: *TileLayer, sheet: *TileSheet, s: *TileSpan, c: *TileCursor,
+                       tint: Vec4, out: *f32, max: usize) usize {
+    var n: usize = 0;
+    if (layer == nil || layer.tiles == nil || sheet == nil) {
+        c.row = s.row1;
+        ret 0;
+    }
+
+    for (c.row < s.row1) {
+        val base: usize = c.row * layer.cols;
+        for (c.col < s.col1) {
+            # Checked before the cell is consumed, so the cursor is left naming
+            # the tile that did not fit rather than the one after it.
+            if (n == max) { ret n; }
+            var src: Rect;
+            if (tilemap_frame(sheet, layer.tiles[base + c.col], ?src)) {
+                sprite_expand(tilemap_cell_rect(layer, c.col, c.row), src, tint,
+                              ?out[n * SPRITE_FLOATS]);
+                n = n + 1;
+            }
+            c.col = c.col + 1;
+        }
+        c.col = s.col0;
+        c.row = c.row + 1;
+    }
+    ret n;
+}
+
+# The first cell at or past a coordinate, clamped into the grid.
+#
+# Clamped before the integer cast rather than after, because the quotient of a
+# world coordinate by a tile size is unbounded: a camera a long way from a small
+# field produces a value no integer holds, and the cast alone would be undefined
+# where the clamp is merely empty.
+fun span_lo(q: f32, hi: usize) usize {
+    if (q <= 0.0) { ret 0; }
+    if (q >= hi::f32) { ret hi; }
+    # Positive here, so truncation is the floor.
+    ret (q::i32)::usize;
+}
+
+# One past the last cell a coordinate reaches, clamped into the grid.
+fun span_hi(q: f32, hi: usize) usize {
+    if (q <= 0.0) { ret 0; }
+    if (q >= hi::f32) { ret hi; }
+    val t: i32 = q::i32;
+    if (t::f32 < q) { ret (t + 1)::usize; }
+    ret t::usize;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# The span is the whole of this module's correctness and none of it needs a
+# device. What a device would add is whether the vertices reach a draw, which is
+# the batcher's and the renderer's own coverage.
+
+use boom.graphics.sprite.rect_overlaps;
+use boom.math.vec.vec4;
+
+test "tilemap: a view inside the field spans exactly the cells it covers" {
+    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(0.0, 0.0));
+
+    # Cells are 32 units. A view from 64 to 192 covers columns 2, 3, 4 and 5,
+    # since column 6 begins at 192 where the view ends. Derived from the
+    # geometry rather than read off the result.
+    val s: TileSpan = tilemap_span(?l, rect(64.0, 64.0, 128.0, 128.0));
+    if (s.col0 != 2 || s.col1 != 6) { ret 1; }
+    if (s.row0 != 2 || s.row1 != 6) { ret 2; }
+    if (tilemap_span_cells(?s) != 16) { ret 3; }
+    ret 0;
+}
+
+test "tilemap: a partly covered cell is in the span" {
+    # The failure this prevents is a column of tiles missing along the leading
+    # edge of the screen as the camera pans, which looks like the field ending
+    # early rather than like a rounding error.
+    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(0.0, 0.0));
+    val s: TileSpan = tilemap_span(?l, rect(65.0, 65.0, 126.0, 126.0));
+    if (s.col0 != 2 || s.col1 != 6) { ret 1; }
+    if (s.row0 != 2 || s.row1 != 6) { ret 2; }
+    ret 0;
+}
+
+test "tilemap: the span agrees with a per-cell overlap test" {
+    # The span is an optimisation of exactly this loop, so the two have to give
+    # the same answer for every cell. Swept over offsets because the disagreement
+    # a hand-derived span produces is at one edge, on some offsets only.
+    var l: TileLayer = tile_layer(nil, 40, 40, 16.0, vec2(0.0 - 100.0, 0.0 - 60.0));
+    var k: i32 = 0;
+    for (k < 37) {
+        val view: Rect = rect(0.0 - 130.0 + 11.0 * k::f32,
+                              0.0 - 90.0 + 7.0 * k::f32,
+                              73.0, 51.0);
+        val s: TileSpan = tilemap_span(?l, view);
+        var r: usize = 0;
+        for (r < 40) {
+            var c: usize = 0;
+            for (c < 40) {
+                val hit: bool = rect_overlaps(tilemap_cell_rect(?l, c, r), view);
+                val in_span: bool = c >= s.col0 && c < s.col1 && r >= s.row0 && r < s.row1;
+                if (hit && !in_span)  { ret 1; }
+                if (in_span && !hit)  { ret 2; }
+                c = c + 1;
+            }
+            r = r + 1;
+        }
+        k = k + 1;
+    }
+    ret 0;
+}
+
+test "tilemap: a view off the field spans nothing" {
+    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
+
+    # Wholly left, right, above and below. Each has to collapse rather than
+    # clamp to one edge row, which would draw a stripe of tiles at the border
+    # of a field the camera has left.
+    if (cells(?l, rect(0.0 - 500.0, 0.0, 100.0, 100.0)) != 0) { ret 1; }
+    if (cells(?l, rect(500.0, 0.0, 100.0, 100.0)) != 0)       { ret 2; }
+    if (cells(?l, rect(0.0, 0.0 - 500.0, 100.0, 100.0)) != 0) { ret 3; }
+    if (cells(?l, rect(0.0, 500.0, 100.0, 100.0)) != 0)       { ret 4; }
+
+    # Exactly touching the left edge of the field shares no column with it.
+    if (cells(?l, rect(0.0 - 64.0, 0.0, 64.0, 64.0)) != 0)    { ret 5; }
+    ret 0;
+}
+
+test "tilemap: an expansion walks the span once, skipping holes" {
+    # Three rows of four, with holes and one index the sheet does not have. Nine
+    # cells are in the span and five of them draw, which is the count the batch
+    # has to receive: a loop that emitted a quad for the holes would draw the
+    # sheet's first frame over the gaps in the map.
+    var tiles: [12]u16 = [12]u16{1, 0, 2, 1,
+                                 0, 2, 9, 1,
+                                 1, 1, 0, 2};
+    var l: TileLayer = tile_layer(?tiles[0], 4, 3, 10.0, vec2(0.0, 0.0));
+    var frames: [3]Rect = [3]Rect{rect(0.0, 0.0, 0.0, 0.0),
+                                  rect(0.0, 0.0, 0.5, 1.0),
+                                  rect(0.5, 0.0, 0.5, 1.0)};
+    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 3);
+
+    # Columns 0 to 2, all three rows: 1, _, 2 / _, 2, 9 / 1, 1, _. Two holes and
+    # one index past the sheet, so nine cells become five tiles.
+    var s: TileSpan = tilemap_span(?l, rect(0.0, 0.0, 30.0, 30.0));
+    if (tilemap_span_cells(?s) != 9) { ret 1; }
+
+    var out: [1536]f32;
+    var c: TileCursor = tile_cursor(?s);
+    val n: usize = tilemap_expand(?l, ?sheet, ?s, ?c, vec4(1.0, 1.0, 1.0, 1.0), ?out[0], 32);
+    if (n != 5) { ret 2; }
+    if (!tilemap_done(?c, ?s)) { ret 3; }
+
+    # The tiles come out in row-major order at their own cells. The first is
+    # (0,0) and the last is (1,2), which is the fifth drawing cell.
+    if (out[0] != 0.0 || out[1] != 0.0)  { ret 4; }
+    val last: usize = 4 * SPRITE_FLOATS;
+    if (out[last] != 10.0 || out[last + 1] != 20.0) { ret 5; }
+    ret 0;
+}
+
+test "tilemap: a chunked expansion loses no tile at the boundary" {
+    # The whole reason the cursor is a value. Expanding a span two tiles at a
+    # time has to produce exactly what one call produces, or the field is drawn
+    # with a tile repeated or missing every chunk, which is a stripe across the
+    # screen at the chunk's period.
+    var tiles: [25]u16;
+    var i: usize = 0;
+    for (i < 25) { tiles[i] = 1; i = i + 1; }
+    var l: TileLayer = tile_layer(?tiles[0], 5, 5, 10.0, vec2(0.0, 0.0));
+    var frames: [2]Rect = [2]Rect{rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 1.0, 1.0)};
+    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 2);
+    val tint: Vec4 = vec4(1.0, 1.0, 1.0, 1.0);
+
+    var s: TileSpan = tilemap_span(?l, rect(0.0, 0.0, 50.0, 50.0));
+    var whole: [1536]f32;
+    var wc: TileCursor = tile_cursor(?s);
+    if (tilemap_expand(?l, ?sheet, ?s, ?wc, tint, ?whole[0], 32) != 25) { ret 1; }
+
+    var part: [1536]f32;
+    var pc: TileCursor = tile_cursor(?s);
+    var got: usize = 0;
+    for (!tilemap_done(?pc, ?s)) {
+        val n: usize = tilemap_expand(?l, ?sheet, ?s, ?pc, tint, ?part[got * SPRITE_FLOATS], 2);
+        # Only the last chunk of a full grid may be short.
+        if (n > 2) { ret 2; }
+        got = got + n;
+        if (got > 25) { ret 3; }
+    }
+    if (got != 25) { ret 4; }
+
+    var f: usize = 0;
+    for (f < 25 * SPRITE_FLOATS) {
+        if (whole[f] != part[f]) { ret 5; }
+        f = f + 1;
+    }
+    ret 0;
+}
+
+test "tilemap: the staging buffer the renderer uses holds a whole chunk" {
+    # pass_draw_tilemap declares its stack buffer with a literal size, since an
+    # array length must be one. A chunk larger than the buffer would write past
+    # it, so the two are tied together here rather than by a comment.
+    if (TILEMAP_CHUNK * SPRITE_FLOATS != 1536) { ret 1; }
+    ret 0;
+}
+
+# How many cells a view reaches, for the tests that only care about the count.
+fun cells(layer: *TileLayer, view: Rect) usize {
+    var s: TileSpan = tilemap_span(layer, view);
+    ret tilemap_span_cells(?s);
+}
+
+test "tilemap: a view larger than the field is clamped to it" {
+    # A camera zoomed out past the world. Without the clamp the span runs past
+    # the array and the draw reads memory that is not the map.
+    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
+    val s: TileSpan = tilemap_span(?l, rect(0.0 - 10000.0, 0.0 - 10000.0, 20000.0, 20000.0));
+    if (s.col0 != 0 || s.col1 != 8) { ret 1; }
+    if (s.row0 != 0 || s.row1 != 8) { ret 2; }
+
+    # And a quotient no integer holds is still a span, not a cast of an
+    # out-of-range float.
+    val far: TileSpan = tilemap_span(?l, rect(1.0e30, 1.0e30, 1.0e30, 1.0e30));
+    if (far.col0 != 8 || far.col1 != 8) { ret 3; }
+    ret 0;
+}
+
+test "tilemap: the origin offsets the field" {
+    # A layer placed anywhere but the origin is the case a span derived from the
+    # view alone gets wrong, and it is wrong by a constant, so it looks like the
+    # map being drawn in the wrong place.
+    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(1000.0, 0.0 - 500.0));
+    val s: TileSpan = tilemap_span(?l, rect(1064.0, 0.0 - 436.0, 128.0, 128.0));
+    if (s.col0 != 2 || s.col1 != 6) { ret 1; }
+    if (s.row0 != 2 || s.row1 != 6) { ret 2; }
+    ret 0;
+}
+
+test "tilemap: a degenerate layer or view spans nothing" {
+    var empty: TileLayer = tile_layer(nil, 0, 0, 32.0, vec2(0.0, 0.0));
+    if (cells(?empty, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 1; }
+
+    # A zero tile size is the divide this would otherwise do.
+    var zero: TileLayer = tile_layer(nil, 8, 8, 0.0, vec2(0.0, 0.0));
+    if (cells(?zero, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 2; }
+
+    # A minimized window gives the pass a view with no area.
+    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
+    if (cells(?l, rect(0.0, 0.0, 0.0, 0.0)) != 0) { ret 3; }
+    ret 0;
+}
+
+test "tilemap: an unculled span is the whole field" {
+    var l: TileLayer = tile_layer(nil, 128, 64, 32.0, vec2(0.0, 0.0));
+    val s: TileSpan = tilemap_all(?l);
+    if (s.col1 != 128 || s.row1 != 64)   { ret 1; }
+    if (tilemap_span_cells(?s) != 8192)  { ret 2; }
+    ret 0;
+}
+
+test "tilemap: a cell reads its own index and nothing outside the grid" {
+    # Row-major, and the transposed reading of it is the bug that looks like a
+    # map drawn mirrored about its diagonal, which is only obvious on a
+    # non-square grid.
+    var tiles: [12]u16 = [12]u16{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    var l: TileLayer = tile_layer(?tiles[0], 4, 3, 32.0, vec2(0.0, 0.0));
+    if (tilemap_at(?l, 0, 0) != 0)  { ret 1; }
+    if (tilemap_at(?l, 3, 0) != 3)  { ret 2; }
+    if (tilemap_at(?l, 0, 1) != 4)  { ret 3; }
+    if (tilemap_at(?l, 3, 2) != 11) { ret 4; }
+
+    # Past either edge is a hole, not a wrap onto the next row.
+    if (tilemap_at(?l, 4, 0) != TILE_EMPTY) { ret 5; }
+    if (tilemap_at(?l, 0, 3) != TILE_EMPTY) { ret 6; }
+    ret 0;
+}
+
+test "tilemap: a cell's rectangle is its own square of the field" {
+    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(10.0, 20.0));
+    val r: Rect = tilemap_cell_rect(?l, 3, 2);
+    if (r.x != 106.0 || r.y != 84.0)  { ret 1; }
+    if (r.w != 32.0 || r.h != 32.0)   { ret 2; }
+
+    # Neighbours meet exactly, or the field has seams between its tiles.
+    val n: Rect = tilemap_cell_rect(?l, 4, 2);
+    if (r.x + r.w != n.x) { ret 3; }
+    ret 0;
+}
+
+test "tilemap: an index past the frame array draws nothing" {
+    # The malformed-map case. Sampling past the array hands the shader whatever
+    # follows it as texture coordinates, which draws a wrong tile rather than no
+    # tile, so the check is that nothing is written at all.
+    var frames: [3]Rect = [3]Rect{rect(0.0, 0.0, 0.0, 0.0),
+                                  rect(0.0, 0.0, 0.5, 0.5),
+                                  rect(0.5, 0.0, 0.5, 0.5)};
+    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 3);
+
+    var out: Rect = rect(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0);
+    if (tilemap_frame(?sheet, 3, ?out))    { ret 1; }
+    if (out.w != 0.0 - 1.0)                { ret 2; }
+    if (tilemap_frame(?sheet, 60000, ?out)) { ret 3; }
+    if (out.w != 0.0 - 1.0)                { ret 4; }
+
+    # The empty sentinel is a hole, not frame zero.
+    if (tilemap_frame(?sheet, TILE_EMPTY, ?out)) { ret 5; }
+    if (out.w != 0.0 - 1.0)                      { ret 6; }
+
+    # An index in range resolves to its own frame.
+    if (!tilemap_frame(?sheet, 2, ?out))         { ret 7; }
+    if (out.x != 0.5 || out.w != 0.5)            { ret 8; }
+    ret 0;
+}

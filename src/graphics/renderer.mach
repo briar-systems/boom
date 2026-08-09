@@ -105,6 +105,16 @@ use boom.graphics.batch.sprite_expand;
 use boom.graphics.batch.SPRITE_FLOATS;
 use boom.graphics.batch.SPRITE_VERTICES;
 use boom.graphics.batch.VERTEX_FLOATS;
+use boom.graphics.tilemap.TileLayer;
+use boom.graphics.tilemap.TileSheet;
+use boom.graphics.tilemap.TileSpan;
+use boom.graphics.tilemap.TileCursor;
+use boom.graphics.tilemap.TILEMAP_CHUNK;
+use boom.graphics.tilemap.tilemap_span;
+use boom.graphics.tilemap.tilemap_all;
+use boom.graphics.tilemap.tile_cursor;
+use boom.graphics.tilemap.tilemap_done;
+use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.vertex.vertex_format_ui;
 use boom.graphics.cache.cache_get;
@@ -1213,6 +1223,50 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
     batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);
+}
+
+# submit a whole tile field as one run of quads
+#
+# WHY THIS IS NOT A LOOP OVER pass_draw_sprite_uv. It is the same expansion into
+# the same batch, and the difference is which cells are visited at all. A sprite
+# is an arbitrary rectangle, so the sprite path can only cull it by testing it
+# against the visible rectangle, and a game looping over its own grid therefore
+# pays for every cell of the world every frame. A cell's position is implied by
+# its index, so the view converts into a column and a row range once and the
+# loops are bounded by that. A field the camera has left costs nothing at all.
+#
+# THE CELLS OFF SCREEN ARE NOT COUNTED AS CULLED, because they are never
+# considered. renderer_culled reports draws the renderer looked at and refused,
+# and adding a number here would mean walking the whole grid to compute it,
+# which is the work this exists to avoid. tilemap_span_cells tells a game how
+# much of its field a frame visited.
+#
+# Cells holding TILE_EMPTY and cells whose index is past the sheet's frame array
+# are skipped. See boom.graphics.tilemap for why a malformed map draws holes
+# rather than being refused as a whole.
+# ---
+# p:     the open pass
+# layer: the grid, borrowed and read now
+# sheet: the frames the indices address
+# tint:  the colour multiplied into every tile
+pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: Vec4) {
+    if (layer == nil || sheet == nil || layer.tiles == nil) { ret; }
+
+    var span: TileSpan;
+    if (p.cull) { span = tilemap_span(layer, p.visible); }
+    or          { span = tilemap_all(layer); }
+
+    # Expanded in chunks rather than a tile at a time, because an append is a
+    # push into the frame's arena and a run check, and a grid is the one case
+    # where the caller already knows the next quad continues the same run. The
+    # staging buffer is a stack array, so it is fixed at TILEMAP_CHUNK tiles and
+    # the span is walked across as many chunks as it needs.
+    var v: [1536]f32;
+    var cur: TileCursor = tile_cursor(?span);
+    for (!tilemap_done(?cur, ?span)) {
+        val n: usize = tilemap_expand(layer, sheet, ?span, ?cur, tint, ?v[0], TILEMAP_CHUNK);
+        if (n > 0) { batch_append(p, sheet.texture, (?v[0]):~*u8, n * SPRITE_VERTICES); }
+    }
 }
 
 # submit a stream of already-placed, per-vertex-coloured triangles
