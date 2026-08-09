@@ -187,17 +187,29 @@ pub fun vertex_format_skinned() VertexFormat {
     ret f;
 }
 
-# the 2D sprite vertex format
+# the immediate-mode vertex format
 #
-# POSITION (vec2, location 0) and TEXCOORD_0 (vec2, location 1): a
-# 16-byte vertex for the renderer's sprite quad, proving the same mesh
-# path drives a layout with no normal.
+# POSITION (vec2, location 0), TEXCOORD_0 (vec2, location 1) and COLOR_0 (vec4,
+# location 3): a 32-byte vertex whose positions are already in pixels.
+#
+# THE LAYOUT IS blit's, DELIBERATELY. blit emits exactly this, 8 f32 at a
+# 32-byte stride with position at 0, uv at 8 and colour at 16, so its draw list
+# uploads with no repacking. That is not a coincidence to be preserved by luck:
+# vertex_format_ui_matches asserts the two agree, and a change on either side
+# fails that rather than reinterpreting every UI vertex.
+#
+# The colour is per vertex, not a uniform, because a whole draw list is one draw
+# and a panel's background, border and text differ inside it.
+#
+# Location 3 rather than 2 because SEMANTIC_COLOR_0 owns 3 by boom's convention
+# and TEXCOORD_0 owns 1 in a 2D format. Leaving the gap costs nothing.
 # ---
-# ret: the sprite format
-pub fun vertex_format_sprite() VertexFormat {
+# ret: the immediate-mode format
+pub fun vertex_format_ui() VertexFormat {
     var f: VertexFormat = vertex_format();
     vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
     vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
+    vertex_format_add(?f, SEMANTIC_COLOR_0,    3, COMP_F32, 4, 0, 0);
     ret f;
 }
 
@@ -254,6 +266,36 @@ pub fun vertex_format_is_skinned(f: *VertexFormat) bool {
     ret joints && weights;
 }
 
+test "vertex: the immediate-mode format matches blit's vertex exactly" {
+    # blit documents its Vert as 8 f32 at a 32-byte stride: aPos (vec2) at 0,
+    # aUV (vec2) at 8, aColor (vec4) at 16. A consumer uploads its draw list
+    # through this format with no repacking, so a disagreement does not fail to
+    # compile anywhere: it reinterprets every UI vertex, and the symptom is a UI
+    # drawn in the wrong place in the wrong colours.
+    var f: VertexFormat = vertex_format_ui();
+    if (f.count != 3)  { ret 1; }
+    if (f.stride != 32) { ret 2; }
+
+    if (f.attributes[0].semantic != SEMANTIC_POSITION)   { ret 3; }
+    if (f.attributes[0].offset != 0)                     { ret 4; }
+    if (f.attributes[0].count != 2)                      { ret 5; }
+
+    if (f.attributes[1].semantic != SEMANTIC_TEXCOORD_0) { ret 6; }
+    if (f.attributes[1].offset != 8)                     { ret 7; }
+    if (f.attributes[1].count != 2)                      { ret 8; }
+
+    if (f.attributes[2].semantic != SEMANTIC_COLOR_0)    { ret 9; }
+    if (f.attributes[2].offset != 16)                    { ret 10; }
+    if (f.attributes[2].count != 4)                      { ret 11; }
+
+    # Floats, not normalized bytes. blit's colours are straight rgba f32, and a
+    # format claiming u8 here would read four colour channels out of the first
+    # four bytes of the float and draw the whole UI black.
+    if (f.attributes[2].component != COMP_F32)           { ret 12; }
+    if (f.attributes[2].normalized != 0)                 { ret 13; }
+    ret 0;
+}
+
 test "vertex: standard format packs to a 32-byte stride" {
     var f: VertexFormat = vertex_format_standard();
     if (f.count != 3) { ret 1; }
@@ -261,14 +303,6 @@ test "vertex: standard format packs to a 32-byte stride" {
     if (f.attributes[1].offset != 12) { ret 3; }
     if (f.attributes[2].offset != 24) { ret 4; }
     if (f.stride != 32) { ret 5; }
-    ret 0;
-}
-
-test "vertex: sprite format packs to a 16-byte stride" {
-    var f: VertexFormat = vertex_format_sprite();
-    if (f.count != 2) { ret 1; }
-    if (f.attributes[1].offset != 8) { ret 2; }
-    if (f.stride != 16) { ret 3; }
     ret 0;
 }
 

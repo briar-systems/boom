@@ -23,16 +23,14 @@ use boom.graphics.buffer.buffer_upload;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
+use vfs: boom.vfs;
 use boom.graphics.vertex.Semantic;
-use boom.graphics.vertex.SEMANTIC_POSITION;
-use boom.graphics.vertex.SEMANTIC_NORMAL;
 use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
 use boom.graphics.vertex.SEMANTIC_TANGENT;
 use boom.graphics.vertex.SEMANTIC_JOINTS_0;
 use boom.graphics.vertex.SEMANTIC_WEIGHTS_0;
 use boom.graphics.vertex.Component;
-use boom.graphics.vertex.COMP_F32;
 use boom.graphics.vertex.COMP_U8;
 use boom.graphics.vertex.COMP_U16;
 use boom.graphics.vertex.COMP_U32;
@@ -40,6 +38,14 @@ use boom.graphics.vertex.COMP_I8;
 use boom.graphics.vertex.COMP_I16;
 use boom.graphics.vertex.VertexAttribute;
 use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.SEMANTIC_POSITION;
+use boom.graphics.vertex.COMP_F32;
+use boom.math.aabb.Aabb;
+use boom.math.aabb.aabb_empty;
+use boom.math.aabb.aabb_add;
+use boom.math.aabb.aabb_is_empty;
+use boom.graphics.vertex.SEMANTIC_NORMAL;
+use boom.math.vec.vec3;
 use boom.graphics.vertex.vertex_format;
 use boom.graphics.vertex.vertex_format_add;
 use boom.graphics.vertex.vertex_format_standard;
@@ -81,6 +87,16 @@ pub rec Mesh {
     indices:     Buffer;
     index_count: i32;
     format:      VertexFormat;
+
+    # The geometry's extent in the mesh's own space, computed once at upload.
+    #
+    # Kept here because this is the only moment the vertices are on the CPU:
+    # once uploaded they are device-local and reading them back would mean a
+    # staging copy and a queue wait. A mesh built from a format with no POSITION
+    # attribute has an empty box, which culls it rather than drawing it blind,
+    # since a mesh whose vertices are not positions is not something this
+    # renderer can place.
+    bounds:      Aabb;
 }
 
 # CPU-side geometry extracted from a glTF primitive, owned by an allocator
@@ -96,6 +112,47 @@ pub rec MeshData {
     format:       VertexFormat;
     indices:      *u32;
     index_count:  i32;
+}
+
+# The box containing every position in an interleaved vertex buffer.
+#
+# Walks the POSITION attribute at its own offset and stride rather than assuming
+# it is first: a format is free to order its attributes, and reading the wrong
+# one produces a box built from normals or texture coordinates, which is a unit
+# cube around the origin and looks entirely plausible.
+#
+# A two-component position is read with z at zero, so the 2D formats get a flat
+# box rather than an empty one.
+pub fun mesh_bounds_of(vertices: *u8, vertex_count: i32, format: *VertexFormat) Aabb {
+    var b: Aabb = aabb_empty();
+    if (vertex_count <= 0 || format.stride == 0) { ret b; }
+
+    var found: bool = false;
+    var off:   usize = 0;
+    var comps: u32 = 0;
+    var a: usize = 0;
+    for (a < format.count::usize) {
+        if (format.attributes[a].semantic == SEMANTIC_POSITION) {
+            off   = format.attributes[a].offset::usize;
+            comps = format.attributes[a].count;
+            found = true;
+            a = format.count::usize;
+        }
+        or { a = a + 1; }
+    }
+    if (!found || comps < 2) { ret b; }
+    val stride: usize = format.stride::usize;
+    var i: usize = 0;
+    for (i < vertex_count::usize) {
+        val base: usize = i * stride + off;
+        var z: f32 = 0.0;
+        if (comps >= 3) { z = read_f32_at(vertices, base + 8); }
+        aabb_add(?b, vec3(read_f32_at(vertices, base),
+                          read_f32_at(vertices, base + 4),
+                          z));
+        i = i + 1;
+    }
+    ret b;
 }
 
 # read a little-endian f32 from a byte buffer at off
@@ -145,6 +202,7 @@ pub fun mesh(d: *Device, vertices: ptr, vertex_count: i32, format: *VertexFormat
     var m: Mesh;
     m.format      = @format;
     m.index_count = index_count;
+    m.bounds      = mesh_bounds_of(vertices:~*u8, vertex_count, format);
 
     val vsize: u64 = vertex_count::u64 * format.stride::u64;
     val isize: u64 = index_count::u64 * 4;
@@ -681,7 +739,17 @@ pub fun mesh_load(d: *Device, path: str) Result[Mesh, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
-    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, path);
+    # THROUGH THE VFS, like every other loader. A game writes `res://art/x.qoi`
+    # and boom.vfs decides what that means; a raw path here would make the
+    # graphics loaders the only ones in the engine that do not, so the same
+    # spelling would work for a sound and fail for a texture.
+    val pr: Result[str, str] = vfs.vfs_resolve(?pa, path);
+    if (is_err[str, str](pr)) {
+        ret err[Mesh, Error](error(unwrap_err[str, str](pr)));
+    }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val br: Result[vec.Vector[u8], str] = fs.read_bytes(?pa, real);
     if (is_err[vec.Vector[u8], str](br)) {
         ret err[Mesh, Error](error(unwrap_err[vec.Vector[u8], str](br)));
     }
@@ -943,5 +1011,61 @@ test "mesh: a skinned primitive is conformed to the skinned layout" {
     # Vertex 2's third joint index.
     if (read_u16_at(md.vertices, 112 + 32 + 4) != 10) { arena.dnit(?ar); ret 13; }
     arena.dnit(?ar);
+    ret 0;
+}
+
+test "mesh: bounds come from the POSITION attribute, wherever it sits" {
+    # A format is free to order its attributes, and reading the wrong one gives
+    # a box built from normals: a unit cube around the origin, which looks
+    # entirely plausible and culls the mesh as soon as it moves.
+    #
+    # NORMAL first, POSITION second, so a reader assuming position is at offset
+    # zero gets the normals instead.
+    var f: VertexFormat = vertex_format();
+    if (!vertex_format_add(?f, SEMANTIC_NORMAL,   1, COMP_F32, 3, 0, 0)) { ret 1; }
+    if (!vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0)) { ret 2; }
+
+    # Two vertices: unit normals at offset 0, real positions at offset 12.
+    var v: [12]f32;
+    v[0] = 0.0; v[1] = 1.0; v[2] = 0.0;
+    v[3] = 10.0; v[4] = 20.0; v[5] = 30.0;
+    v[6] = 0.0; v[7] = 1.0; v[8] = 0.0;
+    v[9] = 0.0 - 5.0; v[10] = 0.0; v[11] = 7.0;
+
+    val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
+    if (b.min.x != 0.0 - 5.0) { ret 3; }
+    if (b.max.x != 10.0)      { ret 4; }
+    if (b.min.y != 0.0)       { ret 5; }
+    if (b.max.y != 20.0)      { ret 6; }
+    if (b.min.z != 7.0)       { ret 7; }
+    if (b.max.z != 30.0)      { ret 8; }
+    ret 0;
+}
+
+test "mesh: a two-component position gives a flat box, not an empty one" {
+    # The 2D formats carry vec2 positions. Refusing them would leave every
+    # sprite mesh with an empty box, which culls it entirely.
+    var f: VertexFormat = vertex_format();
+    if (!vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0)) { ret 1; }
+    var v: [4]f32;
+    v[0] = 1.0; v[1] = 2.0;
+    v[2] = 3.0; v[3] = 4.0;
+    val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
+    if (aabb_is_empty(?b)) { ret 2; }
+    if (b.min.x != 1.0 || b.max.x != 3.0) { ret 3; }
+    if (b.min.z != 0.0 || b.max.z != 0.0) { ret 4; }
+    ret 0;
+}
+
+test "mesh: a format with no position has no bounds" {
+    # Rather than a box built from whatever the first attribute happens to be.
+    # An empty box culls the mesh, which is the safe answer for geometry this
+    # renderer cannot place.
+    var f: VertexFormat = vertex_format();
+    if (!vertex_format_add(?f, SEMANTIC_NORMAL, 0, COMP_F32, 3, 0, 0)) { ret 1; }
+    var v: [3]f32;
+    v[0] = 1.0; v[1] = 2.0; v[2] = 3.0;
+    val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 1, ?f);
+    if (!aabb_is_empty(?b)) { ret 2; }
     ret 0;
 }

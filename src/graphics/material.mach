@@ -25,6 +25,7 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
+use std.types.string.str_equals;
 
 # the most texture bindings a material carries
 pub val MAX_TEXTURES: i32 = 4;
@@ -98,6 +99,35 @@ pub fun material_texture(m: *Material) *Texture {
     ret m.textures[0].texture;
 }
 
+# A named texture binding, or nil.
+#
+# WHY THE SLOTS EXIST WHEN THE BUILT-IN PROGRAM READS ONE. boom's own mesh and
+# lit programs sample a single albedo texture, which is what material_texture
+# above returns. A game supplying its own pipeline is not limited to that: it
+# binds whatever its own shader declares, and it needs a way to get the other
+# maps out of the material it loaded. glTF materials routinely carry normal,
+# metallic-roughness, occlusion and emissive alongside the base colour, and a
+# Material that could hold only one would lose them at load time, where they
+# cannot be recovered.
+#
+# So the slots are storage for the game's own use, not a promise that the
+# built-in shader reads them. Naming rather than indexing, because the order
+# glTF happens to list them in is not a contract.
+# ---
+# m:    the material
+# name: the binding to look up, matched exactly
+# ret:  the texture, or nil when the material has no such binding
+pub fun material_texture_named(m: *Material, name: str) *Texture {
+    var i: i32 = 0;
+    for (i < m.texture_count) {
+        if (str_equals(m.textures[i].name, name)) {
+            ret m.textures[i].texture;
+        }
+        i = i + 1;
+    }
+    ret nil;
+}
+
 test "material: base color defaults to white" {
     var m: Material = material();
     if (m.base_color.x != 1.0 || m.base_color.w != 1.0) { ret 1; }
@@ -127,5 +157,25 @@ test "material: an untextured material names no texture" {
     var t: Texture;
     material_add_texture(?m, "base", ?t);
     if (material_texture(?m) != ?t) { ret 2; }
+    ret 0;
+}
+
+test "material: a named lookup finds the binding it names" {
+    # The built-in programs read slot zero, so the other slots are only ever
+    # reachable by name. A lookup that returned slot zero regardless would make
+    # a custom pipeline bind the albedo as its normal map, which renders as a
+    # surface lit from a direction that shifts with its colour.
+    var albedo: Texture;
+    var normal: Texture;
+    var m: Material = material();
+    if (!material_add_texture(?m, "albedo", ?albedo)) { ret 1; }
+    if (!material_add_texture(?m, "normal", ?normal)) { ret 2; }
+
+    if (material_texture_named(?m, "albedo") != ?albedo) { ret 3; }
+    if (material_texture_named(?m, "normal") != ?normal) { ret 4; }
+    # A binding the material does not carry is absent, not slot zero.
+    if (material_texture_named(?m, "emissive") != nil)   { ret 5; }
+    # And the unnamed accessor the built-in programs use is still the first.
+    if (material_texture(?m) != ?albedo)                 { ret 6; }
     ret 0;
 }

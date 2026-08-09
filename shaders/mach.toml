@@ -36,19 +36,11 @@ targets = ["spirv"]
 link    = []
 need    = []
 
-[artifact.sprite_vert]
-kind    = "bin"
-entry   = "sprite_vert.mach"
-out     = "sprite_vert.spv"
-targets = ["spirv"]
+["spirv"]
 link    = []
 need    = []
 
-[artifact.sprite_frag]
-kind    = "bin"
-entry   = "sprite_frag.mach"
-out     = "sprite_frag.spv"
-targets = ["spirv"]
+["spirv"]
 link    = []
 need    = []
 
@@ -62,4 +54,20 @@ need    = []
 
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
-ref = "tag/0.1.0"
+ref = "branch/main"
+
+[artifact.ui_vert]
+kind    = "bin"
+entry   = "ui_vert.mach"
+out     = "ui_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.ui_frag]
+kind    = "bin"
+entry   = "ui_frag.mach"
+out     = "ui_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []

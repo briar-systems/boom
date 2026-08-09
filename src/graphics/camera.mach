@@ -5,11 +5,26 @@
 # transform. the camera is a plain value the game owns and mutates; graphics
 # imposes no scene structure.
 
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_look_at;
 use boom.math.mat.mat4_perspective;
+use boom.math.mat.mat4_orthographic;
+use boom.math.vec.vec3_add;
+use boom.math.vec.vec3_sub;
+use boom.math.vec.vec3_scale;
+use boom.math.vec.vec3_cross;
+use boom.math.vec.vec3_normalize;
+use boom.math.scalar.tanf;
+use boom.math.ray.Ray;
+use boom.math.ray.ray;
+use boom.math.ray.ray_at;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_project_point;
 
 # a perspective camera
 # ---
@@ -28,7 +43,25 @@ pub rec Camera {
     aspect:   f32;
     near:     f32;
     far:      f32;
+
+    # Which projection to build. PROJECTION_PERSPECTIVE is zero so a
+    # zero-initialised Camera, and every camera built before this field existed,
+    # still means perspective.
+    projection: u8;
+    # Vertical extent in world units, for an orthographic camera. Ignored under
+    # perspective, where `fov` and the distance to the subject set the extent.
+    height:     f32;
 }
+
+# A camera with foreshortening: things further away are smaller.
+pub val PROJECTION_PERSPECTIVE: u8 = 0;
+
+# A camera without foreshortening: parallel lines stay parallel and an object's
+# size on screen does not change with distance.
+#
+# What an isometric or 2.5D game is built on, and not expressible by a
+# perspective camera at any field of view.
+pub val PROJECTION_ORTHOGRAPHIC: u8 = 1;
 
 # a perspective camera looking from position toward target
 # ---
@@ -41,13 +74,46 @@ pub rec Camera {
 # ret:      the configured camera, with world up (0, 1, 0)
 pub fun camera_perspective(position: Vec3, target: Vec3, fov: f32, aspect: f32, near: f32, far: f32) Camera {
     ret Camera{
-        position: position,
-        target:   target,
-        up:       vec3(0.0, 1.0, 0.0),
-        fov:      fov,
-        aspect:   aspect,
-        near:     near,
-        far:      far,
+        position:   position,
+        target:     target,
+        up:         vec3(0.0, 1.0, 0.0),
+        fov:        fov,
+        aspect:     aspect,
+        near:       near,
+        far:        far,
+        projection: PROJECTION_PERSPECTIVE,
+        height:     0.0,
+    };
+}
+
+# an orthographic camera looking from position toward target
+#
+# Sized by the world height it shows rather than by a field of view, because
+# without foreshortening an angle does not determine an extent: the visible box
+# is the same at every distance, so the extent has to be stated outright.
+#
+# The near plane may be negative, which is how a camera placed inside the scene
+# still sees geometry behind it. That is normal for an orthographic view and
+# invalid for a perspective one.
+# ---
+# position: eye position
+# target:   look-at point
+# height:   the world height the view covers, in world units
+# aspect:   viewport width divided by height
+# near:     near clip distance
+# far:      far clip distance
+# ret:      the configured camera, with world up (0, 1, 0)
+pub fun camera_orthographic(position: Vec3, target: Vec3, height: f32, aspect: f32, near: f32, far: f32) Camera {
+    ret Camera{
+        position:   position,
+        target:     target,
+        up:         vec3(0.0, 1.0, 0.0),
+        fov:        0.0,
+        aspect:     aspect,
+        near:       near,
+        far:        far,
+        projection: PROJECTION_ORTHOGRAPHIC,
+        height:     height,
     };
 }
 
@@ -64,7 +130,78 @@ pub fun camera_view(c: *Camera) Mat4 {
 # c:   camera to read
 # ret: the view-to-clip matrix
 pub fun camera_projection(c: *Camera) Mat4 {
+    if (c.projection == PROJECTION_ORTHOGRAPHIC) {
+        val h: f32 = camera_ortho_height(c);
+        val w: f32 = h * c.aspect;
+        # Centred on the view axis, and Y-up in world space:
+        # mat4_orthographic negates Y itself for Vulkan's downward clip Y, the
+        # same as mat4_perspective does.
+        ret mat4_orthographic(0.0 - w * 0.5, w * 0.5,
+                              0.0 - h * 0.5, h * 0.5,
+                              c.near, c.far);
+    }
     ret mat4_perspective(c.fov, c.aspect, c.near, c.far);
+}
+
+# The orthographic height a camera will actually be used with.
+#
+# A zero height collapses the projection and draws nothing with no error
+# reported, which is what a Camera left at its zero value would do if it were
+# marked orthographic. Reported rather than written back, so a read of the field
+# still returns what was set.
+pub fun camera_ortho_height(c: *Camera) f32 {
+    if (c.height <= 0.0) { ret 1.0; }
+    ret c.height;
+}
+
+# The ray through a point on the viewport, for picking.
+#
+# WHAT A GAME CANNOT DO WITHOUT. A pointer arrives in viewport pixels and has to
+# be turned into a question about the world: what was clicked, where to aim,
+# where a dragged object should land. Every game needs it, so leaving it out
+# means every game inverts the projection by hand.
+#
+# Built from the camera basis rather than by inverting the view-projection,
+# which needs no general 4x4 inverse and cannot go singular. The two projections
+# differ in exactly the way they should: a perspective ray fans out from one
+# origin, and an orthographic ray keeps one direction from a moving origin.
+# ---
+# c:      the camera
+# sx:     viewport x in pixels, from the left
+# sy:     viewport y in pixels, from the top
+# width:  viewport width in pixels
+# height: viewport height in pixels
+# ret:    the ray, with a unit direction
+pub fun camera_ray(c: *Camera, sx: f32, sy: f32, width: f32, height: f32) Ray {
+    # Normalised device coordinates, x right and y down, matching how the
+    # pointer and the framebuffer are both addressed.
+    var ndc_x: f32 = 0.0;
+    var ndc_y: f32 = 0.0;
+    if (width  > 0.0) { ndc_x = (sx / width)  * 2.0 - 1.0; }
+    if (height > 0.0) { ndc_y = (sy / height) * 2.0 - 1.0; }
+
+    val forward: Vec3 = vec3_normalize(vec3_sub(c.target, c.position));
+    val right:   Vec3 = vec3_normalize(vec3_cross(forward, c.up));
+    # Recovered from the other two rather than taken from c.up, which is only an
+    # approximate up and need not be perpendicular to the view direction.
+    val up:      Vec3 = vec3_cross(right, forward);
+
+    if (c.projection == PROJECTION_ORTHOGRAPHIC) {
+        val hh: f32 = camera_ortho_height(c) * 0.5;
+        val hw: f32 = hh * c.aspect;
+        # Screen y grows downward and world up grows upward, hence the negation.
+        var o: Vec3 = vec3_add(c.position, vec3_scale(right, ndc_x * hw));
+        o = vec3_add(o, vec3_scale(up, 0.0 - ndc_y * hh));
+        ret ray(o, forward);
+    }
+
+    # At unit distance along the view axis the visible half-height is
+    # tan(fov / 2), which is what makes the fan match the perspective matrix.
+    val hh: f32 = tanf(c.fov * 0.5);
+    val hw: f32 = hh * c.aspect;
+    var d: Vec3 = vec3_add(forward, vec3_scale(right, ndc_x * hw));
+    d = vec3_add(d, vec3_scale(up, 0.0 - ndc_y * hh));
+    ret ray(c.position, vec3_normalize(d));
 }
 
 test "camera: view of the origin from +z translates by -z" {
@@ -85,4 +222,129 @@ test "camera: projection is non-degenerate and targets Vulkan clip space" {
     if (p.m[5] >= 0.0)        { ret 2; }
     if (p.m[11] != 0.0 - 1.0) { ret 3; }
     ret 0;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# The projections are checked by where points land and the rays by where they
+# go, not by matrix entries: both are only ever wrong in those terms.
+
+test "camera: an orthographic projection does not foreshorten" {
+    # The defining difference. Under perspective the same object at twice the
+    # distance is half the size; under orthographic it is unchanged, which is
+    # what an isometric game is built on.
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                        10.0, 1.0, 0.0 - 100.0, 100.0);
+    var vp: Mat4 = view_proj(?c);
+
+    val near_a: Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0));
+    val near_b: Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0));
+    val far_a:  Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0 - 50.0));
+    val far_b:  Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0 - 50.0));
+
+    val near_w: f32 = near_b.x - near_a.x;
+    val far_w:  f32 = far_b.x - far_a.x;
+    if (!near_f(near_w, far_w)) { ret 1; }
+    # And a 10-unit-tall view maps one world unit to 2/10 of clip space.
+    if (!near_f(near_w, 0.2))   { ret 2; }
+    ret 0;
+}
+
+test "camera: a perspective projection does foreshorten" {
+    # The companion to the check above: if both projections behaved the same,
+    # the orthographic test would pass against a camera that ignored the mode.
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                       1.0, 1.0, 0.1, 100.0);
+    var vp: Mat4 = view_proj(?c);
+    val near_a: Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0));
+    val near_b: Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0));
+    val far_a:  Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0 - 50.0));
+    val far_b:  Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0 - 50.0));
+    if (near_f(near_b.x - near_a.x, far_b.x - far_a.x)) { ret 1; }
+    ret 0;
+}
+
+test "camera: the centre of the viewport looks straight ahead" {
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                       1.0, 16.0 / 9.0, 0.1, 100.0);
+    var r: Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
+    if (!near_f(r.origin.z, 10.0))       { ret 1; }
+    if (!near_f(r.direction.x, 0.0))     { ret 2; }
+    if (!near_f(r.direction.y, 0.0))     { ret 3; }
+    if (!near_f(r.direction.z, 0.0 - 1.0)) { ret 4; }
+    ret 0;
+}
+
+test "camera: a ray through a pixel projects back to that pixel" {
+    # The cross-check that matters. camera_ray and camera_projection are
+    # separate derivations of one transform: if they disagree, picking lands
+    # somewhere other than what was drawn and nothing reports it. Off-centre and
+    # off-axis on purpose, since the centre agrees under almost any error.
+    var c: Camera = camera_perspective(vec3(3.0, 4.0, 9.0), vec3(0.0, 1.0, 0.0),
+                                       1.1, 320.0 / 180.0, 0.1, 100.0);
+    var r: Ray = camera_ray(?c, 40.0, 150.0, 320.0, 180.0);
+    val p: Vec3 = ray_at(?r, 7.0);
+
+    var vp: Mat4 = view_proj(?c);
+    val clip: Vec3 = mat4_project_point(?vp, p);
+    val sx: f32 = (clip.x + 1.0) * 0.5 * 320.0;
+    val sy: f32 = (clip.y + 1.0) * 0.5 * 180.0;
+    if (!near_eps(sx, 40.0, 0.05))  { ret 1; }
+    if (!near_eps(sy, 150.0, 0.05) ) { ret 2; }
+    ret 0;
+}
+
+test "camera: an orthographic ray moves its origin, not its direction" {
+    # The structural difference from a perspective ray, and the thing a picking
+    # routine written only against perspective gets wrong: without foreshortening
+    # every ray is parallel, so it is the origin that has to move across the
+    # viewport.
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                        10.0, 2.0, 0.0 - 100.0, 100.0);
+    var mid:  Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
+    var edge: Ray = camera_ray(?c, 320.0, 90.0, 320.0, 180.0);
+
+    if (!near_f(mid.direction.x, edge.direction.x)) { ret 1; }
+    if (!near_f(mid.direction.z, edge.direction.z)) { ret 2; }
+    # A 10-tall view at aspect 2 is 20 wide, so the right edge is 10 across.
+    if (!near_f(edge.origin.x - mid.origin.x, 10.0)) { ret 3; }
+    ret 0;
+}
+
+test "camera: screen y down is world y down" {
+    # A ray from the lower half of the viewport must point below the view axis.
+    # Getting this backwards inverts every pick vertically, which reads as the
+    # world being upside down rather than as a broken projection.
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+                                       1.0, 1.0, 0.1, 100.0);
+    var low: Ray = camera_ray(?c, 160.0, 170.0, 320.0, 180.0);
+    if (low.direction.y >= 0.0) { ret 1; }
+    ret 0;
+}
+
+test "camera: a zero orthographic height is treated as one" {
+    # A Camera left at its zero value and marked orthographic would otherwise
+    # collapse the projection and draw nothing, reporting no error.
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0),
+                                        0.0, 1.0, 0.0 - 1.0, 1.0);
+    if (camera_ortho_height(?c) != 1.0) { ret 1; }
+    if (c.height != 0.0)                { ret 2; }
+    ret 0;
+}
+
+# The combined view-projection, which is what a draw actually applies.
+fun view_proj(c: *Camera) Mat4 {
+    var v: Mat4 = camera_view(c);
+    var p: Mat4 = camera_projection(c);
+    ret mat4_mul(?p, ?v);
+}
+
+fun near_f(a: f32, b: f32) bool {
+    ret near_eps(a, b, 0.0001);
+}
+
+fun near_eps(a: f32, b: f32, eps: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < eps;
 }

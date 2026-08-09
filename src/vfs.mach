@@ -83,11 +83,19 @@ var extra_count: usize = 0;
 # makes `mods://weapon.pack` resolve. re-registering an existing name replaces
 # its root rather than adding a second entry, so a game may call this on every
 # reload without leaking entries.
+#
+# `res` AND `user` ARE REFUSED, they are not registerable. vfs_resolve answers
+# those two from res_root and user_root before it looks at this table, so an
+# entry under either name can never be consulted. Accepting one and returning
+# true, which this used to do, is a report of something that did not happen: the
+# caller believes it has redirected `res://` and every asset then loads from
+# somewhere else. Assign res_root or user_root instead; both are public.
 # ---
 # name: scheme name, without the `://`
 # root: directory the scheme resolves against
-# ret:  false when the table is full
+# ret:  false when the table is full, or when the name is a built-in scheme
 pub fun vfs_register(name: str, root: str) bool {
+    if (str_equals(name, "res") || str_equals(name, "user")) { ret false; }
     var i: usize = 0;
     for (i < extra_count) {
         if (extras[i].used && str_equals(extras[i].name, name)) {
@@ -348,5 +356,35 @@ test "vfs: user:// derives a root when unset rather than failing" {
     if (str_len(unwrap_ok[str, str](r)) == 0) { ret 1; }
 
     user_root = saved;
+    ret 0;
+}
+
+test "vfs: the built-in schemes are refused rather than silently ignored" {
+    # An entry named res or user can never be consulted, because vfs_resolve
+    # answers those from res_root and user_root first. Accepting one and
+    # reporting success is worse than refusing: the caller believes it has
+    # redirected res:// and every asset then loads from the old root.
+    if (vfs_register("res", "/tmp/somewhere"))  { ret 1; }
+    if (vfs_register("user", "/tmp/elsewhere")) { ret 2; }
+
+    # And the refusal must not have consumed a slot or shadowed the real root.
+    var a: allo.Allocator;
+    page.make(?a);
+    val r: Result[str, str] = vfs_resolve(?a, "res://sprite.qoi");
+    if (is_err[str, str](r)) { ret 3; }
+    if (!str_equals(unwrap_ok[str, str](r), "res/sprite.qoi")) { ret 4; }
+    ret 0;
+}
+
+test "vfs: res_root is what redirects the res scheme" {
+    # The supported way to do what vfs_register("res", ...) looks like it does.
+    val saved: str = res_root;
+    res_root = "assets/packed";
+    var a: allo.Allocator;
+    page.make(?a);
+    val r: Result[str, str] = vfs_resolve(?a, "res://sprite.qoi");
+    res_root = saved;
+    if (is_err[str, str](r)) { ret 1; }
+    if (!str_equals(unwrap_ok[str, str](r), "assets/packed/sprite.qoi")) { ret 2; }
     ret 0;
 }

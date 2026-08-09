@@ -52,32 +52,31 @@ pub rec SkinnedUniforms {
     model:     Mat4;
 }
 
-# The sprite vertex stage's uniform block, matching shaders/src/sprite_vert.mach.
+# The fragment stage's tint.
 #
-# The source rect is a vec4 of origin xy and size zw in UV units, not a Rect,
-# because the shader reads four consecutive floats and Rect's field order is the
-# same but its identity is a rectangle in pixels. Converting at this boundary is
-# what keeps `Rect` free to change.
-# ---
-# projection: Pixel-space orthographic projection.
-# model:      Places the unit quad at the sprite's position and size.
-# src:        Atlas sub-rectangle as origin xy and size zw, in UV units.
-pub rec SpriteUniforms {
-    projection: Mat4;
-    model:      Mat4;
-    src:        Vec4;
-}
-
-# The sprite fragment stage's tint, matching shaders/pending/sprite_frag.mach.
-#
-# Separate from SpriteUniforms because it belongs to the fragment stage and its
-# binding differs. Text uses the same block: the glyph atlas stores coverage in
-# alpha with RGB left white, so tinting a glyph and tinting a sprite are one
-# operation.
+# Its own block rather than part of the transform block because it belongs to
+# the fragment stage and its binding differs. Text uses it too: the glyph atlas
+# stores coverage in alpha with RGB left white, so tinting a glyph and tinting a
+# sprite are one operation.
 # ---
 # colour: Multiplied into the sampled texel.
 pub rec TintUniforms {
     colour: Vec4;
+}
+
+# What the immediate-mode vertex stage reads.
+#
+# Only a projection. An immediate-mode draw list arrives already placed, in
+# pixels, so there is no model matrix to send and nothing else varies per draw:
+# the colour is per vertex and one draw covers the whole list.
+#
+# Deliberately the same 64 bytes as one matrix, and the smallest uniform block
+# boom uploads. It still occupies a whole aligned slot, because a uniform
+# descriptor's buffer offset must satisfy minUniformBufferOffsetAlignment.
+# ---
+# projection: pixels to clip space, column-major
+pub rec ScreenUniforms {
+    projection: Mat4;
 }
 
 # Convert an atlas rect in pixels to the UV vec4 the shader reads.
@@ -96,23 +95,21 @@ pub fun src_uv(r: Rect, width: u32, height: u32) Vec4 {
     ret Vec4{x: r.x / fw, y: r.y / fh, z: r.w / fw, w: r.h / fh};
 }
 
-# Convert a source rect already in UV units to the shader's vec4.
-#
-# pass_draw_sprite_uv takes its source rectangle in texture space already, so
-# this is a repack rather than a conversion. It exists so the field order the
-# shader reads is stated once: origin in xy, size in zw.
-# ---
-# r:   the sub-rectangle, in UV units
-# ret: the vec4 the shader reads
-pub fun src_uv_unit(r: Rect) Vec4 {
-    ret Vec4{x: r.x, y: r.y, z: r.w, w: r.h};
-}
-
 # --------------------------------------------------------------------- tests
 #
 # These assert the layout, not behaviour. A wrong size or offset here is read by
 # the shader as whatever happens to be at that address, so it produces no error
 # at any layer and shows up as geometry in the wrong place.
+
+test "uniform: the screen block is exactly one matrix" {
+    # The immediate-mode stage reads a projection and nothing else. A block that
+    # grew here without the shader growing to match would leave the stage
+    # reading a projection out of the wrong bytes, which draws the whole UI
+    # somewhere unrelated rather than failing.
+    if ($size_of(ScreenUniforms) != 64) { ret 1; }
+    if ($size_of(ScreenUniforms) != $size_of(Mat4)) { ret 2; }
+    ret 0;
+}
 
 test "uniform: a matrix is four consecutive vec4s" {
     # std140 lays a mat4 out as four 16-byte-aligned vec4s, which is what the
@@ -146,14 +143,6 @@ test "uniform: the mesh and skinned blocks are the same size" {
     ret 0;
 }
 
-test "uniform: the sprite block is two matrices then the source rect" {
-    # 64 + 64 + 16. A src at any other offset makes every sprite sample the
-    # wrong part of the atlas while still drawing in the right place, which
-    # reads as a texture bug rather than a layout one.
-    if ($size_of(SpriteUniforms) != 144) { ret 1; }
-    ret 0;
-}
-
 test "uniform: the tint block is one vec4" {
     if ($size_of(TintUniforms) != 16) { ret 1; }
     ret 0;
@@ -174,15 +163,6 @@ test "uniform: a sub-rect divides by the atlas, not by itself" {
     if (uv.y != 0.75)  { ret 2; }
     if (uv.z != 0.125) { ret 3; }
     if (uv.w != 0.25)  { ret 4; }
-    ret 0;
-}
-
-test "uniform: a unit-space rect keeps origin in xy and size in zw" {
-    # The shader computes src.xy + uv * src.zw, so swapping the pairs samples
-    # a rectangle of the right size from the wrong place.
-    val v: Vec4 = src_uv_unit(Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.0625});
-    if (v.x != 0.25 || v.y != 0.5)     { ret 1; }
-    if (v.z != 0.125 || v.w != 0.0625) { ret 2; }
     ret 0;
 }
 

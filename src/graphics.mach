@@ -25,9 +25,20 @@
 # what a draw is: a mesh, a skinned mesh, or a sprite. The renderer builds
 # them on demand and keeps them (boom.graphics.cache), keyed by that
 # choice and by the mesh's vertex layout, because Vulkan bakes the vertex
-# input into the pipeline too. The shaders are Mach, compiled to SPIR-V by
+# input into the pipeline too. A game supplies its own stages through
+# boom.graphics.shader instead, which is the supported way to do lighting:
+# boom ships one lit program as a default and does not intend to grow a
+# lighting system, since how a surface responds to light is the game's
+# decision. See examples/shader. The shaders are Mach, compiled to SPIR-V by
 # the build-shaders step and embedded by boom.graphics.spirv; they live in
 # shaders/.
+#
+# AN IMMEDIATE-MODE DRAW LIST GOES THROUGH pass_draw_triangles. A sprite is one
+# rectangle placed by a model matrix, which is the wrong shape for a UI, a
+# particle system or a debug overlay: those produce thousands of triangles that
+# are already in the right place, each with its own colour, rebuilt every frame.
+# Those go in one draw, through a per-frame vertex arena, in the layout
+# vertex_format_ui describes. blit emits exactly that layout.
 #
 # EVERY DRAW TAKES A UNIFORM SLOT. A Vulkan draw reads a buffer range that
 # must already hold its values when the command buffer executes, so each
@@ -87,7 +98,7 @@ fwd boom.graphics.vertex.vertex_format;
 fwd boom.graphics.vertex.vertex_format_add;
 fwd boom.graphics.vertex.vertex_format_standard;
 fwd boom.graphics.vertex.vertex_format_skinned;
-fwd boom.graphics.vertex.vertex_format_sprite;
+fwd boom.graphics.vertex.vertex_format_ui;
 fwd boom.graphics.vertex.vertex_format_is_skinned;
 
 
@@ -146,11 +157,27 @@ fwd boom.graphics.material.material;
 fwd boom.graphics.material.material_set_color;
 fwd boom.graphics.material.material_add_texture;
 fwd boom.graphics.material.material_texture;
+fwd boom.graphics.material.material_texture_named;
 
 fwd boom.graphics.camera.Camera;
 fwd boom.graphics.camera.camera_perspective;
 fwd boom.graphics.camera.camera_view;
 fwd boom.graphics.camera.camera_projection;
+fwd boom.graphics.camera.camera_orthographic;
+fwd boom.graphics.camera.camera_ortho_height;
+fwd boom.graphics.camera.camera_ray;
+fwd boom.graphics.camera.PROJECTION_PERSPECTIVE;
+fwd boom.graphics.camera.PROJECTION_ORTHOGRAPHIC;
+fwd boom.graphics.camera2d.Camera2D;
+fwd boom.graphics.camera2d.camera2d;
+fwd boom.graphics.camera2d.camera2d_identity;
+fwd boom.graphics.camera2d.camera2d_height;
+fwd boom.graphics.camera2d.camera2d_scale;
+fwd boom.graphics.camera2d.camera2d_zoom;
+fwd boom.graphics.camera2d.camera2d_matrix;
+fwd boom.graphics.camera2d.camera2d_screen_to_world;
+fwd boom.graphics.camera2d.camera2d_world_to_screen;
+fwd boom.graphics.camera2d.camera2d_visible;
 
 fwd boom.graphics.target.RenderTarget;
 fwd boom.graphics.target.render_target;
@@ -161,6 +188,7 @@ fwd boom.graphics.target.render_target_delete;
 
 fwd boom.graphics.sprite.Rect;
 fwd boom.graphics.sprite.rect;
+fwd boom.graphics.sprite.rect_overlaps;
 
 fwd boom.graphics.renderer.Renderer;
 fwd boom.graphics.renderer.renderer_init;
@@ -169,12 +197,28 @@ fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_device;
+fwd boom.graphics.fit.FitMode;
+fwd boom.graphics.fit.FIT_STRETCH;
+fwd boom.graphics.fit.FIT_CONTAIN;
+fwd boom.graphics.fit.FIT_COVER;
+fwd boom.graphics.fit.FIT_INTEGER;
+fwd boom.graphics.fit.fit_rect;
+fwd boom.graphics.fit.fit_scale;
+fwd boom.graphics.fit.fit_unproject;
+fwd boom.graphics.renderer.renderer_width;
+fwd boom.graphics.renderer.renderer_height;
 fwd boom.graphics.renderer.renderer_is_srgb;
 fwd boom.graphics.renderer.renderer_dropped;
+fwd boom.graphics.renderer.renderer_draws;
+fwd boom.graphics.renderer.renderer_culled;
+fwd boom.graphics.renderer.renderer_stream_dropped;
+fwd boom.graphics.renderer.renderer_stream_blocks;
+fwd boom.graphics.renderer.renderer_stream_reserved;
 fwd boom.graphics.renderer.PassDesc;
 fwd boom.graphics.renderer.Pass;
 fwd boom.graphics.renderer.pass_scene;
 fwd boom.graphics.renderer.pass_overlay;
+fwd boom.graphics.renderer.pass_world;
 fwd boom.graphics.renderer.pass_begin;
 fwd boom.graphics.renderer.pass_end;
 fwd boom.graphics.renderer.pass_draw;
@@ -183,6 +227,21 @@ fwd boom.graphics.renderer.pass_draw_skinned;
 fwd boom.graphics.renderer.pass_draw_skinned_material;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
+fwd boom.graphics.renderer.pass_draw_triangles;
+
+# A game's own shading. See boom.graphics.shader: a Shader is a pair of SPIR-V
+# modules, and the pipelines it needs are built underneath it, so a game that
+# writes its own lighting never names a pipeline or a render pass.
+fwd boom.graphics.shader.Shader;
+fwd boom.graphics.shader.shader;
+fwd boom.graphics.shader.shader_set_state;
+fwd boom.graphics.shader.shader_pipelines;
+fwd boom.graphics.shader.shader_delete;
+fwd boom.graphics.shader.MAX_SHADER_PIPELINES;
+fwd boom.graphics.renderer.pass_set_user;
+fwd boom.graphics.renderer.pass_draw_shaded;
+fwd boom.graphics.renderer.pass_draw_shaded_skinned;
+fwd boom.graphics.descriptor.USER_BYTES;
 
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;
@@ -206,8 +265,6 @@ fwd boom.graphics.text.text_draw;
 
 fwd boom.graphics.spirv.LIT_FRAG_SPV;
 fwd boom.graphics.spirv.MESH_VERT_SPV;
-fwd boom.graphics.spirv.SPRITE_VERT_SPV;
-fwd boom.graphics.spirv.SPRITE_FRAG_SPV;
 fwd boom.graphics.spirv.VERTEX_ENTRY;
 fwd boom.graphics.spirv.FRAGMENT_ENTRY;
 
@@ -261,7 +318,6 @@ fwd boom.graphics.pipeline.SetLayout;
 fwd boom.graphics.pipeline.set_layout;
 fwd boom.graphics.pipeline.set_layout_at;
 fwd boom.graphics.pipeline.set_layout_mesh;
-fwd boom.graphics.pipeline.set_layout_sprite;
 fwd boom.graphics.pipeline.set_layout_count;
 
 fwd boom.graphics.image.RGBA_BYTES;
@@ -289,7 +345,5 @@ fwd boom.graphics.descriptor.descriptors_bind;
 fwd boom.graphics.descriptor.descriptors_dnit;
 
 fwd boom.graphics.uniform.MeshUniforms;
-fwd boom.graphics.uniform.SpriteUniforms;
 fwd boom.graphics.uniform.TintUniforms;
 fwd boom.graphics.uniform.src_uv;
-fwd boom.graphics.uniform.src_uv_unit;
