@@ -61,6 +61,8 @@ use std.types.string.str_equals;
 
 #[embed("../res/spv/quad_vert.spv")]
 val QUAD_VERT_SPV: [_]u8;
+#[embed("../res/spv/sprite_vert.spv")]
+val SPRITE_VERT_SPV: [_]u8;
 #[embed("../res/spv/gbuf_frag.spv")]
 val GBUF_FRAG_SPV: [_]u8;
 #[embed("../res/spv/light_frag.spv")]
@@ -96,6 +98,11 @@ val QS: i32 = 64;
 # How far a shadow reaches from its occluder, in world units, which are
 # G-buffer pixels here. About four tiles of 32, which is the design's "a few".
 val SHADOW_REACH: f32 = 140.0;
+
+# The floor tile, in world units. 16 over 480x270 is 510 tiles, which is a
+# screenful of a real stage and the number that decides whether the batched path
+# was worth having.
+val TILE: i32 = 16;
 
 # The game's block, matching `rec Scene` in the light and forward stages.
 #
@@ -170,6 +177,7 @@ rec Game {
     sh_copy:  gfx.Shader;
     sh_bloom: gfx.Shader;
     sh_two:   gfx.Shader;
+    sh_gbuf_mesh: gfx.Shader;
 
     pieces:   [9]Piece;
     block:    Scene;
@@ -178,6 +186,8 @@ rec Game {
     budget:   usize;
     drawn:    usize;
     probe_two: bool;
+    unbatched: bool;
+    sprites:   usize;
     two_built: usize;
     failures: usize;
 }
@@ -356,10 +366,14 @@ fun make_target(g: *Game, d: *gfx.Device, out: *gfx.RenderTarget,
     ret true;
 }
 
-fun make_shader(out: *gfx.Shader, frag: *u8, flen: usize, name: str) bool {
-    val r: Result[bool, gfx.Error] = gfx.shader(out,
-                                                ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV),
-                                                frag, flen);
+# A shader from one of the two vertex stages and a fragment stage.
+#
+# The vertex module is a parameter rather than a constant because the mesh path
+# and the batched 2D path have different vertex layouts and different uniform
+# blocks, so a stage written for one is not valid in the other.
+fun make_shader(out: *gfx.Shader, vert: *u8, vlen: usize,
+                frag: *u8, flen: usize, name: str) bool {
+    val r: Result[bool, gfx.Error] = gfx.shader(out, vert, vlen, frag, flen);
     if (is_err[bool, gfx.Error](r)) {
         var e: gfx.Error = unwrap_err[bool, gfx.Error](r);
         print.eprintlnf("{} shader error: {}", name, gfx.error_msg(?e));
@@ -459,13 +473,19 @@ fun on_init(ctx: *Context) {
         ti = ti + 1;
     }
 
-    if (!make_shader(?g.sh_gbuf,  ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  "gbuf"))  { ret; }
-    if (!make_shader(?g.sh_light, ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), "light")) { ret; }
-    if (!make_shader(?g.sh_fwd,   ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   "fwd"))   { ret; }
-    if (!make_shader(?g.sh_copy,  ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  "copy"))  { ret; }
-    if (!make_shader(?g.sh_bloom, ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), "bloom")) { ret; }
+    if (!make_shader(?g.sh_gbuf,  ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  "gbuf"))  { ret; }
+    if (!make_shader(?g.sh_light, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), "light")) { ret; }
+    if (!make_shader(?g.sh_fwd,   ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   "fwd"))   { ret; }
+    if (!make_shader(?g.sh_copy,  ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  "copy"))  { ret; }
+    if (!make_shader(?g.sh_bloom, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), "bloom")) { ret; }
+    if (g.unbatched) {
+        # The same fragment stage against the mesh vertex layout, so the
+        # comparison differs only in how the sprites reach the GPU.
+        if (!make_shader(?g.sh_gbuf_mesh, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV),
+                         ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), "gbuf-mesh")) { ret; }
+    }
     if (g.probe_two) {
-        if (!make_shader(?g.sh_two, ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), "two")) { ret; }
+        if (!make_shader(?g.sh_two, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), "two")) { ret; }
     }
 
     # The scene: a floor, three steel plates, two walls, a crate and a lamp.
@@ -543,6 +563,82 @@ fun full_quad(p: *gfx.Pass, g: *Game, w: f32, h: f32, mat: *gfx.Material, sh: *g
     gfx.pass_draw_shaded(p, ?g.quad, mat, ?t, sh);
 }
 
+# The scene as sprite runs, grouped by material.
+#
+# Every draw here is pass_draw_sprite into the open run. The atlas a piece wears
+# is a pass-level material rather than the sprite's own texture, because the
+# fragment stages sample four quadrants of one atlas and the sprite's texture
+# slot is the first binding either way.
+fun draw_scene_batched(p: *gfx.Pass, g: *Game) {
+    val white: gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
+
+    # The floor, as a grid of tiles. One run, one draw.
+    gfx.pass_set_material(p, ?g.mats[0]);
+    # Rounded up, not down. 270 over a 16-pixel tile is 16.875, and truncating
+    # left the bottom fourteen rows of the target with no floor on them, which
+    # put one of the shadow probe points half on cleared background and inverted
+    # the comparison. The tiles overhang the target instead.
+    val cols: i32 = (GW + TILE - 1) / TILE;
+    val rows: i32 = (GH + TILE - 1) / TILE;
+    var ty: i32 = 0;
+    for (ty < rows) {
+        var tx: i32 = 0;
+        for (tx < cols) {
+            # nil rather than a texture: pass_set_material puts the atlas at
+            # binding 1, and a sprite texture would be dropped, not added.
+            gfx.pass_draw_sprite(p, nil,
+                                 gfx.rect((tx * TILE)::f32, (ty * TILE)::f32,
+                                          TILE::f32, TILE::f32), white);
+            tx = tx + 1;
+        }
+        ty = ty + 1;
+    }
+
+    # The raised layer, grouped so each material is one run rather than one per
+    # piece. Piece 0 is the floor quad the tiles replaced, so it is skipped.
+    var atlas: usize = 1;
+    for (atlas < 4) {
+        gfx.pass_set_material(p, ?g.mats[atlas]);
+        var i: usize = 1;
+        for (i < PIECE_COUNT) {
+            if (g.pieces[i].atlas == atlas) {
+                gfx.pass_draw_sprite(p, nil,
+                                     gfx.rect(g.pieces[i].x, g.pieces[i].y,
+                                              g.pieces[i].w, g.pieces[i].h), white);
+            }
+            i = i + 1;
+        }
+        atlas = atlas + 1;
+    }
+}
+
+# The same scene through one draw per sprite, for the comparison.
+#
+# Not a fallback and not reachable by default: it exists so the cost of the old
+# path is a measured number rather than an arithmetic claim about slot ceilings.
+fun draw_scene_unbatched(p: *gfx.Pass, g: *Game) {
+    val cols: i32 = (GW + TILE - 1) / TILE;
+    val rows: i32 = (GH + TILE - 1) / TILE;
+    var ty: i32 = 0;
+    for (ty < rows) {
+        var tx: i32 = 0;
+        for (tx < cols) {
+            var t: gm.Transform;
+            place(?t, (tx * TILE)::f32, (ty * TILE)::f32, TILE::f32, TILE::f32);
+            gfx.pass_draw_shaded(p, ?g.quad, ?g.mats[0], ?t, ?g.sh_gbuf_mesh);
+            tx = tx + 1;
+        }
+        ty = ty + 1;
+    }
+    var i: usize = 1;
+    for (i < PIECE_COUNT) {
+        var t: gm.Transform;
+        place(?t, g.pieces[i].x, g.pieces[i].y, g.pieces[i].w, g.pieces[i].h);
+        gfx.pass_draw_shaded(p, ?g.quad, ?g.mats[g.pieces[i].atlas], ?t, ?g.sh_gbuf_mesh);
+        i = i + 1;
+    }
+}
+
 fun on_draw(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (g.ready == 0) { ret; }
@@ -575,16 +671,26 @@ fun on_draw(ctx: *Context) {
         g.block.l0_col = gm.vec4(0.0, 0.0, 0.0, 0.0);
     }
 
-    # 1. GEOMETRY. Four attachments, one draw per piece, a game shader writing
-    # four outputs. A built-in program would be refused here by design.
+    # 1. GEOMETRY. Four attachments through the batched 2D path, which is what
+    # boom 0.11.0's pass_set_shader made possible: a run of sprites reaches the
+    # G-buffer as one draw instead of one draw and one uniform slot per sprite.
+    #
+    # THE FLOOR IS TILED RATHER THAN ONE QUAD, and that is the point of the
+    # measurement. A screenful of 16-pixel tiles at 480x270 is 510 sprites, which
+    # is the shape a real stage has and the shape that exhausts a frame's slot
+    # ring on the per-draw path. Batched, the whole floor is one draw.
+    #
+    # The pieces are drawn grouped by material, because pass_set_material closes
+    # the open run: unsorted, nine pieces of four materials would be nine runs.
     var gd: gfx.PassDesc = target_pass(?g.gbuf, 1);
     var gp: gfx.Pass = gfx.pass_begin(?g.renderer, ?gd);
-    var pi: usize = 0;
-    for (pi < PIECE_COUNT) {
-        var t: gm.Transform;
-        place(?t, g.pieces[pi].x, g.pieces[pi].y, g.pieces[pi].w, g.pieces[pi].h);
-        gfx.pass_draw_shaded(?gp, ?g.quad, ?g.mats[g.pieces[pi].atlas], ?t, ?g.sh_gbuf);
-        pi = pi + 1;
+    if (g.unbatched) {
+        draw_scene_unbatched(?gp, g);
+    }
+    or {
+        gfx.pass_set_shader(?gp, ?g.sh_gbuf);
+        draw_scene_batched(?gp, g);
+        gfx.pass_set_shader(?gp, nil);
     }
     gfx.pass_end(?gp);
 
@@ -603,16 +709,15 @@ fun on_draw(ctx: *Context) {
 
     # 3. FORWARD. The same scene lit again with every sheet reachable, because
     # the composite the deferred path wants cannot be written.
+    # Batched like the geometry pass. This one also reads the game's block at
+    # binding 4, which is what makes it the measurement of whether pass_set_user
+    # survives the batched path.
     var fd: gfx.PassDesc = target_pass(?g.scene, 1);
     var fp: gfx.Pass = gfx.pass_begin(?g.renderer, ?fd);
     gfx.pass_set_user(?fp, (?g.block):~*u8, $size_of(Scene));
-    var fi: usize = 0;
-    for (fi < PIECE_COUNT) {
-        var t: gm.Transform;
-        place(?t, g.pieces[fi].x, g.pieces[fi].y, g.pieces[fi].w, g.pieces[fi].h);
-        gfx.pass_draw_shaded(?fp, ?g.quad, ?g.mats[g.pieces[fi].atlas], ?t, ?g.sh_fwd);
-        fi = fi + 1;
-    }
+    gfx.pass_set_shader(?fp, ?g.sh_fwd);
+    draw_scene_batched(?fp, g);
+    gfx.pass_set_shader(?fp, nil);
     gfx.pass_end(?fp);
 
     # 4. BLOOM. Threshold the scene, then blur across and down.
@@ -844,7 +949,12 @@ fun on_dnit(ctx: *Context) {
     if (bgra) { cr = 2; cb = 0; }
     val cg: usize = 1;
 
-    print.printlnf("drew {} frames, {} draws, {} dropped",
+    val cols: i32 = (GW + TILE - 1) / TILE;
+    val rows: i32 = (GH + TILE - 1) / TILE;
+    g.sprites = (cols * rows)::usize + PIECE_COUNT - 1;
+    print.printlnf("geometry pass: {} sprites, batched={}",
+                   g.sprites, !g.unbatched);
+    print.printlnf("drew {} frames, {} draws, {} dropped in the last frame",
                    g.drawn, gfx.renderer_draws(?g.renderer),
                    gfx.renderer_dropped(?g.renderer));
     print.printlnf("pipelines: gbuf {} light {} fwd {} copy {} bloom {}",
@@ -1041,6 +1151,7 @@ fun on_dnit(ctx: *Context) {
     gfx.shader_delete(?g.sh_copy, d);
     gfx.shader_delete(?g.sh_bloom, d);
     if (g.probe_two) { gfx.shader_delete(?g.sh_two, d); }
+    if (g.unbatched) { gfx.shader_delete(?g.sh_gbuf_mesh, d); }
 
     var di: usize = 0;
     for (di < 4) { gfx.texture_delete(d, ?g.texes[di]); di = di + 1; }
@@ -1067,12 +1178,16 @@ fun main(argc: i64, argv: **u8) i64 {
     game.drawn     = 0;
     game.failures  = 0;
     game.probe_two = false;
+    game.unbatched = false;
 
     var argi: i64 = 1;
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
             game.budget = parse_usize(argv[argi + 1]:~str);
             argi = argi + 1;
+        }
+        if (str_equals(argv[argi]:~str, "--unbatched")) {
+            game.unbatched = true;
         }
         if (str_equals(argv[argi]:~str, "--probe-two-samplers")) {
             game.probe_two = true;

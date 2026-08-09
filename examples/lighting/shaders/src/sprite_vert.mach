@@ -1,0 +1,53 @@
+# The vertex stage for the batched 2D path.
+#
+# WHY THERE ARE TWO VERTEX STAGES IN THIS EXAMPLE. quad_vert draws a mesh: it
+# reads boom's transform block at binding 0 and takes position, normal and uv as
+# a standard vertex. The 2D batcher is a different contract entirely. Its
+# vertices arrive already placed in pixels in the layout vertex_format_ui
+# describes, and its only uniform is the projection that maps pixels to clip
+# space, because one draw covers a whole run and there is no per-sprite model
+# matrix to put anything in.
+#
+# So a shader that draws through pass_draw_sprite cannot be the shader that
+# draws through pass_draw_shaded, and swapping one for the other is a pipeline
+# built against the wrong vertex layout rather than a wrong picture.
+#
+# The world position a lighting stage needs comes free here. The batcher's
+# positions are already in target pixels, and this example's world units are
+# target pixels, so the incoming position IS the world position and no model
+# matrix has to be inverted to recover it.
+
+rec Screen {
+    projection_0: f32x4;
+    projection_1: f32x4;
+    projection_2: f32x4;
+    projection_3: f32x4;
+}
+
+#[uniform(0, 0)] var screen: Screen;
+
+#[input(0)] var in_position: f32x2;
+#[input(1)] var in_uv:       f32x2;
+
+#[output(0)] var out_uv:    f32x2;
+#[output(1)] var out_world: f32x3;
+
+#[builtin("position")] var position: f32x4;
+
+# Duplicated per stage because a SPIR-V module cannot call into another
+# (mach#2823).
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    out_uv    = in_uv;
+    out_world = f32x3{in_position[0], in_position[1], 0.0};
+    position  = mul_point(screen.projection_0, screen.projection_1,
+                          screen.projection_2, screen.projection_3,
+                          f32x4{in_position[0], in_position[1], 0.0, 1.0});
+}

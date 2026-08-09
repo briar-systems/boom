@@ -885,6 +885,22 @@ pub fun batch_flush(p: *Pass) {
     u.projection = p.projection;
     if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) { ret; }
 
+    # The game's own block, exactly as the mesh path writes it.
+    #
+    # WITHOUT THIS A BATCHED DRAW READS AN UNDEFINED BINDING 4. pass_set_user
+    # was honoured on the mesh path and silently dropped here, so a game shader
+    # that took its lighting from the block drew with whatever the slot last
+    # held. It is not a wrong picture that announces itself: a stage reading a
+    # zeroed block still draws, still samples its textures, and still writes its
+    # emissive, so what fails is only the part that depended on the block. In
+    # examples/lighting the composite went black while the lamp, the bloom and
+    # the deferred light target all stayed correct, which is the shape of bug
+    # that survives a look at the screen.
+    if (p.user != nil) {
+        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
+                                       p.user, p.user_len)) { ret; }
+    }
+
     # The 2D program always samples, so an untextured run gets the renderer's
     # white texel and `colour * texel` is the flat vertex colour. That is how a
     # solid rectangle, a tinted sprite and a glyph share one shader.
