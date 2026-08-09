@@ -1,0 +1,248 @@
+# What the tilemap path actually saves, measured rather than asserted.
+#
+# WHY THIS IS A PROGRAM AND NOT A CLAIM IN A COMMIT MESSAGE. pass_draw_tilemap
+# exists on the argument that culling a grid by its structure beats culling it a
+# cell at a time. That is an argument about a number, and the number depends on
+# how much of the field a camera sees, which is a property of the game and not
+# of the engine. So this measures it for a field the size the consumer actually
+# has and prints what it found.
+#
+# NO DEVICE, AND THEREFORE ONLY PART OF THE PICTURE. What is measured here is
+# the CPU work both paths do per frame: visiting cells, deciding whether each is
+# visible, and expanding the survivors into vertices. What is not measured is
+# what happens after that, where the tilemap path also wins: the sprite path
+# pushes six vertices into the frame's arena per tile and re-checks the open run
+# each time, and the tilemap path does that once per thirty-two tiles. Leaving
+# it out understates the difference rather than inflating it, which is the right
+# direction for a number nothing here can verify.
+#
+# The naive side is written out in full rather than called through boom, because
+# the thing being measured is what a game writes today: a loop over its own grid
+# calling pass_draw_sprite_uv, whose culling is a rectangle overlap per cell.
+
+use std.runtime;
+use std.print;
+use std.types.size.usize;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.string.str;
+use std.chrono.time.Time;
+use std.chrono.time.monotonic;
+use std.chrono.time.time_sub;
+use std.chrono.duration.Duration;
+use std.chrono.duration.duration_usec;
+use boom.graphics.batch.sprite_expand;
+use boom.graphics.batch.SPRITE_FLOATS;
+use gfx: boom.graphics;
+use gm:  boom.math;
+
+# The consumer's facility: 128 by 128 cells of 32 units.
+val COLS: usize = 128;
+val ROWS: usize = 128;
+val TILE: f32 = 32.0;
+
+# Five frames, of which index zero is the reserved empty slot, so the sheet has
+# four real tiles.
+val FRAME_COUNT: usize = 5;
+
+# A 720p window showing 512 world units vertically, which at 32-unit tiles is 16
+# rows and about 28 columns.
+val WINDOW_W: f32 = 1280.0;
+val WINDOW_H: f32 = 720.0;
+val VIEW_HEIGHT: f32 = 512.0;
+
+# How many tiles the shared staging buffer holds.
+#
+# Every cell of the field, so that no case measured here is capped. A cap would
+# make the two paths look alike exactly where they should differ most, since
+# both would stop emitting at the same point and the remaining difference would
+# be the culling alone.
+val MAX_QUADS: usize = 16384;
+
+# Frames measured per path.
+val REPS: i64 = 2000;
+
+# A field with holes in it, filled from a small linear congruential generator.
+#
+# Deterministic, so the two paths see the same map and two runs of the benchmark
+# are comparable. About one cell in seven is empty, which is what a floor plan
+# with doorways and gaps looks like; a completely full field would flatter the
+# tilemap path by giving the naive path nothing to skip.
+fun fill(grid: *u16) usize {
+    var live: usize = 0;
+    var state: u32 = 12345;
+    var i: usize = 0;
+    for (i < COLS * ROWS) {
+        state = state * 1103515245 + 12345;
+        val r: u32 = (state / 65536) % 7;
+        if (r == 0) { grid[i] = 0; }
+        or {
+            grid[i] = (r % 4 + 1)::u16;
+            live = live + 1;
+        }
+        i = i + 1;
+    }
+    ret live;
+}
+
+# What a game writes today: every cell, culled one rectangle at a time.
+#
+# ---
+# grid:    the map
+# frames:  the sheet's source rectangles
+# view:    the visible world rectangle
+# out:     where the survivors expand to
+# visited: set to how many cells the loop looked at
+# ret:     how many tiles were expanded
+fun naive_draw(grid: *u16, frames: *gfx.Rect, view: gfx.Rect, out: *f32,
+               visited: *usize) usize {
+    val tint: gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
+    var quads: usize = 0;
+    var seen: usize = 0;
+
+    var row: usize = 0;
+    for (row < ROWS) {
+        var col: usize = 0;
+        for (col < COLS) {
+            seen = seen + 1;
+            val t: u16 = grid[row * COLS + col];
+            if (t != 0) {
+                val dest: gfx.Rect = gfx.rect(col::f32 * TILE, row::f32 * TILE, TILE, TILE);
+                # This is the per-cell test the span replaces, and it is the
+                # only thing the sprite path can do with an arbitrary rectangle.
+                if (gfx.rect_overlaps(dest, view)) {
+                    val i: usize = t::usize;
+                    if (i < FRAME_COUNT && quads < MAX_QUADS) {
+                        sprite_expand(dest, frames[i], tint, ?out[quads * SPRITE_FLOATS]);
+                        quads = quads + 1;
+                    }
+                }
+            }
+            col = col + 1;
+        }
+        row = row + 1;
+    }
+    @visited = seen;
+    ret quads;
+}
+
+# The tilemap path, driven exactly as pass_draw_tilemap drives it.
+#
+# The chunk size and the cursor are the renderer's, so this measures the loop
+# that actually runs rather than an idealised one.
+fun tilemap_draw(layer: *gfx.TileLayer, sheet: *gfx.TileSheet, view: gfx.Rect,
+                 out: *f32, visited: *usize) usize {
+    val tint: gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
+    var span: gfx.TileSpan = gfx.tilemap_span(layer, view);
+    @visited = gfx.tilemap_span_cells(?span);
+
+    var quads: usize = 0;
+    var cur: gfx.TileCursor = gfx.tile_cursor(?span);
+    for (!gfx.tilemap_done(?cur, ?span)) {
+        val room: usize = MAX_QUADS - quads;
+        var take: usize = gfx.TILEMAP_CHUNK;
+        if (room < take) { take = room; }
+        if (take == 0) { ret quads; }
+        quads = quads + gfx.tilemap_expand(layer, sheet, ?span, ?cur, tint,
+                                           ?out[quads * SPRITE_FLOATS], take);
+    }
+    ret quads;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var grid: [16384]u16;
+    val live: usize = fill(?grid[0]);
+
+    var frames: [5]gfx.Rect;
+    frames[0] = gfx.rect(0.0, 0.0, 0.0, 0.0);
+    frames[1] = gfx.rect(0.0, 0.0, 0.5, 0.5);
+    frames[2] = gfx.rect(0.5, 0.0, 0.5, 0.5);
+    frames[3] = gfx.rect(0.0, 0.5, 0.5, 0.5);
+    frames[4] = gfx.rect(0.5, 0.5, 0.5, 0.5);
+
+    var layer: gfx.TileLayer = gfx.tile_layer(?grid[0], COLS, ROWS, TILE, gm.vec2(0.0, 0.0));
+    var sheet: gfx.TileSheet = gfx.tile_sheet(nil, ?frames[0], FRAME_COUNT);
+
+    print.printlnf("grid            {} x {} cells of {} units, {} non-empty",
+                   COLS, ROWS, TILE, live);
+    print.printlnf("window          {} x {}", WINDOW_W, WINDOW_H);
+    print.printlnf("frames measured {} per path per case", REPS);
+
+    # Three cameras, because the answer is a function of how much of the field
+    # is on screen and one number would hide that. The last one is the case
+    # where this path cannot win, and it is here so the result is not only the
+    # flattering half of the range. Every camera is parked in the middle of the
+    # field, which is the placement that favours the tilemap path least: near a
+    # corner the naive loop still walks the whole grid while the span halves.
+    val mid: f32 = COLS::f32 * TILE * 0.5;
+    var play: gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), VIEW_HEIGHT);
+    var wide: gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), VIEW_HEIGHT * 4.0);
+    var all:  gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), ROWS::f32 * TILE);
+
+    # One buffer for every case, because a per-case stack array of this size is
+    # megabytes and there is no reason to have three of them alive.
+    var out: [786432]f32;
+
+    var bad: bool = false;
+    if (!run_case("playing", ?grid[0], ?frames[0], ?layer, ?sheet, ?play, ?out[0])) { bad = true; }
+    if (!run_case("zoomed out 4x", ?grid[0], ?frames[0], ?layer, ?sheet, ?wide, ?out[0])) { bad = true; }
+    if (!run_case("whole field on screen", ?grid[0], ?frames[0], ?layer, ?sheet, ?all, ?out[0])) { bad = true; }
+    if (bad) { ret 1; }
+    ret 0;
+}
+
+# Measure one camera and print what it found.
+#
+# ret: false when the two paths disagreed about what to draw, which makes the
+#      timing meaningless rather than merely uninteresting
+fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
+             sheet: *gfx.TileSheet, camera: *gfx.Camera2D, out: *f32) bool {
+    val view: gfx.Rect = gfx.camera2d_visible(camera, WINDOW_W, WINDOW_H);
+
+    var naive_cells: usize = 0;
+    var tile_cells:  usize = 0;
+    val naive_quads: usize = naive_draw(grid, frames, view, out, ?naive_cells);
+    val tile_quads:  usize = tilemap_draw(layer, sheet, view, out, ?tile_cells);
+
+    print.println("");
+    print.printlnf("--- {}", label);
+    print.printlnf("visible rect    {} x {} world units", view.w, view.h);
+    print.printlnf("cells visited   naive {}   tilemap {}", naive_cells, tile_cells);
+    print.printlnf("quads emitted   naive {}   tilemap {}", naive_quads, tile_quads);
+
+    # The two paths have to draw the same thing. A tilemap that is fast because
+    # it drew less is not a result, so the counts are compared rather than
+    # assumed, and the benchmark says so where they differ.
+    if (naive_quads != tile_quads) {
+        print.println("MISMATCH: the two paths emitted different tile counts");
+        ret false;
+    }
+
+    var sink: usize = 0;
+    var t0: Time = monotonic();
+    var k: i64 = 0;
+    for (k < REPS) {
+        sink = sink + naive_draw(grid, frames, view, out, ?naive_cells);
+        k = k + 1;
+    }
+    val naive_us: i64 = duration_usec(time_sub(monotonic(), t0));
+
+    var t1: Time = monotonic();
+    k = 0;
+    for (k < REPS) {
+        sink = sink + tilemap_draw(layer, sheet, view, out, ?tile_cells);
+        k = k + 1;
+    }
+    val tile_us: i64 = duration_usec(time_sub(monotonic(), t1));
+
+    print.printlnf("naive           {} us per frame", naive_us::f64 / REPS::f64);
+    print.printlnf("tilemap         {} us per frame", tile_us::f64 / REPS::f64);
+    if (tile_us > 0) {
+        print.printlnf("speedup         {}x", naive_us::f64 / tile_us::f64);
+    }
+    # Read back, so neither loop can be discarded as having no effect.
+    print.printlnf("checksum        {} {}", sink, out[0]);
+    ret true;
+}
