@@ -11,19 +11,15 @@
 # gfx.Shader. They spin together, and if the hatch is wired correctly they look
 # identical.
 #
-# WHAT THIS PROVES, AND WHAT IT DOES NOT. The shader here is built from boom's
-# own embedded modules, because a game's SPIR-V has to come from somewhere and
-# this example does not compile any. So it proves the plumbing end to end -- that
-# a pipeline is built against the pass in use, bound, and drawn through, and that
-# the descriptor set the engine binds satisfies a shader that did not come from
-# the cache. It does not prove that an arbitrary game shader compiles, which is
-# a question for the shader compiler rather than for this API.
+# THE SHADERS ARE THIS EXAMPLE'S OWN, in shaders/, compiled to SPIR-V by a build
+# step and embedded below. boom does not compile them and does not know what is
+# in them. That is the whole arrangement being demonstrated: a game carries a
+# spirv project of its own, and the engine takes two byte buffers.
 #
-# It also sets a game uniform block through gfx.pass_set_user. The built-in
-# fragment stage does not read binding 4, so nothing on screen depends on it;
-# what is being checked is that writing it costs a shaded draw nothing and
-# upsets no validation. A game's own fragment stage declares that binding and
-# reads its lighting parameters out of it.
+# The fragment stage shades entirely from binding 4, the block gfx.pass_set_user
+# delivers, so the right-hand cube is evidence rather than decoration: if that
+# descriptor were not reaching the shader it would be flat, black, or different
+# every frame, not subtly off.
 #
 # The assets are the cube example's, referenced rather than copied: two binary
 # files duplicated in a repository is two files to keep in step. Run it from this
@@ -53,12 +49,22 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
 
+# The game's compiled stages. Produced by the build-shaders step in mach.toml,
+# which is why the artifact declares `need` on it: an embed is not an edge in
+# the build graph, so nothing would otherwise have been asked to produce these.
+#[embed("../res/spv/game_vert.spv")]
+val GAME_VERT_SPV: [_]u8;
+#[embed("../res/spv/game_frag.spv")]
+val GAME_FRAG_SPV: [_]u8;
+
 # What a game's shader reads at binding 4.
 #
 # Its layout is the game's business: boom copies the bytes and never looks at
 # them. The only rule is that it fits in gfx.USER_BYTES and matches what the
 # shader declares, and the usual std140 rules apply, which is why the direction
-# is a vec4 rather than a vec3.
+# is a vec4 rather than a vec3. The matching declaration is `rec Light` in
+# shaders/src/game_frag.mach, and nothing checks that the two agree: a mismatch
+# reads the colour out of the direction's padding and still draws.
 rec Light {
     direction: gm.Vec4;
     colour:    gm.Vec4;
@@ -129,12 +135,9 @@ fun on_init(ctx: *Context) {
     # THE WHOLE OF THE HATCH. Two SPIR-V modules in, a Shader out. Nothing is
     # built yet: the pipelines a shader needs depend on the render pass and the
     # vertex layout it is drawn with, and neither is known until a draw.
-    #
-    # A game would pass its own compiled modules here, most likely from an
-    # #[embed]. These are boom's, for the reason in the header.
     val sr: Result[bool, gfx.Error] = gfx.shader(?g.shader,
-                                                 ?gfx.MESH_VERT_SPV[0], $length_of(gfx.MESH_VERT_SPV),
-                                                 ?gfx.LIT_FRAG_SPV[0],  $length_of(gfx.LIT_FRAG_SPV));
+                                                 ?GAME_VERT_SPV[0], $length_of(GAME_VERT_SPV),
+                                                 ?GAME_FRAG_SPV[0], $length_of(GAME_FRAG_SPV));
     if (is_err[bool, gfx.Error](sr)) {
         var e: gfx.Error = unwrap_err[bool, gfx.Error](sr);
         print.eprintlnf("shader error: {}", gfx.error_msg(?e));

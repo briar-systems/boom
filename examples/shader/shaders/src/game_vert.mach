@@ -1,0 +1,73 @@
+# The game's vertex stage.
+#
+# Identical in shape to what boom's own mesh stage does, because the engine's
+# contract is fixed: binding 0 holds the model-view-projection and the model
+# matrix as eight f32x4 columns, and the vertex inputs are position, normal and
+# uv at locations 0, 1 and 2, which is what a standard boom mesh uploads.
+#
+# A game is free to write something else entirely here. What it is not free to
+# do is disagree with the vertex layout of the mesh it draws, because that is
+# baked into the pipeline and mismatching it is a build failure at pipeline
+# creation rather than a wrong picture.
+#
+# This one passes the world-space position through as well, which boom's stage
+# does not, because the fragment stage below wants a view direction.
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+#[uniform(0, 0)] var matrices: Matrices;
+
+#[input(0)] var in_position: f32x3;
+#[input(1)] var in_normal:   f32x3;
+#[input(2)] var in_uv:       f32x2;
+
+#[output(0)] var out_normal: f32x3;
+#[output(1)] var out_uv:     f32x2;
+#[output(2)] var out_world:  f32x3;
+
+#[builtin("position")] var position: f32x4;
+
+# A 4x4 transform arrives as its four columns, which is how std140 lays out a
+# mat4 and therefore how boom uploads a Mat4 unchanged. The product is a
+# combination of those columns rather than four dot products, because the
+# columns are what is in hand; taking dot products would need the rows.
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+# A direction takes the upper-left 3x3, so it rotates with the model without
+# picking up its translation.
+fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
+    val r: f32x4 = c0 * f32x4{v[0], v[0], v[0], v[0]}
+                 + c1 * f32x4{v[1], v[1], v[1], v[1]}
+                 + c2 * f32x4{v[2], v[2], v[2], v[2]};
+    ret f32x3{r[0], r[1], r[2]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    val p: f32x4 = f32x4{in_position[0], in_position[1], in_position[2], 1.0};
+
+    position = mul_point(matrices.mvp_0, matrices.mvp_1,
+                         matrices.mvp_2, matrices.mvp_3, p);
+
+    val w: f32x4 = mul_point(matrices.model_0, matrices.model_1,
+                             matrices.model_2, matrices.model_3, p);
+    out_world = f32x3{w[0], w[1], w[2]};
+
+    out_normal = mul_dir(matrices.model_0, matrices.model_1,
+                         matrices.model_2, in_normal);
+    out_uv = in_uv;
+}

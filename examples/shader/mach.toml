@@ -35,6 +35,24 @@ entry = "main.mach"
 out = "bin/shader"
 targets = ["*"]
 link = []
+need = ["build-shaders"]
+
+# The game's own shaders, compiled to SPIR-V and embedded into the binary. This
+# is the shape a game copies: boom does not compile shaders and does not need
+# to, so a game that wants its own carries a spirv project of its own.
+#
+# The artifact above declares `need` on this step because `#[embed]` is not an
+# edge in the build graph (mach#2887): without it the embed would look for a
+# file nothing had been asked to produce, and fail on a fresh checkout while
+# working on every machine that had built once.
+#
+# The modules are named in the copy rather than globbed, for the reason boom's
+# own build step learned: a glob takes whatever is in the directory, including
+# the output of a shader that has since been deleted.
+[step.build-shaders]
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in game_vert game_frag; do cp shaders/out/obj/gameshaders/$m.spv res/spv/$m.spv; done"
+in  = ["shaders/src/*.mach", "shaders/mach.toml"]
+out = ["res/spv/game_vert.spv", "res/spv/game_frag.spv"]
 need = []
 
 # A path dep, not a branch pin: the example is a standalone consumer of boom,

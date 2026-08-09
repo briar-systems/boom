@@ -1,0 +1,48 @@
+# The game's own shaders.
+#
+# A separate project because it targets spirv while the game targets the host,
+# and a project builds for one target. This is the shape a game copies: two
+# stages, compiled to SPIR-V, embedded into the binary and handed to
+# gfx.shader at startup. boom does not compile them and does not need to.
+
+[project]
+id      = "gameshaders"
+version = "0.1.0"
+src     = "src"
+out     = "out"
+
+[target.spirv]
+isa = "spirv"
+os  = "freestanding"
+abi = "spirv"
+of  = "spv"
+
+[profile.debug]
+opt   = 0
+debug = false
+simd  = "scalarize"
+
+[profile.release]
+opt   = 2
+debug = false
+simd  = "scalarize"
+
+[artifact.game_vert]
+kind    = "bin"
+entry   = "game_vert.mach"
+out     = "game_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[artifact.game_frag]
+kind    = "bin"
+entry   = "game_frag.mach"
+out     = "game_frag.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
+[dep.mach-shader]
+git = "https://github.com/briar-systems/mach-shader"
+ref = "branch/main"
