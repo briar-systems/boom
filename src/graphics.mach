@@ -264,6 +264,8 @@ fwd boom.graphics.shader.shader_pipelines;
 fwd boom.graphics.shader.shader_delete;
 fwd boom.graphics.shader.MAX_SHADER_PIPELINES;
 fwd boom.graphics.renderer.pass_set_user;
+fwd boom.graphics.renderer.pass_set_shader;
+fwd boom.graphics.renderer.pass_set_material;
 fwd boom.graphics.renderer.pass_draw_shaded;
 fwd boom.graphics.renderer.pass_draw_shaded_skinned;
 fwd boom.graphics.descriptor.USER_BYTES;

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-08-09
+
+### Added
+- graphics: **`pass_set_shader` and `pass_set_material` on a 2D pass.** A batched
+  sprite run was locked to the built-in UI program and to a single texture, which
+  kept the entire 2D path out of a deferred geometry pass: that program declares
+  one colour output, and the run carried one texture, so it could neither write
+  four attachments nor read a material's four sheets.
+
+  A deferred game had to fall back to `pass_draw_shaded`, one draw and one
+  descriptor slot per sprite. A screenful of floor at 32 units a cell is around
+  510 of them, so the whole floor cost a frame's slots and the raised layer had
+  nothing left.
+
+  Setting either flushes the open run, so a run never spans two programs or two
+  materials. The multi-attachment refusal in `batch_flush` now applies only when
+  no shader is set, because a game's shader declares its own outputs.
+
 ## [0.10.0] - 2026-08-09
 
 ### Fixed

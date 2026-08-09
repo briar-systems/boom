@@ -628,6 +628,20 @@ pub rec Pass {
     # this pass's render pass, so it cannot survive pass_end.
     batch:      Batch2D;
 
+    # What the 2D batch draws with, when a game has replaced the defaults.
+    #
+    # A batched sprite run used to be locked to the built-in UI program and to a
+    # single texture, which is what kept the whole 2D path out of a deferred
+    # geometry pass: that program declares one colour output and the run carried
+    # one texture, so it could neither write four attachments nor read a
+    # material's four sheets. A deferred game had to fall back to one draw per
+    # sprite, and a screenful of floor is five hundred of them.
+    #
+    # Setting either flushes the open run, so a run never spans two programs or
+    # two materials.
+    shader2d:   *Shader;
+    mat2d:      *Material;
+
     # What this pass can see, resolved once when it opens.
     #
     # Both are derived from the matrices above, so they are built here rather
@@ -675,6 +689,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
     batch_reset(?p.batch);
+    p.shader2d = nil;
+    p.mat2d    = nil;
     p.cull     = d.cull != 0;
     p.user     = nil;
     p.user_len = 0;
@@ -840,7 +856,10 @@ pub fun batch_flush(p: *Pass) {
     # multi-attachment pass is a deferred geometry pass and belongs to a game's
     # own Shader. Counting the refusal rather than submitting an invalid
     # pipeline is the difference between a reported drop and a device loss.
-    if (p.targets != 1) {
+    # Only the built-in program is limited to one attachment. A game's own
+    # shader declares its own outputs, so a multi-attachment pass is legal once
+    # one is set.
+    if (p.targets != 1 && p.shader2d == nil) {
         if (p.batch.count != 0) { p.renderer.dropped = p.renderer.dropped + 1; }
         batch_reset(?p.batch);
         ret;
@@ -874,12 +893,19 @@ pub fun batch_flush(p: *Pass) {
     # No tint block: the colour is per vertex. Passing 0 for its size is what
     # tells the descriptor layer binding 2 is not part of this draw.
     var views2d: [4]vk.ImageView;
-    fill_views(r, ?views2d[0], tex);
+    if (p.mat2d != nil) { fill_views_mat(r, ?views2d[0], p.mat2d, tex); }
+    or                  { fill_views(r, ?views2d[0], tex); }
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
                           $size_of(ScreenUniforms)::u64, ?views2d[0], r.sampler,
                           0, 0);
 
-    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    var pipe: *Pipeline = nil;
+    if (p.shader2d != nil) {
+        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, p.targets, ?r.ui_format);
+    }
+    or {
+        pipe = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
         ret;
@@ -1004,6 +1030,27 @@ fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *
         if (src2 == nil) { src2 = ?r.white; }
         out[0] = texture_view(src2);
     }
+}
+
+# Draw the 2D runs that follow with a game's own shader.
+#
+# Passing nil restores the built-in program. Flushes first, so the run already
+# open is drawn with the program it was pushed for.
+pub fun pass_set_shader(p: *Pass, sh: *Shader) {
+    if (p.shader2d == sh) { ret; }
+    batch_flush(p);
+    p.shader2d = sh;
+}
+
+# Bind a material's textures on the 2D runs that follow, rather than the single
+# texture a sprite carries.
+#
+# The sprite's own texture stays the first binding, so a material supplying only
+# companion channels does not have to repeat it.
+pub fun pass_set_material(p: *Pass, mat: *Material) {
+    if (p.mat2d == mat) { ret; }
+    batch_flush(p);
+    p.mat2d = mat;
 }
 
 # Set the game's own uniform block for the draws that follow.
