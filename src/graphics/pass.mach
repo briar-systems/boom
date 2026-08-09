@@ -128,16 +128,38 @@ fun clamp_count(count: usize) usize {
 # format: The colour format, from Vk.color_format.
 # final:  The layout to leave the colour attachment in.
 pub fun pass_loading(format: i32, final: i32) PassOptions {
+    var fmt: i32 = format;
+    ret pass_loading_mrt(?fmt, 1, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, final);
+}
+
+# The multiple-attachment form of pass_loading, with the entry layout named.
+#
+# THE ENTRY LAYOUT IS NOT ALWAYS COLOR_ATTACHMENT_OPTIMAL. The window's resume
+# pass enters attachments the suspended pass left mid-render, so for it that is
+# right. An offscreen target enters in whatever its own pass left behind, which
+# is SHADER_READ_ONLY_OPTIMAL, because the point of a target is that something
+# samples it afterwards. Naming the wrong one here does not fail to create the
+# pass: it declares a layout the image is not in, and the contents the load was
+# supposed to preserve are undefined.
+# ---
+# formats: count attachment formats
+# count:   1 to MAX_COLOR_ATTACHMENTS
+# initial: the layout the colour attachments are already in
+# final:   the layout to leave them in
+pub fun pass_loading_mrt(formats: *i32, count: usize, initial: i32, final: i32) PassOptions {
     var o: PassOptions;
-    o.color_count   = 1;
+    o.color_count   = clamp_count(count);
     o.color_load    = vk.ATTACHMENT_LOAD_OP_LOAD;
-    o.color_initial = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    o.color_initial = initial;
     o.color_final   = final;
     o.depth_load    = vk.ATTACHMENT_LOAD_OP_LOAD;
     o.depth_initial = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     var i: usize = 0;
-    for (i < MAX_COLOR_ATTACHMENTS) { o.color_formats[i] = 0; i = i + 1; }
-    o.color_formats[0] = format;
+    for (i < MAX_COLOR_ATTACHMENTS) {
+        if (i < o.color_count && formats != nil) { o.color_formats[i] = formats[i]; }
+        or                                       { o.color_formats[i] = 0; }
+        i = i + 1;
+    }
     ret o;
 }
 
@@ -310,5 +332,47 @@ test "pass: a clearing pass discards, a loading pass preserves" {
     if (b.depth_load    != vk.ATTACHMENT_LOAD_OP_LOAD)    { ret 5; }
     if (b.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) { ret 6; }
     if (b.depth_initial != vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) { ret 7; }
+    ret 0;
+}
+
+test "pass: a loading pass differs from a clearing one only where compatibility allows" {
+    # These two are used interchangeably with one set of pipelines, which is
+    # only legal because render pass compatibility exempts load and store
+    # operations and attachment layouts. Every other member must match, or a
+    # pipeline built against one is invalid in the other and the diagnostic
+    # names two render passes rather than this line.
+    var fmts: [4]i32 = [4]i32{7, 8, 9, 10};
+    val c: PassOptions = pass_clearing_mrt(?fmts[0], 3, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    val l: PassOptions = pass_loading_mrt(?fmts[0], 3,
+                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (c.color_count != l.color_count) { ret 1; }
+    var i: usize = 0;
+    for (i < c.color_count) {
+        if (c.color_formats[i] != l.color_formats[i]) { ret 2; }
+        i = i + 1;
+    }
+
+    # And they must actually differ in the load op, or the loading pass clears.
+    if (c.color_load != vk.ATTACHMENT_LOAD_OP_CLEAR) { ret 3; }
+    if (l.color_load != vk.ATTACHMENT_LOAD_OP_LOAD)  { ret 4; }
+    if (l.depth_load != vk.ATTACHMENT_LOAD_OP_LOAD)  { ret 5; }
+    ret 0;
+}
+
+test "pass: a loading pass enters in the layout it is told, not a fixed one" {
+    # The window's resume pass enters attachments a suspended pass left
+    # mid-render. An offscreen target enters in SHADER_READ_ONLY_OPTIMAL,
+    # because that is where its own pass leaves it. Hardcoding either one makes
+    # the other preserve nothing, and the pass still creates successfully.
+    var fmt: i32 = 7;
+    val target: PassOptions = pass_loading_mrt(?fmt, 1,
+                                               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (target.color_initial != vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) { ret 1; }
+
+    val window: PassOptions = pass_loading(7, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (window.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) { ret 2; }
+    if (window.color_final != vk.IMAGE_LAYOUT_PRESENT_SRC_KHR)            { ret 3; }
     ret 0;
 }
