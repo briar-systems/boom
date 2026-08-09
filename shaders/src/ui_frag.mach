@@ -9,10 +9,9 @@
 # There is no tint uniform. The colour is per vertex, because one draw covers a
 # whole draw list and a panel's background, border and text differ inside it.
 
-#[spirv_op("core", "OpImageSampleImplicitLod")]
-fun sample(s: sampler2d, uv: f32x2) f32x4;
+use tex: shader.texture;
 
-#[sampler(0, 1)] var atlas: sampler2d;
+#[sampler(0, 1)] var atlas: tex.Sampler2D;
 
 #[input(0)] var in_uv:     f32x2;
 #[input(1)] var in_colour: f32x4;
@@ -21,5 +20,5 @@ fun sample(s: sampler2d, uv: f32x2) f32x4;
 
 #[stage("fragment")]
 fun frag_main() {
-    out_colour = sample(atlas, in_uv) * in_colour;
+    out_colour = tex.sample_2d(atlas, in_uv) * in_colour;
 }

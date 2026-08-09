@@ -100,17 +100,18 @@ def parse(text):
 # chosen. Adding an entry is the moment to also enable the matching feature in
 # boom.graphics.vk, and to say here what forced it.
 ALLOWED_CAPABILITIES = {
-    # Core to every SPIR-V shader module.
+    # Core to every SPIR-V shader module, and as of mach 4.18.0 the only one any
+    # of them declares. Int64 was here until then, forced by codegen rather than
+    # by any shader (mach#2878), and boom had to request shaderInt64 to match.
     "Shader": "the baseline capability every module declares",
-    # From codegen, not from the shaders. An optional VkPhysicalDeviceFeatures
-    # bit that boom must therefore request, narrowing the devices it runs on.
-    "Int64": "mach#2878: 32-bit array indices lower to 64-bit locals",
 }
 
 # Capabilities that must be matched by a feature request at device creation.
-REQUIRES_FEATURE = {
-    "Int64": "shaderInt64",
-}
+#
+# Empty, and boom passes no features at all. An entry here is a device the
+# engine no longer runs on, so it belongs with the matching request in
+# boom.graphics.vk and a note saying what forced it.
+REQUIRES_FEATURE = {}
 
 
 def check_capabilities(module):

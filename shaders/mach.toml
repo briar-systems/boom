@@ -54,7 +54,7 @@ need    = []
 
 [dep.mach-shader]
 git = "https://github.com/briar-systems/mach-shader"
-ref = "tag/0.1.0"
+ref = "branch/main"
 
 [artifact.ui_vert]
 kind    = "bin"
