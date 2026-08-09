@@ -39,6 +39,7 @@ use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
+use boom.graphics.pipeline.sampler_binding;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_map;
@@ -55,6 +56,13 @@ use boom.graphics.uniform.TintUniforms;
 # A line of text is one draw per glyph, so this is sized for a screenful of
 # them rather than for a handful of materials.
 pub val MAX_SLOTS: usize = 512;
+
+# Combined image samplers a draw binds, which is a Material's MAX_TEXTURES.
+#
+# Every one is written every draw. A shader sampling a slot the material left
+# empty must read a defined texture rather than whatever the previous draw put
+# in that set, so the caller supplies a fallback for the unset ones.
+pub val MAX_SAMPLERS: usize = 4;
 
 # The alignment every uniform descriptor's buffer offset must satisfy.
 #
@@ -208,16 +216,23 @@ pub fun descriptors_init(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout
 
     val total: u32 = (MAX_SLOTS * MAX_FRAMES_IN_FLIGHT)::u32;
 
-    # A pool is sized per descriptor type, not per set, and a set does not hold
-    # one of each. The sprite layout holds two uniform buffers, the vertex
-    # stage's transform block and the fragment stage's tint, so a pool sized at
-    # one uniform per set runs out with an error naming the pool rather than
-    # the layout that caused it.
+    # A pool is sized per descriptor type, not per set, and a set consumes what
+    # its LAYOUT declares rather than what a draw writes. So these counts come
+    # from set_layout_full and must move whenever it does.
+    #
+    # set_layout_full declares three uniform buffers (0, 2 and 4), four combined
+    # image samplers (1, 5, 6 and 7) and one storage buffer (3).
+    #
+    # The uniform count was two per set and should always have been three, since
+    # binding 4 has been in the layout as long as the game's own block has. Every
+    # driver this has run on allocated the sets anyway; a stricter one would have
+    # failed with an out-of-pool-memory error naming the pool rather than the
+    # layout that caused it.
     var sizes: [3]vk.DescriptorPoolSize;
     sizes[0].type            = vk.DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    sizes[0].descriptorCount = total * 2;
+    sizes[0].descriptorCount = total * 3;
     sizes[1].type            = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = total;
+    sizes[1].descriptorCount = total * MAX_SAMPLERS::u32;
     sizes[2].type            = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
     sizes[2].descriptorCount = total;
 
@@ -464,10 +479,19 @@ pub fun descriptors_write_slot_at(d: *Descriptors, frame: usize, slot: usize, of
 # offset and must satisfy minUniformBufferOffsetAlignment, which is why it is
 # COLOUR_OFFSET and not the size of the transform block.
 pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize,
-                              size: u64, view: vk.ImageView, sampler: vk.Sampler,
+                              size: u64, views: *vk.ImageView, sampler: vk.Sampler,
                               tint_offset: u64, tint_size: u64) bool {
     if (!d.ready || slot >= MAX_SLOTS || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (view == nil || sampler == nil) { ret false; }
+    if (views == nil || sampler == nil) { ret false; }
+    # Every sampler binding is written every draw, so a shader sampling a slot
+    # the material never filled reads a defined texture rather than whatever the
+    # last draw left in the set. The caller supplies the fallback; the renderer
+    # uses its white texel, which makes an unset slot a multiply by one.
+    var ti2: usize = 0;
+    for (ti2 < MAX_SAMPLERS) {
+        if (views[ti2] == nil) { ret false; }
+        ti2 = ti2 + 1;
+    }
     if (tint_size > 0 && (tint_offset % UNIFORM_ALIGN::u64) != 0) { ret false; }
     val set:  vk.DescriptorSet = d.sets[set_index(slot, frame)];
     val base: u64 = slot_offset(slot);
@@ -482,10 +506,14 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     ti.offset = base + tint_offset;
     ti.range  = tint_size;
 
-    var ii: vk.DescriptorImageInfo;
-    ii.sampler     = sampler;
-    ii.imageView   = view;
-    ii.imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    var ii: [4]vk.DescriptorImageInfo;
+    var ij: usize = 0;
+    for (ij < MAX_SAMPLERS) {
+        ii[ij].sampler     = sampler;
+        ii[ij].imageView   = views[ij];
+        ii[ij].imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        ij = ij + 1;
+    }
 
     # The game's own block, always bound. A shader that does not declare
     # binding 4 simply never reads it, and one that does must not find an
@@ -496,7 +524,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     ui.offset = base + USER_OFFSET::u64;
     ui.range  = USER_BYTES::u64;
 
-    var writes: [4]vk.WriteDescriptorSet;
+    var writes: [7]vk.WriteDescriptorSet;
     var n: u32 = 0;
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -511,17 +539,21 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].pTexelBufferView = nil;
     n = n + 1;
 
-    writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[n].pNext            = nil;
-    writes[n].dstSet           = set;
-    writes[n].dstBinding       = 1;
-    writes[n].dstArrayElement  = 0;
-    writes[n].descriptorCount  = 1;
-    writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[n].pImageInfo       = ?ii;
-    writes[n].pBufferInfo      = nil;
-    writes[n].pTexelBufferView = nil;
-    n = n + 1;
+    var si: usize = 0;
+    for (si < MAX_SAMPLERS) {
+        writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[n].pNext            = nil;
+        writes[n].dstSet           = set;
+        writes[n].dstBinding       = sampler_binding(si);
+        writes[n].dstArrayElement  = 0;
+        writes[n].descriptorCount  = 1;
+        writes[n].descriptorType   = vk.DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[n].pImageInfo       = ?ii[si];
+        writes[n].pBufferInfo      = nil;
+        writes[n].pTexelBufferView = nil;
+        n = n + 1;
+        si = si + 1;
+    }
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[n].pNext            = nil;

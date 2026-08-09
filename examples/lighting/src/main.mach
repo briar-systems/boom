@@ -652,10 +652,24 @@ fun on_draw(ctx: *Context) {
 
     # The two-sampler measurement, once, before anything else can be blamed for
     # the validation output it produces.
-    if (g.probe_two && g.drawn == 0) {
+    # Drawn on the first frame so its validation output cannot be blamed on
+    # anything else, and again on the last so the readback survives: probe1 is
+    # rewritten by a copy pass every frame, and reading it after 40 of those
+    # measures the copy rather than this. That cost me a red check that was
+    # telling the truth about the wrong target.
+    if (g.probe_two && (g.drawn == 0 || g.drawn + 1 == g.budget)) {
+        # TWO DISTINCT TEXTURES, NOT ONE TWICE. The stage adds its two samples,
+        # so the readback can tell three outcomes apart: the second sampler read
+        # the emissive attachment, or it read the renderer's white fallback and
+        # saturated every texel, or it read something else entirely. One texture
+        # bound twice would look identical to the first of those and prove
+        # nothing.
+        var tmat: gfx.Material = gfx.material();
+        gfx.material_add_texture(?tmat, "u_albedo",   gfx.render_target_texture_at(?g.gbuf, 0));
+        gfx.material_add_texture(?tmat, "u_emissive", gfx.render_target_texture_at(?g.gbuf, 3));
         var xd: gfx.PassDesc = target_pass(?g.probe1, 1);
         var xp: gfx.Pass = gfx.pass_begin(?g.renderer, ?xd);
-        full_quad(?xp, g, GW::f32, GH::f32, ?smat, ?g.sh_two);
+        full_quad(?xp, g, GW::f32, GH::f32, ?tmat, ?g.sh_two);
         gfx.pass_end(?xp);
         g.two_built = gfx.shader_pipelines(?g.sh_two);
     }
@@ -839,6 +853,23 @@ fun on_dnit(ctx: *Context) {
                    gfx.shader_pipelines(?g.sh_bloom));
     if (g.probe_two) {
         print.printlnf("two-sampler probe: the shader built {} pipeline(s)", g.two_built);
+        # A pipeline count is not the measurement. The old layout built one too,
+        # with a sampler declared where the layout kept a uniform buffer, and
+        # read that buffer's bytes as an image. What settles it is whether the
+        # second sampler read the texture it was given.
+        if (read(g, d, ?g.probe1, "two-sampler")) {
+            # The lamp is bright in emissive and the floor is black in it, so
+            # adding albedo and emissive must lift the lamp far above the floor
+            # and leave the floor near its albedo. A second sampler reading the
+            # white fallback would saturate both and flatten the difference.
+            val lamp_v:  f32 = patch(GW, 430, 40, cr);
+            val floor_v: f32 = patch(GW, 280, 120, cr);
+            print.printlnf("  two samplers: lamp {} floor {}", lamp_v::i64, floor_v::i64);
+            check(g, lamp_v > floor_v + 40.0,
+                  "the second sampler read the emissive attachment");
+            check(g, floor_v < 200.0,
+                  "the second sampler did not read the white fallback");
+        }
     }
     print.printlnf("readback channel order: bgra={}", bgra);
 
@@ -849,6 +880,14 @@ fun on_dnit(ctx: *Context) {
     val ay: i32 = 120;
     val bx: i32 = 212;
     val by: i32 = 256;
+
+    # In two-sampler mode probe1 holds that probe's output rather than a copy of
+    # attachment 1, so the flat-normal assertions below would be reading someone
+    # else's picture. Skipped out loud rather than left to pass on the wrong
+    # data.
+    if (g.probe_two) {
+        print.println("note: attachment 1 checks are skipped, probe1 carries the two-sampler result");
+    }
 
     print.println("geometry:");
     if (read(g, d, ?g.gbuf, "gbuf")) {
@@ -861,7 +900,7 @@ fun on_dnit(ctx: *Context) {
         check(g, plate_v > floor_v + 30.0, "attachment 0 carries albedo");
     }
 
-    if (read(g, d, ?g.probe1, "probe1")) {
+    if (!g.probe_two && read(g, d, ?g.probe1, "probe1")) {
         # Attachment 1, the packed normal and material. The floor is nearly
         # flat, so its encoded XY should sit near the middle of the range.
         #

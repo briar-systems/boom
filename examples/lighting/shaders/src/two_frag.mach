@@ -1,21 +1,29 @@
 # The measurement, not a stage anything draws with.
 #
-# A deferred composite needs albedo, light and emissive in one draw. boom's
-# descriptor set layout declares one combined image sampler, at binding 1, and a
-# uniform buffer at binding 2. This stage declares a second sampler at binding 2
-# anyway, so the prototype can report what actually happens rather than what the
-# layout code reads as if it would: whether the pipeline is built, whether the
-# validation layers name the mismatch, and whether a game finds out at build
-# time or at the draw.
+# A deferred composite needs albedo, light and emissive in one draw, and this
+# stage is what proves a draw can see more than one texture at all.
 #
-# It is behind --probe-two-samplers and is not part of a normal run, because a
-# deliberate layout mismatch is exactly the kind of thing that should not be in
-# the frame loop of an example someone runs to look at the picture.
+# IT USED TO PROVE THE OPPOSITE. When it was written the layout declared exactly
+# one combined image sampler and there was no free sampler binding to reach for,
+# so it declared its second at binding 2, which the layout called a uniform
+# buffer. The pipeline built, the driver returned success, the draw was not
+# dropped, and the stage read a uniform buffer's bytes as an image. Only the
+# validation layers said anything.
+#
+# The layout now carries a material's four textures at bindings 1, 5, 6 and 7,
+# so the second sampler goes at 5 and the whole thing is legal. A run with this
+# probe reports zero validation errors and samples both textures, which is the
+# statement the prototype could not make before.
+#
+# Declaring a sampler at binding 2 is still a mismatch and still silent outside
+# the layers. That has not been fixed and cannot be: it is a shader asking for
+# something the layout does not offer, and Vulkan's answer is a diagnostic the
+# loader only emits when asked.
 
 use tex: shader.texture;
 
 #[sampler(0, 1)] var first:  tex.Sampler2D;
-#[sampler(0, 2)] var second: tex.Sampler2D;
+#[sampler(0, 5)] var second: tex.Sampler2D;
 
 #[input(0)] var in_uv: f32x2;
 
