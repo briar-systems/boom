@@ -232,6 +232,28 @@ fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
 fwd boom.graphics.renderer.pass_draw_triangles;
 
+# A tile field. The grid's structure is what makes it cheap: the visible
+# rectangle becomes a range of cells, so a world the camera cannot see costs
+# nothing. See boom.graphics.tilemap.
+fwd boom.graphics.tilemap.TILE_EMPTY;
+fwd boom.graphics.tilemap.TILEMAP_CHUNK;
+fwd boom.graphics.tilemap.TileSheet;
+fwd boom.graphics.tilemap.TileLayer;
+fwd boom.graphics.tilemap.TileSpan;
+fwd boom.graphics.tilemap.TileCursor;
+fwd boom.graphics.tilemap.tile_sheet;
+fwd boom.graphics.tilemap.tile_layer;
+fwd boom.graphics.tilemap.tile_cursor;
+fwd boom.graphics.tilemap.tilemap_span;
+fwd boom.graphics.tilemap.tilemap_all;
+fwd boom.graphics.tilemap.tilemap_span_cells;
+fwd boom.graphics.tilemap.tilemap_at;
+fwd boom.graphics.tilemap.tilemap_cell_rect;
+fwd boom.graphics.tilemap.tilemap_frame;
+fwd boom.graphics.tilemap.tilemap_done;
+fwd boom.graphics.tilemap.tilemap_expand;
+fwd boom.graphics.renderer.pass_draw_tilemap;
+
 # A game's own shading. See boom.graphics.shader: a Shader is a pair of SPIR-V
 # modules, and the pipelines it needs are built underneath it, so a game that
 # writes its own lighting never names a pipeline or a render pass.
