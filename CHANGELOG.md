@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-09
+
+### Added
+- graphics: **a tilemap draw path.** `pass_draw_tilemap` turns the visible
+  rectangle into a column and row span and walks only those cells, rather than
+  testing every cell in the grid. A 128x128 field with a playing camera visits
+  480 cells instead of 16384. It appends into the existing 2D batch, so a field
+  shares a texture bind and a draw with the sprite work around it, and it appends
+  once per chunk rather than once per tile.
+
+  Measured headlessly against the per-cell loop a game writes today, same quad
+  count from both paths: **12.9x** at a playing camera, 1.5x zoomed out four
+  times, and 1.05x with the whole field on screen. The last figure is the one
+  worth reading: where there is nothing to cull this costs nothing rather than
+  regressing.
+
+- graphics: `boom.graphics.tilemap`, holding the parts that need no device, so
+  the span arithmetic and the chunked expansion are testable without a GPU
+  rather than only reachable through a draw.
+
+- examples/tilemap-bench: the benchmark behind those numbers, runnable without a
+  GPU, reporting cells visited and quads emitted alongside the timings. A
+  tilemap that were fast because it drew less would not be a result.
+
+### Notes
+- Tile index 0 is the hole, matching `boom.graphics.assets` where slot zero is
+  the handle no resource ever has. An index past the sheet's frame array draws
+  nothing for that cell, so a map that does not match its sheet renders holes
+  rather than sampling past the array.
+- Culled cells are not counted in `renderer_culled`. Counting them would mean
+  walking the whole grid to produce the number, which is the work this exists to
+  avoid, and the doc comment says so.
+
 ## [0.6.1] - 2026-08-09
 
 ### Fixed
