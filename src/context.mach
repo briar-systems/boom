@@ -38,12 +38,29 @@ use std.types.string.str;
 # title:     window title, UTF-8
 # fixed_dt:  duration of one fixed update step; must be positive
 # max_frame: largest frame time folded into the accumulator at once
+# frame_dt:  when non-zero, the delta every frame is told it took, instead of
+#            the wall clock. See below.
+#
+# WHY A GAME WOULD PIN ITS FRAME DELTA. The loop feeds the wall-clock delta into
+# the fixed-step accumulator, so the number of ticks a run executes depends on
+# how busy the machine was. That is correct for a game and wrong for a
+# measurement: a run that draws a fixed number of frames still simulates a
+# variable number of steps, so anything read back afterwards moves between two
+# runs of the same binary.
+#
+# It is not a small effect. Onslaughter's probe reads back its scene target after
+# a fixed frame count and its pixel coverage moved by around one percent across
+# runs, a band wide enough to hide a real regression inside it.
+#
+# Setting frame_dt makes a run a function of its inputs alone. Leave it zero and
+# the engine behaves exactly as before.
 pub rec Config {
     width:     i32;
     height:    i32;
     title:     str;
     fixed_dt:  Duration;
     max_frame: Duration;
+    frame_dt:  Duration;
 }
 
 # the live state of a running engine
@@ -70,6 +87,9 @@ pub rec Context {
     alpha:   f64;
     running: bool;
     user:    ptr;
+    # Zero means the clock is the wall clock. Non-zero pins every frame's delta
+    # to this, which is what makes a run reproducible. See Config.frame_dt.
+    frame_dt: Duration;
 }
 
 # bring the engine subsystems up
@@ -102,6 +122,7 @@ pub fun context_init(ctx: *Context, cfg: Config) bool {
     ctx.alpha   = 0.0;
     ctx.running = true;
     ctx.user    = nil;
+    ctx.frame_dt = cfg.frame_dt;
     ret true;
 }
 
