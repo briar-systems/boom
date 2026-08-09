@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-08-09
+
+### Fixed
+- graphics: **uniform slots grow instead of running out at 512.** A draw that
+  changes texture or uniforms takes a slot, and slots were a hard 512 per frame.
+  Past that, draws were dropped.
+
+  It is not a hypothetical limit. A painter's-ordered layer sorted by depth
+  interleaves textures by construction, so every item is a texture change, every
+  texture change is a flush, and every flush is a slot. A consumer's arena
+  reached **1757 items in a frame** and everything past 512 silently did not
+  appear. `renderer_dropped` counted it, which is the only reason it was found
+  at all — three separate pixel checks read green while most of the layer was
+  missing.
+
+  Slots now grow a **block** at a time, up to 8192. A block cannot be resized:
+  draws already recorded this frame hold its descriptor sets and point into its
+  ring, so enlarging one would move memory under them. Adding a block leaves
+  every recorded draw alone. That is the same shape the palette rings already
+  used.
+
+  Growth happens inside a frame, which is the only time it can — the frame that
+  needs the slots is the frame that discovers it needs them. Exhaustion is still
+  reportable when the block ceiling is reached or a block cannot be allocated,
+  and still counts a dropped draw rather than wrapping onto a live one.
+
+  A one-slot-per-pass fix was considered and is wrong: every flush in a pass does
+  write identical uniforms, but the texture lives in the same descriptor set, and
+  rewriting that set would change what already-recorded draws sample.
+
 ## [0.9.0] - 2026-08-09
 
 ### Fixed
