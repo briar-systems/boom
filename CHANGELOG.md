@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-09
 
 ### Added
 - shaders: `examples/shader` compiles a vertex and fragment stage of its own and draws with them, which is the shape a game copies: boom does not compile shaders and does not need to. Its fragment stage shades entirely from the block `pass_set_user` delivers at binding 4, so the second cube is evidence the descriptor arrives rather than a demonstration that the call does not crash. Confirmed in the emitted SPIR-V, which needs no GPU: it declares set 0 bindings 1 and 4 and nothing else, from a module boom never saw.
