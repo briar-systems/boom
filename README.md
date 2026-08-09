@@ -159,7 +159,7 @@ for checking the driver path on a machine with a GPU.
 
 A mesh is described by a `VertexFormat` (`boom.graphics.vertex`): a declared
 list of attributes (semantic, component type, count, location) rather than a
-fixed vertex struct. `texture_load` / `texture_from_bytes` decode QOI and TGA
+fixed vertex struct. `texture_load` / `texture_from_bytes` decode PNG, QOI and TGA
 images; `mesh_load` / `mesh_from_glb` extract the first primitive of a glTF 2.0
 `.glb`, building the format from whatever attributes the primitive provides
 (POSITION plus any NORMAL, TEXCOORD_0, COLOR_0, TANGENT). Both hide the backing
