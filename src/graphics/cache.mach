@@ -166,7 +166,7 @@ fun cache_add(c: *PipelineCache, v: *Vk, program: Program, f: *VertexFormat) Res
     val i: usize = c.count;
     var desc: PipelineDesc = program_desc(program);
     var lay:  SetLayout    = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init(?c.entries[i].pipeline, v, c.pass, f, ?desc,
+    val r: Result[bool, Error] = pipeline_init(?c.entries[i].pipeline, v, c.pass, 1, f, ?desc,
                                                vert, vlen, frag, flen, ?lay);
     if (is_err[bool, Error](r)) {
         ret err[usize, Error](unwrap_err[bool, Error](r));

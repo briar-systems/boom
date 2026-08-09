@@ -27,6 +27,7 @@ use std.types.result.is_err;
 use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
+use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.vk.Vk;
 use boom.graphics.spirv.VERTEX_ENTRY;
 use boom.graphics.spirv.FRAGMENT_ENTRY;
@@ -379,7 +380,12 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[
 }
 
 # Build a graphics pipeline from two SPIR-V modules and a vertex format.
-pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexFormat, d: *PipelineDesc,
+# `targets` is the colour attachment count of the pass this is built against.
+# The blend state must have one entry per attachment or the pipeline is invalid
+# in that pass, and the count is not recoverable from a vk.RenderPass handle, so
+# it travels alongside it.
+pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
+                      f: *VertexFormat, d: *PipelineDesc,
                       vert: *u8, vlen: usize, frag: *u8, flen: usize, layout: *SetLayout) Result[bool, Error] {
     p.ready      = false;
     p.handle     = nil;
@@ -555,14 +561,25 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, f: *VertexForma
         cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     }
 
+    # Every attachment gets the same blend state. A deferred pass writing albedo
+    # beside a normal map wants no blending on any of them, and a game that
+    # wants them to differ wants separate passes rather than a per-attachment
+    # blend description this API does not carry.
+    var n: usize = targets;
+    if (n == 0) { n = 1; }
+    if (n > MAX_COLOR_ATTACHMENTS) { n = MAX_COLOR_ATTACHMENTS; }
+    var cbs: [4]vk.PipelineColorBlendAttachmentState;
+    var bi: usize = 0;
+    for (bi < n) { cbs[bi] = cb; bi = bi + 1; }
+
     var bs: vk.PipelineColorBlendStateCreateInfo;
     bs.sType             = vk.STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     bs.pNext             = nil;
     bs.flags             = 0;
     bs.logicOpEnable     = vk.FALSE;
     bs.logicOp           = vk.LOGIC_OP_COPY;
-    bs.attachmentCount   = 1;
-    bs.pAttachments      = ?cb;
+    bs.attachmentCount   = n::u32;
+    bs.pAttachments      = ?cbs[0];
     bs.blendConstants[0] = 0.0;
     bs.blendConstants[1] = 0.0;
     bs.blendConstants[2] = 0.0;

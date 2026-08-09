@@ -181,7 +181,10 @@ fwd boom.graphics.camera2d.camera2d_visible;
 
 fwd boom.graphics.target.RenderTarget;
 fwd boom.graphics.target.render_target;
+fwd boom.graphics.target.render_target_mrt;
 fwd boom.graphics.target.render_target_texture;
+fwd boom.graphics.target.render_target_texture_at;
+fwd boom.graphics.target.render_target_count;
 fwd boom.graphics.target.render_target_read;
 fwd boom.graphics.target.render_target_bgra;
 fwd boom.graphics.target.render_target_delete;
