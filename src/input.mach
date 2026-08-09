@@ -29,6 +29,9 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
+use boom.math.Vec2;
+use boom.math.vec2;
+use boom.math.sqrtf;
 
 # ---------------------------------------------------------------- key codes
 
@@ -94,6 +97,113 @@ pub val BUTTON_MIDDLE: Button = 2;
 # One past the highest button, sizing the state arrays
 pub val BUTTON_COUNT: usize = 3;
 
+# ------------------------------------------------------------------ gamepads
+#
+# GAMEPADS ARE POLLED, NOT DELIVERED. The platform reports a level once per
+# frame rather than an edge when it happens, so the edges here are synthesized
+# by diffing successive polls. That has one consequence worth stating plainly:
+# a press and release inside a single frame is invisible, because the platform
+# never saw two levels. The keyboard does not have this limit and this cannot
+# be given it.
+#
+# Everything downstream of the poll keeps the keyboard's discipline. Edges
+# accumulate into a pending set and are folded once per tick, so a frame that
+# ticks three times reports a press to one tick, and a frame that ticks zero
+# times does not lose it.
+#
+# TRIGGERS ARE BOTH. The platform reports them as axes, but a game binds fire
+# to them and wants an edge. They are exposed as an axis and as a synthetic
+# button, with hysteresis on the button so a trigger resting near the threshold
+# does not chatter a semi-automatic weapon into a machine gun.
+
+# A boom gamepad button identifier
+pub def PadButton: i32;
+
+pub val PAD_A:             PadButton = 0;
+pub val PAD_B:             PadButton = 1;
+pub val PAD_X:             PadButton = 2;
+pub val PAD_Y:             PadButton = 3;
+pub val PAD_LEFT_BUMPER:   PadButton = 4;
+pub val PAD_RIGHT_BUMPER:  PadButton = 5;
+pub val PAD_BACK:          PadButton = 6;
+pub val PAD_START:         PadButton = 7;
+pub val PAD_GUIDE:         PadButton = 8;
+pub val PAD_LEFT_THUMB:    PadButton = 9;
+pub val PAD_RIGHT_THUMB:   PadButton = 10;
+pub val PAD_DPAD_UP:       PadButton = 11;
+pub val PAD_DPAD_RIGHT:    PadButton = 12;
+pub val PAD_DPAD_DOWN:     PadButton = 13;
+pub val PAD_DPAD_LEFT:     PadButton = 14;
+
+# Synthesized from the trigger axes rather than reported by the platform.
+pub val PAD_LEFT_TRIGGER:  PadButton = 15;
+pub val PAD_RIGHT_TRIGGER: PadButton = 16;
+
+# How many buttons the platform itself reports. The two above are boom's.
+pub val PAD_NATIVE_BUTTONS: usize = 15;
+
+# One past the highest pad button, sizing the state arrays
+pub val PAD_BUTTON_COUNT: usize = 17;
+
+# A boom gamepad axis identifier
+pub def PadAxis: i32;
+
+pub val PAD_AXIS_LEFT_X:        PadAxis = 0;
+pub val PAD_AXIS_LEFT_Y:        PadAxis = 1;
+pub val PAD_AXIS_RIGHT_X:       PadAxis = 2;
+pub val PAD_AXIS_RIGHT_Y:       PadAxis = 3;
+pub val PAD_AXIS_LEFT_TRIGGER:  PadAxis = 4;
+pub val PAD_AXIS_RIGHT_TRIGGER: PadAxis = 5;
+
+pub val PAD_AXIS_COUNT: usize = 6;
+
+# A stick, for the paired query that applies a deadzone correctly
+pub def PadStick: i32;
+
+pub val PAD_STICK_LEFT:  PadStick = 0;
+pub val PAD_STICK_RIGHT: PadStick = 1;
+
+# How many pads boom tracks, matching what the platform can report
+pub val MAX_PADS: usize = 16;
+
+# What pad_first_pressed returns when no pad pressed the button
+pub val PAD_NONE: usize = 16;
+
+# Below this stick magnitude the stick reads as centred.
+#
+# RADIAL, NOT PER AXIS. A per-axis deadzone squares off the stick: pushing
+# diagonally passes both thresholds at a lower magnitude than pushing straight,
+# so a rig walks faster on the diagonal and the dead region is a cross rather
+# than a circle. The magnitude past the deadzone is rescaled to run 0 to 1, so
+# there is no jump from centred to moving at the boundary.
+pub val PAD_DEADZONE: f32 = 0.2;
+
+# A trigger crosses to down here and back to up at PAD_TRIGGER_UP.
+#
+# The gap is the point. One threshold means a trigger resting on it emits an
+# edge every poll, which fires a semi-automatic weapon continuously.
+val PAD_TRIGGER_DOWN: f32 = 0.6;
+val PAD_TRIGGER_UP:   f32 = 0.4;
+
+# One gamepad's state for the current tick
+#
+# Mirrors the keyboard's shape: `down` is live, `pressed` and `released` belong
+# to this tick, `pend_*` accumulates between ticks. `pend_down` doubles as the
+# level from the previous poll, which is what the edges are diffed against.
+pub rec Gamepad {
+    connected: bool;
+    down:      [17]bool;
+    pressed:   [17]bool;
+    released:  [17]bool;
+    axes:      [6]f32;
+
+    pend_connected: bool;
+    pend_down:      [17]bool;
+    pend_pressed:   [17]bool;
+    pend_released:  [17]bool;
+    pend_axes:      [6]f32;
+}
+
 # ------------------------------------------------------------------- state
 
 # Polled input state for the current tick
@@ -141,6 +251,8 @@ pub rec Input {
     pend_mouse_dy:     f64;
     pend_scroll_x:     f64;
     pend_scroll_y:     f64;
+
+    pads: [16]Gamepad;
 }
 
 # A zeroed input state, nothing held and no edges
@@ -162,6 +274,29 @@ pub fun input_new() Input {
     i.scroll_x = 0.0; i.scroll_y = 0.0;
     i.pend_mouse_x = 0.0; i.pend_mouse_y = 0.0; i.pend_mouse_dx = 0.0; i.pend_mouse_dy = 0.0;
     i.pend_scroll_x = 0.0; i.pend_scroll_y = 0.0;
+
+    var p: usize = 0;
+    for (p < MAX_PADS) {
+        i.pads[p].connected      = false;
+        i.pads[p].pend_connected = false;
+        var pb: usize = 0;
+        for (pb < PAD_BUTTON_COUNT) {
+            i.pads[p].down[pb]          = false;
+            i.pads[p].pressed[pb]       = false;
+            i.pads[p].released[pb]      = false;
+            i.pads[p].pend_down[pb]     = false;
+            i.pads[p].pend_pressed[pb]  = false;
+            i.pads[p].pend_released[pb] = false;
+            pb = pb + 1;
+        }
+        var pa: usize = 0;
+        for (pa < PAD_AXIS_COUNT) {
+            i.pads[p].axes[pa]      = 0.0;
+            i.pads[p].pend_axes[pa] = 0.0;
+            pa = pa + 1;
+        }
+        p = p + 1;
+    }
     ret i;
 }
 
@@ -206,6 +341,86 @@ pub fun input_scroll_event(i: *Input, dx: f64, dy: f64) {
     i.pend_scroll_y = i.pend_scroll_y + dy;
 }
 
+# Record one poll of one gamepad, synthesizing the edges since the last poll
+#
+# `buttons` is PAD_NATIVE_BUTTONS entries, non-zero for held. `axes` is
+# PAD_AXIS_COUNT entries. The trigger buttons are derived here rather than by
+# the platform layer, so every backend gets the same hysteresis.
+# ---
+# i:         the input state
+# pad:       which pad, below MAX_PADS
+# connected: whether the pad is present this poll
+# buttons:   platform button levels, or nil when disconnected
+# axes:      platform axis values, or nil when disconnected
+pub fun input_pad_poll(i: *Input, pad: usize, connected: bool, buttons: *u8, axes: *f32) {
+    if (pad >= MAX_PADS) { ret; }
+
+    # A pad that vanished releases everything it held. Leaving the levels
+    # latched means a rig walks into a wall forever when a cable is kicked out.
+    if (!connected || buttons == nil || axes == nil) {
+        if (i.pads[pad].pend_connected) {
+            var rb: usize = 0;
+            for (rb < PAD_BUTTON_COUNT) {
+                if (i.pads[pad].pend_down[rb]) { i.pads[pad].pend_released[rb] = true; }
+                i.pads[pad].pend_down[rb] = false;
+                rb = rb + 1;
+            }
+            var ra: usize = 0;
+            for (ra < PAD_AXIS_COUNT) {
+                i.pads[pad].pend_axes[ra] = 0.0;
+                ra = ra + 1;
+            }
+        }
+        i.pads[pad].pend_connected = false;
+        ret;
+    }
+
+    i.pads[pad].pend_connected = true;
+
+    var a: usize = 0;
+    for (a < PAD_AXIS_COUNT) {
+        i.pads[pad].pend_axes[a] = axes[a];
+        a = a + 1;
+    }
+
+    var b: usize = 0;
+    for (b < PAD_NATIVE_BUTTONS) {
+        pad_level(i, pad, b, buttons[b] != 0);
+        b = b + 1;
+    }
+
+    pad_trigger_level(i, pad, PAD_LEFT_TRIGGER::usize,
+                      trigger_unit(axes[PAD_AXIS_LEFT_TRIGGER::usize]));
+    pad_trigger_level(i, pad, PAD_RIGHT_TRIGGER::usize,
+                      trigger_unit(axes[PAD_AXIS_RIGHT_TRIGGER::usize]));
+}
+
+# The platform reports a trigger resting at -1 and fully pressed at 1.
+fun trigger_unit(raw: f32) f32 {
+    val v: f32 = (raw + 1.0) * 0.5;
+    if (v < 0.0) { ret 0.0; }
+    if (v > 1.0) { ret 1.0; }
+    ret v;
+}
+
+# Fold one button's new level into the pending edges.
+fun pad_level(i: *Input, pad: usize, b: usize, down: bool) {
+    val was: bool = i.pads[pad].pend_down[b];
+    if (down && !was)  { i.pads[pad].pend_pressed[b]  = true; }
+    if (!down && was)  { i.pads[pad].pend_released[b] = true; }
+    i.pads[pad].pend_down[b] = down;
+}
+
+# A trigger's digital level, with the down and up thresholds apart so a trigger
+# held near the boundary does not emit an edge every poll.
+fun pad_trigger_level(i: *Input, pad: usize, b: usize, unit: f32) {
+    val was: bool = i.pads[pad].pend_down[b];
+    var down: bool = was;
+    if (unit >= PAD_TRIGGER_DOWN) { down = true; }
+    or (unit <= PAD_TRIGGER_UP)   { down = false; }
+    pad_level(i, pad, b, down);
+}
+
 # Fold everything accumulated since the last tick into the live state
 #
 # Called by the engine immediately before each f_tick. this is what makes an
@@ -242,6 +457,26 @@ pub fun input_begin_tick(i: *Input) {
     i.pend_mouse_dy  = 0.0;
     i.pend_scroll_x  = 0.0;
     i.pend_scroll_y  = 0.0;
+
+    var p: usize = 0;
+    for (p < MAX_PADS) {
+        i.pads[p].connected = i.pads[p].pend_connected;
+        var pb: usize = 0;
+        for (pb < PAD_BUTTON_COUNT) {
+            i.pads[p].down[pb]     = i.pads[p].pend_down[pb];
+            i.pads[p].pressed[pb]  = i.pads[p].pend_pressed[pb];
+            i.pads[p].released[pb] = i.pads[p].pend_released[pb];
+            i.pads[p].pend_pressed[pb]  = false;
+            i.pads[p].pend_released[pb] = false;
+            pb = pb + 1;
+        }
+        var pa: usize = 0;
+        for (pa < PAD_AXIS_COUNT) {
+            i.pads[p].axes[pa] = i.pads[p].pend_axes[pa];
+            pa = pa + 1;
+        }
+        p = p + 1;
+    }
 }
 
 # ------------------------------------------------------------ game queries
@@ -292,6 +527,96 @@ pub fun axis(i: *Input, negative: Key, positive: Key) f32 {
     if (key_down(i, positive)) { v = v + 1.0; }
     if (key_down(i, negative)) { v = v - 1.0; }
     ret v;
+}
+
+# ------------------------------------------------------- gamepad queries
+
+# Whether a pad was present at the last poll
+pub fun pad_connected(i: *Input, pad: usize) bool {
+    if (pad >= MAX_PADS) { ret false; }
+    ret i.pads[pad].connected;
+}
+
+# How many pads are connected
+pub fun pad_count(i: *Input) usize {
+    var n: usize = 0;
+    var p: usize = 0;
+    for (p < MAX_PADS) {
+        if (i.pads[p].connected) { n = n + 1; }
+        p = p + 1;
+    }
+    ret n;
+}
+
+# Whether a pad button is held as of this tick
+pub fun pad_down(i: *Input, pad: usize, b: PadButton) bool {
+    if (pad >= MAX_PADS || b < 0 || b::usize >= PAD_BUTTON_COUNT) { ret false; }
+    ret i.pads[pad].down[b::usize];
+}
+
+# Whether a pad button went down during this tick
+pub fun pad_pressed(i: *Input, pad: usize, b: PadButton) bool {
+    if (pad >= MAX_PADS || b < 0 || b::usize >= PAD_BUTTON_COUNT) { ret false; }
+    ret i.pads[pad].pressed[b::usize];
+}
+
+# Whether a pad button came up during this tick
+pub fun pad_released(i: *Input, pad: usize, b: PadButton) bool {
+    if (pad >= MAX_PADS || b < 0 || b::usize >= PAD_BUTTON_COUNT) { ret false; }
+    ret i.pads[pad].released[b::usize];
+}
+
+# The lowest-numbered pad that pressed a button this tick, or PAD_NONE
+#
+# What a join prompt needs: "press start to join" has to know which pad said it.
+pub fun pad_first_pressed(i: *Input, b: PadButton) usize {
+    var p: usize = 0;
+    for (p < MAX_PADS) {
+        if (pad_pressed(i, p, b)) { ret p; }
+        p = p + 1;
+    }
+    ret PAD_NONE;
+}
+
+# A raw axis, with no deadzone applied
+#
+# Triggers read -1 at rest here because that is what the platform reports. Use
+# pad_trigger for the 0 to 1 form, and pad_stick for a stick.
+pub fun pad_axis(i: *Input, pad: usize, a: PadAxis) f32 {
+    if (pad >= MAX_PADS || a < 0 || a::usize >= PAD_AXIS_COUNT) { ret 0.0; }
+    ret i.pads[pad].axes[a::usize];
+}
+
+# A trigger as 0 at rest to 1 fully pressed
+pub fun pad_trigger(i: *Input, pad: usize, a: PadAxis) f32 {
+    if (a != PAD_AXIS_LEFT_TRIGGER && a != PAD_AXIS_RIGHT_TRIGGER) { ret 0.0; }
+    if (!pad_connected(i, pad)) { ret 0.0; }
+    ret trigger_unit(pad_axis(i, pad, a));
+}
+
+# A stick with a radial deadzone, as a direction and magnitude in one vector
+#
+# Magnitude is rescaled so it runs 0 to 1 from the deadzone edge outward, rather
+# than jumping to the deadzone value the moment the stick leaves centre, and it
+# is clamped to 1 because the hardware's corners read past it.
+pub fun pad_stick(i: *Input, pad: usize, s: PadStick) Vec2 {
+    var ax: PadAxis = PAD_AXIS_LEFT_X;
+    var ay: PadAxis = PAD_AXIS_LEFT_Y;
+    if (s == PAD_STICK_RIGHT) {
+        ax = PAD_AXIS_RIGHT_X;
+        ay = PAD_AXIS_RIGHT_Y;
+    }
+    or (s != PAD_STICK_LEFT) { ret vec2(0.0, 0.0); }
+
+    val x: f32 = pad_axis(i, pad, ax);
+    val y: f32 = pad_axis(i, pad, ay);
+    val len: f32 = sqrtf(x * x + y * y);
+    if (len <= PAD_DEADZONE) { ret vec2(0.0, 0.0); }
+
+    var mag: f32 = (len - PAD_DEADZONE) / (1.0 - PAD_DEADZONE);
+    if (mag > 1.0) { mag = 1.0; }
+    val scale: f32 = mag / len;
+    ret vec2(x * scale, y * scale);
 }
 
 # --------------------------------------------------------------------- tests
@@ -408,6 +733,222 @@ test "input: axis is -1, 0, or 1 and opposites cancel" {
     input_key_event(?i, KEY_D, false);
     input_begin_tick(?i);
     if (axis(?i, KEY_A, KEY_D) != -1.0) { ret 1; }
+    ret 0;
+}
+
+    # ------------------------------------------------------ gamepad helpers
+
+# Build a poll's worth of platform state: no buttons held, sticks centred,
+# triggers at rest, which is -1 and not 0.
+fun pad_rest(buttons: *u8, axes: *f32) {
+    var b: usize = 0;
+    for (b < PAD_NATIVE_BUTTONS) { buttons[b] = 0; b = b + 1; }
+    axes[PAD_AXIS_LEFT_X::usize]        = 0.0;
+    axes[PAD_AXIS_LEFT_Y::usize]        = 0.0;
+    axes[PAD_AXIS_RIGHT_X::usize]       = 0.0;
+    axes[PAD_AXIS_RIGHT_Y::usize]       = 0.0;
+    axes[PAD_AXIS_LEFT_TRIGGER::usize]  = -1.0;
+    axes[PAD_AXIS_RIGHT_TRIGGER::usize] = -1.0;
+}
+
+test "input: a pad press is observed by exactly one tick" {
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_connected(?i, 0))          { ret 1; }
+    if (pad_down(?i, 0, PAD_A))         { ret 2; }
+
+    buttons[PAD_A::usize] = 1;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_pressed(?i, 0, PAD_A)) { ret 3; }
+    if (!pad_down(?i, 0, PAD_A))    { ret 4; }
+
+    # Second tick of the same frame: still held, edge spent.
+    input_begin_tick(?i);
+    if (pad_pressed(?i, 0, PAD_A)) { ret 5; }
+    if (!pad_down(?i, 0, PAD_A))   { ret 6; }
+    ret 0;
+}
+
+test "input: a disconnected pad releases what it was holding" {
+    # A cable kicked out mid-run must not latch the stick and the trigger on.
+    # Without this a rig walks into a wall firing until the process ends.
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+    buttons[PAD_A::usize] = 1;
+    axes[PAD_AXIS_LEFT_X::usize] = 1.0;
+
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_down(?i, 0, PAD_A)) { ret 1; }
+
+    input_pad_poll(?i, 0, false, nil, nil);
+    input_begin_tick(?i);
+    if (pad_connected(?i, 0))         { ret 2; }
+    if (pad_down(?i, 0, PAD_A))       { ret 3; }
+    if (!pad_released(?i, 0, PAD_A))  { ret 4; }
+    if (pad_axis(?i, 0, PAD_AXIS_LEFT_X) != 0.0) { ret 5; }
+    ret 0;
+}
+
+test "input: a trigger has hysteresis and does not chatter" {
+    # One threshold means a trigger resting on it emits a press every poll,
+    # which turns a semi-automatic weapon into a continuous one.
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (pad_down(?i, 0, PAD_RIGHT_TRIGGER)) { ret 1; }
+
+    # 0.5 unit: past the up threshold, short of the down threshold. Nothing.
+    axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 0.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (pad_down(?i, 0, PAD_RIGHT_TRIGGER)) { ret 2; }
+
+    # Fully pressed: down.
+    axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 1.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_pressed(?i, 0, PAD_RIGHT_TRIGGER)) { ret 3; }
+
+    # Back to the middle: still down, because the up threshold is lower.
+    axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 0.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_down(?i, 0, PAD_RIGHT_TRIGGER))   { ret 4; }
+    if (pad_released(?i, 0, PAD_RIGHT_TRIGGER)) { ret 5; }
+
+    # Released properly.
+    axes[PAD_AXIS_RIGHT_TRIGGER::usize] = -1.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (!pad_released(?i, 0, PAD_RIGHT_TRIGGER)) { ret 6; }
+    if (pad_down(?i, 0, PAD_RIGHT_TRIGGER))      { ret 7; }
+    ret 0;
+}
+
+test "input: a trigger reads 0 at rest, not -1" {
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (pad_trigger(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 0.0) { ret 1; }
+
+    axes[PAD_AXIS_LEFT_TRIGGER::usize] = 1.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (pad_trigger(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 1.0) { ret 2; }
+
+    # The raw axis still reports what the platform said.
+    if (pad_axis(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 1.0) { ret 3; }
+    ret 0;
+}
+
+test "input: the stick deadzone is radial, not per axis" {
+    # A per-axis deadzone squares off the stick: a diagonal push clears both
+    # thresholds at a lower magnitude than a straight one, so a rig moves
+    # faster on the diagonal and the dead region is a cross rather than a disc.
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+
+    # Each component is under the deadzone but the magnitude is over it, which
+    # is exactly the case a per-axis implementation reports as centred.
+    axes[PAD_AXIS_LEFT_X::usize] = 0.18;
+    axes[PAD_AXIS_LEFT_Y::usize] = 0.18;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    val d: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
+    if (d.x == 0.0 && d.y == 0.0) { ret 1; }
+
+    # And the reverse: each component over the deadzone individually is fine.
+    axes[PAD_AXIS_LEFT_X::usize] = 0.1;
+    axes[PAD_AXIS_LEFT_Y::usize] = 0.1;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    val c: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
+    if (c.x != 0.0 || c.y != 0.0) { ret 2; }
+    ret 0;
+}
+
+test "input: a stick leaves the deadzone from zero and clamps at one" {
+    # Rescaling matters: without it the magnitude jumps straight to the
+    # deadzone value the moment the stick moves, so a rig cannot walk slowly.
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+
+    # Just past the deadzone: nearly zero, not nearly 0.2.
+    axes[PAD_AXIS_LEFT_X::usize] = PAD_DEADZONE + 0.001;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    val slow: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
+    if (slow.x <= 0.0)   { ret 1; }
+    if (slow.x >= 0.01)  { ret 2; }
+
+    # Full deflection is exactly 1, and a corner past it does not exceed 1.
+    axes[PAD_AXIS_LEFT_X::usize] = 1.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    val full: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
+    if (full.x != 1.0) { ret 3; }
+
+    axes[PAD_AXIS_LEFT_X::usize] = 1.0;
+    axes[PAD_AXIS_LEFT_Y::usize] = 1.0;
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    val corner: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
+    val mag: f32 = sqrtf(corner.x * corner.x + corner.y * corner.y);
+    if (mag > 1.001) { ret 4; }
+    ret 0;
+}
+
+test "input: pads are independent and join reports which one" {
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+
+    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
+    buttons[PAD_START::usize] = 1;
+    input_pad_poll(?i, 2, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+
+    if (pad_count(?i) != 2)            { ret 1; }
+    if (pad_down(?i, 0, PAD_START))    { ret 2; }
+    if (!pad_down(?i, 2, PAD_START))   { ret 3; }
+    if (pad_first_pressed(?i, PAD_START) != 2) { ret 4; }
+    if (pad_first_pressed(?i, PAD_A) != PAD_NONE) { ret 5; }
+    ret 0;
+}
+
+test "input: an out-of-range pad is inert" {
+    var i: Input = input_new();
+    var buttons: [15]u8;
+    var axes: [6]f32;
+    pad_rest(?buttons[0], ?axes[0]);
+    buttons[PAD_A::usize] = 1;
+
+    input_pad_poll(?i, MAX_PADS, true, ?buttons[0], ?axes[0]);
+    input_begin_tick(?i);
+    if (pad_connected(?i, MAX_PADS))    { ret 1; }
+    if (pad_down(?i, MAX_PADS, PAD_A))  { ret 2; }
+    if (pad_count(?i) != 0)             { ret 3; }
     ret 0;
 }
 
