@@ -121,6 +121,8 @@ use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
 use boom.graphics.descriptor.MAX_SLOTS;
+use boom.graphics.descriptor.NO_SLOT;
+use boom.graphics.descriptor.SLOTS_PER_BLOCK;
 use boom.graphics.descriptor.MAX_SAMPLERS;
 use boom.graphics.descriptor.descriptors_init;
 use boom.graphics.descriptor.descriptors_dnit;
@@ -817,8 +819,8 @@ fun skinned_bounds(m: *Mesh, pose: *Pose, model: *Mat4) Aabb {
 
 # take a uniform slot for one draw, or report the ring is full
 fun take_slot(p: *Pass) usize {
-    val s: usize = descriptors_take(?p.renderer.desc);
-    if (s == MAX_SLOTS) {
+    val s: usize = descriptors_take(?p.renderer.desc, ?p.renderer.vk);
+    if (s == NO_SLOT) {
         p.renderer.dropped = p.renderer.dropped + 1;
     }
     ret s;
@@ -858,7 +860,7 @@ pub fun batch_flush(p: *Pass) {
     batch_reset(?p.batch);
 
     val slot: usize = take_slot(p);
-    if (slot == MAX_SLOTS) { ret; }
+    if (slot == NO_SLOT) { ret; }
 
     var u: ScreenUniforms;
     u.projection = p.projection;
@@ -1118,7 +1120,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     }
 
     val slot: usize = take_slot(p);
-    if (slot == MAX_SLOTS) { ret; }
+    if (slot == NO_SLOT) { ret; }
 
     # A pose is only usable on geometry that carries joints and weights. Drawing
     # an unskinned mesh through the skinned program leaves those two vertex
@@ -1455,17 +1457,22 @@ test "renderer: pass descriptions differ in what they clear and project" {
 }
 
 test "renderer: a full uniform ring drops draws and counts them" {
+    # Slots grow a block at a time, so exhaustion now means the block ceiling is
+    # reached or the device cannot supply one. Here there is no device, which is
+    # the case that must still count rather than crash or wrap.
     var r: Renderer;
     r.dropped = 0;
-    r.desc.ready = true;
-    r.desc.used  = MAX_SLOTS;
+    r.vk.ready      = false;
+    r.desc.ready    = true;
+    r.desc.bcount   = 1;
+    r.desc.used     = SLOTS_PER_BLOCK;
     var p: Pass;
     p.renderer = ?r;
 
     # Silently drawing with a wrapped slot would give this draw another
     # draw's transform, so exhaustion has to be visible instead.
-    if (take_slot(?p) != MAX_SLOTS) { ret 1; }
-    if (r.dropped != 1)             { ret 2; }
+    if (take_slot(?p) != NO_SLOT) { ret 1; }
+    if (r.dropped != 1)           { ret 2; }
     ret 0;
 }
 
