@@ -3,7 +3,7 @@
 # A game draws through boom handles alone and never imports the backend
 # libraries. Texture, Mesh, Material, RenderTarget, and the Renderer wrap
 # mach-vk, mach-glfw, mach-image, and mach-gltf state that stays hidden
-# here. texture_load decodes QOI and TGA images and mesh_load extracts
+# here. texture_load decodes PNG, QOI and TGA images and mesh_load extracts
 # glTF (.glb) geometry, neither exposing a backend type.
 #
 # THE RENDERER IS THE CORE ABSTRACTION (boom.graphics.renderer). A game

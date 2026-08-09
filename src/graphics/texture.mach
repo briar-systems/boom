@@ -2,8 +2,8 @@
 #
 # a game supplies raw RGBA8 pixels, encoded image bytes, or a file path and
 # receives an opaque Texture; the backing Vulkan image and the mach-image
-# decoder both stay hidden. texture_load and texture_from_bytes decode QOI
-# and TGA today (the formats mach-image decodes); other formats return a
+# decoder both stay hidden. texture_load and texture_from_bytes decode PNG,
+# QOI and TGA today (the formats mach-image decodes); other formats return a
 # clean error until the library grows their decoders.
 #
 # creation takes a Device because Vulkan has no implicit current context the
@@ -104,7 +104,7 @@ pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32, space: ColorSp
 # decode encoded image bytes into a caller-allocated RGBA8 buffer
 #
 # detects the format, sizes the destination from the header, and decodes.
-# QOI and TGA are supported; every decoder normalizes to RGBA8 top-left.
+# PNG, QOI and TGA are supported; every decoder normalizes to RGBA8 top-left.
 # the returned pixels are allocated from a and belong to the caller.
 # ---
 # data: encoded image bytes
@@ -125,8 +125,13 @@ fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool
             ret err[bool, Error](error("tga header is invalid"));
         }
     }
+    or (fmt == img.FORMAT_PNG) {
+        if (img.png_info(data, len, ?header) != img.DECODE_OK) {
+            ret err[bool, Error](error("png header is invalid"));
+        }
+    }
     or {
-        ret err[bool, Error](error("unsupported image format (only QOI and TGA are decoded)"));
+        ret err[bool, Error](error("unsupported image format (only PNG, QOI and TGA are decoded)"));
     }
 
     val need: usize = img.image_byte_len(header.width, header.height);
@@ -145,9 +150,27 @@ fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool
             ret err[bool, Error](error("qoi decode failed"));
         }
     }
-    or {
+    or (fmt == img.FORMAT_TGA) {
         if (img.tga_decode(data, len, dst, need, ?decoded) != img.DECODE_OK) {
             ret err[bool, Error](error("tga decode failed"));
+        }
+    }
+    or {
+        # png inflates through a working buffer the other decoders do not need.
+        # it is scratch, so it is released before returning either way.
+        val slen: usize = img.png_scratch_len(data, len);
+        if (slen == 0) {
+            ret err[bool, Error](error("png header is invalid"));
+        }
+        val sr: Result[*u8, str] = allo.allocate[u8](a, slen);
+        if (is_err[*u8, str](sr)) {
+            ret err[bool, Error](error(unwrap_err[*u8, str](sr)));
+        }
+        val scratch: *u8 = unwrap_ok[*u8, str](sr);
+        val st: img.DecodeStatus = img.png_decode(data, len, dst, need, scratch, slen, ?decoded);
+        allo.deallocate[u8](a, scratch, slen);
+        if (st != img.DECODE_OK) {
+            ret err[bool, Error](error("png decode failed"));
         }
     }
 
@@ -159,9 +182,9 @@ fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool
 
 # decode encoded image bytes and upload them as a Texture
 #
-# supports QOI and TGA. the encoded bytes are not retained.
+# supports PNG, QOI and TGA. the encoded bytes are not retained.
 # ---
-# data: encoded image bytes (QOI or TGA)
+# data: encoded image bytes (PNG, QOI or TGA)
 # len:  length of data in bytes
 # ret:  the uploaded Texture, or a decode error
 pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Error] {
@@ -174,7 +197,7 @@ pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Er
         ret err[Texture, Error](unwrap_err[bool, Error](r));
     }
 
-    # A decoded QOI or TGA is colour authored for display, by construction: the
+    # A decoded PNG, QOI or TGA is colour authored for display, by construction: the
     # formats have no notion of storing a normal map or a mask.
     val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height, COLOR_SRGB);
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(dec.width::u32, dec.height::u32));
@@ -183,10 +206,10 @@ pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Er
 
 # load an image file and upload it as a Texture
 #
-# reads the whole file, decodes it (QOI or TGA), and uploads. the CPU
+# reads the whole file, decodes it (PNG, QOI or TGA), and uploads. the CPU
 # pixels are freed before returning.
 # ---
-# path: filesystem path to a QOI or TGA image
+# path: filesystem path to a PNG, QOI or TGA image
 # ret:  the uploaded Texture, or a read/decode error
 # THE PATH IS VIRTUAL. `res://art/sheet.qoi` resolves through boom.vfs, the same
 # as boom.audio.sound_load and boom.graphics.text.font_load. A path with no
@@ -294,6 +317,41 @@ test "texture: decode round-trips a qoi image" {
     if (dec.width != 2 || dec.height != 2) { ret 3; }
     if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 4; }
     if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0) { ret 5; }
+    allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(2, 2));
+    ret 0;
+}
+
+test "texture: decode round-trips a png image" {
+    # PNG is the format the art is authored in, and it was the one the dispatch
+    # refused: mach-image grew a decoder and this module never called it, so a
+    # .png reported "unsupported image format" with the decoder sitting right
+    # there. Round-tripping through the encoder pins that the branch is wired.
+    var src_px: [16]u8 = [16]u8{
+        255, 0, 0, 255,   0, 255, 0, 255,
+        0, 0, 255, 255,   255, 255, 0, 255,
+    };
+    var srcimg: img.Image;
+    srcimg.pixels     = ?src_px[0];
+    srcimg.width      = 2;
+    srcimg.height     = 2;
+    srcimg.channels   = 4;
+    srcimg.colorspace = 0;
+
+    var enc: [1024]u8;
+    if (img.png_encode_bound(2, 2) > 1024) { ret 1; }
+    val n: usize = img.png_encode(?srcimg, ?enc[0], 1024);
+    if (n == 0) { ret 2; }
+    if (img.detect(?enc[0], n) != img.FORMAT_PNG) { ret 3; }
+
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var dec: Decoded;
+    val r: Result[bool, Error] = decode(?enc[0], n, ?pa, ?dec);
+    if (is_err[bool, Error](r)) { ret 4; }
+    if (dec.width != 2 || dec.height != 2) { ret 5; }
+    if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 6; }
+    if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0) { ret 7; }
+    if (dec.pixels[12] != 255 || dec.pixels[13] != 255 || dec.pixels[14] != 0) { ret 8; }
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(2, 2));
     ret 0;
 }
