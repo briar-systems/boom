@@ -149,7 +149,9 @@ pub fun tile_layer(tiles: *u16, cols: usize, rows: usize, tile_size: f32, origin
 #
 # Every degenerate case collapses to an empty span rather than to a guess: an
 # empty grid, a non-positive tile size, a view with no area, and a view wholly
-# off the field.
+# off the field. An empty grid needs no check of its own, because clamping to
+# the grid size is what the two helpers below already do and clamping to zero
+# leaves nothing between the ends.
 # ---
 # layer: the grid
 # view:  the rectangle to cull against, in the same units as the layer
@@ -157,9 +159,9 @@ pub fun tile_layer(tiles: *u16, cols: usize, rows: usize, tile_size: f32, origin
 pub fun tilemap_span(layer: *TileLayer, view: Rect) TileSpan {
     var s: TileSpan = TileSpan{col0: 0, col1: 0, row0: 0, row1: 0};
     if (layer == nil)                    { ret s; }
-    if (layer.cols == 0 || layer.rows == 0) { ret s; }
-    # Both would divide by zero or invert the range below, and both are states a
-    # half-built layer or a minimized window produces rather than caller bugs.
+    # A zero tile size is the divide below, and a view whose extent is negative
+    # would come out with its ends crossed rather than merely empty. Both are
+    # states a half-built layer or a minimized window produces.
     if (layer.tile_size <= 0.0)          { ret s; }
     if (view.w <= 0.0 || view.h <= 0.0)  { ret s; }
 
@@ -514,13 +516,30 @@ test "tilemap: a degenerate layer or view spans nothing" {
     var empty: TileLayer = tile_layer(nil, 0, 0, 32.0, vec2(0.0, 0.0));
     if (cells(?empty, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 1; }
 
-    # A zero tile size is the divide this would otherwise do.
-    var zero: TileLayer = tile_layer(nil, 8, 8, 0.0, vec2(0.0, 0.0));
-    if (cells(?zero, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 2; }
+    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
 
     # A minimized window gives the pass a view with no area.
-    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
-    if (cells(?l, rect(0.0, 0.0, 0.0, 0.0)) != 0) { ret 3; }
+    if (cells(?l, rect(0.0, 0.0, 0.0, 0.0)) != 0) { ret 2; }
+
+    # A NEGATIVE EXTENT IS NOT A SMALL VIEW. Its far edge is left of its near
+    # one, so the two ends of the span cross and col0 lands past col1. Every
+    # loop over a span reads it as half-open and would run from a start it can
+    # never reach, which is empty here and is not a shape anything downstream
+    # should have to allow for. This is the assertion that fails when the guard
+    # against it is removed, where the zero cases either side collapse to an
+    # empty span with or without it.
+    var back: TileSpan = tilemap_span(?l, rect(100.0, 100.0, 0.0 - 50.0, 0.0 - 50.0));
+    if (back.col1 < back.col0 || back.row1 < back.row0) { ret 3; }
+    if (tilemap_span_cells(?back) != 0)                 { ret 4; }
+
+    # A zero tile size is the divide the guard in tilemap_span avoids, and this
+    # pins the contract rather than catching a regression: without the guard the
+    # quotient is a NaN, the comparisons in span_lo and span_hi are all false,
+    # and what the integer cast then produces is undefined rather than reliably
+    # wrong. Removing the guard does not fail this, and saying so is better than
+    # a check that reads as if it would.
+    var zero: TileLayer = tile_layer(nil, 8, 8, 0.0, vec2(0.0, 0.0));
+    if (cells(?zero, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 5; }
     ret 0;
 }
 
