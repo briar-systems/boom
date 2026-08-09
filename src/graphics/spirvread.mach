@@ -1,0 +1,367 @@
+# Reading the shader modules boom ships, to check them against the CPU.
+#
+# WHY THE ENGINE READS ITS OWN SHADERS. The CPU and the shader agree about
+# things nothing enforces: a uniform block's size and member offsets, which
+# descriptor binding each stage reads, whether the joint palette is a storage
+# buffer, and what capabilities the modules declare. Every one of those is a
+# silent failure when it drifts. A block whose members moved is read as
+# whatever happens to be at that address, so geometry lands somewhere else and
+# no layer reports anything. A binding the set layout does not declare is a
+# descriptor that was never written. A capability nothing enabled a device
+# feature for is invalid usage a driver may honour anyway, so it works here and
+# fails on someone else's machine.
+#
+# This was a Python script over `spirv-dis` that CI ran. That made the checks a
+# side-car: they needed a tool boom does not otherwise use, they could not run
+# with `mach test`, and a machine without spirv-tools skipped them silently. The
+# modules are already embedded in the library, so reading them here makes the
+# agreement a test like any other, running everywhere, with nothing installed.
+#
+# THE READER IS DELIBERATELY PARTIAL. It decodes the instructions these checks
+# need and skips the rest by word count, which is all a SPIR-V consumer has to
+# do: every instruction states its own length, so an unknown opcode costs
+# nothing to step over. It is not a validator and does not try to be; `spirv-val`
+# in CI is the thing that says a module is well-formed.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+
+# The five-word header, then instructions. Both from the SPIR-V specification.
+pub val SPV_MAGIC:        u32 = 0x07230203;
+pub val SPV_HEADER_WORDS: usize = 5;
+
+# The opcodes this reader decodes.
+pub val OP_CAPABILITY:      u32 = 17;
+pub val OP_TYPE_STRUCT:     u32 = 30;
+pub val OP_TYPE_POINTER:    u32 = 32;
+pub val OP_VARIABLE:        u32 = 59;
+pub val OP_DECORATE:        u32 = 71;
+pub val OP_MEMBER_DECORATE: u32 = 72;
+
+# The decorations this reader looks for.
+pub val DEC_BLOCK:          u32 = 2;
+pub val DEC_ARRAY_STRIDE:   u32 = 6;
+pub val DEC_NON_WRITABLE:   u32 = 24;
+pub val DEC_BINDING:        u32 = 33;
+pub val DEC_DESCRIPTOR_SET: u32 = 34;
+pub val DEC_OFFSET:         u32 = 35;
+
+# The storage classes a descriptor is bound in.
+pub val CLASS_UNIFORM:        u32 = 2;
+pub val CLASS_STORAGE_BUFFER: u32 = 12;
+
+# The one capability every module may declare, and the only one boom allows.
+#
+# Anything else is a hardware requirement that arrived without being chosen, and
+# it comes with a device feature that has to be enabled and therefore a set of
+# devices the engine no longer runs on. Int64 was here until mach 4.18.0, forced
+# by codegen rather than by any shader; see boom.graphics.vk for what it cost.
+pub val CAP_SHADER: u32 = 1;
+
+# One word of a module, little-endian.
+#
+# SPIR-V is defined as a stream of 32-bit words and the magic number states the
+# endianness; boom's are produced by the Mach toolchain and are always
+# little-endian, so a module whose magic reads reversed is rejected as not a
+# module rather than byte-swapped.
+pub fun spv_word(m: *u8, i: usize) u32 {
+    ret m[i * 4]::u32
+      | (m[i * 4 + 1]::u32 << 8)
+      | (m[i * 4 + 2]::u32 << 16)
+      | (m[i * 4 + 3]::u32 << 24);
+}
+
+# Whether the bytes begin with the SPIR-V magic number and hold whole words.
+pub fun spv_is_module(m: *u8, len: usize) bool {
+    if (m == nil || len < SPV_HEADER_WORDS * 4 || (len % 4) != 0) { ret false; }
+    ret spv_word(m, 0) == SPV_MAGIC;
+}
+
+# The opcode of the instruction beginning at a word offset.
+pub fun spv_op(m: *u8, at: usize) u32 {
+    ret spv_word(m, at) & 0xFFFF;
+}
+
+# How many words the instruction beginning at a word offset occupies.
+#
+# This is what lets a partial reader be a correct one: an instruction it does
+# not know is stepped over by its own declared length.
+pub fun spv_len(m: *u8, at: usize) usize {
+    ret (spv_word(m, at) >> 16)::usize;
+}
+
+# Every capability the module declares, OR-ed into a set of flags.
+#
+# Returned as a bitmask over the low capability numbers rather than a list,
+# because the question asked of it is "is anything here besides Shader" and a
+# list would need somewhere to live. A capability past 63 sets no bit and is
+# reported through out_high instead, so an exotic one cannot pass unnoticed.
+pub fun spv_capabilities(m: *u8, len: usize, out_high: *bool) u64 {
+    @out_high = false;
+    if (!spv_is_module(m, len)) { ret 0; }
+
+    var caps: u64 = 0;
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret caps; }
+        if (spv_op(m, at) == OP_CAPABILITY && n >= 2) {
+            val c: u32 = spv_word(m, at + 1);
+            if (c < 64) { caps = caps | (1::u64 << c::u64); }
+            or { @out_high = true; }
+        }
+        at = at + n;
+    }
+    ret caps;
+}
+
+# Whether a decoration was applied to a target id with a given operand.
+#
+# The operand is the decoration's single argument: the binding number for
+# Binding, the set number for DescriptorSet, the stride for ArrayStride. A
+# decoration that takes none, such as Block or NonWritable, is asked for with
+# spv_has_decoration instead.
+pub fun spv_decoration_value(m: *u8, len: usize, target: u32, decoration: u32,
+                             out_value: *u32) bool {
+    @out_value = 0;
+    if (!spv_is_module(m, len)) { ret false; }
+
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret false; }
+        if (spv_op(m, at) == OP_DECORATE && n >= 4
+            && spv_word(m, at + 1) == target
+            && spv_word(m, at + 2) == decoration) {
+            @out_value = spv_word(m, at + 3);
+            ret true;
+        }
+        at = at + n;
+    }
+    ret false;
+}
+
+# Whether an operand-less decoration was applied to a target id.
+pub fun spv_has_decoration(m: *u8, len: usize, target: u32, decoration: u32) bool {
+    if (!spv_is_module(m, len)) { ret false; }
+
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret false; }
+        if (spv_op(m, at) == OP_DECORATE && n >= 3
+            && spv_word(m, at + 1) == target
+            && spv_word(m, at + 2) == decoration) {
+            ret true;
+        }
+        at = at + n;
+    }
+    ret false;
+}
+
+# The id of the variable decorated with a given descriptor set and binding.
+#
+# Returns 0 when the module declares no such binding, which is a legal answer:
+# a shader declares only what it reads, so a stage that does not sample has no
+# binding 1.
+pub fun spv_variable_at_binding(m: *u8, len: usize, set: u32, binding: u32) u32 {
+    if (!spv_is_module(m, len)) { ret 0; }
+
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret 0; }
+        if (spv_op(m, at) == OP_DECORATE && n >= 4
+            && spv_word(m, at + 2) == DEC_BINDING
+            && spv_word(m, at + 3) == binding) {
+            val id: u32 = spv_word(m, at + 1);
+            var s: u32 = 0;
+            if (spv_decoration_value(m, len, id, DEC_DESCRIPTOR_SET, ?s) && s == set) {
+                ret id;
+            }
+        }
+        at = at + n;
+    }
+    ret 0;
+}
+
+# The storage class of a variable id, or 0xFFFFFFFF when it has none.
+#
+# OpVariable states its class directly, which is the class the descriptor is
+# bound in: Uniform for a uniform block, StorageBuffer for a storage one. The
+# difference decides which std layout rules apply, so it is not cosmetic.
+pub fun spv_variable_class(m: *u8, len: usize, id: u32) u32 {
+    if (!spv_is_module(m, len)) { ret 0xFFFFFFFF; }
+
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret 0xFFFFFFFF; }
+        # OpVariable: result type, result id, storage class.
+        if (spv_op(m, at) == OP_VARIABLE && n >= 4 && spv_word(m, at + 2) == id) {
+            ret spv_word(m, at + 3);
+        }
+        at = at + n;
+    }
+    ret 0xFFFFFFFF;
+}
+
+# How many members the module gives the struct with the most Offset decorations,
+# and the largest offset among them.
+#
+# A block's layout is exactly its member offsets, and the two numbers that pin
+# it are how many there are and where the last one sits. A member that moved,
+# was added, or was dropped changes one of them.
+#
+# The block searched for is the one reached from a bound variable, so this takes
+# the struct id rather than guessing: see spv_block_of_binding.
+pub fun spv_member_offsets(m: *u8, len: usize, struct_id: u32,
+                           out_count: *usize, out_last: *u32) bool {
+    @out_count = 0;
+    @out_last  = 0;
+    if (!spv_is_module(m, len)) { ret false; }
+
+    var count: usize = 0;
+    var last:  u32   = 0;
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret false; }
+        # OpMemberDecorate: struct id, member index, decoration, operand.
+        if (spv_op(m, at) == OP_MEMBER_DECORATE && n >= 5
+            && spv_word(m, at + 1) == struct_id
+            && spv_word(m, at + 3) == DEC_OFFSET) {
+            count = count + 1;
+            val off: u32 = spv_word(m, at + 4);
+            if (off > last) { last = off; }
+        }
+        at = at + n;
+    }
+    @out_count = count;
+    @out_last  = last;
+    ret count > 0;
+}
+
+# The result type id of a variable id, or 0.
+fun spv_variable_type(m: *u8, len: usize, id: u32) u32 {
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret 0; }
+        # OpVariable: result type, result id, storage class.
+        if (spv_op(m, at) == OP_VARIABLE && n >= 4 && spv_word(m, at + 2) == id) {
+            ret spv_word(m, at + 1);
+        }
+        at = at + n;
+    }
+    ret 0;
+}
+
+# What a pointer type id points at, or 0.
+fun spv_pointee(m: *u8, len: usize, ptr: u32) u32 {
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret 0; }
+        # OpTypePointer: result id, storage class, type id.
+        if (spv_op(m, at) == OP_TYPE_POINTER && n >= 4 && spv_word(m, at + 1) == ptr) {
+            ret spv_word(m, at + 3);
+        }
+        at = at + n;
+    }
+    ret 0;
+}
+
+# The struct describing the block bound at a descriptor set and binding.
+#
+# Walked from the binding rather than found by looking for the module's one
+# Block-decorated struct, because a stage can have more than one: a skinned
+# vertex stage carries its matrices at binding 0 and its joint palette at
+# binding 3, and both are Block-decorated. Picking "the" block would have
+# checked whichever came first and called it the transform block.
+#
+# Returns 0 when nothing is bound there, or when what is bound is not a struct
+# behind a pointer, which is every sampler.
+pub fun spv_block_of_binding(m: *u8, len: usize, set: u32, binding: u32) u32 {
+    if (!spv_is_module(m, len)) { ret 0; }
+    val v: u32 = spv_variable_at_binding(m, len, set, binding);
+    if (v == 0) { ret 0; }
+    val p: u32 = spv_variable_type(m, len, v);
+    if (p == 0) { ret 0; }
+    val t: u32 = spv_pointee(m, len, p);
+    if (t == 0) { ret 0; }
+    if (!spv_has_decoration(m, len, t, DEC_BLOCK)) { ret 0; }
+    ret t;
+}
+
+# The largest ArrayStride the module declares, or 0 if it declares none.
+pub fun spv_max_array_stride(m: *u8, len: usize) u32 {
+    if (!spv_is_module(m, len)) { ret 0; }
+
+    var best: u32 = 0;
+    val words: usize = len / 4;
+    var at: usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret best; }
+        if (spv_op(m, at) == OP_DECORATE && n >= 4
+            && spv_word(m, at + 2) == DEC_ARRAY_STRIDE) {
+            val s: u32 = spv_word(m, at + 3);
+            if (s > best) { best = s; }
+        }
+        at = at + n;
+    }
+    ret best;
+}
+
+# --------------------------------------------------------------------- tests
+
+test "spirvread: a word is read little-endian" {
+    # The magic number is the one word whose value is known independently, so it
+    # is what says the reader agrees with the format about byte order. Reading
+    # big-endian would make every offset and binding in every check nonsense.
+    var bytes: [8]u8;
+    bytes[0] = 0x03; bytes[1] = 0x02; bytes[2] = 0x23; bytes[3] = 0x07;
+    if (spv_word(?bytes[0], 0) != SPV_MAGIC) { ret 1; }
+
+    bytes[4] = 0x78; bytes[5] = 0x56; bytes[6] = 0x34; bytes[7] = 0x12;
+    if (spv_word(?bytes[0], 1) != 0x12345678) { ret 2; }
+    ret 0;
+}
+
+test "spirvread: an instruction's length comes from its high half-word" {
+    # Stepping by anything else walks into the middle of an instruction and
+    # reads operands as opcodes, which is how a partial reader silently reports
+    # whatever it happens to land on.
+    var bytes: [8]u8;
+    # word count 3, opcode 17
+    bytes[0] = 17; bytes[1] = 0; bytes[2] = 3; bytes[3] = 0;
+    if (spv_op(?bytes[0], 0)  != 17) { ret 1; }
+    if (spv_len(?bytes[0], 0) != 3)  { ret 2; }
+    ret 0;
+}
+
+test "spirvread: bytes that are not a module are refused" {
+    # Every reader below returns an empty answer for a non-module, so a check
+    # that was handed rubbish would otherwise pass by finding nothing.
+    var bytes: [32]u8;
+    bytes[0] = 0xFF; bytes[1] = 0xFF; bytes[2] = 0xFF; bytes[3] = 0xFF;
+    if (spv_is_module(?bytes[0], 32))  { ret 1; }
+    # Whole words, right magic, but too short to hold a header.
+    bytes[0] = 0x03; bytes[1] = 0x02; bytes[2] = 0x23; bytes[3] = 0x07;
+    if (spv_is_module(?bytes[0], 16))  { ret 2; }
+    # A byte count that is not a whole number of words.
+    if (spv_is_module(?bytes[0], 30))  { ret 3; }
+    if (spv_is_module(nil, 32))        { ret 4; }
+    ret 0;
+}

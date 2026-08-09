@@ -348,8 +348,8 @@ fun create_device(v: *Vk) Result[bool, Error] {
     # storage buffer that is only ever read was not decorated NonWritable, so a
     # driver had to assume the vertex stage might write it (mach#2879). Both are
     # fixed as of mach 4.18.0, and the emitted modules are what says so:
-    # tools/check-uniform-layout.py reads every module's capabilities and fails
-    # on anything past Shader, which is what keeps this honest without a GPU.
+    # boom.graphics.spirv reads every module's capabilities and fails on
+    # anything past Shader, which is what keeps this honest without a GPU.
     #
     # A feature that is genuinely needed goes here, requested by name and
     # checked for support first. Handing back the supported set is legal and
