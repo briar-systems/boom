@@ -1,0 +1,21 @@
+# A passthrough: one texture in, one colour out.
+#
+# It exists to make attachments 2 and 3 of the G-buffer readable. boom's
+# render_target_read copies attachment 0 and there is no accessor for the rest,
+# so the only way to see what a four-output fragment stage actually wrote into
+# its third and fourth attachments is to draw that attachment into a
+# single-attachment target and read that back. Without this the prototype could
+# assert nothing about half of the outputs it exists to test.
+
+use tex: shader.texture;
+
+#[sampler(0, 1)] var source: tex.Sampler2D;
+
+#[input(0)] var in_uv: f32x2;
+
+#[output(0)] var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    out_colour = tex.sample_2d(source, in_uv);
+}

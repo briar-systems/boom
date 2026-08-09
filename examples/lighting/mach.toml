@@ -1,0 +1,88 @@
+[project]
+id = "lighting"
+version = "0.1.0"
+src = "src"
+out = "out/{target.name}/{profile.name}"
+
+[target.linux-x86_64]
+isa = "x86_64"
+os  = "linux"
+abi = "sysv64"
+
+[target.windows]
+isa = "x86_64"
+os  = "windows"
+abi = "win64"
+
+[target.darwin]
+isa = "x86_64"
+os  = "darwin"
+abi = "sysv64"
+
+[profile.debug]
+opt = 0
+debug = true
+simd = "scalarize"
+
+[profile.release]
+opt = 2
+debug = false
+simd = "scalarize"
+
+[artifact.lighting]
+kind = "bin"
+entry = "main.mach"
+out = "bin/lighting"
+targets = ["*"]
+link = []
+need = ["build-shaders"]
+
+# The prototype's shaders, compiled to SPIR-V and embedded into the binary.
+# Same arrangement as examples/shader: the artifact declares `need` because an
+# `#[embed]` is not an edge in the build graph (mach#2887), and the modules are
+# named rather than globbed so a shader that has been deleted cannot survive in
+# the build directory and be embedded again.
+[step.build-shaders]
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in quad_vert gbuf_frag light_frag fwd_frag copy_frag bloom_frag two_frag; do cp shaders/out/obj/lightshaders/$m.spv res/spv/$m.spv; done"
+in  = ["shaders/src/*.mach", "shaders/mach.toml"]
+out = ["res/spv/quad_vert.spv", "res/spv/gbuf_frag.spv", "res/spv/light_frag.spv", "res/spv/fwd_frag.spv", "res/spv/copy_frag.spv", "res/spv/bloom_frag.spv", "res/spv/two_frag.spv"]
+need = []
+
+# A path dep rather than a branch pin, so the example is a real consumer of the
+# boom being changed rather than of the boom already pushed.
+[dep.boom]
+path = "../.."
+
+[dep.mach-std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "branch/main"
+
+[dep.mach-glfw]
+git = "https://github.com/briar-systems/mach-glfw"
+ref = "branch/main"
+
+[dep.mach-image]
+git = "https://github.com/briar-systems/mach-image"
+ref = "branch/main"
+
+[dep.mach-gltf]
+git = "https://github.com/briar-systems/mach-gltf"
+ref = "branch/main"
+
+# boom links these transitively, but a consumer must still name every dep it
+# shares with a path dependency and match its ref exactly.
+[dep.mach-audio]
+git = "https://github.com/briar-systems/mach-audio"
+ref = "branch/main"
+
+[dep.mach-font]
+git = "https://github.com/briar-systems/mach-font"
+ref = "branch/main"
+
+[dep.mach-phys]
+git = "https://github.com/briar-systems/mach-phys"
+ref = "branch/main"
+
+[dep.mach-vk]
+git = "https://github.com/briar-systems/mach-vk"
+ref = "branch/main"

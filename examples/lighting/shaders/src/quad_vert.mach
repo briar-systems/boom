@@ -1,0 +1,60 @@
+# The one vertex stage every pass in this prototype draws with.
+#
+# Each pass is quads: a sprite in the geometry pass, a full-target quad in the
+# lighting, bloom and composite passes. They differ only in the fragment stage,
+# so there is one vertex stage and seven fragment stages rather than seven
+# pairs. boom's Shader takes the two modules separately, so the same compiled
+# vertex module is handed to every Shader the example builds.
+#
+# Binding 0 is boom's fixed transform block: the model-view-projection and the
+# model matrix, each as four columns. That is not negotiable, it is what
+# boom.graphics.descriptor writes for every draw.
+#
+# The world position is passed through because the lighting stage needs to know
+# where in the world a texel is, and a 2D deferred pass has no depth buffer to
+# reconstruct it from. In this prototype world units are target pixels.
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+#[uniform(0, 0)] var matrices: Matrices;
+
+#[input(0)] var in_position: f32x3;
+#[input(1)] var in_normal:   f32x3;
+#[input(2)] var in_uv:       f32x2;
+
+#[output(0)] var out_uv:    f32x2;
+#[output(1)] var out_world: f32x3;
+
+#[builtin("position")] var position: f32x4;
+
+# A 4x4 arrives as its four columns, which is how std140 lays out a mat4 and
+# therefore how boom uploads one. Duplicated per stage because a SPIR-V module
+# cannot call into another (mach#2823).
+fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
+      + c1 * f32x4{p[1], p[1], p[1], p[1]}
+      + c2 * f32x4{p[2], p[2], p[2], p[2]}
+      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+}
+
+#[stage("vertex")]
+fun vert_main() {
+    val p: f32x4 = f32x4{in_position[0], in_position[1], in_position[2], 1.0};
+
+    position = mul_point(matrices.mvp_0, matrices.mvp_1,
+                         matrices.mvp_2, matrices.mvp_3, p);
+
+    val w: f32x4 = mul_point(matrices.model_0, matrices.model_1,
+                             matrices.model_2, matrices.model_3, p);
+    out_world = f32x3{w[0], w[1], w[2]};
+    out_uv    = in_uv;
+}
