@@ -17,6 +17,7 @@ use inp: boom.input;
 use phy: boom.physics;
 use boom.window.window_should_close;
 use boom.window.window_poll;
+use boom.gamepad.gamepad_poll;
 use boom.window.window_refresh_size;
 use boom.clock.clock_tick;
 use boom.timestep.timestep_add;
@@ -49,6 +50,10 @@ pub fun run(ctx: *Context, app: *App) {
 
     for (ctx.running && !window_should_close(?ctx.window)) {
         window_poll();
+        # Pads have no events to deliver, so they are sampled once per frame
+        # here. The edges this produces still belong to a tick, because
+        # input_begin_tick folds them like every other edge.
+        gamepad_poll(?ctx.input);
         # A window is resizable, so its size is not fixed at open. Refreshing
         # here rather than in a callback means a game reading ctx.window.width
         # during a tick or a draw sees one value for the whole frame, instead

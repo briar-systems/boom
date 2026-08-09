@@ -13,7 +13,7 @@ commit = "0268357dc3b5c44d08a24d6dff99c9976b279360"
 [dep.mach-audio]
 url = "https://github.com/briar-systems/mach-audio"
 ref = "branch/main"
-commit = "bd2b0ef220c791e7144da973223f98d15703c5d0"
+commit = "ebf2bb0722d47a412c820bdeb419ceec65921882"
 
 [dep.mach-image]
 url = "https://github.com/briar-systems/mach-image"

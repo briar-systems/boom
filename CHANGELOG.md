@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-09
+
+### Added
+- input: **gamepads.** Up to 16 pads, with the keyboard's edge semantics: a
+  press belongs to exactly one tick whether the frame ticked three times or
+  none. Sticks use a radial deadzone with the magnitude rescaled from the
+  deadzone edge, so a diagonal push is not faster than a straight one and a rig
+  can still walk slowly. Triggers are exposed both as an axis and as a
+  synthetic button with separate down and up thresholds, because a single
+  threshold turns a trigger resting on it into a continuous fire. A pad that
+  disconnects releases what it was holding rather than latching it.
+- gamepad: the platform boundary, mapping GLFW to the state above, and
+  `gamepad_add_mappings` so a pad newer than the bundled SDL database can be
+  taught without a GLFW upgrade. Unmapped joysticks are reported absent rather
+  than exposed with an uninterpretable button order.
+- audio: per-voice **pan**, with a constant-power law so a source crossing the
+  centre does not dip, **pitch** via the clip's playback rate, and gain, pan and
+  rate all settable while a voice plays.
+- audio: **voice classes and budgets.** `audio_set_class_limit` caps how many
+  voices a category may hold, which is what keeps a weapon audible when the
+  screen is full of impacts. A class at its budget refuses the new sound rather
+  than stealing a playing slot, because only the audio thread may free one and
+  a steal would cost the table its lock-free invariant for no audible gain.
+- audio: `audio_play_ex`, taking pan, rate and class. `audio_play` is unchanged
+  and plays centred at natural pitch in the default class.
+
+### Changed
+- deps: mach-audio 0.4.1, for the playback rate and per-channel mixing this
+  builds on.
+
 ## [0.4.1] - 2026-08-09
 
 ### Fixed

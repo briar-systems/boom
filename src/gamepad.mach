@@ -1,0 +1,64 @@
+# The platform boundary for gamepads.
+#
+# boom.input holds the state and defines the semantics. This is the only place
+# that knows GLFW reports pads, exactly as boom.window is the only place that
+# knows GLFW reports keys. A game importing the windowing library through the
+# back door to read a stick would be the failure this split exists to prevent.
+#
+# POLLED PER FRAME, NOT PER TICK. The platform has no gamepad events to deliver,
+# so this is called once per frame from the engine loop alongside window_poll.
+# The edges it produces still belong to a tick, because boom.input folds them at
+# the tick boundary like everything else.
+#
+# ONLY MAPPED PADS. GLFW distinguishes a raw joystick from one it has an SDL
+# mapping for. An unmapped stick reports axes and buttons in an order nobody can
+# interpret, so binding a game to it produces a controller where fire is
+# whatever the manufacturer put third. Those are reported as absent.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use glfw.glfw;
+use glfw.c;
+use inp: boom.input;
+
+# Poll every pad slot into the input state
+#
+# Called by the engine once per frame. A game calls nothing here.
+pub fun gamepad_poll(i: *inp.Input) {
+    var jid: i32 = 0;
+    for (jid::usize < inp.MAX_PADS) {
+        var st: c.Gamepadstate;
+        val ok: bool = glfw.joystick_present(jid)
+                       && glfw.joystick_is_gamepad(jid)
+                       && glfw.get_gamepad_state(jid, ?st);
+        if (ok) {
+            inp.input_pad_poll(i, jid::usize, true, ?st.buttons[0], ?st.axes[0]);
+        }
+        or {
+            inp.input_pad_poll(i, jid::usize, false, nil, nil);
+        }
+        jid = jid + 1;
+    }
+}
+
+# Load additional SDL gamepad mappings
+#
+# GLFW ships a mapping database, but it ages, and a pad released after the
+# bundled build reports as a raw joystick and is therefore ignored. This takes
+# the SDL_GameControllerDB text so a game can ship a current database without a
+# GLFW upgrade.
+# ---
+# text: SDL mapping lines
+# ret:  whether the mappings parsed
+pub fun gamepad_add_mappings(text: str) bool {
+    ret glfw.update_gamepad_mappings(text);
+}
+
+# The mapped name of a pad, or nil when it is absent or unmapped
+pub fun gamepad_name(pad: usize) str {
+    if (pad >= inp.MAX_PADS) { ret nil; }
+    ret glfw.get_gamepad_name(pad::i32);
+}
