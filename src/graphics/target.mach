@@ -45,6 +45,7 @@ use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.pass.PassOptions;
 use boom.graphics.pass.pass_create;
 use boom.graphics.pass.pass_clearing_mrt;
+use boom.graphics.pass.pass_loading_mrt;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.pass.pass_clearing;
 use boom.graphics.image.DepthAttachment;
@@ -67,6 +68,7 @@ pub rec RenderTarget {
     color_count: usize;
     depth:       DepthAttachment;
     pass:        vk.RenderPass;
+    pass_load:   vk.RenderPass;
     framebuffer: vk.Framebuffer;
     width:       i32;
     height:      i32;
@@ -81,6 +83,15 @@ pub rec RenderTarget {
 # covers the subpass dependencies as well as the attachments. Two hand-written
 # passes agreed on everything obvious and differed in dependency count, which
 # made every draw into a target invalid.
+# TWO PASSES, AND THE SECOND IS WHY ANYTHING CAN ACCUMULATE. A target owning
+# only a clearing pass is wiped by every pass that touches it, which makes a
+# layer that builds up over many frames, such as decals stamped one quad at a
+# time, impossible to express: the only way to add a mark would be to redraw
+# every previous mark.
+#
+# The two are render-pass compatible, so one set of pipelines works in both.
+# Load and store operations and attachment layouts are exactly the members
+# compatibility exempts, and they are the only members these two differ in.
 fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
     # Ends ready to be sampled, which is what an offscreen target is for.
     # Declaring the transition in the pass rather than as a barrier after it
@@ -91,7 +102,16 @@ fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
     for (i < t.color_count) { fmts[i] = t.colors[i].image.format; i = i + 1; }
     val o: PassOptions = pass_clearing_mrt(?fmts[0], t.color_count,
                                            vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    ret pass_create(v, ?o, ?t.pass);
+    val cr: Result[bool, Error] = pass_create(v, ?o, ?t.pass);
+    if (is_err[bool, Error](cr)) { ret cr; }
+
+    # Entered in SHADER_READ_ONLY_OPTIMAL, which is where this target's own
+    # clearing pass leaves it, not COLOR_ATTACHMENT_OPTIMAL as the window's
+    # resume pass uses. Naming the wrong layout preserves nothing.
+    val l: PassOptions = pass_loading_mrt(?fmts[0], t.color_count,
+                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    ret pass_create(v, ?l, ?t.pass_load);
 }
 
 # create an offscreen render target of the given size
@@ -286,6 +306,7 @@ pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     vk_wait_idle(v);
     if (t.framebuffer != nil) { vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil); t.framebuffer = nil; }
     if (t.pass != nil)        { vk.vkDestroyRenderPass(v.device, t.pass, nil); t.pass = nil; }
+    if (t.pass_load != nil)   { vk.vkDestroyRenderPass(v.device, t.pass_load, nil); t.pass_load = nil; }
     depth_attachment_dnit(?t.depth, v);
     var di: usize = 0;
     for (di < MAX_COLOR_ATTACHMENTS) { image_dnit(?t.colors[di].image, v); di = di + 1; }
@@ -318,6 +339,7 @@ test "target: teardown on a target that was never created is a no-op" {
     var t: RenderTarget;
     t.framebuffer = nil;
     t.pass        = nil;
+    t.pass_load   = nil;
     t.depth.view  = nil;
     t.depth.image = nil;
     t.depth.mem   = nil;
