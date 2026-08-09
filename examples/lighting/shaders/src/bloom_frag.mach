@@ -1,0 +1,66 @@
+# Bloom's threshold and blur, in one stage selected by the game's block.
+#
+# One module rather than two because the two differ in four lines and boom
+# builds a pipeline per Shader per pass, so two Shaders that sample one texture
+# and write one colour cost more bookkeeping than the branch does.
+#
+# The alpha channel carries the bloom's own luminance. That is not for the
+# blur's sake: it is what makes the add-back approximable. boom's PipelineDesc
+# offers opaque or source-alpha blending and nothing else, so there is no
+# additive blend to add a bloom target back over a scene with. Blending it with
+# alpha equal to its luminance reads as a glow and is wrong in the way a lerp is
+# wrong, because it darkens the scene underneath in proportion to how much glow
+# it adds.
+#
+# args: x and y are the texel step for this direction, z is the threshold, and
+# w selects the pass: below 0.5 thresholds, at or above 0.5 blurs.
+
+use sh:  shader.math;
+use tex: shader.texture;
+
+rec Args {
+    step:  f32x4;
+    tint:  f32x4;
+}
+
+#[sampler(0, 1)] var source: tex.Sampler2D;
+#[uniform(0, 4)] var args:   Args;
+
+#[input(0)] var in_uv: f32x2;
+
+#[output(0)] var out_colour: f32x4;
+
+# A nine-tap tent along one axis, run once horizontally and once vertically.
+fun blur(uv: f32x2, sx: f32, sy: f32) f32x4 {
+    var acc: f32x4 = tex.sample_2d(source, uv) * f32x4{0.227, 0.227, 0.227, 0.227};
+    acc = acc + (tex.sample_2d(source, f32x2{uv[0] + sx, uv[1] + sy})
+              +  tex.sample_2d(source, f32x2{uv[0] - sx, uv[1] - sy}))
+              * f32x4{0.194, 0.194, 0.194, 0.194};
+    acc = acc + (tex.sample_2d(source, f32x2{uv[0] + sx * 2.0, uv[1] + sy * 2.0})
+              +  tex.sample_2d(source, f32x2{uv[0] - sx * 2.0, uv[1] - sy * 2.0}))
+              * f32x4{0.121, 0.121, 0.121, 0.121};
+    acc = acc + (tex.sample_2d(source, f32x2{uv[0] + sx * 3.0, uv[1] + sy * 3.0})
+              +  tex.sample_2d(source, f32x2{uv[0] - sx * 3.0, uv[1] - sy * 3.0}))
+              * f32x4{0.054, 0.054, 0.054, 0.054};
+    acc = acc + (tex.sample_2d(source, f32x2{uv[0] + sx * 4.0, uv[1] + sy * 4.0})
+              +  tex.sample_2d(source, f32x2{uv[0] - sx * 4.0, uv[1] - sy * 4.0}))
+              * f32x4{0.017, 0.017, 0.017, 0.017};
+    ret acc;
+}
+
+#[stage("fragment")]
+fun frag_main() {
+    val c: f32x4 = tex.sample_2d(source, in_uv);
+    val luma: f32 = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
+
+    # What is above the threshold, scaled so a texel just over it contributes
+    # nothing and one well over it contributes most of itself.
+    val over: f32 = sh.max(luma - args.step[2], 0.0) / sh.max(1.0 - args.step[2], 0.0001);
+    val t: f32x4 = f32x4{c[0] * over, c[1] * over, c[2] * over, over};
+
+    val b: f32x4 = blur(in_uv, args.step[0], args.step[1]);
+
+    val pick: f32 = sh.step(0.5, args.step[3]);
+    out_colour = sh.mix_4(t, b, f32x4{pick, pick, pick, pick})
+               * f32x4{args.tint[0], args.tint[1], args.tint[2], args.tint[3]};
+}

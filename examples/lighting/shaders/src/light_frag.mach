@@ -1,0 +1,198 @@
+# The deferred lighting stage: diffuse, specular and soft short shadows, read
+# out of one G-buffer attachment.
+#
+# WHY IT READS ONE ATTACHMENT AND NOT THREE. boom binds exactly one combined
+# image sampler per draw, so this stage can see one of the geometry pass's four
+# attachments and no more. Everything it shades with therefore has to have been
+# packed into that one: the normal's XY, roughness and metallic. It cannot see
+# albedo, which is why the specular here is white rather than tinted by a
+# metal's base colour, and it cannot see emissive or ambient occlusion at all.
+#
+# WHY THE SHADOWS ARE ANALYTIC SEGMENTS. A shadow map per light means rendering
+# an occluder pass per light into a target per light, and boom would need one
+# target per light plus a way to sample it beside the G-buffer, which is the
+# same one-sampler wall. Ray-marching an occlusion channel is the same problem.
+# So walls arrive as line segments in the game's own uniform block and each
+# fragment tests the segment between itself and the light. For a top-down 2D
+# game whose occluders are wall tiles that is not a compromise: the occluder set
+# is already a short list of axis-aligned segments, it costs no target and no
+# pass, and it cannot project further than the code says it may.
+#
+# Softness is five taps across the light's width, which is an area light rather
+# than a blur of a hard edge. Shortness is a fade with the distance from the
+# shading point to the occluder, so a wall a few tiles away casts almost
+# nothing. Darkening rather than occluding is the floor: full occlusion scales
+# the light by ambient.w and never to zero, and ambient is added afterwards.
+#
+# THE COST OF THE UNIFORM BLOCK. boom's user block is 256 bytes, which is
+# sixteen vec4s. Two lights and three wall segments plus a header fill ten of
+# them. A real stage has dozens of each, so this arrangement does not scale: it
+# is what fits, not what is wanted.
+
+use sh:  shader.math;
+use tex: shader.texture;
+
+# The game's block at binding 4. Field-per-light rather than arrays because the
+# block is small enough that a loop would buy nothing and the layout stays
+# obvious against what src/main.mach writes.
+rec Scene {
+    view:    f32x4;
+    ambient: f32x4;
+    l0_pos:  f32x4;
+    l0_col:  f32x4;
+    l1_pos:  f32x4;
+    l1_col:  f32x4;
+    wall0:   f32x4;
+    wall1:   f32x4;
+    wall2:   f32x4;
+    counts:  f32x4;
+}
+
+#[sampler(0, 1)] var packed: tex.Sampler2D;
+#[uniform(0, 4)] var scene:  Scene;
+
+#[input(0)] var in_uv: f32x2;
+
+#[output(0)] var out_light: f32x4;
+
+# Whether the segment ab blocks the straight line from p to l, and by how much.
+#
+# Branchless because every term is wanted as a weight rather than as control
+# flow: a parallel pair produces a garbage t and u that the parallel test then
+# multiplies away, which is cheaper and shorter than guarding the divide.
+fun seg_block(px: f32, py: f32, lx: f32, ly: f32,
+              ax: f32, ay: f32, bx: f32, by: f32, short: f32) f32 {
+    val rx: f32 = lx - px;
+    val ry: f32 = ly - py;
+    val sx: f32 = bx - ax;
+    val sy: f32 = by - ay;
+
+    val denom: f32 = rx * sy - ry * sx;
+    val ok: f32 = sh.step(0.0001, sh.abs(denom));
+    val safe: f32 = denom + (1.0 - ok);
+
+    val qx: f32 = ax - px;
+    val qy: f32 = ay - py;
+    val t: f32 = (qx * sy - qy * sx) / safe;
+    val u: f32 = (qx * ry - qy * rx) / safe;
+
+    val inside: f32 = sh.step(0.0, t) * sh.step(t, 1.0)
+                    * sh.step(0.0, u) * sh.step(u, 1.0);
+
+    # Short range: an occluder far from the shading point casts almost nothing,
+    # so a shadow falls off within a few tiles instead of running to the edge of
+    # the light's reach.
+    val hit: f32 = t * sh.sqrt(rx * rx + ry * ry);
+    val near: f32 = 1.0 - sh.smooth_step(short * 0.35, short, hit);
+
+    ret ok * inside * near;
+}
+
+# The strongest of the three wall segments, gated by how many are live.
+fun walls_block(px: f32, py: f32, lx: f32, ly: f32, n: f32, short: f32) f32 {
+    val w0: f32 = seg_block(px, py, lx, ly, scene.wall0[0], scene.wall0[1],
+                            scene.wall0[2], scene.wall0[3], short) * sh.step(0.5, n);
+    val w1: f32 = seg_block(px, py, lx, ly, scene.wall1[0], scene.wall1[1],
+                            scene.wall1[2], scene.wall1[3], short) * sh.step(1.5, n);
+    val w2: f32 = seg_block(px, py, lx, ly, scene.wall2[0], scene.wall2[1],
+                            scene.wall2[2], scene.wall2[3], short) * sh.step(2.5, n);
+    ret sh.max(w0, sh.max(w1, w2));
+}
+
+# Five taps across the light's width, averaged.
+#
+# An area light rather than a blurred hard edge: the penumbra widens with the
+# distance from the occluder on its own, which is what makes a shadow read as
+# cast by something with size in the room.
+fun soft_block(px: f32, py: f32, lx: f32, ly: f32, width: f32, n: f32, short: f32) f32 {
+    val dx: f32 = lx - px;
+    val dy: f32 = ly - py;
+    val len: f32 = sh.max(sh.sqrt(dx * dx + dy * dy), 0.0001);
+
+    # Perpendicular to the line to the light, so the taps spread across the
+    # light rather than along the ray, where they would all give one answer.
+    val ox: f32 = (0.0 - dy) / len * width;
+    val oy: f32 = dx / len * width;
+
+    val a: f32 = walls_block(px, py, lx - ox, ly - oy, n, short);
+    val b: f32 = walls_block(px, py, lx - ox * 0.5, ly - oy * 0.5, n, short);
+    val c: f32 = walls_block(px, py, lx, ly, n, short);
+    val d: f32 = walls_block(px, py, lx + ox * 0.5, ly + oy * 0.5, n, short);
+    val e: f32 = walls_block(px, py, lx + ox, ly + oy, n, short);
+    ret (a + b + c + d + e) * 0.2;
+}
+
+# One light's contribution at a texel: diffuse plus a Blinn specular lobe,
+# attenuated by range and by shadow.
+fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32,
+             pos: f32x4, col: f32x4, nwalls: f32, floor: f32) f32x3 {
+    val dx: f32 = pos[0] - px;
+    val dy: f32 = pos[1] - py;
+    val dz: f32 = pos[2];
+    val dist: f32 = sh.max(sh.sqrt(dx * dx + dy * dy + dz * dz), 0.0001);
+
+    val lx: f32 = dx / dist;
+    val ly: f32 = dy / dist;
+    val lz: f32 = dz / dist;
+
+    val fall: f32 = sh.clamp(1.0 - dist / sh.max(pos[3], 0.0001), 0.0, 1.0);
+    val att: f32 = fall * fall * col[3];
+
+    val ndl: f32 = sh.max(n[0] * lx + n[1] * ly + n[2] * lz, 0.0);
+
+    # The view is straight down in a top-down 2D scene, so the half vector is
+    # the light direction with one added to Z and renormalised.
+    val hx: f32 = lx;
+    val hy: f32 = ly;
+    val hz: f32 = lz + 1.0;
+    val hl: f32 = sh.max(sh.sqrt(hx * hx + hy * hy + hz * hz), 0.0001);
+    val ndh: f32 = sh.max((n[0] * hx + n[1] * hy + n[2] * hz) / hl, 0.0);
+
+    # Roughness drives the lobe width. Squaring the smooth end keeps a polished
+    # plate tight enough that the highlight is a streak rather than a wash,
+    # which is the whole effect the material stack is bought for.
+    val gloss: f32 = 1.0 - rough;
+    val power: f32 = sh.mix(8.0, 220.0, gloss * gloss);
+    # The metallic factor is written value-first. A literal on the left of a
+    # multiply is refused by the spirv target as an operand-type mix, while the
+    # same product the other way round compiles.
+    val spec: f32 = sh.pow(ndh, power) * (0.04 + metal * 0.96) * ndl;
+
+    # Shadow scales the light and stops at the floor, so a shadowed region reads
+    # dimmer and never black. Ambient is added by the composite, not here.
+    val occ: f32 = soft_block(px, py, pos[0], pos[1], sh.max(pos[3] * 0.06, 1.0),
+                              nwalls, scene.counts[1]);
+    val shade: f32 = sh.mix(1.0, floor, occ);
+
+    val diff: f32 = ndl * (1.0 - metal * 0.9) * att * shade;
+    val s: f32 = spec * att * shade;
+
+    ret f32x3{col[0] * diff + s, col[1] * diff + s, col[2] * diff + s};
+}
+
+#[stage("fragment")]
+fun frag_main() {
+    val px: f32 = in_uv[0] * scene.view[0];
+    val py: f32 = in_uv[1] * scene.view[1];
+
+    val g: f32x4 = tex.sample_2d(packed, in_uv);
+
+    # Z is recovered rather than stored, exact for a unit normal facing the
+    # camera, which every tangent-space normal in a top-down scene is.
+    val nx: f32 = g[0] * 2.0 - 1.0;
+    val ny: f32 = g[1] * 2.0 - 1.0;
+    val nz: f32 = sh.sqrt(sh.max(1.0 - nx * nx - ny * ny, 0.0));
+    val n: f32x3 = sh.normalize_3(f32x3{nx, ny, nz});
+
+    val rough: f32 = sh.clamp(g[2], 0.02, 1.0);
+    val metal: f32 = sh.clamp(g[3], 0.0, 1.0);
+
+    val nwalls: f32 = scene.counts[0];
+    val floor: f32 = scene.ambient[3];
+
+    val a: f32x3 = light_at(px, py, n, rough, metal, scene.l0_pos, scene.l0_col, nwalls, floor);
+    val b: f32x3 = light_at(px, py, n, rough, metal, scene.l1_pos, scene.l1_col, nwalls, floor)
+                 * f32x3{sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3])};
+
+    out_light = f32x4{a[0] + b[0], a[1] + b[1], a[2] + b[2], 1.0};
+}
