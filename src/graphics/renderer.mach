@@ -909,8 +909,17 @@ pub fun batch_flush(p: *Pass) {
     # No tint block: the colour is per vertex. Passing 0 for its size is what
     # tells the descriptor layer binding 2 is not part of this draw.
     var views2d: [4]vk.ImageView;
-    if (p.mat2d != nil) { fill_views_mat(r, ?views2d[0], p.mat2d, tex); }
-    or                  { fill_views(r, ?views2d[0], tex); }
+    if (p.mat2d != nil) {
+        fill_views_mat(r, ?views2d[0], p.mat2d, tex);
+        # THE RUN'S OWN TEXTURE OWNS BINDING 1, ALWAYS. A batched run's UVs were
+        # normalised against the texture the sprites were pushed with, so a
+        # material whose first texture is a different sheet makes every vertex
+        # sample the right coordinates in the wrong atlas. The material supplies
+        # the companion channels at 5, 6 and 7; it does not get to replace the
+        # sheet the geometry was built for.
+        views2d[0] = texture_view(tex);
+    }
+    or { fill_views(r, ?views2d[0], tex); }
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
                           $size_of(ScreenUniforms)::u64, ?views2d[0], r.sampler,
                           0, 0);
