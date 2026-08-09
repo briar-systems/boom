@@ -104,6 +104,13 @@ rec Game {
     budget:   usize;
     gbuf:     gfx.RenderTarget;
     gbuf_ok:  bool;
+
+    # A 64x64 target used to prove a loading pass preserves what is already
+    # drawn. Nothing about this is visible on screen; it exists because the
+    # failure it checks for is invisible to any test without a GPU.
+    probe:    gfx.RenderTarget;
+    probe_ok: bool;
+    probe_lit: usize;
     drawn:    usize;
 }
 
@@ -141,6 +148,17 @@ fun on_init(ctx: *Context) {
     g.gbuf_ok = true;
     print.printlnf("mrt target: {} attachments at 320x180",
                    gfx.render_target_count(?g.gbuf));
+
+    g.probe_ok  = false;
+    g.probe_lit = 0;
+    val pb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, 64, 64);
+    if (is_err[gfx.RenderTarget, gfx.Error](pb)) {
+        var pe: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](pb);
+        print.eprintlnf("probe target error: {}", gfx.error_msg(?pe));
+        ret;
+    }
+    g.probe = unwrap_ok[gfx.RenderTarget, gfx.Error](pb);
+    g.probe_ok = true;
 
     val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
     if (is_err[gfx.Mesh, gfx.Error](loaded)) {
@@ -232,6 +250,27 @@ fun on_draw(ctx: *Context) {
     # five clear values in front of the driver. The sprite draw is expected to
     # be refused and counted, because the built-in programs declare one colour
     # output and are not valid here.
+    # THE LOADING-PASS CHECK, over the first two frames.
+    #
+    # Frame 0 clears the probe to black and draws a white square into it.
+    # Frame 1 opens a pass with clear = 0 and draws nothing. If a loading pass
+    # preserves the attachment, the square is still there at the end; if the
+    # target is wiped by every pass that touches it, it is gone. on_dnit reads
+    # the pixels back and says which happened.
+    if (g.probe_ok && g.drawn < 2) {
+        var pd: gfx.PassDesc = gfx.pass_overlay();
+        pd.target      = ?g.probe;
+        pd.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+        pd.clear       = 0;
+        if (g.drawn == 0) { pd.clear = 1; }
+        var pp: gfx.Pass = gfx.pass_begin(?g.renderer, ?pd);
+        if (g.drawn == 0) {
+            gfx.pass_draw_sprite(?pp, nil, gfx.rect(0.0, 0.0, 32.0, 32.0),
+                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+        }
+        gfx.pass_end(?pp);
+    }
+
     if (g.gbuf_ok) {
         var gd: gfx.PassDesc = gfx.pass_overlay();
         gd.target      = ?g.gbuf;
@@ -290,6 +329,33 @@ fun on_dnit(ctx: *Context) {
                    g.drawn, gfx.shader_pipelines(?g.shader));
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    if (g.probe_ok) {
+        var px: [16384]u8;
+        val rr: Result[bool, gfx.Error] = gfx.render_target_read(d, ?g.probe, ?px[0], 16384);
+        if (is_err[bool, gfx.Error](rr)) {
+            var re: gfx.Error = unwrap_err[bool, gfx.Error](rr);
+            print.eprintlnf("probe read error: {}", gfx.error_msg(?re));
+        }
+        or {
+            var lit: usize = 0;
+            var i: usize = 0;
+            for (i < 4096) {
+                if (px[i * 4] > 128) { lit = lit + 1; }
+                i = i + 1;
+            }
+            g.probe_lit = lit;
+            # 32x32 of a 64x64 target is a quarter of 4096.
+            if (lit >= 1000 && lit <= 1100) {
+                print.printlnf("PROBE OK: a loading pass preserved {} pixels", lit);
+            }
+            or {
+                print.printlnf("PROBE FAIL: expected about 1024 pixels, found {}", lit);
+            }
+        }
+        gfx.render_target_delete(d, ?g.probe);
+    }
+
     if (g.gbuf_ok) { gfx.render_target_delete(d, ?g.gbuf); }
     gfx.shader_delete(?g.shader, d);
     gfx.mesh_delete(d, ?g.mesh);
@@ -355,5 +421,8 @@ fun main(argc: i64, argv: **u8) i64 {
         print.printlnf("FAIL frames: drew {} of {}", game.drawn, game.budget);
         ret 1;
     }
+    # The probe reports through the exit code as well as the output. A check
+    # that prints FAIL and exits 0 is a check nothing can act on.
+    if (game.probe_ok && (game.probe_lit < 1000 || game.probe_lit > 1100)) { ret 1; }
     ret 0;
 }

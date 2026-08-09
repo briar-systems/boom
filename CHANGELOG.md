@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-08-09
+
+### Fixed
+- graphics: **`PassDesc.clear` was ignored for offscreen targets.** A
+  `RenderTarget` owned exactly one render pass, built to clear, and `pass_begin`
+  began it regardless of what the caller asked for. Every pass touching a target
+  wiped it, and a game setting `clear = 0` got no error and no effect. Targets
+  now carry a loading pass alongside the clearing one and `pass_begin` selects
+  on `d.clear`.
+
+  This made anything that accumulates across frames impossible to express. A
+  decal layer stamped one quad at a time could only be built by redrawing every
+  previous mark, which is the growing cost such a layer exists to avoid.
+
+  The two passes are render pass compatible, so one set of pipelines still works
+  in both: load and store operations and attachment layouts are exactly the
+  members compatibility exempts, and they are the only members these differ in.
+
+### Added
+- graphics: `pass_loading_mrt`, the multiple-attachment form of `pass_loading`,
+  with the entry layout named rather than fixed. A target enters in
+  `SHADER_READ_ONLY_OPTIMAL`, where its own pass leaves it, while the window's
+  resume pass enters in `COLOR_ATTACHMENT_OPTIMAL`. Naming the wrong one still
+  creates the pass and preserves nothing.
+- examples/shader: a readback probe that draws into a target, opens a second
+  pass with `clear = 0`, and reports through the exit code whether the pixels
+  survived. This class of bug is invisible to every test without a GPU, which is
+  why it lasted this long.
+
 ## [0.6.0] - 2026-08-09
 
 ### Added
