@@ -45,6 +45,7 @@ use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vertex.vertex_format_eq;
@@ -194,6 +195,11 @@ pub fun shader_pipelines(s: *Shader) usize {
 pub fun shader_delete(s: *Shader, d: *Device) {
     if (d == nil || !d.ready) { ret; }
     val v: *Vk = d.vk;
+    # A pipeline the GPU has not finished with is still referenced by a
+    # submitted command buffer, and the frame loop runs several frames ahead, so
+    # "after the last draw" is not after the last use. Every public delete waits
+    # first; see vk_wait_idle.
+    vk_wait_idle(v);
     var i: usize = 0;
     for (i < s.count) {
         if (s.built[i].live) {

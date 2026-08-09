@@ -6,10 +6,11 @@
 # a gfx.Shader, a gfx.pass_draw_shaded, and a block of its own parameters. No
 # pipeline, no render pass, no descriptor set, no vk import.
 #
-# Two cubes are drawn side by side. The left one goes through
-# gfx.pass_draw_material and the built-in program; the right one goes through a
-# gfx.Shader. They spin together, and if the hatch is wired correctly they look
-# identical.
+# Two cubes are drawn side by side, spinning together. The left one goes through
+# gfx.pass_draw_material and boom's built-in program: one hardcoded directional
+# light. The right one goes through a gfx.Shader, and it is meant to look
+# DIFFERENT -- a rim light in a colour the game chose. Identical cubes would
+# mean the game's fragment stage was not the one that ran.
 #
 # THE SHADERS ARE THIS EXAMPLE'S OWN, in shaders/, compiled to SPIR-V by a build
 # step and embedded below. boom does not compile them and does not know what is
@@ -47,7 +48,9 @@ use std.types.result.unwrap_err;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
+use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_equals;
 
 # The game's compiled stages. Produced by the build-shaders step in mach.toml,
 # which is why the artifact declares `need` on it: an embed is not an edge in
@@ -94,6 +97,12 @@ rec Game {
     light:    Light;
     ready:    u8;
     paused:   bool;
+
+    # --frames N draws N frames and quits, so the example can be checked without
+    # someone watching it: the exit code says whether it managed to, and a run
+    # under the validation layers says whether it did so legally.
+    budget:   usize;
+    drawn:    usize;
 }
 
 fun on_init(ctx: *Context) {
@@ -198,6 +207,9 @@ fun on_draw(ctx: *Context) {
     }
     if (!opened) { ret; }
 
+    g.drawn = g.drawn + 1;
+    if (g.budget != 0 && g.drawn >= g.budget) { ctx.running = false; }
+
     var desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
     var p: gfx.Pass = gfx.pass_begin(?g.renderer, ?desc);
 
@@ -231,7 +243,11 @@ fun on_dnit(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (g.ready == 0) { ret; }
 
-    print.printlnf("the shader built {} pipeline(s)", gfx.shader_pipelines(?g.shader));
+    # One per render pass and vertex layout the shader was drawn with, so one
+    # here. A number that climbs with the frame count would mean the cache is
+    # not being hit and every frame is building a pipeline.
+    print.printlnf("drew {} frames; the shader built {} pipeline(s)",
+                   g.drawn, gfx.shader_pipelines(?g.shader));
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
     gfx.shader_delete(?g.shader, d);
@@ -240,9 +256,32 @@ fun on_dnit(ctx: *Context) {
     gfx.renderer_dnit(?g.renderer);
 }
 
+# Decimal digits to a count, stopping at the first character that is not one.
+fun parse_usize(s: str) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    for (s[i] != 0) {
+        val c: u8 = s[i];
+        if (c < 48 || c > 57) { ret n; }
+        n = n * 10 + (c - 48)::usize;
+        i = i + 1;
+    }
+    ret n;
+}
+
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     var game: Game;
+    game.budget = 0;
+    game.drawn  = 0;
+    var argi: i64 = 1;
+    for (argi < argc) {
+        if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
+            game.budget = parse_usize(argv[argi + 1]:~str);
+            argi = argi + 1;
+        }
+        argi = argi + 1;
+    }
 
     var app: App;
     app.f_init = on_init;
@@ -266,5 +305,14 @@ fun main(argc: i64, argv: **u8) i64 {
     context_set_user(?ctx, (?game)::ptr);
     run(?ctx, ?app);
     context_shutdown(?ctx);
+
+    # A failed startup step leaves ready at 0, and a run that was asked for a
+    # fixed number of frames and drew fewer did not do what it was asked. Both
+    # have to reach the exit code, or a check that runs this cannot fail.
+    if (game.ready == 0) { ret 1; }
+    if (game.budget != 0 && game.drawn < game.budget) {
+        print.printlnf("FAIL frames: drew {} of {}", game.drawn, game.budget);
+        ret 1;
+    }
     ret 0;
 }
