@@ -24,9 +24,15 @@
 # PLAYING, so it never sees a half-written stream. That ordering is the whole
 # safety argument and is why the store must come last.
 #
-# Positional audio, per-voice pitch, and streaming from disk are not
-# implemented. Every clip is decoded fully into memory. All three are additive
-# and none of them change the shapes here.
+# Streaming from disk is not implemented: every clip is decoded fully into
+# memory. That is additive and does not change the shapes here.
+#
+# PAN, RATE AND GAIN MAY CHANGE WHILE A VOICE PLAYS, which is the one place the
+# game thread writes a slot the audio thread owns. Each is a single aligned
+# 32-bit word, so a reader sees the old value or the new one and never half of
+# each. The worst case is the audio thread using the previous value for one
+# callback, which is a few milliseconds late rather than wrong. The stream
+# cursor stays the audio thread's alone, so nothing here races it.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -47,6 +53,7 @@ use atomic: std.sync.atomic;
 use thread: std.sync.thread;
 use audio;
 use vfs: boom.vfs;
+use boom.math.sqrtf;
 
 # How many sounds may play at once
 #
@@ -55,6 +62,16 @@ use vfs: boom.vfs;
 # a sound nobody hears, while a stolen one is an audible glitch in something
 # already playing.
 pub val MAX_VOICES: usize = 32;
+
+# How many voice classes a game may budget separately
+#
+# A class is a category of sound competing for the same headroom: weapons,
+# impacts, footsteps, voice. Without budgets, forty simultaneous impacts fill
+# the table and the gunshot that caused them is the one that gets dropped.
+pub val MAX_CLASSES: usize = 8;
+
+# The class a sound plays in when nothing says otherwise
+pub val CLASS_DEFAULT: usize = 0;
 
 # The game thread owns this slot and may write it
 val FREE: i64 = 0;
@@ -74,13 +91,21 @@ pub rec Sound {
 
 # One playback slot
 # ---
-# stream: cursor over a Sound's samples, written only while FREE
+# stream: cursor over a Sound's samples, claimed while FREE. Its rate may be
+#         retuned afterwards; its cursor belongs to the audio thread
 # state:  FREE / PLAYING / STOPPING, the atomic that orders everything else
-# gain:   per-voice volume, written only while FREE
+# gain:   per-voice volume
+# left:   channel 0 gain from the pan law, precomputed so the callback does no
+#         square roots
+# right:  channel 1 gain from the pan law
+# class:  which budget this voice is counted against
 rec Voice {
     stream: audio.Stream;
     state:  i64;
     gain:   f32;
+    left:   f32;
+    right:  f32;
+    class:  usize;
 }
 
 # A handle to a playing voice
@@ -109,6 +134,7 @@ pub rec Audio {
     device:  audio.Device;
     voices:  [32]Voice;
     gens:    [32]i64;
+    limits:  [8]usize;
     scratch: *f32;
     master:  f32;
     frames:  usize;
@@ -151,7 +177,9 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
             var k: usize = 0;
             for (k < total) { s.scratch[k] = 0.0; k = k + 1; }
             audio.pull(?s.voices[v].stream, s.scratch, frames, channels);
-            audio.mix_add(out, s.scratch, total, s.voices[v].gain * s.master);
+            audio.mix_add_pan(out, s.scratch, frames::usize, channels::usize,
+                              s.voices[v].left  * s.voices[v].gain * s.master,
+                              s.voices[v].right * s.voices[v].gain * s.master);
 
             if (audio.done(s.voices[v].stream)) {
                 atomic.store(?s.voices[v].state, FREE);
@@ -177,6 +205,10 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
     s.a      = a;
     s.master = 1.0;
     s.ready  = false;
+
+    var cl: usize = 0;
+    for (cl < MAX_CLASSES) { s.limits[cl] = 0; cl = cl + 1; }
+
     s.chans  = channels::usize;
     s.rate   = rate;
 
@@ -393,12 +425,35 @@ fun claim(s: *Audio) usize {
     ret MAX_VOICES;
 }
 
+# Start a clip centred, at its own pitch, in the default class
+pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
+    ret audio_play_ex(s, snd, gain, 0.0, 1.0, looping, CLASS_DEFAULT);
+}
+
 # Start a clip, returning the voice playing it
 #
 # `looping` restarts the clip at its end rather than freeing the voice, so a
 # looping voice occupies its slot until stopped.
-pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
-    if (!s.ready || !snd.valid) { ret voice_none(); }
+# ---
+# gain:    linear volume
+# pan:     -1 left, 0 centre, 1 right
+# rate:    playback speed, 1 being the clip's own pitch
+# class:   the budget this voice counts against, below MAX_CLASSES
+pub fun audio_play_ex(s: *Audio, snd: *Sound, gain: f32, pan: f32, rate: f32,
+                      looping: bool, class: usize) VoiceId {
+    if (!s.ready || !snd.valid)  { ret voice_none(); }
+    if (class >= MAX_CLASSES)    { ret voice_none(); }
+
+    # ADMISSION CONTROL, NOT STEALING. A class at its budget refuses the new
+    # sound rather than taking a slot back from a playing one. Taking one back
+    # cannot be done here anyway: only the audio thread may free a PLAYING
+    # slot, so a steal would land a callback later and the invariant that makes
+    # this table lock-free would have to go. Refusing costs nothing audible,
+    # because the budget's whole job is to keep headroom free for the classes
+    # that matter, and the ninth simultaneous impact is one nobody can pick out.
+    if (s.limits[class] != 0 && audio_class_playing(s, class) >= s.limits[class]) {
+        ret voice_none();
+    }
 
     val v: usize = claim(s);
     if (v == MAX_VOICES) { ret voice_none(); }
@@ -406,13 +461,86 @@ pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
     # The slot is ours and invisible to the audio thread: it reads only
     # PLAYING, and this is STOPPING until the store below
     s.voices[v].stream = audio.stream_over(?snd.buffer, looping);
+    audio.stream_set_rate(?s.voices[v].stream, rate);
     s.voices[v].gain   = gain;
+    s.voices[v].class  = class;
+    pan_gains(pan, ?s.voices[v].left, ?s.voices[v].right);
     s.gens[v]          = s.gens[v] + 1;
     val g: i64 = s.gens[v];
 
     # Publishes every write above, and must therefore come last
     atomic.store(?s.voices[v].state, PLAYING);
     ret VoiceId{slot: v + 1, gen: g};
+}
+
+# Constant-power channel gains for a pan position
+#
+# CONSTANT POWER, NOT LINEAR. Fading one channel down while the other comes up
+# linearly makes the sum quieter in the middle, so a source panned across the
+# field audibly dips as it passes centre. Taking the square root of each
+# channel's share keeps left squared plus right squared constant, which is what
+# holds the loudness flat.
+fun pan_gains(pan: f32, out_left: *f32, out_right: *f32) {
+    var p: f32 = pan;
+    if (p < -1.0) { p = -1.0; }
+    if (p > 1.0)  { p = 1.0; }
+    val r: f32 = (p + 1.0) * 0.5;
+    @out_left  = sqrtf(1.0 - r);
+    @out_right = sqrtf(r);
+}
+
+# Cap how many voices a class may hold at once, or 0 for no cap
+#
+# Budgets exist to reserve headroom. Capping impacts well below MAX_VOICES is
+# what guarantees a weapon or a line of dialogue still finds a slot when the
+# screen is full of them.
+pub fun audio_set_class_limit(s: *Audio, class: usize, limit: usize) {
+    if (class >= MAX_CLASSES) { ret; }
+    s.limits[class] = limit;
+}
+
+# How many voices of a class are playing
+pub fun audio_class_playing(s: *Audio, class: usize) usize {
+    if (class >= MAX_CLASSES) { ret 0; }
+    var n: usize = 0;
+    var v: usize = 0;
+    for (v < MAX_VOICES) {
+        if (atomic.load(?s.voices[v].state) == PLAYING && s.voices[v].class == class) {
+            n = n + 1;
+        }
+        v = v + 1;
+    }
+    ret n;
+}
+
+# Retune, repan or requantify a playing voice
+#
+# Each writes one aligned 32-bit word that the audio thread reads, so a
+# callback in flight sees the old value or the new one and never a mixture.
+# A stale id is ignored rather than retuning whatever took the slot.
+pub fun audio_set_gain(s: *Audio, id: VoiceId, gain: f32) bool {
+    if (!live(s, id)) { ret false; }
+    s.voices[id.slot - 1].gain = gain;
+    ret true;
+}
+
+pub fun audio_set_pan(s: *Audio, id: VoiceId, pan: f32) bool {
+    if (!live(s, id)) { ret false; }
+    pan_gains(pan, ?s.voices[id.slot - 1].left, ?s.voices[id.slot - 1].right);
+    ret true;
+}
+
+pub fun audio_set_rate(s: *Audio, id: VoiceId, rate: f32) bool {
+    if (!live(s, id)) { ret false; }
+    audio.stream_set_rate(?s.voices[id.slot - 1].stream, rate);
+    ret true;
+}
+
+fun live(s: *Audio, id: VoiceId) bool {
+    if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
+    val v: usize = id.slot - 1;
+    if (s.gens[v] != id.gen) { ret false; }
+    ret atomic.load(?s.voices[v].state) == PLAYING;
 }
 
 # Stop a voice, if it is still the one that started
@@ -817,5 +945,123 @@ test "audio: halving the rate halves the frame count" {
     if (!near(out.samples[0], 0.0)) { ret 4; }
     if (!near(out.samples[1], 0.5)) { ret 5; }
     audio.dnit(?out);
+    ret 0;
+}
+
+test "audio: the pan law holds power flat across the sweep" {
+    # A linear pan makes a source dip as it crosses centre, because the two
+    # channels each sit at half amplitude and the summed power is halved.
+    # Constant power means left squared plus right squared stays 1.
+    var l: f32 = 0.0;
+    var r: f32 = 0.0;
+
+    pan_gains(0.0, ?l, ?r);
+    var p: f32 = l * l + r * r;
+    if (p < 0.999 || p > 1.001) { ret 1; }
+    # Centre is equal, and notably not 0.5 each.
+    if (l != r)      { ret 2; }
+    if (l > 0.708)   { ret 3; }
+    if (l < 0.706)   { ret 4; }
+
+    pan_gains(-1.0, ?l, ?r);
+    if (l != 1.0 || r != 0.0) { ret 5; }
+    pan_gains(1.0, ?l, ?r);
+    if (l != 0.0 || r != 1.0) { ret 6; }
+
+    # Part way across, still flat.
+    pan_gains(0.35, ?l, ?r);
+    p = l * l + r * r;
+    if (p < 0.999 || p > 1.001) { ret 7; }
+    ret 0;
+}
+
+test "audio: a pan past the ends is clamped, not wrapped" {
+    var l: f32 = 0.0;
+    var r: f32 = 0.0;
+    pan_gains(-9.0, ?l, ?r);
+    if (l != 1.0 || r != 0.0) { ret 1; }
+    pan_gains(9.0, ?l, ?r);
+    if (l != 0.0 || r != 1.0) { ret 2; }
+    ret 0;
+}
+
+test "audio: a class budget refuses rather than filling the table" {
+    # The point of a budget is headroom. Without one, a screenful of impacts
+    # takes all 32 slots and the weapon that caused them is what gets dropped.
+    var s: Audio;
+    s.ready = false;
+    var c: usize = 0;
+    for (c < MAX_CLASSES) { s.limits[c] = 0; c = c + 1; }
+    var v: usize = 0;
+    for (v < MAX_VOICES) {
+        s.voices[v].state = FREE;
+        s.voices[v].class = 0;
+        v = v + 1;
+    }
+
+    audio_set_class_limit(?s, 3, 2);
+    if (s.limits[3] != 2) { ret 1; }
+
+    # Two of class 3 playing, and one of another class that must not count.
+    s.voices[0].state = PLAYING; s.voices[0].class = 3;
+    s.voices[1].state = PLAYING; s.voices[1].class = 3;
+    s.voices[2].state = PLAYING; s.voices[2].class = 5;
+
+    if (audio_class_playing(?s, 3) != 2) { ret 2; }
+    if (audio_class_playing(?s, 5) != 1) { ret 3; }
+    if (audio_class_playing(?s, 0) != 0) { ret 4; }
+    ret 0;
+}
+
+test "audio: an out-of-range class is refused and does not corrupt a budget" {
+    var s: Audio;
+    var c: usize = 0;
+    for (c < MAX_CLASSES) { s.limits[c] = 0; c = c + 1; }
+
+    audio_set_class_limit(?s, MAX_CLASSES, 4);
+    if (audio_class_playing(?s, MAX_CLASSES) != 0) { ret 1; }
+
+    var v: usize = 0;
+    for (v < MAX_VOICES) { s.voices[v].state = FREE; v = v + 1; }
+    c = 0;
+    for (c < MAX_CLASSES) {
+        if (s.limits[c] != 0) { ret 2; }
+        c = c + 1;
+    }
+    ret 0;
+}
+
+test "audio: a stale voice id does not retune whatever took the slot" {
+    var s: Audio;
+    var v: usize = 0;
+    for (v < MAX_VOICES) { s.voices[v].state = FREE; s.gens[v] = 0; v = v + 1; }
+
+    s.voices[0].state = PLAYING;
+    s.gens[0]         = 7;
+    s.voices[0].gain  = 1.0;
+
+    val stale: VoiceId = VoiceId{slot: 1, gen: 6};
+    if (audio_set_gain(?s, stale, 0.0)) { ret 1; }
+    if (s.voices[0].gain != 1.0)        { ret 2; }
+
+    val good: VoiceId = VoiceId{slot: 1, gen: 7};
+    if (!audio_set_gain(?s, good, 0.25)) { ret 3; }
+    if (s.voices[0].gain != 0.25)        { ret 4; }
+
+    # And a voice that already finished refuses too.
+    s.voices[0].state = FREE;
+    if (audio_set_gain(?s, good, 0.9)) { ret 5; }
+    if (s.voices[0].gain != 0.25)      { ret 6; }
+    ret 0;
+}
+
+test "audio: voice_none names nothing and is refused everywhere" {
+    var s: Audio;
+    var v: usize = 0;
+    for (v < MAX_VOICES) { s.voices[v].state = PLAYING; s.gens[v] = 0; v = v + 1; }
+    val none: VoiceId = voice_none();
+    if (audio_set_gain(?s, none, 0.5)) { ret 1; }
+    if (audio_set_pan(?s, none, 0.5))  { ret 2; }
+    if (audio_set_rate(?s, none, 2.0)) { ret 3; }
     ret 0;
 }

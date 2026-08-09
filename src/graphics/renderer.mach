@@ -161,6 +161,7 @@ use boom.math.aabb.aabb_union;
 use boom.math.aabb.aabb_transform;
 use boom.graphics.sprite.rect_overlaps;
 use boom.graphics.target.RenderTarget;
+use boom.graphics.target.render_target_count;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.math.vec.Vec4;
@@ -599,6 +600,9 @@ pub fun pass_world(camera: *Camera2D) PassDesc {
 # projection: the projection matrix draws combine into their transform
 pub rec Pass {
     renderer:   *Renderer;
+    # How many colour attachments this pass writes. A pipeline is only valid in
+    # a pass with a matching attachment count, so it travels with the handle.
+    targets:    usize;
     cmd:        vk.CommandBuffer;
     target:     *RenderTarget;
     width:      i32;
@@ -666,12 +670,14 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     if (d.target != nil) {
         p.width  = d.target.width;
         p.height = d.target.height;
-        p.pass   = d.target.pass;
+        p.pass    = d.target.pass;
+        p.targets = render_target_count(d.target);
     }
     or {
         p.width  = r.width;
         p.height = r.height;
-        p.pass   = r.frame.pass;
+        p.pass    = r.frame.pass;
+        p.targets = 1;
     }
 
     if (d.perspective != 0) {
@@ -707,15 +713,22 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     if (d.target != nil) {
         frame_suspend_pass(?r.frame);
 
-        var clears: [2]vk.ClearValue;
-        clears[0].color.float32[0] = d.clear_color.x;
-        clears[0].color.float32[1] = d.clear_color.y;
-        clears[0].color.float32[2] = d.clear_color.z;
-        clears[0].color.float32[3] = d.clear_color.w;
+        # ONE CLEAR VALUE PER ATTACHMENT, and depth last, matching the order
+        # pass_create declared. A short array here is read past its end by the
+        # driver for every attachment beyond the second.
+        var clears: [5]vk.ClearValue;
+        var cvi: usize = 0;
+        for (cvi < p.targets) {
+            clears[cvi].color.float32[0] = d.clear_color.x;
+            clears[cvi].color.float32[1] = d.clear_color.y;
+            clears[cvi].color.float32[2] = d.clear_color.z;
+            clears[cvi].color.float32[3] = d.clear_color.w;
+            cvi = cvi + 1;
+        }
         # Depth clears to 1.0, the far plane. Clearing to 0 would make every
         # fragment fail the less-than test and the target come out empty.
-        clears[1].depthStencil.depth   = 1.0;
-        clears[1].depthStencil.stencil = 0;
+        clears[p.targets].depthStencil.depth   = 1.0;
+        clears[p.targets].depthStencil.stencil = 0;
 
         var rbi: vk.RenderPassBeginInfo;
         rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -726,7 +739,7 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         rbi.renderArea.offset.y      = 0;
         rbi.renderArea.extent.width  = d.target.width::u32;
         rbi.renderArea.extent.height = d.target.height::u32;
-        rbi.clearValueCount          = 2;
+        rbi.clearValueCount          = (p.targets + 1)::u32;
         rbi.pClearValues             = ?clears[0];
         vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
     }
@@ -799,6 +812,16 @@ fun take_slot(p: *Pass) usize {
 # One uniform slot per flush rather than per sprite is the whole point: the slot
 # carries the pass projection, which is the same for every sprite in the run.
 pub fun batch_flush(p: *Pass) {
+    # THE BUILT-IN PROGRAMS WRITE ONE COLOUR OUTPUT, so their pipelines are
+    # built for a single attachment and are not valid in a pass with more. A
+    # multi-attachment pass is a deferred geometry pass and belongs to a game's
+    # own Shader. Counting the refusal rather than submitting an invalid
+    # pipeline is the difference between a reported drop and a device loss.
+    if (p.targets != 1) {
+        if (p.batch.count != 0) { p.renderer.dropped = p.renderer.dropped + 1; }
+        batch_reset(?p.batch);
+        ret;
+    }
     val r: *Renderer = p.renderer;
     if (!p.batch.open || p.batch.count == 0) {
         batch_reset(?p.batch);
@@ -1000,6 +1023,12 @@ pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose
 # replaces only the program, so a game's own shading gets the same culling,
 # slot handling, texture binding and palette upload as a built-in draw.
 fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
+    # See batch_flush: only a game's own Shader can write a multi-attachment
+    # pass, because the built-in programs declare one output.
+    if (p.targets != 1 && sh == nil) {
+        p.renderer.dropped = p.renderer.dropped + 1;
+        ret;
+    }
     val r:    *Renderer = p.renderer;
 
     # Any open 2D run has to be drawn before this mesh, or it would be recorded
@@ -1106,7 +1135,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
         # is only valid in a render pass compatible with the one it was made
         # for, and a game shader drawn into an offscreen target would otherwise
         # be using the window's.
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?m.format);
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, p.targets, ?m.format);
     }
     or {
         pipe = cache_get(?r.pipes, ?r.vk, program, ?m.format);

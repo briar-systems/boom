@@ -20,6 +20,7 @@
 # PassOptions, and a pass that would be incompatible is not expressible.
 
 use std.types.bool.bool;
+use std.types.size.usize;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.result.Result;
@@ -47,8 +48,24 @@ use boom.graphics.image.DEPTH_FORMAT;
 # color_final:   The layout it is left in.
 # depth_load:    Whether depth is cleared or loaded.
 # depth_initial: The layout depth is in on entry.
+# The most colour attachments a pass may write.
+#
+# Four because that is Vulkan's guaranteed minimum for maxColorAttachments, so
+# a pass built to this limit works on every conforming device without querying
+# one. It is also exactly what a deferred pipeline wants: albedo, normal,
+# material, emissive.
+pub val MAX_COLOR_ATTACHMENTS: usize = 4;
+
+# ---
+# color_formats: one format per colour attachment
+# color_count:   how many of color_formats are used, 1 to MAX_COLOR_ATTACHMENTS
+#
+# The load and layout settings are shared by every colour attachment, because
+# attachments written together in one pass are cleared and transitioned
+# together. A pass wanting them to differ wants two passes.
 pub rec PassOptions {
-    color_format:  i32;
+    color_formats: [4]i32;
+    color_count:   usize;
     color_load:    i32;
     color_initial: i32;
     color_final:   i32;
@@ -65,14 +82,40 @@ pub rec PassOptions {
 # format: The colour format, from Vk.color_format.
 # final:  The layout to leave the colour attachment in.
 pub fun pass_clearing(format: i32, final: i32) PassOptions {
-    ret PassOptions{
-        color_format:  format,
-        color_load:    vk.ATTACHMENT_LOAD_OP_CLEAR,
-        color_initial: vk.IMAGE_LAYOUT_UNDEFINED,
-        color_final:   final,
-        depth_load:    vk.ATTACHMENT_LOAD_OP_CLEAR,
-        depth_initial: vk.IMAGE_LAYOUT_UNDEFINED,
-    };
+    var o: PassOptions = pass_clearing_mrt(?format, 1, final);
+    ret o;
+}
+
+# The multiple-attachment form of pass_clearing.
+#
+# ---
+# formats: count attachment formats
+# count:   1 to MAX_COLOR_ATTACHMENTS
+# final:   the layout to leave every colour attachment in
+pub fun pass_clearing_mrt(formats: *i32, count: usize, final: i32) PassOptions {
+    var o: PassOptions;
+    o.color_count   = clamp_count(count);
+    o.color_load    = vk.ATTACHMENT_LOAD_OP_CLEAR;
+    o.color_initial = vk.IMAGE_LAYOUT_UNDEFINED;
+    o.color_final   = final;
+    o.depth_load    = vk.ATTACHMENT_LOAD_OP_CLEAR;
+    o.depth_initial = vk.IMAGE_LAYOUT_UNDEFINED;
+    var i: usize = 0;
+    for (i < MAX_COLOR_ATTACHMENTS) {
+        if (i < o.color_count && formats != nil) { o.color_formats[i] = formats[i]; }
+        or                                       { o.color_formats[i] = 0; }
+        i = i + 1;
+    }
+    ret o;
+}
+
+# A count outside the supported range is a caller error that Vulkan would turn
+# into a validation failure at pass creation. Clamping keeps it a pass that
+# works rather than one that does not exist.
+fun clamp_count(count: usize) usize {
+    if (count == 0) { ret 1; }
+    if (count > MAX_COLOR_ATTACHMENTS) { ret MAX_COLOR_ATTACHMENTS; }
+    ret count;
 }
 
 # A pass that preserves what is already drawn.
@@ -85,47 +128,59 @@ pub fun pass_clearing(format: i32, final: i32) PassOptions {
 # format: The colour format, from Vk.color_format.
 # final:  The layout to leave the colour attachment in.
 pub fun pass_loading(format: i32, final: i32) PassOptions {
-    ret PassOptions{
-        color_format:  format,
-        color_load:    vk.ATTACHMENT_LOAD_OP_LOAD,
-        color_initial: vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        color_final:   final,
-        depth_load:    vk.ATTACHMENT_LOAD_OP_LOAD,
-        depth_initial: vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    };
+    var o: PassOptions;
+    o.color_count   = 1;
+    o.color_load    = vk.ATTACHMENT_LOAD_OP_LOAD;
+    o.color_initial = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    o.color_final   = final;
+    o.depth_load    = vk.ATTACHMENT_LOAD_OP_LOAD;
+    o.depth_initial = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    var i: usize = 0;
+    for (i < MAX_COLOR_ATTACHMENTS) { o.color_formats[i] = 0; i = i + 1; }
+    o.color_formats[0] = format;
+    ret o;
 }
 
 # Create a render pass from the shared description.
 pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, Error] {
-    var atts: [2]vk.AttachmentDescription;
-    atts[0].flags          = 0;
-    atts[0].format         = o.color_format;
-    atts[0].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[0].loadOp         = o.color_load;
-    atts[0].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
-    atts[0].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[0].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[0].initialLayout  = o.color_initial;
-    atts[0].finalLayout    = o.color_final;
+    val n: usize = clamp_count(o.color_count);
+
+    # DEPTH IS LAST, AT INDEX n. Every consumer that builds a framebuffer or a
+    # clear-value array for this pass has to agree on that ordering, so it is
+    # stated once here and derived everywhere else from color_count.
+    var atts: [5]vk.AttachmentDescription;
+    var color_refs: [4]vk.AttachmentReference;
+    var ai: usize = 0;
+    for (ai < n) {
+        atts[ai].flags          = 0;
+        atts[ai].format         = o.color_formats[ai];
+        atts[ai].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+        atts[ai].loadOp         = o.color_load;
+        atts[ai].storeOp        = vk.ATTACHMENT_STORE_OP_STORE;
+        atts[ai].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[ai].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[ai].initialLayout  = o.color_initial;
+        atts[ai].finalLayout    = o.color_final;
+
+        color_refs[ai].attachment = ai::u32;
+        color_refs[ai].layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ai = ai + 1;
+    }
 
     # Nothing reads the depth buffer after the pass, so it need not be stored.
     # Saying so lets a tiled GPU skip writing it to memory at all.
-    atts[1].flags          = 0;
-    atts[1].format         = DEPTH_FORMAT;
-    atts[1].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
-    atts[1].loadOp         = o.depth_load;
-    atts[1].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
-    atts[1].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
-    atts[1].initialLayout  = o.depth_initial;
-    atts[1].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    var color_ref: vk.AttachmentReference;
-    color_ref.attachment = 0;
-    color_ref.layout     = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    atts[n].flags          = 0;
+    atts[n].format         = DEPTH_FORMAT;
+    atts[n].samples        = vk.SAMPLE_COUNT_1_BIT::i32;
+    atts[n].loadOp         = o.depth_load;
+    atts[n].storeOp        = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[n].stencilLoadOp  = vk.ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[n].stencilStoreOp = vk.ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[n].initialLayout  = o.depth_initial;
+    atts[n].finalLayout    = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     var depth_ref: vk.AttachmentReference;
-    depth_ref.attachment = 1;
+    depth_ref.attachment = n::u32;
     depth_ref.layout     = vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     var sub: vk.SubpassDescription;
@@ -133,8 +188,8 @@ pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, E
     sub.pipelineBindPoint       = vk.PIPELINE_BIND_POINT_GRAPHICS;
     sub.inputAttachmentCount    = 0;
     sub.pInputAttachments       = nil;
-    sub.colorAttachmentCount    = 1;
-    sub.pColorAttachments       = ?color_ref;
+    sub.colorAttachmentCount    = n::u32;
+    sub.pColorAttachments       = ?color_refs[0];
     sub.pResolveAttachments     = nil;
     sub.pDepthStencilAttachment = ?depth_ref;
     sub.preserveAttachmentCount = 0;
@@ -179,7 +234,7 @@ pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, E
     ci.sType           = vk.STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     ci.pNext           = nil;
     ci.flags           = 0;
-    ci.attachmentCount = 2;
+    ci.attachmentCount = (n + 1)::u32;
     ci.pAttachments    = ?atts[0];
     ci.subpassCount    = 1;
     ci.pSubpasses      = ?sub;
@@ -205,7 +260,39 @@ test "pass: a clearing and a loading pass differ only where compatibility allows
     # the diagnostic names two render passes rather than this line.
     val a: PassOptions = pass_clearing(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     val b: PassOptions = pass_loading(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (a.color_format != b.color_format) { ret 1; }
+    if (a.color_formats[0] != b.color_formats[0]) { ret 1; }
+    if (a.color_count != b.color_count)           { ret 2; }
+    ret 0;
+}
+
+test "pass: a single-attachment pass is the multi form with a count of one" {
+    # pass_clearing is the common case and must stay exactly the old behaviour,
+    # or every existing pipeline built against it becomes incompatible.
+    var fmt: i32 = vk.FORMAT_B8G8R8A8_SRGB;
+    val one: PassOptions = pass_clearing(fmt, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    val mrt: PassOptions = pass_clearing_mrt(?fmt, 1, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (one.color_count != 1)                      { ret 1; }
+    if (one.color_formats[0] != mrt.color_formats[0]) { ret 2; }
+    if (one.color_load != mrt.color_load)          { ret 3; }
+    if (one.color_initial != mrt.color_initial)    { ret 4; }
+    if (one.color_final != mrt.color_final)        { ret 5; }
+    ret 0;
+}
+
+test "pass: an impossible attachment count is clamped into range" {
+    # Zero would create a pass nothing can draw into and a count past the
+    # guaranteed minimum would fail validation on a conforming device. Both are
+    # caller errors, and a working pass beats one that does not exist.
+    var fmts: [4]i32 = [4]i32{1, 2, 3, 4};
+    val zero: PassOptions = pass_clearing_mrt(?fmts[0], 0, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (zero.color_count != 1) { ret 1; }
+
+    val over: PassOptions = pass_clearing_mrt(?fmts[0], 99, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (over.color_count != MAX_COLOR_ATTACHMENTS) { ret 2; }
+
+    val four: PassOptions = pass_clearing_mrt(?fmts[0], 4, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (four.color_count != 4)      { ret 3; }
+    if (four.color_formats[3] != 4) { ret 4; }
     ret 0;
 }
 
