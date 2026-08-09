@@ -41,15 +41,21 @@ need = ["build-shaders"]
 # embedded into the library. They cannot be an artifact of this project because
 # a project builds for one target and boom builds for the host.
 #
+# THE MODULES ARE NAMED, NOT GLOBBED. A `*.spv` copy takes whatever is in the
+# build directory, which includes the output of a shader that has since been
+# deleted: the sprite pair survived its own removal that way and would have been
+# embedded again. Naming them means a module that is not in this list cannot
+# reach res/spv, and one that is missing fails the copy instead.
+#
 # The output lands in res/ by project convention: game assets, including
 # compiled shaders, live under a project root's res/. That is also what
 # vfs.res_root points at by default. It cannot live under {project.out}
 # because #[embed] takes a literal path and {project.out} varies by target
 # and profile; SPIR-V is target-independent, so one copy serves every build.
 [step.build-shaders]
-cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && cp shaders/out/obj/shaders/*.spv res/spv/"
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in lit_frag mesh_vert skinned_vert ui_vert ui_frag; do cp shaders/out/obj/shaders/$m.spv res/spv/$m.spv; done"
 in  = ["shaders/src/*.mach", "shaders/mach.toml"]
-out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/sprite_vert.spv", "res/spv/sprite_frag.spv", "res/spv/ui_vert.spv", "res/spv/ui_frag.spv"]
+out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/ui_vert.spv", "res/spv/ui_frag.spv"]
 need = []
 
 [dep.mach-std]

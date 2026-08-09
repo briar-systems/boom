@@ -1,0 +1,133 @@
+# A ray: an origin and a direction, for asking what is where.
+#
+# WHY THIS IS A TYPE AND NOT A PAIR OF VECTORS. A ray is produced in one place
+# and consumed in another: a camera turns a pointer position into one, and
+# picking, aiming and line-of-sight consume it. Passing an origin and a
+# direction as two arguments across that gap invites them to be swapped, which
+# type-checks and produces a plausible wrong answer rather than an error.
+#
+# The direction is expected to be normalized. Nothing enforces it, because a
+# ray built from a camera always is and re-normalizing on every use would cost
+# a square root to defend against a caller error that a test would catch.
+# Distances returned by intersection are therefore in world units.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.vec.vec3_add;
+use boom.math.vec.vec3_scale;
+
+# An origin and a direction.
+# ---
+# origin:    where the ray starts
+# direction: which way it points, expected to be unit length
+pub rec Ray {
+    origin:    Vec3;
+    direction: Vec3;
+}
+
+# Build a ray.
+pub fun ray(origin: Vec3, direction: Vec3) Ray {
+    ret Ray{origin: origin, direction: direction};
+}
+
+# The point a given distance along the ray.
+pub fun ray_at(r: *Ray, t: f32) Vec3 {
+    ret vec3_add(r.origin, vec3_scale(r.direction, t));
+}
+
+# Where a ray crosses a horizontal plane, if it does.
+#
+# THE CASE ALMOST EVERY GAME NEEDS. Clicking on the ground, placing a building,
+# aiming at a floor: all of them are a camera ray against a plane at a constant
+# height. Returning whether it hit rather than a sentinel point means a click on
+# the sky is distinguishable from a click at the origin, which a caller reading
+# a zero vector cannot tell apart.
+# ---
+# r:     the ray
+# y:     the plane's height
+# out_p: set to the intersection when this returns true, untouched otherwise
+# ret:   whether the ray crosses the plane ahead of its origin
+pub fun ray_plane_y(r: *Ray, y: f32, out_p: *Vec3) bool {
+    # Parallel to the plane, or close enough that the intersection would be
+    # arbitrarily far away and dominated by rounding.
+    var d: f32 = r.direction.y;
+    if (d < 0.0) { d = 0.0 - d; }
+    if (d < 0.000001) { ret false; }
+
+    val t: f32 = (y - r.origin.y) / r.direction.y;
+    # Behind the camera. A ray aimed at the sky still meets the ground plane, at
+    # a negative distance, and reporting that as a hit puts the cursor's target
+    # behind the player.
+    if (t < 0.0) { ret false; }
+
+    @out_p = ray_at(r, t);
+    ret true;
+}
+
+# --------------------------------------------------------------------- tests
+
+test "ray: a point along the ray is the origin plus the scaled direction" {
+    var r: Ray = ray(vec3(1.0, 2.0, 3.0), vec3(0.0, 0.0, 0.0 - 1.0));
+    val p: Vec3 = ray_at(?r, 5.0);
+    if (p.x != 1.0)         { ret 1; }
+    if (p.y != 2.0)         { ret 2; }
+    if (p.z != 0.0 - 2.0)   { ret 3; }
+    ret 0;
+}
+
+test "ray: a downward ray meets the ground where geometry says it should" {
+    # From 10 up, aimed 45 degrees down and forward, the ground at y = 0 is
+    # reached after falling 10, so the horizontal travel is also 10. Derived
+    # from the geometry, not read off the result.
+    val k: f32 = 0.70710678;
+    var r: Ray = ray(vec3(0.0, 10.0, 0.0), vec3(k, 0.0 - k, 0.0));
+    var p: Vec3;
+    if (!ray_plane_y(?r, 0.0, ?p)) { ret 1; }
+    if (!near(p.y, 0.0))           { ret 2; }
+    if (!near(p.x, 10.0))          { ret 3; }
+    ret 0;
+}
+
+test "ray: a ray pointing away from the plane does not hit it" {
+    # The plane is behind the origin, so the algebra has a solution at a
+    # negative distance. Reporting it would put a click on the sky onto the
+    # ground behind the camera.
+    var r: Ray = ray(vec3(0.0, 10.0, 0.0), vec3(0.0, 1.0, 0.0));
+    var p: Vec3;
+    p.x = 42.0;
+    if (ray_plane_y(?r, 0.0, ?p)) { ret 1; }
+    # And the out parameter is left alone, so a caller that ignores the return
+    # value does not silently read a fabricated point.
+    if (p.x != 42.0) { ret 2; }
+    ret 0;
+}
+
+test "ray: a ray parallel to the plane does not hit it" {
+    # The division would be by zero, or by something small enough that the
+    # intersection is arbitrarily far away and entirely rounding.
+    var r: Ray = ray(vec3(0.0, 5.0, 0.0), vec3(1.0, 0.0, 0.0));
+    var p: Vec3;
+    if (ray_plane_y(?r, 0.0, ?p)) { ret 1; }
+    ret 0;
+}
+
+test "ray: a plane at the origin's own height is hit at zero distance" {
+    # The boundary case between hitting and being behind. A strict inequality on
+    # t would reject it and make a camera exactly level with the ground unable
+    # to pick anything.
+    var r: Ray = ray(vec3(3.0, 0.0, 4.0), vec3(0.0, 0.0 - 1.0, 0.0));
+    var p: Vec3;
+    if (!ray_plane_y(?r, 0.0, ?p)) { ret 1; }
+    if (!near(p.x, 3.0)) { ret 2; }
+    if (!near(p.z, 4.0)) { ret 3; }
+    ret 0;
+}
+
+fun near(a: f32, b: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < 0.001;
+}

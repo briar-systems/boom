@@ -12,23 +12,19 @@
 # The normal is an f32x3 rather than an f32x4 with a zeroed fourth lane, so
 # normalize divides by the length of the three lanes that exist.
 
-use sh: shader.math;
-
-# Sampling is a SPIR-V instruction, declared here rather than taken from
-# shader.math because a SPIR-V module cannot call a function another module
-# defines (mach#2823). sprite_frag declares the same one.
-#[spirv_op("core", "OpImageSampleImplicitLod")]
-fun sample(s: sampler2d, uv: f32x2) f32x4;
+use sh:  shader.math;
+use tex: shader.texture;
 
 # The material's base colour, multiplied into the sampled texel.
 #
-# At binding 2 rather than 1, matching the sprite stage's tint, so one descriptor
-# write path serves both. See boom.graphics.descriptor.descriptors_bind_slot.
+# At binding 2 rather than 1, so it does not collide with the sampler and one
+# descriptor write path serves every stage. See
+# boom.graphics.descriptor.descriptors_bind_slot.
 rec Base {
     colour: f32x4;
 }
 
-#[sampler(0, 1)] var albedo: sampler2d;
+#[sampler(0, 1)] var albedo: tex.Sampler2D;
 #[uniform(0, 2)] var base:   Base;
 
 #[input(0)] var in_normal: f32x3;
@@ -48,5 +44,5 @@ fun frag_main() {
 
     # Light multiplies the colour channels only. Applying it to alpha as well
     # would make a surface fade as it turned away from the light.
-    out_colour = sample(albedo, in_uv) * base.colour * f32x4{k, k, k, 1.0};
+    out_colour = tex.sample_2d(albedo, in_uv) * base.colour * f32x4{k, k, k, 1.0};
 }

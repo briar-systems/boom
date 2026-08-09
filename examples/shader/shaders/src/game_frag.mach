@@ -1,0 +1,68 @@
+# The game's fragment stage: a rim light, from parameters the game sets.
+#
+# THIS IS THE POINT OF THE EXAMPLE. Everything it shades with comes from
+# binding 4, the block the game fills and `gfx.pass_set_user` delivers. Nothing
+# here is hardcoded the way boom's own lit stage hardcodes its one directional
+# light, which is precisely why an engine should not own lighting: this is a
+# decision about how the game looks.
+#
+# The rim term is deliberately not subtle. If binding 4 were not reaching the
+# shader, the direction and colour would be whatever the slot happened to hold
+# and the cube would be flat, black, or strobing between frames rather than
+# quietly a little different. A demonstration of a descriptor that is delivered
+# should not be satisfied by a descriptor that is not.
+
+use sh:  shader.math;
+use tex: shader.texture;
+
+# What the game sets, matching the `Light` record in src/main.mach.
+#
+# std140 rounds a three-component vector up to four, so both are f32x4 and the
+# CPU side declares Vec4 for the same reason. Getting that wrong reads the
+# colour out of the direction's padding, which is the classic uniform-layout
+# bug: it draws, and it draws wrong.
+rec Light {
+    direction: f32x4;
+    colour:    f32x4;
+}
+
+#[sampler(0, 1)] var albedo: tex.Sampler2D;
+#[uniform(0, 4)] var light:  Light;
+
+#[input(0)] var in_normal: f32x3;
+#[input(1)] var in_uv:     f32x2;
+#[input(2)] var in_world:  f32x3;
+
+#[output(0)] var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    val n: f32x3 = sh.normalize_3(in_normal);
+    val l: f32x3 = sh.normalize_3(f32x3{light.direction[0],
+                                        light.direction[1],
+                                        light.direction[2]});
+
+    # A plain lambert term, so the lit side reads as lit.
+    val d: f32 = sh.max(sh.dot_3(n, l), 0.0);
+
+    # The rim: bright where the surface turns away from the camera. The camera
+    # sits on +z looking at the origin, so the view direction is close enough to
+    # +z for a demonstration, and taking it from the world position keeps the
+    # term varying across the faces rather than being flat per face.
+    val v: f32x3 = sh.normalize_3(f32x3{0.0 - in_world[0],
+                                        0.0 - in_world[1],
+                                        5.5 - in_world[2]});
+    val facing: f32 = sh.max(sh.dot_3(n, v), 0.0);
+    val rim: f32 = (1.0 - facing) * (1.0 - facing);
+
+    val texel: f32x4 = tex.sample_2d(albedo, in_uv);
+    val k: f32 = 0.15 + 0.55 * d;
+
+    # The rim is added in the game's own colour rather than multiplied, so it
+    # reads as light landing on the edge instead of as a tint over the whole
+    # surface.
+    out_colour = f32x4{texel[0] * k + light.colour[0] * rim,
+                       texel[1] * k + light.colour[1] * rim,
+                       texel[2] * k + light.colour[2] * rim,
+                       texel[3]};
+}

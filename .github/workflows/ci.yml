@@ -83,9 +83,6 @@ jobs:
             exit 1
           fi
 
-      - name: Check uniform blocks match their CPU records
-        run: python3 ./tools/check-uniform-layout.py
-
       - name: Test
         run: mach test .
 

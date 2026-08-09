@@ -337,34 +337,24 @@ fun create_device(v: *Vk) Result[bool, Error] {
 
     var swapchain_ext: *u8 = vk.KHR_SWAPCHAIN_EXTENSION_NAME::*u8;
 
-    # THE FEATURES A SHADER USES HAVE TO BE ASKED FOR. A device is created with
-    # every optional feature off, and using one that was not enabled is invalid
-    # usage that a driver may honour anyway. boom passed nil here, so the two
-    # features its skinned vertex stage needs were never enabled and the skinned
-    # path was invalid on every device: it drew correctly and reported nothing.
+    # NO OPTIONAL FEATURES, AND THAT IS A CLAIM ABOUT THE SHADERS. A device is
+    # created with every optional feature off, and using one that was not
+    # enabled is invalid usage a driver may honour anyway, so a shader that
+    # quietly needs one is a bug that only appears on someone else's machine.
     #
-    # Both requirements come from the emitted SPIR-V rather than from anything
-    # the shader asks for. The palette index arithmetic is written in u32 and
-    # lowers to 64-bit locals, which declares the Int64 capability (mach#2878),
-    # and a storage buffer that is only ever read is not decorated NonWritable,
-    # so the driver must assume the vertex stage might write to it
-    # (mach#2879). Once either is fixed the matching request here can go.
-    var supported: vk.PhysicalDeviceFeatures;
-    vk.vkGetPhysicalDeviceFeatures(v.physical, ?supported);
-    if (supported.shaderInt64 == 0) {
-        ret err[bool, Error](error("the device does not support 64-bit integers in shaders"));
-    }
-    if (supported.vertexPipelineStoresAndAtomics == 0) {
-        ret err[bool, Error](error("the device does not support storage buffer access from a vertex stage"));
-    }
-
-    # Requested one by one rather than by handing the supported set straight
-    # back. Enabling everything a device offers is legal and wrong: it hides
-    # which features the engine actually depends on, so the first device missing
-    # one fails somewhere far from here instead of at this check.
-    var features: vk.PhysicalDeviceFeatures;
-    features.shaderInt64                    = vk.TRUE::u32;
-    features.vertexPipelineStoresAndAtomics = vk.TRUE::u32;
+    # boom needed two for a while, both of them artefacts of how the skinned
+    # stage was emitted rather than of anything it does: the palette index
+    # arithmetic lowered to 64-bit locals and declared Int64 (mach#2878), and a
+    # storage buffer that is only ever read was not decorated NonWritable, so a
+    # driver had to assume the vertex stage might write it (mach#2879). Both are
+    # fixed as of mach 4.18.0, and the emitted modules are what says so:
+    # boom.graphics.spirv reads every module's capabilities and fails on
+    # anything past Shader, which is what keeps this honest without a GPU.
+    #
+    # A feature that is genuinely needed goes here, requested by name and
+    # checked for support first. Handing back the supported set is legal and
+    # wrong: it hides what the engine depends on, so the first device missing
+    # something fails far from the reason.
 
     var dci: vk.DeviceCreateInfo;
     dci.sType                   = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -376,7 +366,7 @@ fun create_device(v: *Vk) Result[bool, Error] {
     dci.ppEnabledLayerNames     = nil;
     dci.enabledExtensionCount   = 1;
     dci.ppEnabledExtensionNames = ?swapchain_ext;
-    dci.pEnabledFeatures        = ?features;
+    dci.pEnabledFeatures        = nil;
 
     if (vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device) != vk.SUCCESS) {
         ret err[bool, Error](error("vkCreateDevice failed"));

@@ -27,9 +27,12 @@
 #
 # There is no per-pass or per-material shader. A pipeline bakes both stages
 # and the whole fixed-function state into one immutable object, so choosing
-# a shader is choosing a pipeline. The renderer owns the two the engine
-# needs, and a game that wants a third gets it by building a Pipeline
-# against a pass rather than by handing a program to a draw.
+# a shader is choosing a pipeline. The renderer owns the ones the engine
+# needs, and a game that wants its own supplies a boom.graphics.Shader and
+# draws with pass_draw_shaded. The pipelines that needs are built under the
+# Shader, keyed by the pass and the vertex layout each draw actually uses, so
+# a game never names a Pipeline or a RenderPass. Its shading parameters go in
+# the block set by pass_set_user, which arrives at binding 4.
 #
 # A 3D draw takes a uniform slot. GL set named uniforms on the bound program
 # between draws; a Vulkan draw reads a buffer range that must already hold
@@ -83,7 +86,6 @@ use boom.graphics.cache.PipelineCache;
 use boom.graphics.cache.Program;
 use boom.graphics.cache.PROGRAM_MESH;
 use boom.graphics.cache.PROGRAM_SKINNED;
-use boom.graphics.cache.PROGRAM_SPRITE;
 use boom.graphics.cache.cache_init;
 use boom.graphics.cache.PROGRAM_UI;
 use boom.graphics.stream.VertexStream;
@@ -122,6 +124,10 @@ use boom.graphics.descriptor.descriptors_write_palette;
 use boom.graphics.descriptor.descriptors_bind_palette;
 use boom.graphics.descriptor.MAX_PALETTES;
 use boom.graphics.descriptor.COLOUR_OFFSET;
+use boom.graphics.descriptor.USER_OFFSET;
+use boom.graphics.descriptor.USER_BYTES;
+use boom.graphics.shader.Shader;
+use boom.graphics.shader.shader_pipeline;
 use boom.graphics.image.sampler_init;
 use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.sampler_dnit;
@@ -135,7 +141,6 @@ use boom.graphics.texture.texture_delete;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
 use boom.graphics.vertex.vertex_format_is_skinned;
-use boom.graphics.vertex.vertex_format_sprite;
 use boom.graphics.skeleton.Pose;
 use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.pose_matrices;
@@ -144,12 +149,20 @@ use boom.graphics.material.material_texture;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
+use boom.graphics.camera2d.Camera2D;
+use boom.graphics.camera2d.camera2d_matrix;
+use boom.graphics.camera2d.camera2d_visible;
+use boom.math.frustum.Frustum;
+use boom.math.frustum.frustum_from_matrix;
+use boom.math.frustum.frustum_contains_aabb;
+use boom.math.aabb.Aabb;
+use boom.math.aabb.aabb_empty;
+use boom.math.aabb.aabb_union;
+use boom.math.aabb.aabb_transform;
+use boom.graphics.sprite.rect_overlaps;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
-use boom.graphics.sprite.SpriteResources;
-use boom.graphics.sprite.sprite_resources;
-use boom.graphics.sprite.sprite_resources_delete;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use boom.math.vec.vec3;
@@ -171,16 +184,17 @@ use boom.math.transform.transform_matrix;
 # pipes:   the pipeline cache, keyed by program and vertex layout
 # white:   a 1x1 opaque white texture, bound when a draw has no texture of
 #          its own, since every fragment stage samples
-# sprite:  the unit quad every sprite draw is scaled from
 # width:   the target width in pixels
 # height:  the target height in pixels
 # frame_index: which in-flight frame is being recorded
 # drawing: whether a frame is currently open
 # dropped: draws refused this frame because the ring ran out
+# culled:  draws skipped this frame because they were outside the view
 # draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
 pub rec Renderer {
+    window:      glfw.Window;
     vk:          Vk;
     dev:         Device;
     swap:        Swapchain;
@@ -189,7 +203,6 @@ pub rec Renderer {
     sampler:     vk.Sampler;
     pipes:       PipelineCache;
     white:       Texture;
-    sprite:      SpriteResources;
     stream:      VertexStream;
     ui_format:   VertexFormat;
     width:       i32;
@@ -197,6 +210,7 @@ pub rec Renderer {
     frame_index: usize;
     drawing:     bool;
     dropped:     usize;
+    culled:      usize;
     draws:       usize;
     srgb:        bool;
 }
@@ -212,11 +226,13 @@ pub rec Renderer {
 # height: the window framebuffer height in pixels
 # ret:    true on success, or the first step that failed
 pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32) Result[bool, Error] {
+    r.window      = window;
     r.width       = width;
     r.height      = height;
     r.drawing     = false;
     r.frame_index = 0;
     r.dropped     = 0;
+    r.culled      = 0;
     r.draws       = 0;
 
     val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
@@ -248,16 +264,16 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.ui_format = vertex_format_ui();
 
     # The descriptor pool needs a set layout before any pipeline exists, so the
-    # sprite pipeline is built first and its layout is what the pool allocates
+    # 2D pipeline is built first and its layout is what the pool allocates
     # against. Every pipeline shares one set layout, so any of them would do;
-    # building one up front just means there is one to ask.
-    var spr_fmt: VertexFormat = vertex_format_sprite();
-    val spr: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_SPRITE, ?spr_fmt);
-    if (spr == nil) {
-        ret err[bool, Error](error("could not build the sprite pipeline"));
+    # building one up front just means there is one to ask. This one, because it
+    # is the pipeline every frame uses.
+    val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    if (two_d == nil) {
+        ret err[bool, Error](error("could not build the 2D pipeline"));
     }
 
-    val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, spr.set_layout);
+    val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, two_d.set_layout);
     if (is_err[bool, Error](der)) { ret der; }
 
     # Every fragment stage samples, so a draw with no texture of its own needs
@@ -274,17 +290,10 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     }
     r.white = unwrap_ok[Texture, Error](wr);
 
-    # The per-frame arena for geometry that is rebuilt every frame. Created
-    # before the sprite quad only so a failure here is reported before anything
-    # depends on it.
+    # The per-frame arena for geometry that is rebuilt every frame: every 2D
+    # draw boom makes goes through it.
     val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
     if (is_err[bool, Error](str_r)) { ret str_r; }
-
-    val qr: Result[SpriteResources, Error] = sprite_resources(?r.dev);
-    if (is_err[SpriteResources, Error](qr)) {
-        ret err[bool, Error](unwrap_err[SpriteResources, Error](qr));
-    }
-    r.sprite = unwrap_ok[SpriteResources, Error](qr);
 
     ret ok[bool, Error](true);
 }
@@ -313,6 +322,22 @@ pub fun renderer_device(r: *Renderer) *Device {
     ret ?r.dev;
 }
 
+# The framebuffer width the renderer is currently drawing into, in pixels.
+#
+# THE ONE TO USE FOR ANYTHING IN FRAMEBUFFER PIXELS. It is the size the
+# swapchain images actually have, which is what a full-screen composite has to
+# be laid out against. It tracks the window, but it is adopted from the surface
+# at rebuild time rather than copied from the window, so the two can disagree
+# for the frame in which a resize is being applied.
+pub fun renderer_width(r: *Renderer) i32 {
+    ret r.width;
+}
+
+# The framebuffer height the renderer is currently drawing into, in pixels.
+pub fun renderer_height(r: *Renderer) i32 {
+    ret r.height;
+}
+
 # update the framebuffer size after a window resize
 #
 # rebuilds the swapchain and the frame loop's targets, both of which are
@@ -325,6 +350,11 @@ pub fun renderer_device(r: *Renderer) *Device {
 # height: the new framebuffer height in pixels
 pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
     if (width <= 0 || height <= 0) { ret; }
+
+    # Already the right size, so there is nothing to rebuild. Without this the
+    # per-frame check below would idle the device and recreate every swapchain
+    # image on every frame, which is a rebuild storm rather than a resize.
+    if (width == r.width && height == r.height && r.swap.ready) { ret; }
 
     val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32);
     if (is_err[bool, Error](sr)) { ret; }
@@ -357,7 +387,34 @@ pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
 pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     @out_ok = false;
     r.dropped = 0;
+    r.culled  = 0;
     r.draws   = 0;
+
+    # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
+    # rebuild only when the presentation engine reported it out of date, which
+    # is not something every driver and compositor does on a resize: the window
+    # would change size and the renderer would go on drawing at the old one
+    # indefinitely, stretched, with no error anywhere. Measured on lavapipe
+    # under Wayland, a window taken from 1280x720 to 640x640 left the renderer
+    # at 1280x720 for as long as it ran.
+    #
+    # A game cannot be expected to drive this. The swapchain has to match the
+    # surface or presentation is undefined, so it is not a policy choice a game
+    # is entitled to make differently, and anything a game must remember to call
+    # every frame is something it will one day forget. Rendering at a lower
+    # resolution on purpose is a separate thing, done with an offscreen target
+    # the game already owns.
+    #
+    # Checked here rather than in a resize callback so the size is stable for
+    # the whole frame, matching how the engine loop refreshes the window's own.
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    glfw.get_framebuffer_size(r.window, ?fw, ?fh);
+    # Zero in either dimension is a minimized window: a legal state, and not one
+    # a swapchain can be built for, so the frame is skipped rather than rebuilt.
+    if (fw > 0 && fh > 0 && (fw != r.width || fh != r.height)) {
+        renderer_resize(r, fw, fh);
+    }
 
     var began: bool = false;
     val br: Result[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap, ?began);
@@ -418,6 +475,16 @@ pub fun renderer_draws(r: *Renderer) usize {
     ret r.draws;
 }
 
+# Draws skipped in the most recent frame for being outside the view.
+#
+# The number that says whether culling is doing anything. Zero in a large scene
+# means the bounds are wrong or the pass has culling off; a count that equals
+# the submission count means everything is being rejected, which is what a
+# frustum built from the wrong matrix looks like.
+pub fun renderer_culled(r: *Renderer) usize {
+    ret r.culled;
+}
+
 # release everything the renderer owns
 # ---
 # r: renderer to shut down; must not be used afterward
@@ -426,7 +493,6 @@ pub fun renderer_dnit(r: *Renderer) {
     # shutdown a frame is usually still in flight.
     vk.vkDeviceWaitIdle(r.vk.device);
     stream_dnit(?r.stream, ?r.vk);
-    sprite_resources_delete(?r.dev, ?r.sprite);
     texture_delete(?r.dev, ?r.white);
     descriptors_dnit(?r.desc, ?r.vk);
     cache_dnit(?r.pipes, ?r.vk);
@@ -448,8 +514,23 @@ pub rec PassDesc {
     target:      *RenderTarget;
     perspective: u8;
     camera:      *Camera;
+    # The 2D view, for a pass that is not perspective. nil is the pixel-space
+    # default: origin at the target's top left, one world unit to one pixel,
+    # which is what a UI overlay wants.
+    camera2d:    *Camera2D;
     clear:       u8;
     clear_color: Vec4;
+
+    # Whether the pass skips draws whose bounds are outside its view. Non-zero
+    # by default, because a draw that cannot be seen is not worth submitting and
+    # a game should not have to remember to ask.
+    #
+    # Turned off for a pass whose output is not what the camera sees: a shadow
+    # map rendered from the light's point of view, or a pass deliberately
+    # capturing geometry behind the viewer. Also turned off by a game doing its
+    # own culling upstream, where this second test is redundant rather than
+    # wrong.
+    cull:        u8;
 }
 
 # a 3D scene pass description: perspective camera, depth test, opaque
@@ -461,8 +542,10 @@ pub fun pass_scene(camera: *Camera) PassDesc {
         target:      nil,
         perspective: 1,
         camera:      camera,
+        camera2d:    nil,
         clear:       1,
         clear_color: vec4(0.08, 0.09, 0.12, 1.0),
+        cull:        1,
     };
 }
 
@@ -474,8 +557,34 @@ pub fun pass_overlay() PassDesc {
         target:      nil,
         perspective: 0,
         camera:      nil,
+        camera2d:    nil,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        cull:        1,
+    };
+}
+
+# a 2D world pass seen through a camera: pan, zoom and roll
+#
+# The same pass as pass_overlay in every other respect. The difference is
+# whose coordinates the draws are in: an overlay is placed in the target's
+# pixels, and this is placed in world units the camera maps onto them.
+#
+# A game wants both in the same frame, which is the reason they are separate
+# descriptions rather than one with an optional field: the world moves with the
+# camera and the UI drawn over it does not.
+# ---
+# camera: the view; borrowed for the duration of the pass, not copied
+# ret:    the pass description
+pub fun pass_world(camera: *Camera2D) PassDesc {
+    ret PassDesc{
+        target:      nil,
+        perspective: 0,
+        camera:      nil,
+        camera2d:    camera,
+        clear:       0,
+        clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        cull:        1,
     };
 }
 
@@ -501,6 +610,28 @@ pub rec Pass {
     # its vertices were placed for this pass's projection and must be drawn into
     # this pass's render pass, so it cannot survive pass_end.
     batch:      Batch2D;
+
+    # What this pass can see, resolved once when it opens.
+    #
+    # Both are derived from the matrices above, so they are built here rather
+    # than at each draw: a frustum is six planes out of a matrix multiply, and
+    # recomputing it per draw would make culling cost more than the draws it
+    # saves. visible is the 2D equivalent, in world units.
+    cull:       bool;
+    frustum:    Frustum;
+    visible:    Rect;
+
+    # The render pass draws are recorded into: the window's, or an offscreen
+    # target's. Kept here because a game shader builds its pipelines against
+    # whichever pass it is actually drawn in, and that is only known once the
+    # pass is open.
+    pass:       vk.RenderPass;
+
+    # The game's own uniform block, set by pass_set_user, copied into each
+    # draw's slot. Borrowed for the duration of the pass, not copied here, so a
+    # game may change it between draws by calling pass_set_user again.
+    user:       *u8;
+    user_len:   usize;
 }
 
 # begin a pass
@@ -527,15 +658,20 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
     batch_reset(?p.batch);
+    p.cull     = d.cull != 0;
+    p.user     = nil;
+    p.user_len = 0;
 
     p.target = d.target;
     if (d.target != nil) {
         p.width  = d.target.width;
         p.height = d.target.height;
+        p.pass   = d.target.pass;
     }
     or {
         p.width  = r.width;
         p.height = r.height;
+        p.pass   = r.frame.pass;
     }
 
     if (d.perspective != 0) {
@@ -543,8 +679,29 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.projection = camera_projection(d.camera);
     }
     or {
-        p.view       = mat4_identity();
-        p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
+        p.view = mat4_identity();
+        if (d.camera2d != nil) {
+            # The camera folds into the projection rather than riding in the
+            # view, because the 2D program takes a single matrix: its vertices
+            # arrive already placed, so there is no model transform to combine
+            # a separate view with.
+            p.projection = camera2d_matrix(d.camera2d, p.width::f32, p.height::f32);
+        }
+        or {
+            p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
+        }
+    }
+
+    # Resolve what this pass can see, once. The frustum serves 3D draws and the
+    # rectangle serves 2D ones; both come out of the matrices just built, so a
+    # pass with no camera still gets a correct answer from its fixed projection.
+    var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
+    p.frustum = frustum_from_matrix(?vp);
+    if (d.camera2d != nil) {
+        p.visible = camera2d_visible(d.camera2d, p.width::f32, p.height::f32);
+    }
+    or {
+        p.visible = rect(0.0, 0.0, p.width::f32, p.height::f32);
     }
 
     if (d.target != nil) {
@@ -593,6 +750,35 @@ pub fun pass_end(p: *Pass) {
     if (p.target == nil) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
     frame_resume_pass(?p.renderer.frame, ?p.renderer.swap);
+}
+
+# The world-space box a skinned mesh actually occupies this frame.
+#
+# A skinned mesh's vertices are placed by its joints, so the box it was authored
+# in describes only its rest pose. Culling against that box makes a character
+# who reaches, lunges or is flung by a ragdoll disappear at the edge of the
+# screen while plainly still on it.
+#
+# The pose's joint matrices are already built for the palette upload, so this
+# reuses them: the rest box is transformed by each joint and the results unioned.
+# That is conservative rather than exact, since a vertex is a weighted blend of
+# several joints and therefore lies inside the union of their transforms rather
+# than at any one of them, so the box always contains the geometry and is never
+# tighter than the truth.
+fun skinned_bounds(m: *Mesh, pose: *Pose, model: *Mat4) Aabb {
+    val n: usize = pose.count;
+    if (n == 0) { ret aabb_transform(?m.bounds, model); }
+    val joints: *Mat4 = pose_matrices(pose);
+
+    var acc: Aabb = aabb_empty();
+    var i: usize = 0;
+    for (i < n) {
+        var world: Mat4 = mat4_mul(model, ?joints[i]);
+        var b: Aabb = aabb_transform(?m.bounds, ?world);
+        aabb_union(?acc, ?b);
+        i = i + 1;
+    }
+    ret acc;
 }
 
 # take a uniform slot for one draw, or report the ring is full
@@ -718,7 +904,7 @@ fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize
 # m: the mesh to draw
 # t: the model transform
 pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), nil);
+    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), nil, nil);
 }
 
 # submit a 3D mesh draw with a material
@@ -731,7 +917,76 @@ pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
 # mat: the material to draw with
 # t:   the model transform
 pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil);
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, nil);
+}
+
+# Set the game's own uniform block for the draws that follow.
+#
+# WHY THIS EXISTS. boom's built-in shading is a default, not a system: a game
+# that wants its own lighting, its own fog, its own anything supplies a Shader,
+# and a shader whose parameters are baked in at compile time is not useful. This
+# is where a light direction, a colour, a time value or whatever else the game's
+# shader reads comes from. It arrives at binding 4.
+#
+# BORROWED UNTIL THE NEXT DRAW, then copied. The bytes are read at each
+# following draw rather than now, so a game may fill one struct, draw, change
+# it, and draw again, and each draw sees what the struct held when it was
+# submitted. The pointer must stay valid until the last draw that uses it.
+#
+# Passing nil clears it, and the following draws read an undefined block if
+# their shader declares binding 4.
+# ---
+# p:   the open pass
+# data: the block's bytes, or nil to clear
+# len:  its length, at most USER_BYTES
+# ret:  false when the block is larger than a slot's user region, in which case
+#       nothing is set and the draws that follow are unaffected
+pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
+    if (data == nil) {
+        p.user     = nil;
+        p.user_len = 0;
+        ret true;
+    }
+    if (len == 0 || len > USER_BYTES) { ret false; }
+    p.user     = data;
+    p.user_len = len;
+    ret true;
+}
+
+# Submit a mesh drawn with the game's own shader.
+#
+# Everything else is as pass_draw_material: the material supplies the texture and
+# the base colour, the transform places the mesh, and the draw is culled against
+# the pass frustum. Only the program differs, and with it whatever the game's
+# fragment stage does with the block set by pass_set_user.
+#
+# The pipeline for this mesh's vertex layout and this pass is built on the first
+# draw that needs it and reused afterwards, so the first frame a shader appears
+# in is more expensive than the rest.
+# ---
+# p:   the open pass
+# m:   the mesh to draw
+# mat: the material to draw with
+# t:   the model transform
+# sh:  the game's shader
+pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, nil, sh);
+}
+
+# Submit a skinned mesh drawn with the game's own shader.
+#
+# The shader's vertex stage must read the joint palette at binding 3 and place
+# the vertex by it, as the built-in skinned stage does; a shader that ignores it
+# draws the mesh in its rest pose rather than failing.
+# ---
+# p:    the open pass
+# m:    the skinned mesh to draw
+# mat:  the material to draw with
+# pose: the pose whose joint matrices place the vertices
+# t:    the model transform
+# sh:   the game's shader
+pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform, sh: *Shader) {
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, sh);
 }
 
 # the shared body of the mesh draws, skinned and not
@@ -740,7 +995,11 @@ pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
 # what goes in the uniform block, and whether a joint palette is uploaded, but
 # share the texture binding, the base colour, and the slot bookkeeping, so
 # splitting them would duplicate the parts that are easy to get subtly wrong.
-fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose) {
+#
+# a shader of nil draws through the built-in program for the mesh; a shader
+# replaces only the program, so a game's own shading gets the same culling,
+# slot handling, texture binding and palette upload as a built-in draw.
+fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
     val r:    *Renderer = p.renderer;
 
     # Any open 2D run has to be drawn before this mesh, or it would be recorded
@@ -748,6 +1007,25 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     # batcher can defer a sprite past another sprite because it then draws them
     # in order; it cannot defer one past a draw it does not own.
     batch_flush(p);
+
+    var model: Mat4 = transform_matrix(t);
+
+    # OUT OF VIEW, SO NOT SUBMITTED. Done before the slot is taken, since a
+    # culled draw that still consumed a uniform slot would starve the draws that
+    # are visible, which is the failure this renderer already had once.
+    #
+    # A skinned mesh is bounded by its pose rather than by its rest position: a
+    # character reaching up or a ragdoll flung sideways leaves the box the mesh
+    # was authored in, and culling against that box pops it out of view at the
+    # edges of the screen while it is plainly still on them.
+    if (p.cull) {
+        var wb: Aabb = aabb_transform(?m.bounds, ?model);
+        if (pose != nil) { wb = skinned_bounds(m, pose, ?model); }
+        if (!frustum_contains_aabb(?p.frustum, ?wb)) {
+            r.culled = r.culled + 1;
+            ret;
+        }
+    }
 
     val slot: usize = take_slot(p);
     if (slot == MAX_SLOTS) { ret; }
@@ -758,7 +1036,6 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     # than a mesh that ignores its pose.
     val skinned: bool = pose != nil && vertex_format_is_skinned(?m.format);
 
-    var model: Mat4 = transform_matrix(t);
     var vp:    Mat4 = mat4_mul(?p.projection, ?p.view);
 
     if (skinned) {
@@ -789,6 +1066,14 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
                                    (?basec):~*u8, $size_of(TintUniforms))) { ret; }
 
+    # The game's own block, if this pass has one. Copied per draw rather than
+    # held by reference, so a game may change the struct between draws and each
+    # draw keeps what it was submitted with.
+    if (p.user != nil) {
+        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
+                                       p.user, p.user_len)) { ret; }
+    }
+
     # Every fragment stage samples, so an untextured draw gets the renderer's
     # white texel and comes out as its base colour.
     var src: *Texture = tex;
@@ -802,7 +1087,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
     if (skinned) {
         program = PROGRAM_SKINNED;
 
-        val pal: usize = descriptors_take_palette(?r.desc);
+        val pal: usize = descriptors_take_palette(?r.desc, ?r.vk, r.frame_index);
         if (pal == MAX_PALETTES) {
             r.dropped = r.dropped + 1;
             ret;
@@ -815,7 +1100,17 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
         descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal);
     }
 
-    val pipe: *Pipeline = cache_get(?r.pipes, ?r.vk, program, ?m.format);
+    var pipe: *Pipeline = nil;
+    if (sh != nil) {
+        # Built against this pass rather than the window's, because a pipeline
+        # is only valid in a render pass compatible with the one it was made
+        # for, and a game shader drawn into an offscreen target would otherwise
+        # be using the window's.
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?m.format);
+    }
+    or {
+        pipe = cache_get(?r.pipes, ?r.vk, program, ?m.format);
+    }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
         ret;
@@ -841,7 +1136,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, tex: *Texture, tint: V
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), pose);
+    pass_draw_textured(p, m, t, nil, vec4(1.0, 1.0, 1.0, 1.0), pose, nil);
 }
 
 # submit a skinned mesh draw with a material
@@ -852,7 +1147,7 @@ pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned_material(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose);
+    pass_draw_textured(p, m, t, material_texture(mat), mat.base_color, pose, nil);
 }
 
 # submit a 2D sprite draw covering a whole texture
@@ -877,6 +1172,15 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
     # A run of sprites sharing a texture becomes one draw and one uniform slot,
     # which is what lets a screenful of them cost what a handful used to. See
     # boom.graphics.batch for why the per-sprite uniform had to go.
+    # Off screen, so not expanded. Checked before sprite_expand rather than
+    # after, because the cost this avoids is the six vertices in the frame's
+    # arena, not the draw: a large world is mostly off screen, and expanding all
+    # of it fills the arena with geometry nothing can see.
+    if (p.cull && !rect_overlaps(dest, p.visible)) {
+        p.renderer.culled = p.renderer.culled + 1;
+        ret;
+    }
+
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
     batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);
@@ -1023,5 +1327,28 @@ test "renderer: a full uniform ring drops draws and counts them" {
     # draw's transform, so exhaustion has to be visible instead.
     if (take_slot(?p) != MAX_SLOTS) { ret 1; }
     if (r.dropped != 1)             { ret 2; }
+    ret 0;
+}
+
+test "renderer: a game block larger than a slot's region is refused, not truncated" {
+    # Truncating would hand the shader a struct whose tail is whatever the last
+    # draw left there, which shades wrongly rather than not at all, and does it
+    # only for the fields past the cut. Refusing leaves the previous block in
+    # place and reports it, so the caller finds out at the call that is wrong.
+    var p: Pass;
+    p.user     = nil;
+    p.user_len = 0;
+    var block: [512]u8;
+
+    if (pass_set_user(?p, ?block[0], USER_BYTES + 1)) { ret 1; }
+    if (p.user != nil || p.user_len != 0)             { ret 2; }
+
+    # A block of exactly the advertised size is accepted.
+    if (!pass_set_user(?p, ?block[0], USER_BYTES))    { ret 3; }
+    if (p.user != ?block[0] || p.user_len != USER_BYTES) { ret 4; }
+
+    # And nil clears it rather than being treated as a zero-length block.
+    if (!pass_set_user(?p, nil, 0)) { ret 5; }
+    if (p.user != nil)              { ret 6; }
     ret 0;
 }

@@ -1,0 +1,228 @@
+# An axis-aligned bounding box: the cheapest useful answer to "where is this".
+#
+# WHY AXIS-ALIGNED AND NOT TIGHTER. A box that ignores orientation is larger
+# than the geometry it wraps, sometimes considerably, and that is the right
+# trade for what it is used for. Culling only has to be conservative: a box that
+# is too big costs a draw that could have been skipped, while a box that is too
+# small deletes geometry that is genuinely on screen. The failures are not
+# symmetric, so the representation leans toward the harmless one.
+#
+# Kept in the mesh's own space and transformed on use, rather than stored in
+# world space, because a mesh is drawn at more than one transform and the box
+# would otherwise belong to whichever draw wrote it last.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_translation;
+use boom.math.mat.mat4_scale;
+use boom.math.mat.mat4_from_quat;
+use boom.math.quat.Quat;
+use boom.math.quat.quat_from_axis_angle;
+
+# The corners of a box, or an empty one.
+# ---
+# min: the low corner on each axis
+# max: the high corner on each axis
+pub rec Aabb {
+    min: Vec3;
+    max: Vec3;
+}
+
+# A box that contains nothing, ready to be grown by aabb_add.
+#
+# INVERTED ON PURPOSE. min holds the largest representable value and max the
+# smallest, so the first point added replaces both and the box becomes exactly
+# that point. A box starting at the origin instead would always contain the
+# origin, which silently inflates every mesh that does not happen to span it.
+pub fun aabb_empty() Aabb {
+    val big: f32 = 3.0e38;
+    ret Aabb{min: vec3(big, big, big), max: vec3(0.0 - big, 0.0 - big, 0.0 - big)};
+}
+
+# Whether a box has had anything added to it.
+pub fun aabb_is_empty(b: *Aabb) bool {
+    ret b.min.x > b.max.x || b.min.y > b.max.y || b.min.z > b.max.z;
+}
+
+# Grow a box to contain a point.
+pub fun aabb_add(b: *Aabb, p: Vec3) {
+    if (p.x < b.min.x) { b.min.x = p.x; }
+    if (p.y < b.min.y) { b.min.y = p.y; }
+    if (p.z < b.min.z) { b.min.z = p.z; }
+    if (p.x > b.max.x) { b.max.x = p.x; }
+    if (p.y > b.max.y) { b.max.y = p.y; }
+    if (p.z > b.max.z) { b.max.z = p.z; }
+}
+
+# Grow a box to contain another.
+#
+# An empty operand contributes nothing, which is what makes a union over a list
+# of boxes work without special-casing the first one.
+pub fun aabb_union(b: *Aabb, o: *Aabb) {
+    if (aabb_is_empty(o)) { ret; }
+    aabb_add(b, o.min);
+    aabb_add(b, o.max);
+}
+
+# The point at the middle of a box.
+pub fun aabb_center(b: *Aabb) Vec3 {
+    ret vec3((b.min.x + b.max.x) * 0.5,
+             (b.min.y + b.max.y) * 0.5,
+             (b.min.z + b.max.z) * 0.5);
+}
+
+# Half the box's size on each axis.
+pub fun aabb_extent(b: *Aabb) Vec3 {
+    ret vec3((b.max.x - b.min.x) * 0.5,
+             (b.max.y - b.min.y) * 0.5,
+             (b.max.z - b.min.z) * 0.5);
+}
+
+# The smallest axis-aligned box containing a transformed box.
+#
+# A rotated box is no longer axis-aligned, so the result is the box around the
+# rotated box rather than around the original geometry, and it grows a little
+# with every rotation. That is the conservative direction, and re-fitting to the
+# geometry would mean keeping the geometry, which is the thing a bounding box
+# exists to avoid.
+#
+# Computed from the centre and the extent rather than by transforming eight
+# corners: the transformed extent on each axis is the extent dotted with the
+# absolute value of that row, which is three rows of work instead of eight
+# points, and it cannot miss a corner.
+pub fun aabb_transform(b: *Aabb, m: *Mat4) Aabb {
+    if (aabb_is_empty(b)) { ret aabb_empty(); }
+
+    val c: Vec3 = aabb_center(b);
+    val e: Vec3 = aabb_extent(b);
+
+    # Column-major, matching boom.math.mat: m[0], m[4], m[8] are the x row.
+    val cx: f32 = m.m[0] * c.x + m.m[4] * c.y + m.m[8]  * c.z + m.m[12];
+    val cy: f32 = m.m[1] * c.x + m.m[5] * c.y + m.m[9]  * c.z + m.m[13];
+    val cz: f32 = m.m[2] * c.x + m.m[6] * c.y + m.m[10] * c.z + m.m[14];
+
+    val ex: f32 = absf(m.m[0]) * e.x + absf(m.m[4]) * e.y + absf(m.m[8])  * e.z;
+    val ey: f32 = absf(m.m[1]) * e.x + absf(m.m[5]) * e.y + absf(m.m[9])  * e.z;
+    val ez: f32 = absf(m.m[2]) * e.x + absf(m.m[6]) * e.y + absf(m.m[10]) * e.z;
+
+    ret Aabb{min: vec3(cx - ex, cy - ey, cz - ez),
+             max: vec3(cx + ex, cy + ey, cz + ez)};
+}
+
+fun absf(x: f32) f32 {
+    if (x < 0.0) { ret 0.0 - x; }
+    ret x;
+}
+
+# --------------------------------------------------------------------- tests
+
+test "aabb: an empty box contains nothing and is grown by its first point" {
+    # Starting at the origin instead would silently include it, inflating every
+    # mesh that does not span the origin, which is most of them.
+    var b: Aabb = aabb_empty();
+    if (!aabb_is_empty(?b)) { ret 1; }
+
+    aabb_add(?b, vec3(5.0, 6.0, 7.0));
+    if (aabb_is_empty(?b))  { ret 2; }
+    if (b.min.x != 5.0 || b.max.x != 5.0) { ret 3; }
+    if (b.min.y != 6.0 || b.max.y != 6.0) { ret 4; }
+    if (b.min.z != 7.0 || b.max.z != 7.0) { ret 5; }
+    ret 0;
+}
+
+test "aabb: adding points grows the box to hold all of them" {
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(1.0, 2.0, 3.0));
+    aabb_add(?b, vec3(0.0 - 4.0, 8.0, 0.0));
+    if (b.min.x != 0.0 - 4.0) { ret 1; }
+    if (b.max.x != 1.0)       { ret 2; }
+    if (b.min.y != 2.0)       { ret 3; }
+    if (b.max.y != 8.0)       { ret 4; }
+    if (b.min.z != 0.0)       { ret 5; }
+    if (b.max.z != 3.0)       { ret 6; }
+    ret 0;
+}
+
+test "aabb: a union with an empty box changes nothing" {
+    # What makes a union over a list work without special-casing the first
+    # entry. Treating an empty box as a real one would drag every union out to
+    # the huge sentinel values it is built from.
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(0.0, 0.0, 0.0));
+    aabb_add(?b, vec3(1.0, 1.0, 1.0));
+    var e: Aabb = aabb_empty();
+    aabb_union(?b, ?e);
+    if (b.min.x != 0.0) { ret 1; }
+    if (b.max.x != 1.0) { ret 2; }
+    ret 0;
+}
+
+test "aabb: a translation moves the box and does not resize it" {
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0));
+    aabb_add(?b, vec3(1.0, 1.0, 1.0));
+    var m: Mat4 = mat4_translation(vec3(10.0, 0.0, 0.0));
+    val t: Aabb = aabb_transform(?b, ?m);
+    if (!near(t.min.x, 9.0))  { ret 1; }
+    if (!near(t.max.x, 11.0)) { ret 2; }
+    if (!near(t.min.y, 0.0 - 1.0)) { ret 3; }
+    if (!near(t.max.y, 1.0))       { ret 4; }
+    ret 0;
+}
+
+test "aabb: a rotation grows the box, conservatively" {
+    # A unit cube turned 45 degrees about z has a diagonal of sqrt(2) across
+    # x and y, so the axis-aligned box around it is that wide. Derived from the
+    # geometry: a transform that rotated the corners but kept the old extent
+    # would clip the corners off and cull things that are on screen.
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0));
+    aabb_add(?b, vec3(1.0, 1.0, 1.0));
+
+    val q: Quat = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.78539816);
+    var m: Mat4 = mat4_from_quat(q);
+    val t: Aabb = aabb_transform(?b, ?m);
+
+    if (!near_eps(t.max.x, 1.41421356, 0.001)) { ret 1; }
+    if (!near_eps(t.max.y, 1.41421356, 0.001)) { ret 2; }
+    # z is the rotation axis, so it is untouched.
+    if (!near_eps(t.max.z, 1.0, 0.001))        { ret 3; }
+    ret 0;
+}
+
+test "aabb: a scale scales the box about its centre" {
+    var b: Aabb = aabb_empty();
+    aabb_add(?b, vec3(0.0, 0.0, 0.0));
+    aabb_add(?b, vec3(2.0, 2.0, 2.0));
+    var m: Mat4 = mat4_scale(vec3(3.0, 1.0, 1.0));
+    val t: Aabb = aabb_transform(?b, ?m);
+    if (!near(t.min.x, 0.0)) { ret 1; }
+    if (!near(t.max.x, 6.0)) { ret 2; }
+    if (!near(t.max.y, 2.0)) { ret 3; }
+    ret 0;
+}
+
+test "aabb: transforming an empty box leaves it empty" {
+    # A mesh with no vertices has no bounds, and a box built from the huge
+    # sentinels would otherwise transform into nonsense that contains
+    # everything or nothing depending on the sign of the matrix.
+    var b: Aabb = aabb_empty();
+    var m: Mat4 = mat4_translation(vec3(5.0, 5.0, 5.0));
+    val t: Aabb = aabb_transform(?b, ?m);
+    if (!aabb_is_empty(?t)) { ret 1; }
+    ret 0;
+}
+
+fun near(a: f32, b: f32) bool {
+    ret near_eps(a, b, 0.0001);
+}
+
+fun near_eps(a: f32, b: f32, eps: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < eps;
+}
