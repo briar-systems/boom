@@ -79,6 +79,13 @@ context the way GL did, so `texture_load`, `mesh_load`, `model_load`, and
 `COLOR_LINEAR`; the latter stores normal, roughness, metallic, occlusion and
 mask maps in RGBA8 UNORM so sampling preserves their authored channel values.
 
+**Embedded resources do not need a filesystem round trip.**
+`texture_from_bytes_as`, `boom.audio.sound_from_bytes`, and
+`font_from_bytes` decode image, WAV, and TrueType byte spans respectively. Each
+borrows the encoded bytes only for the call and returns a handle that owns its
+decoded GPU or sample storage, so callers may pass compile-time embedded data
+and release any temporary buffer immediately afterwards.
+
 **Shaders are pipelines, not programs.** A Vulkan pipeline bakes both stages and
 the whole fixed-function state into one immutable object, so there is no
 per-pass or per-material shader to set. A pipeline is chosen by what a draw is:
