@@ -30,13 +30,21 @@ use std.types.string.str_equals;
 # the most texture bindings a material carries
 pub val MAX_TEXTURES: i32 = 4;
 
+# How a material binding samples its texture between texels.
+pub def TextureFilter: u8;
+
+pub val TEXTURE_NEAREST: TextureFilter = 0;
+pub val TEXTURE_LINEAR:  TextureFilter = 1;
+
 # one named texture binding within a material
 # ---
 # name:    the binding's name, for a game's own bookkeeping
 # texture: the bound texture, owned by the game
+# filter:  point or bilinear sampling for this binding
 pub rec MaterialTexture {
     name:    str;
     texture: *Texture;
+    filter:  TextureFilter;
 }
 
 # a surface description: a base color and texture bindings
@@ -78,10 +86,19 @@ pub fun material_set_color(m: *Material, color: Vec4) {
 # texture: the texture to bind, owned by the game
 # ret:     true if the binding was added, false if the material is full
 pub fun material_add_texture(m: *Material, name: str, texture: *Texture) bool {
+    ret material_add_texture_filtered(m, name, texture, TEXTURE_NEAREST);
+}
+
+# Add a named texture binding with an explicit sampling filter.
+#
+# Filtering belongs to a binding rather than an image: the same rendered target
+# may be inspected with nearest sampling and composited with linear sampling.
+pub fun material_add_texture_filtered(m: *Material, name: str, texture: *Texture,
+                                      filter: TextureFilter) bool {
     if (m.texture_count >= MAX_TEXTURES) {
         ret false;
     }
-    m.textures[m.texture_count] = MaterialTexture{name: name, texture: texture};
+    m.textures[m.texture_count] = MaterialTexture{name: name, texture: texture, filter: filter};
     m.texture_count = m.texture_count + 1;
     ret true;
 }
@@ -145,6 +162,17 @@ test "material: texture bindings fill then reject overflow" {
     }
     if (m.texture_count != MAX_TEXTURES) { ret 2; }
     if (material_add_texture(?m, "u_texture", ?t)) { ret 3; }
+    ret 0;
+}
+
+test "material: texture bindings default to nearest and may request linear" {
+    var a: Texture;
+    var b: Texture;
+    var m: Material = material();
+    if (!material_add_texture(?m, "albedo", ?a)) { ret 1; }
+    if (!material_add_texture_filtered(?m, "field", ?b, TEXTURE_LINEAR)) { ret 2; }
+    if (m.textures[0].filter != TEXTURE_NEAREST) { ret 3; }
+    if (m.textures[1].filter != TEXTURE_LINEAR)  { ret 4; }
     ret 0;
 }
 

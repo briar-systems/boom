@@ -9,14 +9,15 @@
 # WHAT IT DELIBERATELY HIDES. A Vulkan pipeline is not a shader. It bakes the
 # shader stages together with the vertex layout, the blend and depth state, and
 # the render pass it will be used inside, so the same pair of shaders needs a
-# different pipeline for every mesh layout and every target it is drawn into. A
+# different pipeline for every mesh layout and incompatible target signature. A
 # game that had to manage that would be writing the bookkeeping this engine
 # exists to have already written, and would get it wrong in a way that surfaces
 # as a validation error rather than as a picture.
 #
 # So a Shader is the pair of SPIR-V modules and nothing else, and the pipelines
-# are built underneath it, on demand, keyed by the render pass and vertex layout
-# each draw actually needs. A game creates one, draws with it, and deletes it.
+# are built underneath it, on demand, keyed by render-pass compatibility and the
+# vertex layout each draw actually needs. A game creates one, draws with it, and
+# deletes it.
 # It never names a pipeline, a render pass, or a descriptor set.
 #
 # WHAT A GAME SHADER MUST DECLARE. The descriptor layout is fixed, because a
@@ -58,6 +59,9 @@ use boom.graphics.pipeline.pipeline_init;
 use boom.graphics.pipeline.pipeline_dnit;
 use boom.graphics.pipeline.SetLayout;
 use boom.graphics.pipeline.set_layout_full;
+use boom.graphics.pass.PassCompatibility;
+use boom.graphics.pass.pass_compatibility_eq;
+use boom.graphics.pass.pass_compatibility_one;
 
 # How many pipelines one shader may build.
 #
@@ -69,7 +73,7 @@ pub val MAX_SHADER_PIPELINES: usize = 4;
 
 # One built pipeline and the two things it was built for.
 rec ShaderPipeline {
-    pass:     vk.RenderPass;
+    compatibility: PassCompatibility;
     format:   VertexFormat;
     pipeline: Pipeline;
     live:     bool;
@@ -149,12 +153,14 @@ pub fun shader_set_state(s: *Shader, d: PipelineDesc) {
 # type. Returns nil when the shader is full or the pipeline could not be built,
 # and the caller reports that as a dropped draw rather than drawing with a
 # pipeline meant for different geometry.
-pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, targets: usize, f: *VertexFormat) *Pipeline {
+pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
+                        compatibility: *PassCompatibility, f: *VertexFormat) *Pipeline {
     if (!s.ready || pass == nil) { ret nil; }
 
     var i: usize = 0;
     for (i < s.count) {
-        if (s.built[i].live && s.built[i].pass == pass
+        if (s.built[i].live
+            && pass_compatibility_eq(?s.built[i].compatibility, compatibility)
             && vertex_format_eq(?s.built[i].format, f)) {
             ret ?s.built[i].pipeline;
         }
@@ -165,11 +171,12 @@ pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass, targets: usize,
 
     val n: usize = s.count;
     var lay: SetLayout = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass, targets, f, ?s.desc,
+    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass,
+                                               compatibility.color_count, f, ?s.desc,
                                                s.vert, s.vlen, s.frag, s.flen, ?lay);
     if (is_err[bool, Error](r)) { ret nil; }
 
-    s.built[n].pass   = pass;
+    s.built[n].compatibility = @compatibility;
     s.built[n].format = @f;
     s.built[n].live   = true;
     s.count = n + 1;
@@ -272,24 +279,29 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
 
     var std_fmt:  VertexFormat = vertex_format_standard();
     var skin_fmt: VertexFormat = vertex_format_skinned();
+    var compatibility: PassCompatibility = pass_compatibility_one(1);
+    var other: PassCompatibility = pass_compatibility_one(2);
 
-    s.built[0].pass   = a;
+    s.built[0].compatibility = compatibility;
     s.built[0].format = std_fmt;
     s.built[0].live   = true;
     s.count = 1;
 
     # The pair it was built for.
-    if (shader_pipeline(?s, ?v, a, 1, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
+    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
 
-    # A different pass, same layout: must not reuse it. Building instead fails
+    # A distinct but compatible pass reuses it.
+    if (shader_pipeline(?s, ?v, b, ?compatibility, ?std_fmt) != ?s.built[0].pipeline) { ret 3; }
+
+    # A different attachment format is not compatible. Building instead fails
     # here for want of a device, which is the nil.
-    if (shader_pipeline(?s, ?v, b, 1, ?std_fmt) != nil) { ret 3; }
+    if (shader_pipeline(?s, ?v, b, ?other, ?std_fmt) != nil) { ret 4; }
 
     # Same pass, a different layout: likewise.
-    if (shader_pipeline(?s, ?v, a, 1, ?skin_fmt) != nil) { ret 4; }
+    if (shader_pipeline(?s, ?v, a, ?compatibility, ?skin_fmt) != nil) { ret 5; }
 
     # And a failed build leaves nothing behind to be handed out later.
-    if (shader_pipelines(?s) != 1) { ret 5; }
+    if (shader_pipelines(?s) != 1) { ret 6; }
     ret 0;
 }
 
@@ -304,10 +316,12 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
 
     var fmt: VertexFormat = vertex_format_standard();
     var handles: [4]u32;
+    var compatibilities: [4]PassCompatibility;
     var i: usize = 0;
     for (i < MAX_SHADER_PIPELINES) {
         handles[i] = i::u32;
-        s.built[i].pass   = (?handles[i]):~vk.RenderPass;
+        compatibilities[i] = pass_compatibility_one((i + 1)::i32);
+        s.built[i].compatibility = compatibilities[i];
         s.built[i].format = fmt;
         s.built[i].live   = true;
         i = i + 1;
@@ -315,7 +329,9 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     s.count = MAX_SHADER_PIPELINES;
 
     var extra: u32 = 99;
-    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass, 1, ?fmt) != nil) { ret 2; }
+    var extra_compatibility: PassCompatibility = pass_compatibility_one(99);
+    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass,
+                        ?extra_compatibility, ?fmt) != nil) { ret 2; }
     # Nothing was evicted to make room.
     if (shader_pipelines(?s) != MAX_SHADER_PIPELINES) { ret 3; }
     if (!s.built[0].live)                             { ret 4; }
@@ -329,8 +345,10 @@ test "shader: an unready shader builds nothing" {
     var v: Vk;
     var f: VertexFormat = vertex_format_standard();
     var pass: u32 = 1;
+    var compatibility: PassCompatibility = pass_compatibility_one(1);
     s.ready = false;
     s.count = 0;
-    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass, 1, ?f) != nil) { ret 1; }
+    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass,
+                        ?compatibility, ?f) != nil) { ret 1; }
     ret 0;
 }

@@ -151,11 +151,15 @@ fwd boom.graphics.model.model_rest_player;
 fwd boom.graphics.model.model_delete;
 
 fwd boom.graphics.material.MAX_TEXTURES;
+fwd boom.graphics.material.TextureFilter;
+fwd boom.graphics.material.TEXTURE_NEAREST;
+fwd boom.graphics.material.TEXTURE_LINEAR;
 fwd boom.graphics.material.MaterialTexture;
 fwd boom.graphics.material.Material;
 fwd boom.graphics.material.material;
 fwd boom.graphics.material.material_set_color;
 fwd boom.graphics.material.material_add_texture;
+fwd boom.graphics.material.material_add_texture_filtered;
 fwd boom.graphics.material.material_texture;
 fwd boom.graphics.material.material_texture_named;
 
@@ -180,12 +184,25 @@ fwd boom.graphics.camera2d.camera2d_world_to_screen;
 fwd boom.graphics.camera2d.camera2d_visible;
 
 fwd boom.graphics.target.RenderTarget;
+fwd boom.graphics.target.RenderFormat;
+fwd boom.graphics.target.RENDER_SURFACE;
+fwd boom.graphics.target.RENDER_RGBA8_SRGB;
+fwd boom.graphics.target.RENDER_RGBA8_UNORM;
+fwd boom.graphics.target.RENDER_RGBA16_FLOAT;
+fwd boom.graphics.target.RenderTargetDesc;
+fwd boom.graphics.target.render_target_desc;
+fwd boom.graphics.target.render_target_desc_mrt;
+fwd boom.graphics.target.render_format_bytes;
 fwd boom.graphics.target.render_target;
 fwd boom.graphics.target.render_target_mrt;
+fwd boom.graphics.target.render_target_create;
 fwd boom.graphics.target.render_target_texture;
 fwd boom.graphics.target.render_target_texture_at;
 fwd boom.graphics.target.render_target_count;
+fwd boom.graphics.target.render_target_format_at;
+fwd boom.graphics.target.render_target_raw_bytes_at;
 fwd boom.graphics.target.render_target_read;
+fwd boom.graphics.target.render_target_read_raw_at;
 fwd boom.graphics.target.render_target_bgra;
 fwd boom.graphics.target.render_target_delete;
 

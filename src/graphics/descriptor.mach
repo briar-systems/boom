@@ -555,17 +555,17 @@ pub fun descriptors_write_slot_at(d: *Descriptors, frame: usize, slot: usize, of
 # offset and must satisfy minUniformBufferOffsetAlignment, which is why it is
 # COLOUR_OFFSET and not the size of the transform block.
 pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize,
-                              size: u64, views: *vk.ImageView, sampler: vk.Sampler,
+                              size: u64, views: *vk.ImageView, samplers: *vk.Sampler,
                               tint_offset: u64, tint_size: u64) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (views == nil || sampler == nil) { ret false; }
+    if (views == nil || samplers == nil) { ret false; }
     # Every sampler binding is written every draw, so a shader sampling a slot
     # the material never filled reads a defined texture rather than whatever the
     # last draw left in the set. The caller supplies the fallback; the renderer
     # uses its white texel, which makes an unset slot a multiply by one.
     var ti2: usize = 0;
     for (ti2 < MAX_SAMPLERS) {
-        if (views[ti2] == nil) { ret false; }
+        if (views[ti2] == nil || samplers[ti2] == nil) { ret false; }
         ti2 = ti2 + 1;
     }
     if (tint_size > 0 && (tint_offset % UNIFORM_ALIGN::u64) != 0) { ret false; }
@@ -586,7 +586,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     var ii: [4]vk.DescriptorImageInfo;
     var ij: usize = 0;
     for (ij < MAX_SAMPLERS) {
-        ii[ij].sampler     = sampler;
+        ii[ij].sampler     = samplers[ij];
         ii[ij].imageView   = views[ij];
         ii[ij].imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         ij = ij + 1;
