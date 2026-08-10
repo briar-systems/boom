@@ -156,11 +156,12 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
 
     val raster_scale: f32 = oversample::f32;
     val raster_pixels: f32 = pixels * raster_scale;
-    val scale: f32 = finfo.scale_for_pixel_height(?face, raster_pixels);
+    val logical_scale: f32 = finfo.scale_for_pixel_height(?face, pixels);
+    val glyph_scale: f32 = finfo.scale_for_pixel_height(?face, raster_pixels);
 
-    # Cells are square and sized to the requested height plus a margin, so a
-    # descender or an accent cannot bleed into the neighbouring cell
-    val cell: usize = (raster_pixels::i64 + (raster_pixels::i64 / 4) + 2)::usize;
+    # Scale the complete established cell, including its margin, so changing
+    # atlas resolution cannot change the logical destination rectangle.
+    val cell: usize = logical_cell_size(pixels) * oversample;
     f.cell_w = cell;
     f.cell_h = cell;
     f.cols   = 16;
@@ -202,13 +203,13 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
             var adv: u16 = 0;
             var lsb: i16 = 0;
             if (finfo.glyph_hmetrics(?face, gi, ?adv, ?lsb)) {
-                f.glyphs[g].advance = adv::f32 * scale / raster_scale;
+                f.glyphs[g].advance = adv::f32 * logical_scale;
             }
 
             var k: usize = 0;
             for (k < cell * cell) { cov[k] = 0; k = k + 1; }
 
-            if (finfo.render_glyph(?face, gi, scale, ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
+            if (finfo.render_glyph(?face, gi, glyph_scale, ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
                                    ?edges[0], MAX_EDGES, cov, cell::u16, cell::u16)) {
                 f.glyphs[g].w = cell::f32 / raster_scale;
                 f.glyphs[g].h = cell::f32 / raster_scale;
@@ -347,6 +348,11 @@ fun glyph_dest(f: *Font, x: f32, y: f32) Rect {
             f.cell_h::f32 / f.raster_scale);
 }
 
+fun logical_cell_size(pixels: f32) usize {
+    val whole: i64 = pixels::i64;
+    ret (whole + whole / 4 + 2)::usize;
+}
+
 # Draw a string into a pass, returning the pen x after the last glyph
 #
 # `x`/`y` are the top-left of the first cell in the pass's coordinate space,
@@ -452,13 +458,14 @@ test "text: an invalid face measures zero rather than reading glyphs" {
 
 test "text: oversampling preserves logical glyph geometry" {
     var f: Font = test_font(7.0);
-    f.cell_w = 32;
-    f.cell_h = 40;
+    if (logical_cell_size(16.0) != 22) { ret 1; }
+    f.cell_w = logical_cell_size(16.0) * 2;
+    f.cell_h = logical_cell_size(16.0) * 2;
     f.raster_scale = 2.0;
     val d: Rect = glyph_dest(?f, 3.0, 5.0);
-    if (d.x != 3.0 || d.y != 5.0) { ret 1; }
-    if (d.w != 16.0 || d.h != 20.0) { ret 2; }
-    if (text_measure(?f, "abc") != 21.0) { ret 3; }
+    if (d.x != 3.0 || d.y != 5.0) { ret 2; }
+    if (d.w != 22.0 || d.h != 22.0) { ret 3; }
+    if (text_measure(?f, "abc") != 21.0) { ret 4; }
     ret 0;
 }
 
