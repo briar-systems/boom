@@ -219,10 +219,10 @@ pub rec Gamepad {
 # btn_down:      held state per mouse button
 # btn_pressed:   went down during this tick
 # btn_released:  came up during this tick
-# mouse_x:       cursor position in window coordinates
-# mouse_y:       cursor position in window coordinates
-# mouse_dx:      cursor movement accumulated over this tick
-# mouse_dy:      cursor movement accumulated over this tick
+# mouse_x:       cursor position in window framebuffer pixels
+# mouse_y:       cursor position in window framebuffer pixels
+# mouse_dx:      framebuffer-pixel movement accumulated over this tick
+# mouse_dy:      framebuffer-pixel movement accumulated over this tick
 # scroll_x:      horizontal scroll accumulated over this tick
 # scroll_y:      vertical scroll accumulated over this tick
 pub rec Input {
@@ -327,10 +327,38 @@ pub fun input_button_event(i: *Input, b: Button, down: bool) {
 
 # Record an absolute cursor position, accumulating the movement since the
 # last tick rather than the last event, so a game reading delta sees the whole
-# tick's motion regardless of how many move events composed it
+# tick's motion regardless of how many move events composed it. Coordinates
+# are framebuffer pixels, matching the public Input fields.
 pub fun input_mouse_event(i: *Input, x: f64, y: f64) {
-    i.pend_mouse_dx = i.pend_mouse_dx + (x - i.pend_mouse_x);
-    i.pend_mouse_dy = i.pend_mouse_dy + (y - i.pend_mouse_y);
+    input_mouse_event_with_delta(i, x, y,
+                                 x - i.pend_mouse_x, y - i.pend_mouse_y);
+}
+
+# Record an absolute cursor position and an independently mapped movement.
+#
+# The window backend uses this when platform cursor positions and framebuffer
+# pixels have different scales. Deriving the delta from two mapped positions
+# would turn a content-scale change into motion even when the cursor stood
+# still, so the platform-space movement is scaled separately.
+# ---
+# x/y:   new absolute position in framebuffer pixels
+# dx/dy: movement in framebuffer pixels
+pub fun input_mouse_event_with_delta(i: *Input, x: f64, y: f64,
+                                     dx: f64, dy: f64) {
+    i.pend_mouse_dx = i.pend_mouse_dx + dx;
+    i.pend_mouse_dy = i.pend_mouse_dy + dy;
+    i.pend_mouse_x = x;
+    i.pend_mouse_y = y;
+}
+
+# Replace the pending cursor position without reporting movement.
+#
+# Window refresh uses this after a framebuffer or content-scale change so a
+# stationary cursor remains aligned with the framebuffer and its delta stays
+# zero.
+# ---
+# x/y: replacement absolute position in framebuffer pixels
+pub fun input_mouse_rebase(i: *Input, x: f64, y: f64) {
     i.pend_mouse_x = x;
     i.pend_mouse_y = y;
 }
