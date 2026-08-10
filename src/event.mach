@@ -22,7 +22,7 @@ pub val NONE: EventKind = 0;
 pub val KEY: EventKind = 1;
 # a mouse button changed state
 pub val MOUSE_BUTTON: EventKind = 2;
-# the cursor moved
+# the cursor moved; a/b are its framebuffer-pixel x/y, truncated to integers
 pub val MOUSE_MOVE: EventKind = 3;
 # the scroll wheel moved
 pub val SCROLL: EventKind = 4;

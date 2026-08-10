@@ -31,8 +31,8 @@ use std.types.string.str;
 # a platform window
 # ---
 # handle: the underlying GLFW window, nil-handled when creation failed
-# width:  requested client-area width in screen coordinates
-# height: requested client-area height in screen coordinates
+# width:  current framebuffer width in pixels
+# height: current framebuffer height in pixels
 pub rec Window {
     handle: glfw.Window;
     width:  i32;
@@ -69,10 +69,14 @@ fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
 }
 
 fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
-    val s: *Sink = sink_of(glfw.window_from_handle(handle));
-    if (s == nil) { ret; }
-    inp.input_mouse_event(s.input, x, y);
-    queue_push(s.queue, Event{kind: MOUSE_MOVE, a: x::i64, b: y::i64, c: 0, d: 0});
+    val w: glfw.Window = glfw.window_from_handle(handle);
+    var ww: i32 = 0;
+    var wh: i32 = 0;
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    glfw.get_window_size(w, ?ww, ?wh);
+    glfw.get_framebuffer_size(w, ?fw, ?fh);
+    deliver_cursor(sink_of(w), x, y, ww, wh, fw, fh);
 }
 
 fun on_scroll(handle: ptr, dx: f64, dy: f64) {
@@ -87,6 +91,53 @@ fun sink_of(w: glfw.Window) *Sink {
     val p: ptr = glfw.get_window_user_pointer(w);
     if (p == nil) { ret nil; }
     ret p::*Sink;
+}
+
+fun cursor_scale(window: i32, framebuffer: i32) f64 {
+    # A minimized window has no framebuffer coordinate space. Retaining the
+    # platform coordinate avoids a divide by zero and the next valid refresh
+    # replaces it before the application can draw into a framebuffer again.
+    if (window <= 0 || framebuffer <= 0) { ret 1.0; }
+    ret framebuffer::f64 / window::f64;
+}
+
+fun cursor_pixels(x: f64, y: f64,
+                  ww: i32, wh: i32, fw: i32, fh: i32,
+                  out_x: *f64, out_y: *f64) {
+    @out_x = x * cursor_scale(ww, fw);
+    @out_y = y * cursor_scale(wh, fh);
+}
+
+fun rebase_cursor(s: *Sink, x: f64, y: f64,
+                  ww: i32, wh: i32, fw: i32, fh: i32) {
+    if (s == nil) { ret; }
+    var px: f64 = 0.0;
+    var py: f64 = 0.0;
+    cursor_pixels(x, y, ww, wh, fw, fh, ?px, ?py);
+    inp.input_mouse_rebase(s.input, px, py);
+    s.cursor_x = x;
+    s.cursor_y = y;
+    s.cursor_known = true;
+}
+
+fun deliver_cursor(s: *Sink, x: f64, y: f64,
+                   ww: i32, wh: i32, fw: i32, fh: i32) {
+    if (s == nil) { ret; }
+    val sx: f64 = cursor_scale(ww, fw);
+    val sy: f64 = cursor_scale(wh, fh);
+    var px: f64 = x * sx;
+    var py: f64 = y * sy;
+    var dx: f64 = px;
+    var dy: f64 = py;
+    if (s.cursor_known) {
+        dx = (x - s.cursor_x) * sx;
+        dy = (y - s.cursor_y) * sy;
+    }
+    inp.input_mouse_event_with_delta(s.input, px, py, dx, dy);
+    s.cursor_x = x;
+    s.cursor_y = y;
+    s.cursor_known = true;
+    queue_push(s.queue, Event{kind: MOUSE_MOVE, a: px::i64, b: py::i64, c: 0, d: 0});
 }
 
 # translate a GLFW key code into a boom Key
@@ -174,18 +225,30 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
 # game reading w.width after a resize would otherwise lay its interface out
 # against dimensions the window has not had since startup.
 #
-# In pixels, for the same reason window_open records pixels. A minimized window
-# reports zero in at least one dimension, which is a legal state and not a
-# failure, so it is recorded as-is; callers that cannot divide by it check.
+# In pixels, for the same reason window_open records pixels. The cursor is
+# rebased into that same space here as well. A minimized window reports zero in
+# at least one dimension, which is a legal state and not a failure, so it is
+# recorded as-is; callers that cannot divide by it check.
 # ---
 # w: window to update in place
 pub fun window_refresh_size(w: *Window) {
     if (!glfw.window_is_valid(w.handle)) { ret; }
+    var ww: i32 = 0;
+    var wh: i32 = 0;
     var fw: i32 = 0;
     var fh: i32 = 0;
+    glfw.get_window_size(w.handle, ?ww, ?wh);
     glfw.get_framebuffer_size(w.handle, ?fw, ?fh);
     w.width  = fw;
     w.height = fh;
+
+    # Cursor callbacks carry screen coordinates. Re-read the current position
+    # beside the new size so a stationary pointer follows a DPI or resize
+    # change without inventing a movement event.
+    var x: f64 = 0.0;
+    var y: f64 = 0.0;
+    glfw.get_cursor_pos(w.handle, ?x, ?y);
+    rebase_cursor(sink_of(w.handle), x, y, ww, wh, fw, fh);
 }
 
 # whether the window was created successfully
@@ -204,18 +267,35 @@ pub fun window_is_valid(w: *Window) bool {
 # queue preserves order for UI and discrete actions, the Input answers held
 # state for movement. pass a Sink that outlives the window.
 # ---
-# queue: receives ordered events
-# input: receives state transitions
+# queue:        receives ordered events
+# input:        receives state transitions
+# cursor_x:     last raw window-coordinate x used to form a movement delta
+# cursor_y:     last raw window-coordinate y used to form a movement delta
+# cursor_known: whether cursor_x/y have been initialized
 pub rec Sink {
     queue: *EventQueue;
     input: *inp.Input;
+    cursor_x:     f64;
+    cursor_y:     f64;
+    cursor_known: bool;
 }
 
 # route this window's input at the given sink
 # ---
 # w: window to observe
-# s: sink to receive input; must outlive the window
+# s: sink to receive input; must outlive the window. Its cursor position is
+#    initialized in framebuffer pixels without reporting synthetic motion.
 pub fun window_set_event_sink(w: *Window, s: *Sink) {
+    var ww: i32 = 0;
+    var wh: i32 = 0;
+    var fw: i32 = 0;
+    var fh: i32 = 0;
+    var x: f64 = 0.0;
+    var y: f64 = 0.0;
+    glfw.get_window_size(w.handle, ?ww, ?wh);
+    glfw.get_framebuffer_size(w.handle, ?fw, ?fh);
+    glfw.get_cursor_pos(w.handle, ?x, ?y);
+    rebase_cursor(s, x, y, ww, wh, fw, fh);
     glfw.set_window_user_pointer(w.handle, s::ptr);
 }
 
@@ -254,5 +334,44 @@ test "window: Escape is delivered as application input" {
     if (!queue_pop(?q, ?e)) { ret 3; }
     if (e.kind != KEY || e.a != inp.KEY_ESCAPE::i64
         || e.b != glfw.PRESS::i64) { ret 4; }
+    ret 0;
+}
+
+test "window: cursor coordinates follow framebuffer scale" {
+    var x: f64 = 0.0;
+    var y: f64 = 0.0;
+    cursor_pixels(125.5, 44.25, 800, 600, 800, 600, ?x, ?y);
+    if (x != 125.5 || y != 44.25) { ret 1; }
+
+    cursor_pixels(125.5, 44.25, 800, 600, 1600, 1200, ?x, ?y);
+    if (x != 251.0 || y != 88.5) { ret 2; }
+
+    cursor_pixels(100.5, 50.0, 800, 600, 1200, 900, ?x, ?y);
+    if (x != 150.75 || y != 75.0) { ret 3; }
+    ret 0;
+}
+
+test "window: content-scale changes do not become cursor motion" {
+    var q: EventQueue = queue_new();
+    var input: inp.Input = inp.input_new();
+    var sink: Sink;
+    sink.queue = ?q;
+    sink.input = ?input;
+    sink.cursor_known = false;
+
+    rebase_cursor(?sink, 100.0, 50.0, 800, 600, 800, 600);
+    rebase_cursor(?sink, 100.0, 50.0, 800, 600, 1600, 1200);
+    inp.input_begin_tick(?input);
+    if (input.mouse_x != 200.0 || input.mouse_y != 100.0) { ret 1; }
+    if (input.mouse_dx != 0.0 || input.mouse_dy != 0.0) { ret 2; }
+
+    deliver_cursor(?sink, 101.0, 52.0, 800, 600, 1600, 1200);
+    inp.input_begin_tick(?input);
+
+    if (input.mouse_x != 202.0 || input.mouse_y != 104.0) { ret 3; }
+    if (input.mouse_dx != 2.0 || input.mouse_dy != 4.0) { ret 4; }
+    var e: Event;
+    if (!queue_pop(?q, ?e)) { ret 5; }
+    if (e.kind != MOUSE_MOVE || e.a != 202 || e.b != 104) { ret 6; }
     ret 0;
 }
