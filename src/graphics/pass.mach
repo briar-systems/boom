@@ -7,17 +7,17 @@
 # the subpass dependencies must match. Only the load and store operations and
 # the initial and final layouts are exempt.
 #
-# boom builds one set of pipelines, in boom.graphics.cache, and draws them into
-# the window and into offscreen targets alike. When the window pass and the
-# target pass were written out separately they agreed on everything a reader
-# would think of and differed in dependency count, one against two, which is
-# enough to make every draw into a target invalid. Nothing about that is visible
-# at either call site; it shows up as a validation error at the draw, naming two
-# render passes.
+# boom builds pipelines lazily and may draw them into the window or an offscreen
+# target. When the window pass and the target pass were written out separately
+# they agreed on everything a reader would think of and differed in dependency
+# count, one against two, which is enough to make every draw into a target
+# invalid. Nothing about that is visible at either call site; it shows up as a
+# validation error at the draw, naming two render passes.
 #
-# So there is one description here and the only things a caller may vary are
-# exactly the members compatibility ignores. Adding a pass is filling in a
-# PassOptions, and a pass that would be incompatible is not expressible.
+# So there is one description here. A caller supplies attachment formats plus
+# the members compatibility ignores, while every other compatibility-relevant
+# choice stays invariant. PassCompatibility records the varying formats and
+# count for the pipeline caches.
 
 use std.types.bool.bool;
 use std.types.size.usize;
@@ -34,15 +34,11 @@ use boom.graphics.image.DEPTH_FORMAT;
 
 # What a caller may vary about a pass.
 #
-# EVERY FIELD HERE IS EXEMPT FROM RENDER PASS COMPATIBILITY, and that is the
-# invariant this record encodes. A field added here that is not exempt would
-# reintroduce exactly the class of bug the module exists to remove, so a new
-# member has to be checked against the compatibility rules before it is added.
+# Colour formats and count are captured in PassCompatibility. Every other field
+# here is exempt from render-pass compatibility. A new member must either join
+# that key or be checked against Vulkan's compatibility rules before it is
+# added.
 # ---
-# color_format:  Format of the colour attachment. Not a free choice: it is the
-#                surface's, from Vk.color_format, for every pass, since formats
-#                must match. Carried so the field is written once, not so it can
-#                differ.
 # color_load:    Whether the colour attachment is cleared, loaded, or discarded.
 # color_initial: The layout the colour attachment is in on entry.
 # color_final:   The layout it is left in.
@@ -55,6 +51,47 @@ use boom.graphics.image.DEPTH_FORMAT;
 # one. It is also exactly what a deferred pipeline wants: albedo, normal,
 # material, emissive.
 pub val MAX_COLOR_ATTACHMENTS: usize = 4;
+
+# The compatibility-relevant colour part of a render pass.
+#
+# Vulkan pipelines may be reused between distinct render-pass handles when the
+# passes are compatible. Boom keeps depth format, sample count and subpass shape
+# invariant, so attachment count and formats are the only varying members a
+# pipeline key needs. Load/store operations and layouts are deliberately absent:
+# Vulkan excludes them from render-pass compatibility.
+pub rec PassCompatibility {
+    color_formats: [4]i32;
+    color_count:   usize;
+}
+
+# Build a compatibility key from one format per colour attachment.
+pub fun pass_compatibility(formats: *i32, count: usize) PassCompatibility {
+    var k: PassCompatibility;
+    k.color_count = clamp_count(count);
+    var i: usize = 0;
+    for (i < MAX_COLOR_ATTACHMENTS) {
+        if (i < k.color_count && formats != nil) { k.color_formats[i] = formats[i]; }
+        or                                       { k.color_formats[i] = 0; }
+        i = i + 1;
+    }
+    ret k;
+}
+
+# Build the common single-colour compatibility key.
+pub fun pass_compatibility_one(format: i32) PassCompatibility {
+    ret pass_compatibility(?format, 1);
+}
+
+# Whether two render passes are compatible for pipeline reuse.
+pub fun pass_compatibility_eq(a: *PassCompatibility, b: *PassCompatibility) bool {
+    if (a.color_count != b.color_count) { ret false; }
+    var i: usize = 0;
+    for (i < a.color_count) {
+        if (a.color_formats[i] != b.color_formats[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
 
 # ---
 # color_formats: one format per colour attachment
@@ -94,7 +131,8 @@ pub fun pass_clearing(format: i32, final: i32) PassOptions {
 # final:   the layout to leave every colour attachment in
 pub fun pass_clearing_mrt(formats: *i32, count: usize, final: i32) PassOptions {
     var o: PassOptions;
-    o.color_count   = clamp_count(count);
+    val key: PassCompatibility = pass_compatibility(formats, count);
+    o.color_count   = key.color_count;
     o.color_load    = vk.ATTACHMENT_LOAD_OP_CLEAR;
     o.color_initial = vk.IMAGE_LAYOUT_UNDEFINED;
     o.color_final   = final;
@@ -102,8 +140,7 @@ pub fun pass_clearing_mrt(formats: *i32, count: usize, final: i32) PassOptions {
     o.depth_initial = vk.IMAGE_LAYOUT_UNDEFINED;
     var i: usize = 0;
     for (i < MAX_COLOR_ATTACHMENTS) {
-        if (i < o.color_count && formats != nil) { o.color_formats[i] = formats[i]; }
-        or                                       { o.color_formats[i] = 0; }
+        o.color_formats[i] = key.color_formats[i];
         i = i + 1;
     }
     ret o;
@@ -298,6 +335,20 @@ test "pass: a single-attachment pass is the multi form with a count of one" {
     if (one.color_load != mrt.color_load)          { ret 3; }
     if (one.color_initial != mrt.color_initial)    { ret 4; }
     if (one.color_final != mrt.color_final)        { ret 5; }
+    ret 0;
+}
+
+test "pass: compatibility is attachment count and formats" {
+    var a_formats: [4]i32 = [4]i32{1, 2, 0, 0};
+    var b_formats: [4]i32 = [4]i32{1, 2, 0, 0};
+    var c_formats: [4]i32 = [4]i32{1, 3, 0, 0};
+    val a: PassCompatibility = pass_compatibility(?a_formats[0], 2);
+    val b: PassCompatibility = pass_compatibility(?b_formats[0], 2);
+    val c: PassCompatibility = pass_compatibility(?c_formats[0], 2);
+    val one: PassCompatibility = pass_compatibility(?a_formats[0], 1);
+    if (!pass_compatibility_eq(?a, ?b)) { ret 1; }
+    if (pass_compatibility_eq(?a, ?c))  { ret 2; }
+    if (pass_compatibility_eq(?a, ?one)) { ret 3; }
     ret 0;
 }
 

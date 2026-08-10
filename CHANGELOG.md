@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- graphics: explicit per-attachment render formats, including linear RGBA8 and
+  floating-point RGBA16. Mixed-format MRT targets let deferred renderers keep
+  colour, data and HDR emission in representations suited to each channel.
+- graphics: nearest or linear filtering per material texture binding. Existing
+  bindings remain nearest by default.
+- graphics: format-aware raw target readback and byte-size queries. The legacy
+  RGBA8 readback refuses wider formats instead of underallocating its staging
+  buffer.
+
+### Changed
+- graphics: built-in and game shader pipelines are cached by render-pass
+  compatibility rather than a window pass or raw handle. Equivalent ping-pong
+  targets share a pipeline; targets with different attachment formats cannot
+  reuse an invalid one.
+
 ## [0.12.0] - 2026-08-09
 
 ### Fixed

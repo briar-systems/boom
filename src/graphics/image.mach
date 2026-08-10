@@ -71,6 +71,24 @@ pub fun image_bytes(width: u32, height: u32) usize {
     ret width::usize * height::usize * RGBA_BYTES;
 }
 
+# Bytes occupied by one texel of an image format boom can read back.
+#
+# Zero means the raw layout is not part of the readback contract. Depth and
+# compressed formats are deliberately absent: copying them into a tightly
+# packed colour buffer needs more than a byte count.
+pub fun image_format_bytes(format: i32) usize {
+    if (format == vk.FORMAT_R16G16B16A16_SFLOAT) { ret 8; }
+    if (format == vk.FORMAT_R8G8B8A8_SRGB || format == vk.FORMAT_R8G8B8A8_UNORM
+        || format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_B8G8R8A8_UNORM) { ret 4; }
+    ret 0;
+}
+
+# The tightly packed raw byte size of an image, or zero for an unsupported
+# readback format.
+pub fun image_raw_bytes(i: *Image) usize {
+    ret i.width::usize * i.height::usize * image_format_bytes(i.format);
+}
+
 # What the bytes in an image mean, which decides how sampling reads them.
 #
 # NOT A BOOLEAN. Colour space is an axis this will grow along: a normal map, a
@@ -397,7 +415,7 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
     ret true;
 }
 
-# Copy an image's pixels back to host memory, tightly packed as RGBA8.
+# Copy an image's pixels back to host memory in its native packed format.
 #
 # WHY AN ENGINE HAS THIS. Presenting a frame proves that every call succeeded; it
 # does not prove that anything was drawn. A pipeline with its winding backwards
@@ -412,11 +430,12 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
 # descriptor does not describe.
 # ---
 # i:    the image to read, in SHADER_READ_ONLY_OPTIMAL
-# out:  destination for width * height * 4 bytes
+# out:  destination for image_raw_bytes bytes
 # len:  size of out in bytes, checked against the image
 pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) Result[bool, Error] {
     if (!i.ready) { ret err[bool, Error](error("cannot read an image that was never created")); }
-    val size: usize = image_bytes(i.width, i.height);
+    val size: usize = image_raw_bytes(i);
+    if (size == 0) { ret err[bool, Error](error("this image format does not support raw readback")); }
     if (len < size) { ret err[bool, Error](error("the destination is smaller than the image")); }
 
     var staging: Buffer;
@@ -638,6 +657,19 @@ test "image: byte size is width times height times four" {
     if (image_bytes(2, 3) != 24)  { ret 1; }
     if (image_bytes(1, 1) != 4)   { ret 2; }
     if (image_bytes(0, 100) != 0) { ret 3; }
+    ret 0;
+}
+
+test "image: raw byte size follows the image format" {
+    var i: Image;
+    i.width = 2;
+    i.height = 3;
+    i.format = vk.FORMAT_R8G8B8A8_UNORM;
+    if (image_raw_bytes(?i) != 24) { ret 1; }
+    i.format = vk.FORMAT_R16G16B16A16_SFLOAT;
+    if (image_raw_bytes(?i) != 48) { ret 2; }
+    i.format = vk.FORMAT_D32_SFLOAT;
+    if (image_raw_bytes(?i) != 0)  { ret 3; }
     ret 0;
 }
 

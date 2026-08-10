@@ -30,9 +30,9 @@
 # a shader is choosing a pipeline. The renderer owns the ones the engine
 # needs, and a game that wants its own supplies a boom.graphics.Shader and
 # draws with pass_draw_shaded. The pipelines that needs are built under the
-# Shader, keyed by the pass and the vertex layout each draw actually uses, so
-# a game never names a Pipeline or a RenderPass. Its shading parameters go in
-# the block set by pass_set_user, which arrives at binding 4.
+# Shader, keyed by render-pass compatibility and the vertex layout each draw
+# actually uses, so a game never names a Pipeline or a RenderPass. Its shading
+# parameters go in the block set by pass_set_user, which arrives at binding 4.
 #
 # A 3D draw takes a uniform slot. GL set named uniforms on the bound program
 # between draws; a Vulkan draw reads a buffer range that must already hold
@@ -159,6 +159,7 @@ use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.material.Material;
 use boom.graphics.material.material_texture;
+use boom.graphics.material.TEXTURE_LINEAR;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
@@ -175,6 +176,8 @@ use boom.math.aabb.aabb_transform;
 use boom.graphics.sprite.rect_overlaps;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.target.render_target_count;
+use boom.graphics.pass.PassCompatibility;
+use boom.graphics.pass.pass_compatibility_one;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.math.vec.Vec4;
@@ -194,7 +197,8 @@ use boom.math.transform.transform_matrix;
 # swap:    the swapchain the window is presented through
 # frame:   the frame loop and its synchronization
 # desc:    descriptor sets and the per-frame uniform ring
-# sampler: the one sampler every texture is read through
+# nearest: point sampling for pixel art and discrete data
+# linear:  bilinear sampling for scaled images and continuous fields
 # pipes:   the pipeline cache, keyed by program and vertex layout
 # white:   a 1x1 opaque white texture, bound when a draw has no texture of
 #          its own, since every fragment stage samples
@@ -214,7 +218,8 @@ pub rec Renderer {
     swap:        Swapchain;
     frame:       FrameLoop;
     desc:        Descriptors;
-    sampler:     vk.Sampler;
+    nearest:     vk.Sampler;
+    linear:      vk.Sampler;
     pipes:       PipelineCache;
     white:       Texture;
     stream:      VertexStream;
@@ -269,12 +274,18 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     # can say so.
     r.srgb = format_is_srgb(r.swap.format);
 
-    val samr: Result[bool, Error] = sampler_init(?r.sampler, ?r.vk, true);
+    val samr: Result[bool, Error] = sampler_init(?r.nearest, ?r.vk, true);
     if (is_err[bool, Error](samr)) { ret samr; }
+    val saml: Result[bool, Error] = sampler_init(?r.linear, ?r.vk, false);
+    if (is_err[bool, Error](saml)) {
+        sampler_dnit(r.nearest, ?r.vk);
+        r.nearest = nil;
+        ret saml;
+    }
 
     # Pipelines are built on demand, keyed by program and vertex layout, because
     # a .glb decides its own layout. See boom.graphics.cache.
-    cache_init(?r.pipes, r.frame.pass);
+    cache_init(?r.pipes);
     r.ui_format = vertex_format_ui();
 
     # The descriptor pool needs a set layout before any pipeline exists, so the
@@ -282,7 +293,9 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     # against. Every pipeline shares one set layout, so any of them would do;
     # building one up front just means there is one to ask. This one, because it
     # is the pipeline every frame uses.
-    val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+    val window_compatibility: PassCompatibility = pass_compatibility_one(r.vk.color_format);
+    val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, r.frame.pass,
+                                      ?window_compatibility, PROGRAM_UI, ?r.ui_format);
     if (two_d == nil) {
         ret err[bool, Error](error("could not build the 2D pipeline"));
     }
@@ -510,7 +523,8 @@ pub fun renderer_dnit(r: *Renderer) {
     texture_delete(?r.dev, ?r.white);
     descriptors_dnit(?r.desc, ?r.vk);
     cache_dnit(?r.pipes, ?r.vk);
-    sampler_dnit(r.sampler, ?r.vk);
+    sampler_dnit(r.linear, ?r.vk);
+    sampler_dnit(r.nearest, ?r.vk);
     frame_dnit(?r.frame, ?r.vk);
     swapchain_dnit(?r.swap, ?r.vk);
     device_dnit(?r.dev);
@@ -616,6 +630,7 @@ pub rec Pass {
     # How many colour attachments this pass writes. A pipeline is only valid in
     # a pass with a matching attachment count, so it travels with the handle.
     targets:    usize;
+    compatibility: PassCompatibility;
     cmd:        vk.CommandBuffer;
     target:     *RenderTarget;
     width:      i32;
@@ -705,12 +720,14 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.pass    = d.target.pass;
         if (d.clear == 0) { p.pass = d.target.pass_load; }
         p.targets = render_target_count(d.target);
+        p.compatibility = d.target.compatibility;
     }
     or {
         p.width  = r.width;
         p.height = r.height;
         p.pass    = r.frame.pass;
         p.targets = 1;
+        p.compatibility = pass_compatibility_one(r.vk.color_format);
     }
 
     if (d.perspective != 0) {
@@ -908,9 +925,11 @@ pub fun batch_flush(p: *Pass) {
 
     # No tint block: the colour is per vertex. Passing 0 for its size is what
     # tells the descriptor layer binding 2 is not part of this draw.
-    var views2d: [4]vk.ImageView;
+    var views2d:    [4]vk.ImageView;
+    var samplers2d: [4]vk.Sampler;
     if (p.mat2d != nil) {
         fill_views_mat(r, ?views2d[0], p.mat2d, tex);
+        fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
         # THE RUN'S OWN TEXTURE OWNS BINDING 1, ALWAYS. A batched run's UVs were
         # normalised against the texture the sprites were pushed with, so a
         # material whose first texture is a different sheet makes every vertex
@@ -919,17 +938,21 @@ pub fun batch_flush(p: *Pass) {
         # sheet the geometry was built for.
         views2d[0] = texture_view(tex);
     }
-    or { fill_views(r, ?views2d[0], tex); }
+    or {
+        fill_views(r, ?views2d[0], tex);
+        fill_samplers_mat(r, ?samplers2d[0], nil);
+    }
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(ScreenUniforms)::u64, ?views2d[0], r.sampler,
+                          $size_of(ScreenUniforms)::u64, ?views2d[0], ?samplers2d[0],
                           0, 0);
 
     var pipe: *Pipeline = nil;
     if (p.shader2d != nil) {
-        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, p.targets, ?r.ui_format);
+        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility, ?r.ui_format);
     }
     or {
-        pipe = cache_get(?r.pipes, ?r.vk, PROGRAM_UI, ?r.ui_format);
+        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
+                         PROGRAM_UI, ?r.ui_format);
     }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
@@ -1054,6 +1077,20 @@ fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *
         var src2: *Texture = fallback;
         if (src2 == nil) { src2 = ?r.white; }
         out[0] = texture_view(src2);
+    }
+}
+
+# Fill the sampler array parallel to a draw's image views.
+fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: *Material) {
+    var i: usize = 0;
+    for (i < MAX_SAMPLERS) { out[i] = r.nearest; i = i + 1; }
+    if (mat == nil) { ret; }
+    var n: usize = mat.texture_count::usize;
+    if (n > MAX_SAMPLERS) { n = MAX_SAMPLERS; }
+    i = 0;
+    for (i < n) {
+        if (mat.textures[i].filter == TEXTURE_LINEAR) { out[i] = r.linear; }
+        i = i + 1;
     }
 }
 
@@ -1246,10 +1283,12 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     # Every texture the material carries, not only the first. A shader that
     # samples one reads binding 1 exactly as before; one that samples four reads
     # 1, 5, 6 and 7.
-    var views: [4]vk.ImageView;
+    var views:    [4]vk.ImageView;
+    var samplers: [4]vk.Sampler;
     fill_views_mat(r, ?views[0], mat, src);
+    fill_samplers_mat(r, ?samplers[0], mat);
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(SkinnedUniforms)::u64, ?views[0], r.sampler,
+                          $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
                           base_off::u64, $size_of(TintUniforms)::u64);
 
     var program: Program = PROGRAM_MESH;
@@ -1275,10 +1314,11 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         # is only valid in a render pass compatible with the one it was made
         # for, and a game shader drawn into an offscreen target would otherwise
         # be using the window's.
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, p.targets, ?m.format);
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility, ?m.format);
     }
     or {
-        pipe = cache_get(?r.pipes, ?r.vk, program, ?m.format);
+        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
+                         program, ?m.format);
     }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;

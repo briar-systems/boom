@@ -138,7 +138,13 @@ fun on_init(ctx: *Context) {
     # real driver, because those are the parts that fail at object creation
     # rather than anywhere a test without a GPU can see.
     g.gbuf_ok = false;
-    val gb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_mrt(d, 320, 180, 4);
+    var formats: [4]gfx.RenderFormat;
+    formats[0] = gfx.RENDER_RGBA8_SRGB;
+    formats[1] = gfx.RENDER_RGBA8_UNORM;
+    formats[2] = gfx.RENDER_RGBA8_UNORM;
+    formats[3] = gfx.RENDER_RGBA16_FLOAT;
+    val gdesc: gfx.RenderTargetDesc = gfx.render_target_desc_mrt(?formats[0], 4);
+    val gb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 320, 180, ?gdesc);
     if (is_err[gfx.RenderTarget, gfx.Error](gb)) {
         var ge: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](gb);
         print.eprintlnf("mrt target error: {}", gfx.error_msg(?ge));
@@ -146,8 +152,9 @@ fun on_init(ctx: *Context) {
     }
     g.gbuf = unwrap_ok[gfx.RenderTarget, gfx.Error](gb);
     g.gbuf_ok = true;
-    print.printlnf("mrt target: {} attachments at 320x180",
-                   gfx.render_target_count(?g.gbuf));
+    print.printlnf("mixed mrt target: {} attachments at 320x180; hdr readback is {} bytes",
+                   gfx.render_target_count(?g.gbuf),
+                   gfx.render_target_raw_bytes_at(?g.gbuf, 3));
 
     g.probe_ok  = false;
     g.probe_lit = 0;
