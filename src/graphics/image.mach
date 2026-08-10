@@ -603,9 +603,10 @@ pub fun image_dnit(i: *Image, v: *Vk) {
 
 # Create a sampler.
 #
-# `nearest` picks point sampling, which is what pixel art and a glyph atlas want;
-# linear filtering blurs a glyph's coverage across its cell and bleeds
-# neighbouring sprites into each other at an atlas boundary.
+# `nearest` picks point sampling, which keeps pixel-art texels discrete. Linear
+# filtering softens scaled images, but arbitrary packed atlases need their own
+# edge gutters to keep neighbouring sprites out of the filter footprint. Boom's
+# font atlases provide those gutters.
 pub fun sampler_init(out: *vk.Sampler, v: *Vk, nearest: bool) Result[bool, Error] {
     var filter: i32 = vk.FILTER_LINEAR;
     if (nearest) { filter = vk.FILTER_NEAREST; }
