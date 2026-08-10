@@ -114,7 +114,10 @@ The default target constructors use the window's format. A
 `RenderTargetDesc` can instead choose sRGB RGBA8, linear RGBA8, or floating-point
 RGBA16 independently for each attachment. Materials sample nearest by default;
 `material_add_texture_filtered` selects linear filtering for bindings such as a
-scaled scene, continuous data field, or bloom buffer.
+scaled scene, continuous data field, or bloom buffer. A custom `Shader` takes a
+`PipelineDesc`; its `blend` can replace the attachment (`BLEND_OPAQUE`), compose
+with source alpha (`BLEND_SOURCE_ALPHA`), or sum overlapping contributions
+(`BLEND_ADDITIVE`). The selected mode applies to every attachment in the pass.
 
 `renderer_begin_frame` reports through an out parameter whether a frame was
 actually opened. A `false` there is a swapchain that went out of date and was

@@ -386,7 +386,7 @@ fun make_shader(out: *gfx.Shader, vert: *u8, vlen: usize,
     # lighting accumulation with nothing to accumulate into, which is the point
     # made in the report.
     var desc: gfx.PipelineDesc = gfx.pipeline_desc_2d();
-    desc.blend = false;
+    desc.blend = gfx.BLEND_OPAQUE;
     gfx.shader_set_state(out, desc);
     ret true;
 }
