@@ -58,15 +58,24 @@ pub rec Pipeline {
     ready:      bool;
 }
 
+# How a pipeline combines fragment output with an existing colour attachment.
+pub def BlendMode: i32;
+
+# Replace the attachment with the fragment output.
+pub val BLEND_OPAQUE: BlendMode = 0;
+# Compose the fragment over the attachment using source alpha.
+pub val BLEND_SOURCE_ALPHA: BlendMode = 1;
+# Add fragment channels to the existing attachment channels.
+pub val BLEND_ADDITIVE: BlendMode = 2;
+
 # What a pipeline needs beyond its shaders and vertex format.
 # ---
-# blend:   Alpha blending on the colour attachment. Sprites and text need it;
-#          opaque geometry is cheaper without it.
+# blend:   How fragment output combines with the colour attachment.
 # cull:    Back-face culling. Off for 2D, where quads may be wound either way.
 # depth:   Depth test and write. Off for overlays drawn in submission order.
 # topology: Primitive topology, normally a triangle list.
 pub rec PipelineDesc {
-    blend:    bool;
+    blend:    BlendMode;
     cull:     bool;
     depth:    bool;
     topology: i32;
@@ -75,7 +84,7 @@ pub rec PipelineDesc {
 # The default description: opaque, culled, depth-tested triangles.
 pub fun pipeline_desc_3d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend    = false;
+    d.blend    = BLEND_OPAQUE;
     d.cull     = true;
     d.depth    = true;
     d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -85,7 +94,7 @@ pub fun pipeline_desc_3d() PipelineDesc {
 # The 2D description: blended, unculled, no depth.
 pub fun pipeline_desc_2d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend    = true;
+    d.blend    = BLEND_SOURCE_ALPHA;
     d.cull     = false;
     d.depth    = false;
     d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -403,6 +412,33 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[
     ret ok[bool, Error](true);
 }
 
+# Map a public blend mode to the fixed state baked into a Vulkan pipeline.
+fun blend_attachment(mode: BlendMode) vk.PipelineColorBlendAttachmentState {
+    var cb: vk.PipelineColorBlendAttachmentState;
+    cb.colorWriteMask      = vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT
+                           | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT;
+    cb.blendEnable         = vk.FALSE;
+    cb.srcColorBlendFactor = vk.BLEND_FACTOR_ONE;
+    cb.dstColorBlendFactor = vk.BLEND_FACTOR_ZERO;
+    cb.colorBlendOp        = vk.BLEND_OP_ADD;
+    cb.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
+    cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ZERO;
+    cb.alphaBlendOp        = vk.BLEND_OP_ADD;
+
+    if (mode == BLEND_SOURCE_ALPHA) {
+        cb.blendEnable         = vk.TRUE;
+        cb.srcColorBlendFactor = vk.BLEND_FACTOR_SRC_ALPHA;
+        cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    }
+    or (mode == BLEND_ADDITIVE) {
+        cb.blendEnable         = vk.TRUE;
+        cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE;
+        cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
+    }
+    ret cb;
+}
+
 # Build a graphics pipeline from two SPIR-V modules and a vertex format.
 # `targets` is the colour attachment count of the pass this is built against.
 # The blend state must have one entry per attachment or the pipeline is invalid
@@ -417,6 +453,9 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
     p.set_layout = nil;
 
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+    if (d.blend < BLEND_OPAQUE || d.blend > BLEND_ADDITIVE) {
+        ret err[bool, Error](error("invalid pipeline blend mode"));
+    }
 
     var vmod: vk.ShaderModule;
     var fmod: vk.ShaderModule;
@@ -564,26 +603,7 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
     ds.minDepthBounds        = 0.0;
     ds.maxDepthBounds        = 1.0;
 
-    var cb: vk.PipelineColorBlendAttachmentState;
-    cb.colorWriteMask      = vk.COLOR_COMPONENT_R_BIT | vk.COLOR_COMPONENT_G_BIT
-                           | vk.COLOR_COMPONENT_B_BIT | vk.COLOR_COMPONENT_A_BIT;
-    cb.blendEnable         = vk.FALSE;
-    cb.srcColorBlendFactor = vk.BLEND_FACTOR_ONE;
-    cb.dstColorBlendFactor = vk.BLEND_FACTOR_ZERO;
-    cb.colorBlendOp        = vk.BLEND_OP_ADD;
-    cb.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
-    cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ZERO;
-    cb.alphaBlendOp        = vk.BLEND_OP_ADD;
-    if (d.blend) {
-        # Standard source-alpha blending. The alpha channel accumulates as
-        # one minus source alpha so a blended result stays composable when it is
-        # later drawn over something else.
-        cb.blendEnable         = vk.TRUE;
-        cb.srcColorBlendFactor = vk.BLEND_FACTOR_SRC_ALPHA;
-        cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-        cb.srcAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
-        cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    }
+    val cb: vk.PipelineColorBlendAttachmentState = blend_attachment(d.blend);
 
     # Every attachment gets the same blend state. A deferred pass writing albedo
     # beside a normal map wants no blending on any of them, and a game that
@@ -797,8 +817,32 @@ test "pipeline: 2D and 3D descriptions differ where it matters" {
     val b: PipelineDesc = pipeline_desc_2d();
     # Sprites and glyphs need blending and must not be culled or depth-tested;
     # sharing one description would make overlays disappear behind geometry.
-    if (a.blend || !a.cull || !a.depth) { ret 1; }
-    if (!b.blend || b.cull || b.depth)  { ret 2; }
+    if (a.blend != BLEND_OPAQUE || !a.cull || !a.depth) { ret 1; }
+    if (b.blend != BLEND_SOURCE_ALPHA || b.cull || b.depth) { ret 2; }
+    ret 0;
+}
+
+test "pipeline: blend modes map to exact attachment factors" {
+    val opaque: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_OPAQUE);
+    if (opaque.blendEnable != vk.FALSE
+        || opaque.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
+        || opaque.dstColorBlendFactor != vk.BLEND_FACTOR_ZERO) { ret 1; }
+
+    val alpha: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_SOURCE_ALPHA);
+    if (alpha.blendEnable != vk.TRUE
+        || alpha.srcColorBlendFactor != vk.BLEND_FACTOR_SRC_ALPHA
+        || alpha.dstColorBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+        || alpha.srcAlphaBlendFactor != vk.BLEND_FACTOR_ONE
+        || alpha.dstAlphaBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA) { ret 2; }
+
+    val additive: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_ADDITIVE);
+    if (additive.blendEnable != vk.TRUE
+        || additive.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
+        || additive.dstColorBlendFactor != vk.BLEND_FACTOR_ONE
+        || additive.colorBlendOp != vk.BLEND_OP_ADD
+        || additive.srcAlphaBlendFactor != vk.BLEND_FACTOR_ONE
+        || additive.dstAlphaBlendFactor != vk.BLEND_FACTOR_ONE
+        || additive.alphaBlendOp != vk.BLEND_OP_ADD) { ret 3; }
     ret 0;
 }
 

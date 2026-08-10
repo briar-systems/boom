@@ -4,13 +4,8 @@
 # builds a pipeline per Shader per pass, so two Shaders that sample one texture
 # and write one colour cost more bookkeeping than the branch does.
 #
-# The alpha channel carries the bloom's own luminance. That is not for the
-# blur's sake: it is what makes the add-back approximable. boom's PipelineDesc
-# offers opaque or source-alpha blending and nothing else, so there is no
-# additive blend to add a bloom target back over a scene with. Blending it with
-# alpha equal to its luminance reads as a glow and is wrong in the way a lerp is
-# wrong, because it darkens the scene underneath in proportion to how much glow
-# it adds.
+# Alpha stays zero so the additive add-back contributes radiance without
+# changing the window attachment's alpha.
 #
 # args: x and y are the texel step for this direction, z is the threshold, and
 # w selects the pass: below 0.5 thresholds, at or above 0.5 blurs.
@@ -56,7 +51,7 @@ fun frag_main() {
     # What is above the threshold, scaled so a texel just over it contributes
     # nothing and one well over it contributes most of itself.
     val over: f32 = sh.max(luma - args.step[2], 0.0) / sh.max(1.0 - args.step[2], 0.0001);
-    val t: f32x4 = f32x4{c[0] * over, c[1] * over, c[2] * over, over};
+    val t: f32x4 = f32x4{c[0] * over, c[1] * over, c[2] * over, 0.0};
 
     val b: f32x4 = blur(in_uv, args.step[0], args.step[1]);
 
