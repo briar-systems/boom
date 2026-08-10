@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.2] - 2026-08-10
+
+### Fixed
+- input: Cursor positions, movement deltas and `MOUSE_MOVE` payloads use
+  framebuffer pixels, matching `Window.width`, `Window.height`, renderer
+  viewports and 2D projections on scaled displays. Resizing or changing content
+  scale rebases the absolute position without reporting synthetic motion.
+
 ## [0.15.1] - 2026-08-10
 
 ### Fixed
