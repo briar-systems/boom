@@ -77,8 +77,9 @@ context the way GL did, so `texture_load`, `mesh_load`, `model_load`, and
 the whole fixed-function state into one immutable object, so there is no
 per-pass or per-material shader to set. A pipeline is chosen by what a draw is:
 a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
-keeps them, keyed by that choice and by the mesh's vertex layout, because Vulkan
-bakes vertex input into the pipeline too. The shaders themselves live in
+keeps them, keyed by that choice, the mesh's vertex layout, and the target's
+attachment formats, because Vulkan bakes both vertex input and render-pass
+compatibility into the pipeline. The shaders themselves live in
 `shaders/` as Mach source, are compiled to SPIR-V by the `build-shaders` step,
 and are embedded from `res/spv/`.
 
@@ -94,8 +95,8 @@ The `Renderer` is the core abstraction. A game creates one (or several), then
 each frame calls `renderer_begin_frame`, runs one or more **passes**, and
 `renderer_end_frame` to finalize. A **pass** has a target (the window or an
 offscreen `RenderTarget`), a projection (a perspective `Camera` for 3D or a
-pixel-space orthographic projection for 2D), clear and render state, and an
-and clear state. 2D and 3D go through the same machinery: `pass_scene` builds a
+pixel-space orthographic projection for 2D), and clear and render state. 2D and
+3D go through the same machinery: `pass_scene` builds a
 3D pass and takes mesh draws (`pass_draw`, `pass_draw_material`,
 `pass_draw_skinned`); `pass_overlay` builds a 2D pass and takes sprite draws
 (`pass_draw_sprite`). Set `PassDesc.target` to render into a texture, which is
@@ -108,6 +109,12 @@ Compositing several sources into a frame is what passes and render targets are
 for. A pass targeting an offscreen `RenderTarget` suspends the window's render
 pass and resumes it afterwards without erasing what the frame has drawn, so a
 later pass can sample that target as a texture.
+
+The default target constructors use the window's format. A
+`RenderTargetDesc` can instead choose sRGB RGBA8, linear RGBA8, or floating-point
+RGBA16 independently for each attachment. Materials sample nearest by default;
+`material_add_texture_filtered` selects linear filtering for bindings such as a
+scaled scene, continuous data field, or bloom buffer.
 
 `renderer_begin_frame` reports through an out parameter whether a frame was
 actually opened. A `false` there is a swapchain that went out of date and was

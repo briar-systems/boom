@@ -40,6 +40,8 @@ use boom.graphics.image.image_init;
 use boom.graphics.image.USAGE_TARGET;
 use boom.graphics.image.image_transition;
 use boom.graphics.image.image_read;
+use boom.graphics.image.image_format_bytes;
+use boom.graphics.image.image_raw_bytes;
 use boom.graphics.image.image_dnit;
 use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.pass.PassOptions;
@@ -48,15 +50,87 @@ use boom.graphics.pass.pass_clearing_mrt;
 use boom.graphics.pass.pass_loading_mrt;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.pass.pass_clearing;
+use boom.graphics.pass.PassCompatibility;
+use boom.graphics.pass.pass_compatibility;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.depth_attachment_init;
 use boom.graphics.image.depth_attachment_dnit;
+
+# The storage format of one offscreen colour attachment.
+#
+# These names describe data rather than Vulkan. Surface preserves the historical
+# behaviour and matches the window; the explicit formats let data buffers avoid
+# an sRGB transfer and let light buffers retain values above one.
+pub def RenderFormat: u8;
+
+pub val RENDER_SURFACE:      RenderFormat = 0;
+pub val RENDER_RGBA8_SRGB:   RenderFormat = 1;
+pub val RENDER_RGBA8_UNORM:  RenderFormat = 2;
+pub val RENDER_RGBA16_FLOAT: RenderFormat = 3;
+
+# One format per colour attachment in an offscreen target.
+pub rec RenderTargetDesc {
+    formats:     [4]RenderFormat;
+    color_count: usize;
+}
+
+# A target description whose attachments all share one format.
+pub fun render_target_desc(format: RenderFormat, count: usize) RenderTargetDesc {
+    var d: RenderTargetDesc;
+    d.color_count = count;
+    if (d.color_count == 0) { d.color_count = 1; }
+    if (d.color_count > MAX_COLOR_ATTACHMENTS) { d.color_count = MAX_COLOR_ATTACHMENTS; }
+    var i: usize = 0;
+    for (i < MAX_COLOR_ATTACHMENTS) { d.formats[i] = format; i = i + 1; }
+    ret d;
+}
+
+# A mixed-format target description.
+pub fun render_target_desc_mrt(formats: *RenderFormat, count: usize) RenderTargetDesc {
+    var d: RenderTargetDesc = render_target_desc(RENDER_SURFACE, count);
+    if (formats == nil) { ret d; }
+    var i: usize = 0;
+    for (i < d.color_count) { d.formats[i] = formats[i]; i = i + 1; }
+    ret d;
+}
+
+# Bytes occupied by one texel of a public render format.
+pub fun render_format_bytes(format: RenderFormat) usize {
+    if (format == RENDER_RGBA16_FLOAT) { ret 8; }
+    if (format == RENDER_SURFACE || format == RENDER_RGBA8_SRGB
+        || format == RENDER_RGBA8_UNORM) { ret 4; }
+    ret 0;
+}
+
+# Resolve a backend-neutral render format for this device.
+fun render_vk_format(d: *Device, format: RenderFormat) i32 {
+    if (format == RENDER_SURFACE)      { ret d.vk.color_format; }
+    if (format == RENDER_RGBA8_SRGB)   { ret vk.FORMAT_R8G8B8A8_SRGB; }
+    if (format == RENDER_RGBA8_UNORM)  { ret vk.FORMAT_R8G8B8A8_UNORM; }
+    if (format == RENDER_RGBA16_FLOAT) { ret vk.FORMAT_R16G16B16A16_SFLOAT; }
+    ret vk.FORMAT_UNDEFINED;
+}
+
+# Whether optimal-tiling images of this format support every operation a target
+# exposes: drawing, sampling, filtered sampling, upload and readback.
+fun render_format_supported(d: *Device, format: i32) bool {
+    var props: vk.FormatProperties;
+    vk.vkGetPhysicalDeviceFormatProperties(d.vk.physical, format, ?props);
+    val need: u32 = vk.FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+                    | vk.FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                    | vk.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+                    | vk.FORMAT_FEATURE_TRANSFER_DST_BIT
+                    | vk.FORMAT_FEATURE_TRANSFER_SRC_BIT;
+    ret (props.optimalTilingFeatures & need) == need;
+}
 
 
 # an opaque handle to an offscreen render target
 # ---
 # colors:      the colour attachments, each sampleable as a Texture
+# formats:     the public storage format of each attachment
 # color_count: how many of colors this target writes
+# compatibility: the attachment signature pipelines are cached against
 # depth:       the depth attachment, shared with the frame loop's
 # pass:        the render pass drawing into this target uses
 # framebuffer: the framebuffer binding the two attachments
@@ -65,7 +139,9 @@ use boom.graphics.image.depth_attachment_dnit;
 # ready:       whether creation completed
 pub rec RenderTarget {
     colors:      [4]Texture;
+    formats:     [4]RenderFormat;
     color_count: usize;
+    compatibility: PassCompatibility;
     depth:       DepthAttachment;
     pass:        vk.RenderPass;
     pass_load:   vk.RenderPass;
@@ -116,16 +192,17 @@ fun make_pass(t: *RenderTarget, v: *Vk) Result[bool, Error] {
 
 # create an offscreen render target of the given size
 #
-# allocates an RGBA8 colour image exposed as a Texture, a depth image, a
-# render pass ending with the colour attachment ready to sample, and a
-# framebuffer binding the two.
+# allocates a surface-format colour image exposed as a Texture, a depth image,
+# a render pass ending with the colour attachment ready to sample, and a
+# framebuffer binding the two. Use render_target_create for explicit formats.
 # ---
 # d:      the upload context
 # width:  target width in pixels, positive
 # height: target height in pixels, positive
 # ret:    the render target, or a creation error
 pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, Error] {
-    ret render_target_mrt(d, width, height, 1);
+    val desc: RenderTargetDesc = render_target_desc(RENDER_SURFACE, 1);
+    ret render_target_create(d, width, height, ?desc);
 }
 
 # create an offscreen target with several colour attachments
@@ -145,11 +222,29 @@ pub fun render_target(d: *Device, width: i32, height: i32) Result[RenderTarget, 
 # count:  colour attachments, 1 to MAX_COLOR_ATTACHMENTS
 # ret:    the render target, or a creation error
 pub fun render_target_mrt(d: *Device, width: i32, height: i32, count: usize) Result[RenderTarget, Error] {
+    val desc: RenderTargetDesc = render_target_desc(RENDER_SURFACE, count);
+    ret render_target_create(d, width, height, ?desc);
+}
+
+# Create an offscreen target from an explicit attachment description.
+#
+# Mixed formats are useful for deferred rendering: display colour can retain
+# sRGB precision, normal and mask data can stay linear, and emissive output can
+# be floating point, all in one geometry pass.
+# ---
+# d:      the upload context
+# width:  target width in pixels, positive
+# height: target height in pixels, positive
+# desc:   attachment count and formats; nil means one surface-format attachment
+# ret:    the render target, or a creation error
+pub fun render_target_create(d: *Device, width: i32, height: i32,
+                             desc: *RenderTargetDesc) Result[RenderTarget, Error] {
     var t: RenderTarget;
     t.ready       = false;
     t.width       = width;
     t.height      = height;
-    t.color_count = count;
+    t.color_count = 1;
+    if (desc != nil) { t.color_count = desc.color_count; }
     if (t.color_count == 0) { t.color_count = 1; }
     if (t.color_count > MAX_COLOR_ATTACHMENTS) { t.color_count = MAX_COLOR_ATTACHMENTS; }
 
@@ -160,29 +255,33 @@ pub fun render_target_mrt(d: *Device, width: i32, height: i32, count: usize) Res
         ret err[RenderTarget, Error](error("render target dimensions must be positive"));
     }
 
-    # THE TARGET'S FORMAT IS THE SURFACE'S, NOT A CHOICE MADE HERE. Two render
-    # passes are compatible only when their attachment formats and counts match,
-    # and a pipeline may only be used in a pass compatible with the one it was
-    # built against. boom builds one set of pipelines, against the window pass, so
-    # a target that picked its own format could not be drawn into at all. Reading
-    # the surface's answer is what keeps a single pipeline cache correct.
-    #
-    # It is an sRGB format on every driver that offers one, which is also what a
-    # target wants on its own merits: it holds a rendered image that a later pass
-    # samples, so it goes through the same encode on write and decode on read as
-    # a loaded texture, and a linear one would band in the darks at eight bits.
+    var vk_formats: [4]i32;
     var ci: usize = 0;
     for (ci < t.color_count) {
+        var public_format: RenderFormat = RENDER_SURFACE;
+        if (desc != nil) { public_format = desc.formats[ci]; }
+        val format: i32 = render_vk_format(d, public_format);
+        if (format == vk.FORMAT_UNDEFINED) {
+            render_target_delete(d, ?t);
+            ret err[RenderTarget, Error](error("unknown render target format"));
+        }
+        if (!render_format_supported(d, format)) {
+            render_target_delete(d, ?t);
+            ret err[RenderTarget, Error](error("render target format is not supported by this device"));
+        }
         val cr: Result[bool, Error] = image_init(?t.colors[ci].image, d.vk, width::u32, height::u32,
-                                                 d.vk.color_format, USAGE_TARGET);
+                                                 format, USAGE_TARGET);
         if (is_err[bool, Error](cr)) {
             render_target_delete(d, ?t);
             ret err[RenderTarget, Error](error("could not create a colour attachment"));
         }
+        t.formats[ci] = public_format;
+        vk_formats[ci] = format;
         t.colors[ci].width  = width;
         t.colors[ci].height = height;
         ci = ci + 1;
     }
+    t.compatibility = pass_compatibility(?vk_formats[0], t.color_count);
 
     # Put the colour image into a readable layout before anything draws into it.
     # A game is free to sample a target on the first frame, before its first
@@ -268,12 +367,23 @@ pub fun render_target_count(t: *RenderTarget) usize {
     ret t.color_count;
 }
 
+# The declared format of one colour attachment.
+pub fun render_target_format_at(t: *RenderTarget, i: usize) RenderFormat {
+    if (i >= t.color_count) { ret t.formats[0]; }
+    ret t.formats[i];
+}
+
+# The byte size required for raw readback of one attachment.
+pub fun render_target_raw_bytes_at(t: *RenderTarget, i: usize) usize {
+    if (i >= t.color_count) { ret 0; }
+    ret image_raw_bytes(?t.colors[i].image);
+}
+
 # copy the target's rendered pixels back to host memory, as tightly packed RGBA8
 #
-# The bytes are in the colour attachment's format, which is the surface's, so
-# the channel order is whatever the surface chose: B8G8R8A8 on most drivers,
-# R8G8B8A8 on some. A caller comparing against an authored colour has to account
-# for that; render_target_bgra reports which it is.
+# The bytes are in the first colour attachment's four-byte format. A surface
+# target may be B8G8R8A8 or R8G8B8A8; render_target_bgra reports which. Wider
+# formats are refused here and read with render_target_read_raw_at instead.
 # ---
 # d:   the upload context the target was created against
 # t:   the target to read
@@ -284,7 +394,26 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) R
     if (!t.ready) {
         ret err[bool, Error](error("cannot read a target that was never created"));
     }
+    if (image_format_bytes(t.colors[0].image.format) != 4) {
+        ret err[bool, Error](error("render_target_read supports only four-byte colour formats"));
+    }
     ret image_read(?t.colors[0].image, d.vk, d.pool, out, len);
+}
+
+# Copy one attachment back in its native packed format.
+#
+# RGBA8 attachments occupy four bytes per texel. RENDER_RGBA16_FLOAT occupies
+# eight bytes per texel as four IEEE 754 half-floats. Query the required size
+# with render_target_raw_bytes_at before allocating the destination.
+pub fun render_target_read_raw_at(d: *Device, t: *RenderTarget, i: usize,
+                                  out: *u8, len: usize) Result[bool, Error] {
+    if (!t.ready) {
+        ret err[bool, Error](error("cannot read a target that was never created"));
+    }
+    if (i >= t.color_count) {
+        ret err[bool, Error](error("render target attachment index is out of range"));
+    }
+    ret image_read(?t.colors[i].image, d.vk, d.pool, out, len);
 }
 
 # whether a target's pixels come back blue-green-red-alpha rather than RGBA
@@ -332,6 +461,21 @@ test "target: creation against an uninitialized context is refused" {
     var d: Device;
     d.ready = false;
     if (!is_err[RenderTarget, Error](render_target(?d, 16, 16))) { ret 1; }
+    ret 0;
+}
+
+test "target: descriptions preserve mixed attachment formats" {
+    var formats: [4]RenderFormat;
+    formats[0] = RENDER_RGBA8_SRGB;
+    formats[1] = RENDER_RGBA8_UNORM;
+    formats[2] = RENDER_RGBA16_FLOAT;
+    val d: RenderTargetDesc = render_target_desc_mrt(?formats[0], 3);
+    if (d.color_count != 3)                    { ret 1; }
+    if (d.formats[0] != RENDER_RGBA8_SRGB)     { ret 2; }
+    if (d.formats[1] != RENDER_RGBA8_UNORM)    { ret 3; }
+    if (d.formats[2] != RENDER_RGBA16_FLOAT)   { ret 4; }
+    if (render_format_bytes(d.formats[0]) != 4) { ret 5; }
+    if (render_format_bytes(d.formats[2]) != 8) { ret 6; }
     ret 0;
 }
 
