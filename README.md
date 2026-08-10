@@ -73,6 +73,12 @@ never imports `mach-vk`, `mach-glfw`, `mach-gltf`, or `mach-image`.
 context the way GL did, so `texture_load`, `mesh_load`, `model_load`, and
 `render_target` take the `Device` that `renderer_device` returns.
 
+**Decoded textures name their colour space.** `texture_load` and
+`texture_from_bytes` retain their sRGB default for display colour. Their
+`texture_load_as` and `texture_from_bytes_as` forms take `COLOR_SRGB` or
+`COLOR_LINEAR`; the latter stores normal, roughness, metallic, occlusion and
+mask maps in RGBA8 UNORM so sampling preserves their authored channel values.
+
 **Shaders are pipelines, not programs.** A Vulkan pipeline bakes both stages and
 the whole fixed-function state into one immutable object, so there is no
 per-pass or per-material shader to set. A pipeline is chosen by what a draw is:
@@ -135,11 +141,14 @@ use gm:  boom.math;
 # resources are created against the renderer's device
 val d: *gfx.Device = gfx.renderer_device(?renderer);
 
-# a mesh and texture from files (glTF / QOI / TGA), and a material
+# a mesh, display colour and data map from files, and a material
 val cube: gfx.Mesh    = unwrap_ok[gfx.Mesh, gfx.Error](gfx.mesh_load(d, "cube.glb"));
 val skin: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](gfx.texture_load(d, "skin.qoi"));
+val norm: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](
+    gfx.texture_load_as(d, "normal.qoi", gfx.COLOR_LINEAR));
 var mat:  gfx.Material = gfx.material();
 gfx.material_add_texture(?mat, "u_texture0", ?skin);
+gfx.material_add_texture(?mat, "u_normal", ?norm);
 
 # in f_draw: a 3D scene pass, then a 2D overlay pass
 var opened: bool = false;
@@ -169,8 +178,8 @@ for checking the driver path on a machine with a GPU.
 
 A mesh is described by a `VertexFormat` (`boom.graphics.vertex`): a declared
 list of attributes (semantic, component type, count, location) rather than a
-fixed vertex struct. `texture_load` / `texture_from_bytes` decode PNG, QOI and TGA
-images; `mesh_load` / `mesh_from_glb` extract the first primitive of a glTF 2.0
+fixed vertex struct. The texture loaders decode PNG, QOI and TGA images;
+`mesh_load` / `mesh_from_glb` extract the first primitive of a glTF 2.0
 `.glb`, building the format from whatever attributes the primitive provides
 (POSITION plus any NORMAL, TEXCOORD_0, COLOR_0, TANGENT). Both hide the backing
 libraries entirely and return an `Error` on anything they cannot handle.
