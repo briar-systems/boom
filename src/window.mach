@@ -267,14 +267,14 @@ pub fun window_is_valid(w: *Window) bool {
 # queue preserves order for UI and discrete actions, the Input answers held
 # state for movement. pass a Sink that outlives the window.
 # ---
-# queue: receives ordered events
-# input: receives state transitions
+# queue:        receives ordered events
+# input:        receives state transitions
+# cursor_x:     last raw window-coordinate x used to form a movement delta
+# cursor_y:     last raw window-coordinate y used to form a movement delta
+# cursor_known: whether cursor_x/y have been initialized
 pub rec Sink {
     queue: *EventQueue;
     input: *inp.Input;
-    # Last platform-space cursor position. Deltas are formed here before the
-    # absolute position is mapped into framebuffer pixels, so changing scale is
-    # not mistaken for mouse motion.
     cursor_x:     f64;
     cursor_y:     f64;
     cursor_known: bool;
