@@ -111,6 +111,10 @@ rec Game {
     probe:    gfx.RenderTarget;
     probe_ok: bool;
     probe_lit: usize;
+    # A tiny float target cleared above one and read back after the run.
+    hdr_probe: gfx.RenderTarget;
+    hdr_ok:    bool;
+    hdr_kept:  bool;
     drawn:    usize;
 }
 
@@ -166,6 +170,18 @@ fun on_init(ctx: *Context) {
     }
     g.probe = unwrap_ok[gfx.RenderTarget, gfx.Error](pb);
     g.probe_ok = true;
+
+    g.hdr_ok = false;
+    g.hdr_kept = false;
+    val hdesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RENDER_RGBA16_FLOAT, 1);
+    val hp: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?hdesc);
+    if (is_err[gfx.RenderTarget, gfx.Error](hp)) {
+        var he: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](hp);
+        print.eprintlnf("hdr probe target error: {}", gfx.error_msg(?he));
+        ret;
+    }
+    g.hdr_probe = unwrap_ok[gfx.RenderTarget, gfx.Error](hp);
+    g.hdr_ok = true;
 
     val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
     if (is_err[gfx.Mesh, gfx.Error](loaded)) {
@@ -278,6 +294,16 @@ fun on_draw(ctx: *Context) {
         gfx.pass_end(?pp);
     }
 
+
+    if (g.hdr_ok && g.drawn == 0) {
+        var hd: gfx.PassDesc = gfx.pass_overlay();
+        hd.target = ?g.hdr_probe;
+        hd.clear = 1;
+        hd.clear_color = gm.vec4(2.0, 0.5, 0.25, 1.0);
+        var hp: gfx.Pass = gfx.pass_begin(?g.renderer, ?hd);
+        gfx.pass_end(?hp);
+    }
+
     if (g.gbuf_ok) {
         var gd: gfx.PassDesc = gfx.pass_overlay();
         gd.target      = ?g.gbuf;
@@ -363,6 +389,25 @@ fun on_dnit(ctx: *Context) {
         gfx.render_target_delete(d, ?g.probe);
     }
 
+
+    if (g.hdr_ok) {
+        var raw: [32]u8;
+        val hr: Result[bool, gfx.Error] = gfx.render_target_read_raw_at(
+            d, ?g.hdr_probe, 0, ?raw[0], 32);
+        if (is_err[bool, gfx.Error](hr)) {
+            var hre: gfx.Error = unwrap_err[bool, gfx.Error](hr);
+            print.eprintlnf("hdr probe read error: {}", gfx.error_msg(?hre));
+        }
+        or {
+            # Half-float 2.0 is 0x4000. Seeing it proves the float attachment
+            # retained radiance that an RGBA8 target would clamp to 1.0.
+            g.hdr_kept = raw[0] == 0x00 && raw[1] == 0x40;
+            if (g.hdr_kept) { print.println("HDR PROBE OK: float target retained 2.0"); }
+            or              { print.println("HDR PROBE FAIL: float target clipped or changed 2.0"); }
+        }
+        gfx.render_target_delete(d, ?g.hdr_probe);
+    }
+
     if (g.gbuf_ok) { gfx.render_target_delete(d, ?g.gbuf); }
     gfx.shader_delete(?g.shader, d);
     gfx.mesh_delete(d, ?g.mesh);
@@ -431,5 +476,6 @@ fun main(argc: i64, argv: **u8) i64 {
     # The probe reports through the exit code as well as the output. A check
     # that prints FAIL and exits 0 is a check nothing can act on.
     if (game.probe_ok && (game.probe_lit < 1000 || game.probe_lit > 1100)) { ret 1; }
+    if (game.hdr_ok && !game.hdr_kept) { ret 1; }
     ret 0;
 }
