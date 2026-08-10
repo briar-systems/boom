@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- graphics: `font_from_bytes_oversampled` and `font_load_oversampled` rasterize
+  extra glyph coverage while preserving logical text measurement and layout.
+
 ### Fixed
 - graphics: Font atlas cells have transparent-white gutters, allowing linear
   filtering to scale glyph coverage without bleeding neighbouring glyphs or
