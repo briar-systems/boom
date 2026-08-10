@@ -191,7 +191,11 @@ fun on_init(ctx: *Context) {
     }
     g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](loaded);
 
-    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load(d, "../cube/assets/checker.qoi");
+    # This example knows the checker is display colour and names that explicitly.
+    # A normal or material map uses the same loader with COLOR_LINEAR; examples
+    # such as cube retain the shorter, source-compatible sRGB form.
+    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load_as(
+        d, "../cube/assets/checker.qoi", gfx.COLOR_SRGB);
     if (is_err[gfx.Texture, gfx.Error](tex)) {
         var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tex);
         print.eprintlnf("texture load error: {}", gfx.error_msg(?e));
