@@ -341,8 +341,10 @@ pub fun input_mouse_event(i: *Input, x: f64, y: f64) {
 # would turn a content-scale change into motion even when the cursor stood
 # still, so the platform-space movement is scaled separately.
 # ---
-# x/y:   new absolute position in framebuffer pixels
-# dx/dy: movement in framebuffer pixels
+# x:  new horizontal position in framebuffer pixels
+# y:  new vertical position in framebuffer pixels
+# dx: horizontal movement in framebuffer pixels
+# dy: vertical movement in framebuffer pixels
 pub fun input_mouse_event_with_delta(i: *Input, x: f64, y: f64,
                                      dx: f64, dy: f64) {
     i.pend_mouse_dx = i.pend_mouse_dx + dx;
@@ -357,7 +359,8 @@ pub fun input_mouse_event_with_delta(i: *Input, x: f64, y: f64,
 # stationary cursor remains aligned with the framebuffer and its delta stays
 # zero.
 # ---
-# x/y: replacement absolute position in framebuffer pixels
+# x: replacement horizontal position in framebuffer pixels
+# y: replacement vertical position in framebuffer pixels
 pub fun input_mouse_rebase(i: *Input, x: f64, y: f64) {
     i.pend_mouse_x = x;
     i.pend_mouse_y = y;
