@@ -89,6 +89,9 @@ mask maps in RGBA8 UNORM so sampling preserves their authored channel values.
 borrows the encoded bytes only for the call and returns a handle that owns its
 decoded GPU or sample storage, so callers may pass compile-time embedded data
 and release any temporary buffer immediately afterwards.
+The `font_from_bytes_oversampled` and `font_load_oversampled` variants keep
+logical text dimensions unchanged while rasterizing extra coverage for scaled
+or high-density interfaces.
 
 **Shaders are pipelines, not programs.** A Vulkan pipeline bakes both stages and
 the whole fixed-function state into one immutable object, so there is no

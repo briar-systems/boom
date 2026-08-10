@@ -87,27 +87,28 @@ rec Glyph {
     h:       f32;
 }
 
-# A loaded face at one pixel size
+# A loaded face at one logical pixel size
 #
-# A face is rasterized for the size it was loaded at. drawing it larger
-# resamples the atlas and softens, which is the trade a bitmap atlas makes;
-# load a second Font for a second size.
+# A face may rasterize above its logical size. Its atlas then carries more edge
+# coverage while measurement and drawing remain in the caller's coordinates.
 # ---
-# atlas:  the uploaded glyph texture
-# glyphs: per-codepoint placement and metrics
-# cell_w: atlas cell width in pixels
-# cell_h: atlas cell height in pixels
-# cols:   cells per atlas row
-# height: the pixel height this face was rasterized at
-# valid:  whether the face loaded
+# atlas:        the uploaded glyph texture
+# glyphs:       per-codepoint placement and logical metrics
+# cell_w:       atlas cell width in raster texels
+# cell_h:       atlas cell height in raster texels
+# cols:         cells per atlas row
+# height:       logical pixel height used for measurement and drawing
+# raster_scale: atlas texels per logical pixel
+# valid:        whether the face loaded
 pub rec Font {
-    atlas:  Texture;
-    glyphs: [95]Glyph;
-    cell_w: usize;
-    cell_h: usize;
-    cols:   usize;
-    height: f32;
-    valid:  bool;
+    atlas:        Texture;
+    glyphs:       [95]Glyph;
+    cell_w:       usize;
+    cell_h:       usize;
+    cols:         usize;
+    height:       f32;
+    raster_scale: f32;
+    valid:        bool;
 }
 
 # Rasterize a face from borrowed TrueType bytes.
@@ -121,27 +122,50 @@ pub rec Font {
 # d:      device receiving the rasterized atlas
 # data:   complete TrueType byte stream, borrowed for this call
 # len:    encoded byte count
-# pixels: pixel height to rasterize at
+# pixels: logical pixel height to rasterize and draw at
 # ret:    an owned Font, or a parse/allocation/upload error
 pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
                         pixels: f32) Result[Font, Error] {
+    ret font_from_bytes_oversampled(a, d, data, len, pixels, 1);
+}
+
+# Rasterize borrowed TrueType bytes above their logical draw resolution.
+#
+# Oversampling improves scaled text without changing advances or layout. The
+# encoded bytes remain borrowed only for this call, as in `font_from_bytes`.
+# ---
+# a:          allocator for temporary atlas and glyph storage
+# d:          device receiving the rasterized atlas
+# data:       complete TrueType byte stream, borrowed for this call
+# len:        encoded byte count
+# pixels:     logical pixel height used for measurement and drawing
+# oversample: raster texels per logical pixel, at least one
+# ret:        an owned Font, or a validation/parse/allocation/upload error
+pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
+                                    pixels: f32, oversample: usize) Result[Font, Error] {
     var f: Font;
     f.valid = false;
+
+    if (pixels <= 0.0) { ret err[Font, Error](error("font pixel height must be positive")); }
+    if (oversample == 0) { ret err[Font, Error](error("font oversample must be at least one")); }
 
     var face: finfo.Font;
     if (!finfo.init(data, len, ?face)) {
         ret err[Font, Error](error("not a TrueType font"));
     }
 
-    val scale: f32 = finfo.scale_for_pixel_height(?face, pixels);
+    val raster_scale: f32 = oversample::f32;
+    val raster_pixels: f32 = pixels * raster_scale;
+    val scale: f32 = finfo.scale_for_pixel_height(?face, raster_pixels);
 
     # Cells are square and sized to the requested height plus a margin, so a
     # descender or an accent cannot bleed into the neighbouring cell
-    val cell: usize = (pixels::i64 + (pixels::i64 / 4) + 2)::usize;
+    val cell: usize = (raster_pixels::i64 + (raster_pixels::i64 / 4) + 2)::usize;
     f.cell_w = cell;
     f.cell_h = cell;
     f.cols   = 16;
     f.height = pixels;
+    f.raster_scale = raster_scale;
 
     val rows:   usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
     val stride: usize = cell + GUTTER * 2;
@@ -178,7 +202,7 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
             var adv: u16 = 0;
             var lsb: i16 = 0;
             if (finfo.glyph_hmetrics(?face, gi, ?adv, ?lsb)) {
-                f.glyphs[g].advance = adv::f32 * scale;
+                f.glyphs[g].advance = adv::f32 * scale / raster_scale;
             }
 
             var k: usize = 0;
@@ -186,8 +210,8 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
 
             if (finfo.render_glyph(?face, gi, scale, ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
                                    ?edges[0], MAX_EDGES, cov, cell::u16, cell::u16)) {
-                f.glyphs[g].w = cell::f32;
-                f.glyphs[g].h = cell::f32;
+                f.glyphs[g].w = cell::f32 / raster_scale;
+                f.glyphs[g].h = cell::f32 / raster_scale;
                 blit_cell(rgba, aw, cov, cell, g, f.cols);
             }
         }
@@ -216,10 +240,16 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
 # a:      allocator for the file bytes and temporary atlas storage
 # d:      device receiving the rasterized atlas
 # vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
-# pixels: pixel height to rasterize at
+# pixels: logical pixel height to rasterize and draw at
 # ret:    an owned Font, or a read/parse/allocation/upload error
 pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
                   pixels: f32) Result[Font, Error] {
+    ret font_load_oversampled(a, d, vpath, pixels, 1);
+}
+
+# Load a face from a virtual path with a higher raster than logical resolution.
+pub fun font_load_oversampled(a: *allo.Allocator, d: *Device, vpath: str,
+                              pixels: f32, oversample: usize) Result[Font, Error] {
     val pr: Result[str, str] = vfs.vfs_resolve(a, vpath);
     if (is_err[str, str](pr)) { ret err[Font, Error](error(unwrap_err[str, str](pr))); }
     val real: str = unwrap_ok[str, str](pr);
@@ -229,7 +259,8 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
         ret err[Font, Error](error(unwrap_err[vector.Vector[u8], str](br)));
     }
     var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-    val fr: Result[Font, Error] = font_from_bytes(a, d, bytes.data, bytes.len, pixels);
+    val fr: Result[Font, Error] = font_from_bytes_oversampled(
+        a, d, bytes.data, bytes.len, pixels, oversample);
     vector.dnit[u8](?bytes);
     ret fr;
 }
@@ -311,6 +342,11 @@ fun cell_uv(f: *Font, slot: usize) Rect {
     ret rect(u, v, f.cell_w::f32 / aw, f.cell_h::f32 / ah);
 }
 
+fun glyph_dest(f: *Font, x: f32, y: f32) Rect {
+    ret rect(x, y, f.cell_w::f32 / f.raster_scale,
+            f.cell_h::f32 / f.raster_scale);
+}
+
 # Draw a string into a pass, returning the pen x after the last glyph
 #
 # `x`/`y` are the top-left of the first cell in the pass's coordinate space,
@@ -335,7 +371,7 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
             # A space has an advance and no coverage, so skipping the quad
             # saves a draw call per space without changing the layout
             if (f.glyphs[sl].w > 0.0) {
-                val dest: Rect = rect(pen, y, f.cell_w::f32, f.cell_h::f32);
+                val dest: Rect = glyph_dest(f, pen, y);
                 pass_draw_sprite_uv(p, ?f.atlas, dest, cell_uv(f, sl), tint);
             }
             pen = pen + f.glyphs[sl].advance;
@@ -358,6 +394,7 @@ fun test_font(advance: f32) Font {
     f.cell_h = 16;
     f.cols   = 16;
     f.height = 12.0;
+    f.raster_scale = 1.0;
     f.valid  = true;
     var g: usize = 0;
     for (g < GLYPH_COUNT) {
@@ -410,6 +447,18 @@ test "text: an invalid face measures zero rather than reading glyphs" {
     var f: Font = test_font(7.0);
     f.valid = false;
     if (text_measure(?f, "abc") != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "text: oversampling preserves logical glyph geometry" {
+    var f: Font = test_font(7.0);
+    f.cell_w = 32;
+    f.cell_h = 40;
+    f.raster_scale = 2.0;
+    val d: Rect = glyph_dest(?f, 3.0, 5.0);
+    if (d.x != 3.0 || d.y != 5.0) { ret 1; }
+    if (d.w != 16.0 || d.h != 20.0) { ret 2; }
+    if (text_measure(?f, "abc") != 21.0) { ret 3; }
     ret 0;
 }
 
