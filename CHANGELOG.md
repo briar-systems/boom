@@ -9,13 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - graphics: opaque, source-alpha, and additive blend modes for game shaders.
-  Additive passes sum overlapping HDR contributions without normalizing energy
-  into alpha.
+  Additive passes sum overlapping HDR contributions without using source alpha
+  as a colour factor.
 - graphics: `texture_load_as` and `texture_from_bytes_as`, explicit-colour-space
   forms of the decoded image loaders. Use `COLOR_LINEAR` for normal, roughness,
   metallic, occlusion and mask maps so sampling reads their RGBA8 bytes through
   a linear UNORM image instead of applying an sRGB transfer function. The
   existing loaders remain sRGB wrappers and keep their previous behaviour.
+
+### Changed
+- graphics: `PipelineDesc.blend` is now a `BlendMode`. Migrate `false` to
+  `BLEND_OPAQUE` and `true` to `BLEND_SOURCE_ALPHA`; use `BLEND_ADDITIVE` when
+  both source and destination colour and alpha channels should be summed.
 
 ## [0.13.0] - 2026-08-09
 

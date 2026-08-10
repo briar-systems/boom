@@ -175,6 +175,7 @@ rec Game {
     sh_light: gfx.Shader;
     sh_fwd:   gfx.Shader;
     sh_copy:  gfx.Shader;
+    sh_add:   gfx.Shader;
     sh_bloom: gfx.Shader;
     sh_two:   gfx.Shader;
     sh_gbuf_mesh: gfx.Shader;
@@ -372,7 +373,7 @@ fun make_target(g: *Game, d: *gfx.Device, out: *gfx.RenderTarget,
 # and the batched 2D path have different vertex layouts and different uniform
 # blocks, so a stage written for one is not valid in the other.
 fun make_shader(out: *gfx.Shader, vert: *u8, vlen: usize,
-                frag: *u8, flen: usize, name: str) bool {
+                frag: *u8, flen: usize, blend: gfx.BlendMode, name: str) bool {
     val r: Result[bool, gfx.Error] = gfx.shader(out, vert, vlen, frag, flen);
     if (is_err[bool, gfx.Error](r)) {
         var e: gfx.Error = unwrap_err[bool, gfx.Error](r);
@@ -380,13 +381,11 @@ fun make_shader(out: *gfx.Shader, vert: *u8, vlen: usize,
         ret false;
     }
 
-    # Every pass here is 2D quads written straight into a target: no depth, no
-    # face culling, and no blending, because a G-buffer attachment holds data
-    # rather than colour and blending it would be meaningless. That leaves the
-    # lighting accumulation with nothing to accumulate into, which is the point
-    # made in the report.
+    # Every pass here is a 2D quad without depth or face culling. Data and
+    # full-target passes replace their attachment; the bloom add-back sums into
+    # the scene already drawn to the window.
     var desc: gfx.PipelineDesc = gfx.pipeline_desc_2d();
-    desc.blend = gfx.BLEND_OPAQUE;
+    desc.blend = blend;
     gfx.shader_set_state(out, desc);
     ret true;
 }
@@ -473,19 +472,21 @@ fun on_init(ctx: *Context) {
         ti = ti + 1;
     }
 
-    if (!make_shader(?g.sh_gbuf,  ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  "gbuf"))  { ret; }
-    if (!make_shader(?g.sh_light, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), "light")) { ret; }
-    if (!make_shader(?g.sh_fwd,   ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   "fwd"))   { ret; }
-    if (!make_shader(?g.sh_copy,  ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  "copy"))  { ret; }
-    if (!make_shader(?g.sh_bloom, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), "bloom")) { ret; }
+    val opaque: gfx.BlendMode = gfx.BLEND_OPAQUE;
+    if (!make_shader(?g.sh_gbuf,  ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  opaque, "gbuf"))  { ret; }
+    if (!make_shader(?g.sh_light, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), opaque, "light")) { ret; }
+    if (!make_shader(?g.sh_fwd,   ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   opaque, "fwd"))   { ret; }
+    if (!make_shader(?g.sh_copy,  ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  opaque, "copy"))  { ret; }
+    if (!make_shader(?g.sh_add,   ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  gfx.BLEND_ADDITIVE, "add")) { ret; }
+    if (!make_shader(?g.sh_bloom, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), opaque, "bloom")) { ret; }
     if (g.unbatched) {
         # The same fragment stage against the mesh vertex layout, so the
         # comparison differs only in how the sprites reach the GPU.
         if (!make_shader(?g.sh_gbuf_mesh, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV),
-                         ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), "gbuf-mesh")) { ret; }
+                         ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), opaque, "gbuf-mesh")) { ret; }
     }
     if (g.probe_two) {
-        if (!make_shader(?g.sh_two, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), "two")) { ret; }
+        if (!make_shader(?g.sh_two, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), opaque, "two")) { ret; }
     }
 
     # The scene: a floor, three steel plates, two walls, a crate and a lamp.
@@ -779,16 +780,16 @@ fun on_draw(ctx: *Context) {
         g.two_built = gfx.shader_pipelines(?g.sh_two);
     }
 
-    # 5. PRESENT. The scene at two, with the bloom blended over it, because
-    # there is no additive blend to add it with.
+    # 5. PRESENT. Draw the scene, then add the bloom without attenuating what is
+    # already underneath it.
     var wd: gfx.PassDesc = gfx.pass_overlay();
     var wp: gfx.Pass = gfx.pass_begin(?g.renderer, ?wd);
     gfx.pass_draw_sprite(?wp, gfx.render_target_texture(?g.scene),
                          gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
                          gm.vec4(1.0, 1.0, 1.0, 1.0));
-    gfx.pass_draw_sprite(?wp, gfx.render_target_texture(?g.bloom_a),
-                         gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
-                         gm.vec4(1.0, 1.0, 1.0, 1.0));
+    var bloom_mat: gfx.Material = gfx.material();
+    gfx.material_add_texture(?bloom_mat, "u_bloom", gfx.render_target_texture(?g.bloom_a));
+    full_quad(?wp, g, (GW * 2)::f32, (GH * 2)::f32, ?bloom_mat, ?g.sh_add);
     gfx.pass_end(?wp);
 
     g.drawn = g.drawn + 1;
@@ -1149,6 +1150,7 @@ fun on_dnit(ctx: *Context) {
     gfx.shader_delete(?g.sh_light, d);
     gfx.shader_delete(?g.sh_fwd, d);
     gfx.shader_delete(?g.sh_copy, d);
+    gfx.shader_delete(?g.sh_add, d);
     gfx.shader_delete(?g.sh_bloom, d);
     if (g.probe_two) { gfx.shader_delete(?g.sh_two, d); }
     if (g.unbatched) { gfx.shader_delete(?g.sh_gbuf_mesh, d); }
