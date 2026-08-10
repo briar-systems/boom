@@ -73,6 +73,7 @@ use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use std.runtime;
 use p: std.print;
+use img: image;
 use boom.window.Window;
 use boom.window.window_open;
 use boom.window.window_is_valid;
@@ -452,14 +453,39 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var px: [256]u8;
     build_checker(?px[0]);
-    val tr: Result[gfx.Texture, gfx.Error] = gfx.texture(d, ?px[0], 8, 8, gfx.COLOR_SRGB);
+    var source: img.Image;
+    source.pixels     = ?px[0];
+    source.width      = 8;
+    source.height     = 8;
+    source.channels   = 4;
+    source.colorspace = 0;
+    var encoded: [1024]u8;
+    val encoded_len: usize = img.qoi_encode(?source, ?encoded[0], 1024);
+    if (encoded_len == 0) {
+        p.println("FAIL texture: could not encode the in-memory checker");
+        ret 1;
+    }
+
+    # The legacy decoded-byte loader remains sRGB. The explicit form below uses
+    # the same bytes as linear data; a readback later proves the two uploads are
+    # sampled differently and that the linear one preserves the authored values.
+    val tr: Result[gfx.Texture, gfx.Error] = gfx.texture_from_bytes(
+        d, ?encoded[0], encoded_len);
     if (is_err[gfx.Texture, gfx.Error](tr)) {
         var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tr);
         p.printlnf("FAIL texture: {}", gfx.error_msg(?e));
         ret 1;
     }
     var tex: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](tr);
-    p.println("ok   texture staged and transitioned for sampling");
+    val ltr: Result[gfx.Texture, gfx.Error] = gfx.texture_from_bytes_as(
+        d, ?encoded[0], encoded_len, gfx.COLOR_LINEAR);
+    if (is_err[gfx.Texture, gfx.Error](ltr)) {
+        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](ltr);
+        p.printlnf("FAIL linear texture: {}", gfx.error_msg(?e));
+        ret 1;
+    }
+    var linear_tex: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](ltr);
+    p.println("ok   decoded textures staged as legacy sRGB and explicit linear data");
 
     var mat: gfx.Material = gfx.material();
     gfx.material_add_texture(?mat, "u_texture0", ?tex);
@@ -721,6 +747,82 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
     p.printlnf("ok   the checkerboard is sampled: covered pixels run {} to {}", lo, hi);
+
+    # ----------------------------------------------- decoded texture colour space
+    #
+    # Render the two uploads from the same QOI beside one another into a linear
+    # target. The legacy loader's sRGB image decodes each channel when sampled;
+    # the explicit linear image must deliver the authored 40 and 220 byte values
+    # unchanged. Comparing rendered pixels reaches the image format and upload,
+    # rather than merely checking which enum the loader intended to pass.
+    val space_desc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RENDER_RGBA8_UNORM, 1);
+    val space_result: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(
+        d, 16, 8, ?space_desc);
+    if (is_err[gfx.RenderTarget, gfx.Error](space_result)) {
+        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](space_result);
+        p.printlnf("FAIL texture space target: {}", gfx.error_msg(?e));
+        ret 1;
+    }
+    var space_target: gfx.RenderTarget = unwrap_ok[gfx.RenderTarget, gfx.Error](space_result);
+
+    var space_drew: bool = false;
+    var space_try: usize = 0;
+    for (space_try < 8 && !space_drew) {
+        window_poll();
+        var opened: bool = false;
+        if (fail("renderer_begin_frame", gfx.renderer_begin_frame(?r, ?opened))) { ret 1; }
+        if (opened) {
+            var sd: gfx.PassDesc = gfx.pass_overlay();
+            sd.target      = ?space_target;
+            sd.clear       = 1;
+            sd.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+            var sp: gfx.Pass = gfx.pass_begin(?r, ?sd);
+            gfx.pass_draw_sprite(?sp, ?tex, gfx.rect(0.0, 0.0, 8.0, 8.0),
+                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+            gfx.pass_draw_sprite(?sp, ?linear_tex, gfx.rect(8.0, 0.0, 8.0, 8.0),
+                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+            gfx.pass_end(?sp);
+            if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+            space_drew = true;
+        }
+        space_try = space_try + 1;
+    }
+    if (!space_drew) {
+        p.println("FAIL texture space: the swapchain never came back to draw the check frame");
+        ret 1;
+    }
+
+    var space_pixels: [512]u8;
+    if (fail("texture space readback",
+             gfx.render_target_read(d, ?space_target, ?space_pixels[0], 512))) { ret 1; }
+    var dark: usize = 0;
+    var light: usize = 0;
+    var colour_y: usize = 0;
+    for (colour_y < 8) {
+        var colour_x: usize = 0;
+        for (colour_x < 8) {
+            val left:  u8 = space_pixels[(colour_y * 16 + colour_x) * 4];
+            val right: u8 = space_pixels[(colour_y * 16 + colour_x + 8) * 4];
+            if (right != 40 && right != 220) {
+                p.printlnf("FAIL texture space: linear upload produced {}, not authored 40 or 220", right);
+                ret 1;
+            }
+            if (right <= left) {
+                p.printlnf("FAIL texture space: legacy sRGB {} was not decoded below linear {}", left, right);
+                ret 1;
+            }
+            if (right == 40) { dark = dark + 1; }
+            or               { light = light + 1; }
+            colour_x = colour_x + 1;
+        }
+        colour_y = colour_y + 1;
+    }
+    if (dark != 32 || light != 32) {
+        p.printlnf("FAIL texture space: linear checker has {} dark and {} light texels", dark, light);
+        ret 1;
+    }
+    p.println("ok   explicit linear decode preserves bytes; legacy decode samples as sRGB");
+    gfx.render_target_delete(d, ?space_target);
 
     # ------------------------------------------------------------------ depth
     #
@@ -1068,6 +1170,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # the device goes before the renderer that owns it, and destroying anything
     # the GPU is still reading is what the validation layers exist to catch.
     gfx.render_target_delete(d, ?target);
+    gfx.texture_delete(d, ?linear_tex);
     gfx.texture_delete(d, ?tex);
     gfx.mesh_delete(d, ?mesh);
     gfx.renderer_dnit(?r);
