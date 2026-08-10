@@ -43,9 +43,9 @@ need = ["build-shaders"]
 # named rather than globbed so a shader that has been deleted cannot survive in
 # the build directory and be embedded again.
 [step.build-shaders]
-cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in quad_vert gbuf_frag light_frag fwd_frag copy_frag bloom_frag two_frag; do cp shaders/out/obj/lightshaders/$m.spv res/spv/$m.spv; done"
+cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in quad_vert sprite_vert gbuf_frag light_frag fwd_frag copy_frag bloom_frag two_frag; do cp shaders/out/obj/lightshaders/$m.spv res/spv/$m.spv; done"
 in  = ["shaders/src/*.mach", "shaders/mach.toml"]
-out = ["res/spv/quad_vert.spv", "res/spv/gbuf_frag.spv", "res/spv/light_frag.spv", "res/spv/fwd_frag.spv", "res/spv/copy_frag.spv", "res/spv/bloom_frag.spv", "res/spv/two_frag.spv"]
+out = ["res/spv/quad_vert.spv", "res/spv/sprite_vert.spv", "res/spv/gbuf_frag.spv", "res/spv/light_frag.spv", "res/spv/fwd_frag.spv", "res/spv/copy_frag.spv", "res/spv/bloom_frag.spv", "res/spv/two_frag.spv"]
 need = []
 
 # A path dep rather than a branch pin, so the example is a real consumer of the
