@@ -38,6 +38,14 @@ targets = ["spirv"]
 link    = []
 need    = []
 
+[artifact.sprite_vert]
+kind    = "bin"
+entry   = "sprite_vert.mach"
+out     = "sprite_vert.spv"
+targets = ["spirv"]
+link    = []
+need    = []
+
 [artifact.gbuf_frag]
 kind    = "bin"
 entry   = "gbuf_frag.mach"
