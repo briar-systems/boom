@@ -44,9 +44,9 @@ use std.types.string.str;
 # WHY A GAME WOULD PIN ITS FRAME DELTA. The loop feeds the wall-clock delta into
 # the fixed-step accumulator, so the number of ticks a run executes depends on
 # how busy the machine was. That is correct for a game and wrong for a
-# measurement: a run that draws a fixed number of frames still simulates a
-# variable number of steps, so anything read back afterwards moves between two
-# runs of the same binary.
+# A measurement that draws a fixed number of frames still simulates a variable
+# number of steps, so anything read back afterwards moves between two runs of
+# the same binary.
 #
 # It is not a small effect. Onslaughter's probe reads back its scene target after
 # a fixed frame count and its pixel coverage moved by around one percent across

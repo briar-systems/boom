@@ -175,12 +175,6 @@ pub val PALETTE_BYTES: usize = 128 * 64;
 # sets:   Allocated sets, indexed as slot * MAX_FRAMES_IN_FLIGHT + frame.
 # rings:  One host-visible uniform buffer per frame in flight.
 # mapped: The persistent host pointer for each ring.
-# used:   Slots taken so far in the current frame.
-# pals:   Host-visible storage buffers of joint palettes, per frame then block.
-# pmap:   The persistent host pointer for each palette block.
-# pcount: How many palette blocks each frame has created.
-# pused:  Palette slots taken so far in the current frame, across its blocks.
-# ready:  Whether creation completed.
 # One block's worth of sets and rings.
 pub rec SlotBlock {
     pool:   vk.DescriptorPool;
@@ -189,6 +183,17 @@ pub rec SlotBlock {
     mapped: [2]ptr;
 }
 
+# The growing uniform and joint-palette descriptor storage.
+# ---
+# blocks: Uniform descriptor blocks retained across frames.
+# bcount: Number of uniform blocks created.
+# used:   Uniform slots taken so far in the current frame.
+# layout: Descriptor layout reused when another uniform block is added.
+# pals:   Host-visible joint-palette buffers, per frame then block.
+# pmap:   Persistent host pointer for each palette block.
+# pcount: Number of palette blocks each frame has created.
+# pused:  Palette slots taken so far in the current frame, across its blocks.
+# ready:  Whether creation completed.
 pub rec Descriptors {
     blocks: [16]SlotBlock;
     bcount: usize;
