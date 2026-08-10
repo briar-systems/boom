@@ -63,6 +63,10 @@ fun main(argc: i64, argv: **u8) i64 {
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.
 
+Window-manager close requests stop the loop. Escape is otherwise an ordinary
+`KEY_ESCAPE` input owned by the application, so it can open a pause menu, act as
+Back, or call `context_stop` when the application chooses to quit.
+
 ## Graphics
 
 `boom.graphics` is a render facade over the ecosystem libraries: a game draws

@@ -3,8 +3,9 @@
 # wraps a GLFW window created with no client API and routes
 # input into both an event queue and the polled input state. the window's
 # GLFW user pointer holds the Sink, so the C callbacks can reach both. these
-# paths drive real platform and GL calls and cannot run headless; they are
-# built but not covered by tests.
+# paths drive real platform calls and cannot run headless. key translation and
+# delivery are kept in a pure core below so their application-owned policy is
+# still covered without opening a window.
 #
 # THE PLATFORM'S KEY CODES STOP HERE. map_key translates a GLFW code into a
 # boom Key, and nothing above this file sees a GLFW integer. a game naming a
@@ -15,6 +16,8 @@ use glfw.glfw;
 use boom.event.EventQueue;
 use boom.event.Event;
 use boom.event.queue_push;
+use boom.event.queue_new;
+use boom.event.queue_pop;
 use boom.event.KEY;
 use boom.event.MOUSE_BUTTON;
 use boom.event.MOUSE_MOVE;
@@ -37,11 +40,15 @@ pub rec Window {
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
-    val w: glfw.Window = glfw.window_from_handle(handle);
-    if (action == glfw.PRESS && key == glfw.KEY_ESCAPE) {
-        glfw.set_window_should_close(w, true);
-    }
-    val s: *Sink = sink_of(w);
+    val s: *Sink = sink_of(glfw.window_from_handle(handle));
+    deliver_key(s, key, action, mods);
+}
+
+# Deliver one platform key transition without assigning policy to any key.
+# Escape reaches the application through the same state and queue as every
+# other key; only the application decides whether that means pause, back, or
+# context_stop.
+fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
     if (s == nil) { ret; }
     val k: inp.Key = map_key(key);
     # GLFW REPEAT is neither a press nor a release: the key never came up, so
@@ -215,7 +222,7 @@ pub fun window_set_event_sink(w: *Window, s: *Sink) {
 # whether the window has been asked to close
 # ---
 # w:   window to query
-# ret: true once the close flag is set (by the user or by pressing ESC)
+# ret: true once the platform's window-close flag is set
 pub fun window_should_close(w: *Window) bool {
     ret glfw.window_should_close(w.handle);
 }
@@ -231,4 +238,21 @@ pub fun window_poll() {
 pub fun window_close(w: *Window) {
     glfw.destroy_window(w.handle);
     glfw.terminate();
+}
+
+test "window: Escape is delivered as application input" {
+    var q: EventQueue = queue_new();
+    var input: inp.Input = inp.input_new();
+    var sink: Sink = Sink{queue: ?q, input: ?input};
+
+    deliver_key(?sink, glfw.KEY_ESCAPE, glfw.PRESS, 0);
+    inp.input_begin_tick(?input);
+    if (!inp.key_pressed(?input, inp.KEY_ESCAPE)) { ret 1; }
+    if (!inp.key_down(?input, inp.KEY_ESCAPE)) { ret 2; }
+
+    var e: Event;
+    if (!queue_pop(?q, ?e)) { ret 3; }
+    if (e.kind != KEY || e.a != inp.KEY_ESCAPE::i64
+        || e.b != glfw.PRESS::i64) { ret 4; }
+    ret 0;
 }
