@@ -261,24 +261,18 @@ pub fun audio_dnit(s: *Audio) {
     s.ready = false;
 }
 
-# Decode a clip from a virtual path
+# Decode a clip from borrowed WAV bytes.
 #
-# The whole file is decoded into memory, so this is for sound effects and
-# short music. `res://sfx/hit.wav` resolves through boom.vfs like every other
-# asset path.
-pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
-    val pr: Result[str, str] = vfs.vfs_resolve(s.a, vpath);
-    if (is_err[str, str](pr)) { ret err[Sound, str](unwrap_err[str, str](pr)); }
-    val real: str = unwrap_ok[str, str](pr);
-
-    val br: Result[vector.Vector[u8], str] = fs.read_bytes(s.a, real);
-    if (is_err[vector.Vector[u8], str](br)) {
-        ret err[Sound, str](unwrap_err[vector.Vector[u8], str](br));
-    }
-    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-
-    val dr: Result[audio.Buffer, str] = audio.decode(s.a, bytes.data, bytes.len);
-    vector.dnit[u8](?bytes);
+# The encoded bytes are read only during this call. The returned Sound owns its
+# decoded and device-conformed samples, so the caller may release the byte span
+# immediately after return.
+# ---
+# s:    mixer whose allocator and device format own the decoded clip
+# data: complete encoded WAV byte stream, borrowed for this call
+# len:  encoded byte count
+# ret:  an owned Sound, or a decode/conform error
+pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) Result[Sound, str] {
+    val dr: Result[audio.Buffer, str] = audio.decode(s.a, data, len);
     if (is_err[audio.Buffer, str](dr)) {
         ret err[Sound, str](unwrap_err[audio.Buffer, str](dr));
     }
@@ -308,6 +302,27 @@ pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
     snd.buffer = unwrap_ok[audio.Buffer, str](cr);
     snd.valid  = true;
     ret ok[Sound, str](snd);
+}
+
+# Decode a clip from a virtual path.
+#
+# The whole file is decoded into memory, so this is for sound effects and
+# short music. `res://sfx/hit.wav` resolves through boom.vfs like every other
+# asset path.
+pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
+    val pr: Result[str, str] = vfs.vfs_resolve(s.a, vpath);
+    if (is_err[str, str](pr)) { ret err[Sound, str](unwrap_err[str, str](pr)); }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val br: Result[vector.Vector[u8], str] = fs.read_bytes(s.a, real);
+    if (is_err[vector.Vector[u8], str](br)) {
+        ret err[Sound, str](unwrap_err[vector.Vector[u8], str](br));
+    }
+    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
+
+    val sr: Result[Sound, str] = sound_from_bytes(s, bytes.data, bytes.len);
+    vector.dnit[u8](?bytes);
+    ret sr;
 }
 
 # Resample and remix a decoded clip into the device's format.
@@ -799,6 +814,35 @@ fun conform_fixture(s: *Audio, a: *allo.Allocator, rate: u32, chans: usize) {
     s.ready = false;
 }
 
+# Write one little-endian integer into a byte fixture.
+fun wav_u16(b: *u8, at: usize, v: u16) {
+    b[at] = (v & 255)::u8;
+    b[at + 1] = ((v >> 8) & 255)::u8;
+}
+
+fun wav_u32(b: *u8, at: usize, v: u32) {
+    b[at] = (v & 255)::u8;
+    b[at + 1] = ((v >> 8) & 255)::u8;
+    b[at + 2] = ((v >> 16) & 255)::u8;
+    b[at + 3] = ((v >> 24) & 255)::u8;
+}
+
+fun wav_tag(b: *u8, at: usize, tag: str) {
+    var i: usize = 0;
+    for (i < 4) { b[at + i] = tag[i]; i = i + 1; }
+}
+
+# Two mono PCM frames at 48 kHz: silence and one half-scale sample.
+fun wav_fixture(b: *u8) {
+    wav_tag(b, 0, "RIFF"); wav_u32(b, 4, 40);
+    wav_tag(b, 8, "WAVE"); wav_tag(b, 12, "fmt ");
+    wav_u32(b, 16, 16); wav_u16(b, 20, 1); wav_u16(b, 22, 1);
+    wav_u32(b, 24, 48000); wav_u32(b, 28, 96000);
+    wav_u16(b, 32, 2); wav_u16(b, 34, 16);
+    wav_tag(b, 36, "data"); wav_u32(b, 40, 4);
+    wav_u16(b, 44, 0); wav_u16(b, 46, 16384);
+}
+
 # Build a source buffer of `frames` frames with `chans` channels, filled by
 # `vals` in interleaved order.
 fun conform_source(a: *allo.Allocator, rate: u32, chans: u16, frames: usize, vals: *f32) Result[audio.Buffer, str] {
@@ -820,6 +864,35 @@ fun near(a: f32, b: f32) bool {
     var d: f32 = a - b;
     if (d < 0.0) { d = 0.0 - d; }
     ret d < 0.001;
+}
+
+test "audio: borrowed WAV bytes decode and conform into an owned sound" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 48000, 2);
+
+    var bytes: [48]u8;
+    wav_fixture(?bytes[0]);
+    val sr: Result[Sound, str] = sound_from_bytes(?s, ?bytes[0], 48);
+    if (is_err[Sound, str](sr)) { ret 1; }
+    var snd: Sound = unwrap_ok[Sound, str](sr);
+    if (!snd.valid || snd.buffer.frames != 2) { sound_free(?snd); ret 2; }
+    if (snd.buffer.format.channels != 2)      { sound_free(?snd); ret 3; }
+    if (!near(snd.buffer.samples[0], 0.0)
+        || !near(snd.buffer.samples[1], 0.0)
+        || !near(snd.buffer.samples[2], 0.5)
+        || !near(snd.buffer.samples[3], 0.5)) {
+        sound_free(?snd);
+        ret 4;
+    }
+
+    # The owned sample buffer survives destruction of the encoded span.
+    var i: usize = 0;
+    for (i < 48) { bytes[i] = 0; i = i + 1; }
+    if (!near(snd.buffer.samples[2], 0.5)) { sound_free(?snd); ret 5; }
+    sound_free(?snd);
+    ret 0;
 }
 
 test "audio: a clip already in the device's format is passed through untouched" {

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-08-10
+
+### Added
+- audio: `sound_from_bytes` decodes and conforms a borrowed WAV byte stream
+  into an owned `Sound`, allowing compile-time embedded clips without a
+  filesystem round trip.
+- graphics: `font_from_bytes` rasterizes a borrowed TrueType byte stream into
+  an owned glyph atlas, allowing compile-time embedded fonts. The existing
+  path loaders remain wrappers with unchanged behaviour.
+
 ## [0.14.1] - 2026-08-10
 
 ### Fixed

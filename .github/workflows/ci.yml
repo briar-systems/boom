@@ -35,7 +35,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
-            libwayland-dev libxkbcommon-dev wayland-protocols
+            libwayland-dev libxkbcommon-dev wayland-protocols \
+            fonts-dejavu-core mesa-vulkan-drivers vulkan-tools xvfb
 
       - name: Install spirv-tools
         run: |
@@ -98,3 +99,12 @@ jobs:
             (cd "$e" && mach dep pull . && mach build .)
             echo "::endgroup::"
           done
+
+      # Unit tests cover invalid borrowed bytes without touching Vulkan. This
+      # finite example exercises the successful upload, releases its encoded
+      # source before drawing, then samples and deletes the returned atlas.
+      - name: Check borrowed font bytes
+        run: |
+          timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
+            ./examples/text/out/linux-x86_64/debug/bin/text \
+            --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf

@@ -38,6 +38,7 @@ use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
 use allo:   std.allocator;
+use page:   std.allocator.page;
 use fs:     std.filesystem;
 use vector: std.collections.vector;
 use finfo:  font.info;
@@ -105,29 +106,26 @@ pub rec Font {
     valid:  bool;
 }
 
-# Load a face and rasterize its atlas
+# Rasterize a face from borrowed TrueType bytes.
+#
+# The encoded bytes are read only during this call. The returned Font owns its
+# uploaded atlas and glyph metrics, so the caller may release the byte span
+# immediately after return.
 #
 # ---
-# a:      allocator for the file bytes and the atlas, all released before return
-# vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
+# a:      allocator for temporary atlas and glyph storage
+# d:      device receiving the rasterized atlas
+# data:   complete TrueType byte stream, borrowed for this call
+# len:    encoded byte count
 # pixels: pixel height to rasterize at
-pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Result[Font, Error] {
+# ret:    an owned Font, or a parse/allocation/upload error
+pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
+                        pixels: f32) Result[Font, Error] {
     var f: Font;
     f.valid = false;
 
-    val pr: Result[str, str] = vfs.vfs_resolve(a, vpath);
-    if (is_err[str, str](pr)) { ret err[Font, Error](error(unwrap_err[str, str](pr))); }
-    val real: str = unwrap_ok[str, str](pr);
-
-    val br: Result[vector.Vector[u8], str] = fs.read_bytes(a, real);
-    if (is_err[vector.Vector[u8], str](br)) {
-        ret err[Font, Error](error(unwrap_err[vector.Vector[u8], str](br)));
-    }
-    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-
     var face: finfo.Font;
-    if (!finfo.init(bytes.data, bytes.len, ?face)) {
-        vector.dnit[u8](?bytes);
+    if (!finfo.init(data, len, ?face)) {
         ret err[Font, Error](error("not a TrueType font"));
     }
 
@@ -147,7 +145,6 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Resul
 
     val ar: Result[*u8, str] = allo.allocate[u8](a, aw * ah * 4);
     if (is_err[*u8, str](ar)) {
-        vector.dnit[u8](?bytes);
         ret err[Font, Error](error(unwrap_err[*u8, str](ar)));
     }
     val rgba: *u8 = unwrap_ok[*u8, str](ar);
@@ -157,7 +154,6 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Resul
     val cr: Result[*u8, str] = allo.allocate[u8](a, cell * cell);
     if (is_err[*u8, str](cr)) {
         allo.deallocate[u8](a, rgba, aw * ah * 4);
-        vector.dnit[u8](?bytes);
         ret err[Font, Error](error(unwrap_err[*u8, str](cr)));
     }
     val cov: *u8 = unwrap_ok[*u8, str](cr);
@@ -201,7 +197,6 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Resul
     if (is_err[Texture, Error](tr)) {
         allo.deallocate[u8](a, cov, cell * cell);
         allo.deallocate[u8](a, rgba, aw * ah * 4);
-        vector.dnit[u8](?bytes);
         ret err[Font, Error](unwrap_err[Texture, Error](tr));
     }
     f.atlas = unwrap_ok[Texture, Error](tr);
@@ -209,8 +204,30 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str, pixels: f32) Resul
 
     allo.deallocate[u8](a, cov, cell * cell);
     allo.deallocate[u8](a, rgba, aw * ah * 4);
-    vector.dnit[u8](?bytes);
     ret ok[Font, Error](f);
+}
+
+# Load a face from a virtual path and rasterize its atlas.
+# ---
+# a:      allocator for the file bytes and temporary atlas storage
+# d:      device receiving the rasterized atlas
+# vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
+# pixels: pixel height to rasterize at
+# ret:    an owned Font, or a read/parse/allocation/upload error
+pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
+                  pixels: f32) Result[Font, Error] {
+    val pr: Result[str, str] = vfs.vfs_resolve(a, vpath);
+    if (is_err[str, str](pr)) { ret err[Font, Error](error(unwrap_err[str, str](pr))); }
+    val real: str = unwrap_ok[str, str](pr);
+
+    val br: Result[vector.Vector[u8], str] = fs.read_bytes(a, real);
+    if (is_err[vector.Vector[u8], str](br)) {
+        ret err[Font, Error](error(unwrap_err[vector.Vector[u8], str](br)));
+    }
+    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
+    val fr: Result[Font, Error] = font_from_bytes(a, d, bytes.data, bytes.len, pixels);
+    vector.dnit[u8](?bytes);
+    ret fr;
 }
 
 # Copy one coverage bitmap into its atlas cell as white-with-alpha
@@ -340,6 +357,16 @@ test "text: a codepoint outside the atlas maps to no slot" {
     if (slot_of(127) != GLYPH_COUNT) { ret 1; }
     if (slot_of(32) != 0)            { ret 1; }
     if (slot_of(126) != GLYPH_COUNT - 1) { ret 1; }
+    ret 0;
+}
+
+test "text: borrowed invalid font bytes return a parse error before upload" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var d: Device;
+    var bytes: [4]u8 = [4]u8{0, 1, 2, 3};
+    val r: Result[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 4, 16.0);
+    if (!is_err[Font, Error](r)) { ret 1; }
     ret 0;
 }
 
