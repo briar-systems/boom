@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-08-09
+
+### Fixed
+- graphics: **a batched run's own texture owns binding 1.** `pass_set_material`
+  documented that the sprite's texture stays the first binding and then let
+  `fill_views_mat` overwrite it with the material's first. A batched run's UVs
+  are normalised against the texture its sprites were pushed with, so a material
+  naming a different sheet made every vertex sample the right coordinates in the
+  wrong atlas: plausible-looking garbage rather than an error. The material
+  supplies the companion channels at 5, 6 and 7; it does not replace the sheet
+  the geometry was built for.
+- graphics: **the game's uniform block reaches a batched 2D run.**
+  `pass_set_user` had no effect on the batch path, so a game shader driving the
+  batcher read an undefined block at binding 4. In `examples/lighting` the
+  composite went black while the lamp, the bloom and the deferred light target
+  stayed correct, which is the shape of bug that survives a look at the screen.
+
 ## [0.11.0] - 2026-08-09
 
 ### Added
