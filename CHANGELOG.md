@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an owned glyph atlas, allowing compile-time embedded fonts. The existing
   path loaders remain wrappers with unchanged behaviour.
 
+## [0.14.1] - 2026-08-10
+
+### Fixed
+- documentation: declaration annotations now describe only fields owned by
+  their record, restoring warning-free Mach 4.18.3 builds for Boom and its
+  consumers.
+
 ## [0.14.0] - 2026-08-09
 
 ### Added
