@@ -14,6 +14,9 @@
 # sprite shader tints text by multiplying. No text-specific shader and no
 # single-channel texture format is needed.
 #
+# Each cell has a transparent one-texel gutter. Linear sampling can therefore
+# soften coverage at a scaled edge without pulling in the neighbouring glyph.
+#
 # The atlas uses a fixed cell grid rather than tight packing. A tight packer
 # buys atlas space and costs a rectangle-packing algorithm plus per-glyph
 # bookkeeping. At one size and 95 glyphs the whole atlas is a few hundred
@@ -69,6 +72,7 @@ pub val GLYPH_COUNT: usize = 95;
 val MAX_POINTS:   usize = 512;
 val MAX_CONTOURS: usize = 32;
 val MAX_EDGES:    usize = 1024;
+val GUTTER:       usize = 1;
 
 # One glyph's placement in the atlas and its metrics
 # ---
@@ -139,17 +143,17 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
     f.cols   = 16;
     f.height = pixels;
 
-    val rows:  usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
-    val aw:    usize = f.cols * cell;
-    val ah:    usize = rows * cell;
+    val rows:   usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
+    val stride: usize = cell + GUTTER * 2;
+    val aw:     usize = f.cols * stride;
+    val ah:     usize = rows * stride;
 
     val ar: Result[*u8, str] = allo.allocate[u8](a, aw * ah * 4);
     if (is_err[*u8, str](ar)) {
         ret err[Font, Error](error(unwrap_err[*u8, str](ar)));
     }
     val rgba: *u8 = unwrap_ok[*u8, str](ar);
-    var i: usize = 0;
-    for (i < aw * ah * 4) { rgba[i] = 0; i = i + 1; }
+    clear_atlas(rgba, aw * ah);
 
     val cr: Result[*u8, str] = allo.allocate[u8](a, cell * cell);
     if (is_err[*u8, str](cr)) {
@@ -230,13 +234,24 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
     ret fr;
 }
 
-# Copy one coverage bitmap into its atlas cell as white-with-alpha
-#
-# RGB is left white and coverage becomes alpha, so the sprite shader's tint
-# multiply colours the text and no text-specific shader is needed.
+# Fill an atlas with transparent white so filtered coverage keeps its colour.
+fun clear_atlas(rgba: *u8, pixels: usize) {
+    var i: usize = 0;
+    for (i < pixels) {
+        val o: usize = i * 4;
+        rgba[o]     = 255;
+        rgba[o + 1] = 255;
+        rgba[o + 2] = 255;
+        rgba[o + 3] = 0;
+        i = i + 1;
+    }
+}
+
+# Copy one coverage bitmap into the padded atlas cell as white-with-alpha.
 fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, cols: usize) {
-    val cx: usize = (index % cols) * cell;
-    val cy: usize = (index / cols) * cell;
+    val stride: usize = cell + GUTTER * 2;
+    val cx: usize = (index % cols) * stride + GUTTER;
+    val cy: usize = (index / cols) * stride + GUTTER;
     var y: usize = 0;
     for (y < cell) {
         var x: usize = 0;
@@ -287,9 +302,13 @@ pub fun text_measure(f: *Font, s: str) f32 {
 fun cell_uv(f: *Font, slot: usize) Rect {
     val cols: usize = f.cols;
     val rows: usize = (GLYPH_COUNT + cols - 1) / cols;
-    val u: f32 = (slot % cols)::f32 / cols::f32;
-    val v: f32 = (slot / cols)::f32 / rows::f32;
-    ret rect(u, v, 1.0 / cols::f32, 1.0 / rows::f32);
+    val stride_x: usize = f.cell_w + GUTTER * 2;
+    val stride_y: usize = f.cell_h + GUTTER * 2;
+    val aw: f32 = (cols * stride_x)::f32;
+    val ah: f32 = (rows * stride_y)::f32;
+    val u: f32 = ((slot % cols) * stride_x + GUTTER)::f32 / aw;
+    val v: f32 = ((slot / cols) * stride_y + GUTTER)::f32 / ah;
+    ret rect(u, v, f.cell_w::f32 / aw, f.cell_h::f32 / ah);
 }
 
 # Draw a string into a pass, returning the pen x after the last glyph
@@ -351,6 +370,12 @@ fun test_font(advance: f32) Font {
     ret f;
 }
 
+fun text_near(a: f32, b: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < 0.000001;
+}
+
 test "text: a codepoint outside the atlas maps to no slot" {
     # Below the range, above it, and the boundaries themselves
     if (slot_of(31) != GLYPH_COUNT)  { ret 1; }
@@ -388,23 +413,43 @@ test "text: an invalid face measures zero rather than reading glyphs" {
     ret 0;
 }
 
-test "text: atlas UVs tile the grid without overlap or gap" {
+test "text: atlas UVs leave a transparent gutter between glyphs" {
     var f: Font = test_font(7.0);
     val rows: usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
+    val stride_x: usize = f.cell_w + GUTTER * 2;
+    val stride_y: usize = f.cell_h + GUTTER * 2;
+    val aw: f32 = (f.cols * stride_x)::f32;
+    val ah: f32 = (rows * stride_y)::f32;
 
     val first: Rect = cell_uv(?f, 0);
-    if (first.x != 0.0 || first.y != 0.0) { ret 1; }
-    if (first.w != 1.0 / 16.0)            { ret 1; }
-    if (first.h != 1.0 / rows::f32)       { ret 1; }
+    if (!text_near(first.x, 1.0 / aw) || !text_near(first.y, 1.0 / ah)) { ret 1; }
+    if (!text_near(first.w, f.cell_w::f32 / aw)) { ret 1; }
+    if (!text_near(first.h, f.cell_h::f32 / ah)) { ret 1; }
 
-    # The cell after the first wraps to the next row at the column count, so a
-    # miscomputed stride shows up here rather than as a subtly wrong glyph
+    # Adjacent source rectangles have two transparent texels between them: the
+    # trailing gutter of one slot and the leading gutter of the next.
     val col1:  Rect = cell_uv(?f, 1);
-    if (col1.x != 1.0 / 16.0 || col1.y != 0.0) { ret 1; }
+    if (!text_near(col1.x - (first.x + first.w), 2.0 / aw)) { ret 1; }
 
     val row1: Rect = cell_uv(?f, 16);
-    if (row1.x != 0.0)                { ret 1; }
-    if (row1.y != 1.0 / rows::f32)    { ret 1; }
+    if (!text_near(row1.y - (first.y + first.h), 2.0 / ah)) { ret 1; }
+    ret 0;
+}
+
+test "text: glyph coverage stays inside a white transparent gutter" {
+    var rgba: [64]u8;
+    var cov: [4]u8 = [4]u8{32, 64, 128, 255};
+    clear_atlas(?rgba[0], 16);
+    blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1);
+
+    # Both outer corners remain transparent white, so a linear edge sample
+    # softens alpha without introducing a dark fringe.
+    if (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255 || rgba[3] != 0) { ret 1; }
+    if (rgba[60] != 255 || rgba[61] != 255 || rgba[62] != 255 || rgba[63] != 0) { ret 2; }
+
+    # The two-by-two coverage starts one texel inside the four-by-four slot.
+    if (rgba[23] != 32 || rgba[27] != 64) { ret 3; }
+    if (rgba[39] != 128 || rgba[43] != 255) { ret 4; }
     ret 0;
 }
 
