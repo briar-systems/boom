@@ -234,10 +234,7 @@ pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
     ret fr;
 }
 
-# Copy one coverage bitmap into its atlas cell as white-with-alpha
-#
-# RGB is left white and coverage becomes alpha, so the sprite shader's tint
-# multiply colours the text and no text-specific shader is needed.
+# Fill an atlas with transparent white so filtered coverage keeps its colour.
 fun clear_atlas(rgba: *u8, pixels: usize) {
     var i: usize = 0;
     for (i < pixels) {
@@ -250,6 +247,7 @@ fun clear_atlas(rgba: *u8, pixels: usize) {
     }
 }
 
+# Copy one coverage bitmap into the padded atlas cell as white-with-alpha.
 fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, cols: usize) {
     val stride: usize = cell + GUTTER * 2;
     val cx: usize = (index % cols) * stride + GUTTER;
@@ -304,11 +302,12 @@ pub fun text_measure(f: *Font, s: str) f32 {
 fun cell_uv(f: *Font, slot: usize) Rect {
     val cols: usize = f.cols;
     val rows: usize = (GLYPH_COUNT + cols - 1) / cols;
-    val stride: usize = f.cell_w + GUTTER * 2;
-    val aw: f32 = (cols * stride)::f32;
-    val ah: f32 = (rows * stride)::f32;
-    val u: f32 = ((slot % cols) * stride + GUTTER)::f32 / aw;
-    val v: f32 = ((slot / cols) * stride + GUTTER)::f32 / ah;
+    val stride_x: usize = f.cell_w + GUTTER * 2;
+    val stride_y: usize = f.cell_h + GUTTER * 2;
+    val aw: f32 = (cols * stride_x)::f32;
+    val ah: f32 = (rows * stride_y)::f32;
+    val u: f32 = ((slot % cols) * stride_x + GUTTER)::f32 / aw;
+    val v: f32 = ((slot / cols) * stride_y + GUTTER)::f32 / ah;
     ret rect(u, v, f.cell_w::f32 / aw, f.cell_h::f32 / ah);
 }
 
@@ -417,9 +416,10 @@ test "text: an invalid face measures zero rather than reading glyphs" {
 test "text: atlas UVs leave a transparent gutter between glyphs" {
     var f: Font = test_font(7.0);
     val rows: usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
-    val stride: usize = f.cell_w + GUTTER * 2;
-    val aw: f32 = (f.cols * stride)::f32;
-    val ah: f32 = (rows * stride)::f32;
+    val stride_x: usize = f.cell_w + GUTTER * 2;
+    val stride_y: usize = f.cell_h + GUTTER * 2;
+    val aw: f32 = (f.cols * stride_x)::f32;
+    val ah: f32 = (rows * stride_y)::f32;
 
     val first: Rect = cell_uv(?f, 0);
     if (!text_near(first.x, 1.0 / aw) || !text_near(first.y, 1.0 / ah)) { ret 1; }
