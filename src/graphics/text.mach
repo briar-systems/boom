@@ -118,7 +118,7 @@ pub rec Font {
 # data:   complete TrueType byte stream, borrowed for this call
 # len:    encoded byte count
 # pixels: pixel height to rasterize at
-# ret:    an owned Font, or a parse/raster/upload error
+# ret:    an owned Font, or a parse/allocation/upload error
 pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
                         pixels: f32) Result[Font, Error] {
     var f: Font;
@@ -213,7 +213,7 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
 # d:      device receiving the rasterized atlas
 # vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
 # pixels: pixel height to rasterize at
-# ret:    an owned Font, or a read/parse/raster/upload error
+# ret:    an owned Font, or a read/parse/allocation/upload error
 pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
                   pixels: f32) Result[Font, Error] {
     val pr: Result[str, str] = vfs.vfs_resolve(a, vpath);

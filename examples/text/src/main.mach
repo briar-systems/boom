@@ -1,0 +1,184 @@
+# Finite ownership check for font_from_bytes.
+#
+# The encoded file is released before the first draw. A pass therefore proves
+# the returned Font owns both its glyph metrics and uploaded atlas rather than
+# retaining a pointer into the caller's byte buffer.
+
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+use std.types.result.Result;
+use std.types.result.is_err;
+use std.types.result.unwrap_ok;
+use std.types.result.unwrap_err;
+use std.chrono.duration.SECOND;
+use std.chrono.duration.MILLISECOND;
+use std.print;
+use allo: std.allocator;
+use page: std.allocator.page;
+use fs: std.filesystem;
+use vector: std.collections.vector;
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.context.context_shutdown;
+use boom.engine.run;
+use gfx: boom.graphics;
+use gm: boom.math;
+
+rec Check {
+    a:           allo.Allocator;
+    renderer:    gfx.Renderer;
+    font:        gfx.Font;
+    renderer_ok: bool;
+    font_ok:     bool;
+    drawn:       usize;
+}
+
+var FONT_PATH: str = "";
+
+fun on_init(ctx: *Context) {
+    val c: *Check = context_user(ctx)::*Check;
+    c.renderer_ok = false;
+    c.font_ok = false;
+    c.drawn = 0;
+    page.make(?c.a);
+
+    val rr: Result[bool, gfx.Error] = gfx.renderer_init(
+        ?c.renderer, ctx.window.handle, ctx.window.width, ctx.window.height);
+    if (is_err[bool, gfx.Error](rr)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](rr);
+        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+        ctx.running = false;
+        ret;
+    }
+    c.renderer_ok = true;
+
+    val br: Result[vector.Vector[u8], str] = fs.read_bytes(?c.a, FONT_PATH);
+    if (is_err[vector.Vector[u8], str](br)) {
+        print.eprintlnf("font fixture read error: {}",
+                       unwrap_err[vector.Vector[u8], str](br));
+        ctx.running = false;
+        ret;
+    }
+    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
+    val fr: Result[gfx.Font, gfx.Error] = gfx.font_from_bytes(
+        ?c.a, gfx.renderer_device(?c.renderer), bytes.data, bytes.len, 18.0);
+
+    # The source lifetime ends here, before metrics are inspected or the atlas
+    # is sampled by a draw.
+    vector.dnit[u8](?bytes);
+    if (is_err[gfx.Font, gfx.Error](fr)) {
+        var e: gfx.Error = unwrap_err[gfx.Font, gfx.Error](fr);
+        print.eprintlnf("font bytes error: {}", gfx.error_msg(?e));
+        ctx.running = false;
+        ret;
+    }
+    c.font = unwrap_ok[gfx.Font, gfx.Error](fr);
+    c.font_ok = true;
+    if (gfx.text_measure(?c.font, "borrowed bytes") <= 0.0) {
+        print.eprintln("font metrics did not survive their encoded source");
+        ctx.running = false;
+    }
+}
+
+fun on_tick(ctx: *Context) {}
+
+fun on_draw(ctx: *Context) {
+    val c: *Check = context_user(ctx)::*Check;
+    if (!c.font_ok) { ctx.running = false; ret; }
+
+    var opened: bool = false;
+    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?c.renderer, ?opened);
+    if (is_err[bool, gfx.Error](br)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
+        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+        ctx.running = false;
+        ret;
+    }
+    if (!opened) { ret; }
+
+    var desc: gfx.PassDesc = gfx.pass_overlay();
+    desc.clear = 1;
+    desc.clear_color = gm.vec4(0.02, 0.02, 0.03, 1.0);
+    var pass: gfx.Pass = gfx.pass_begin(?c.renderer, ?desc);
+    gfx.text_draw(?pass, ?c.font, "borrowed bytes", 16.0, 16.0,
+                  gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?pass);
+
+    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?c.renderer);
+    if (is_err[bool, gfx.Error](er)) {
+        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
+        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+        ctx.running = false;
+        ret;
+    }
+    c.drawn = c.drawn + 1;
+    if (c.drawn == 2) { ctx.running = false; }
+}
+
+fun on_dnit(ctx: *Context) {
+    val c: *Check = context_user(ctx)::*Check;
+    if (c.font_ok) {
+        gfx.font_delete(gfx.renderer_device(?c.renderer), ?c.font);
+        c.font_ok = false;
+    }
+    if (c.renderer_ok) {
+        gfx.renderer_dnit(?c.renderer);
+        c.renderer_ok = false;
+    }
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var argi: i64 = 1;
+    for (argi < argc) {
+        if (str_equals(argv[argi]:~str, "--font") && argi + 1 < argc) {
+            FONT_PATH = argv[argi + 1]:~str;
+            argi = argi + 1;
+        }
+        argi = argi + 1;
+    }
+    if (FONT_PATH == nil || str_equals(FONT_PATH, "")) {
+        print.eprintln("usage: text --font PATH.ttf");
+        ret 1;
+    }
+
+    var check: Check;
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     320,
+        height:    120,
+        title:     "boom.graphics: borrowed font bytes",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  SECOND / 60,
+    };
+    if (!context_init(?ctx, cfg)) {
+        print.eprintln("failed to open window");
+        ret 1;
+    }
+    context_set_user(?ctx, (?check)::ptr);
+    run(?ctx, ?app);
+    context_shutdown(?ctx);
+
+    if (check.drawn != 2) {
+        print.eprintlnf("font check drew {} of 2 frames", check.drawn);
+        ret 1;
+    }
+    print.println("PASS: borrowed font bytes were released before atlas use");
+    ret 0;
+}
