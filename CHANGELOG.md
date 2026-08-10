@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- graphics: `texture_load_as` and `texture_from_bytes_as`, explicit-colour-space
+  forms of the decoded image loaders. Use `COLOR_LINEAR` for normal, roughness,
+  metallic, occlusion and mask maps so sampling reads their RGBA8 bytes through
+  a linear UNORM image instead of applying an sRGB transfer function. The
+  existing loaders remain sRGB wrappers and keep their previous behaviour.
+
 ## [0.13.0] - 2026-08-09
 
 ### Added

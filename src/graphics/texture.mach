@@ -2,9 +2,10 @@
 #
 # a game supplies raw RGBA8 pixels, encoded image bytes, or a file path and
 # receives an opaque Texture; the backing Vulkan image and the mach-image
-# decoder both stay hidden. texture_load and texture_from_bytes decode PNG,
-# QOI and TGA today (the formats mach-image decodes); other formats return a
-# clean error until the library grows their decoders.
+# decoder both stay hidden. texture_load_as and texture_from_bytes_as decode
+# PNG, QOI and TGA today (the formats mach-image decodes) in a caller-selected
+# colour space; their shorter counterparts retain the original sRGB default.
+# Other formats return a clean error until the library grows their decoders.
 #
 # creation takes a Device because Vulkan has no implicit current context the
 # way GL did: an image is created against a device, and the staged upload
@@ -24,6 +25,7 @@ use boom.graphics.image.image_upload;
 use boom.graphics.image.ColorSpace;
 use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.COLOR_LINEAR;
+use boom.graphics.image.image_format;
 use boom.graphics.image.image_dnit;
 use img: image;
 use boom.graphics.error.Error;
@@ -62,10 +64,12 @@ pub rec Texture {
 # pixels: width*height*4 RGBA8 bytes
 # width:  image width in texels
 # height: image height in texels
+# space:  how sampling interprets the decoded bytes
 rec Decoded {
     pixels: *u8;
     width:  i32;
     height: i32;
+    space:  ColorSpace;
 }
 
 # upload an RGBA8 image to the GPU
@@ -110,9 +114,11 @@ pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32, space: ColorSp
 # data: encoded image bytes
 # len:  length of data in bytes
 # a:    allocator for the pixel buffer
-# out:  populated with the decoded pixels and dimensions on success
+# space: interpretation to retain with the decoded pixels
+# out:  populated with the decoded pixels, dimensions and space on success
 # ret:  true on success, or a decode/allocation error
-fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool, Error] {
+fun decode(data: *u8, len: usize, space: ColorSpace,
+           a: *allo.Allocator, out: *Decoded) Result[bool, Error] {
     val fmt: u8 = img.detect(data, len);
     var header: img.Image;
     if (fmt == img.FORMAT_QOI) {
@@ -177,40 +183,61 @@ fun decode(data: *u8, len: usize, a: *allo.Allocator, out: *Decoded) Result[bool
     out.pixels = dst;
     out.width  = decoded.width::i32;
     out.height = decoded.height::i32;
+    out.space  = space;
     ret ok[bool, Error](true);
 }
 
-# decode encoded image bytes and upload them as a Texture
+# Decode encoded image bytes and upload them in an explicit colour space.
 #
-# supports PNG, QOI and TGA. the encoded bytes are not retained.
+# Supports PNG, QOI and TGA. The encoded and decoded bytes are not retained.
+# COLOR_SRGB applies the inverse sRGB transfer function when sampled;
+# COLOR_LINEAR preserves authored channel values for normal maps and masks.
 # ---
+# d:    the upload context
 # data: encoded image bytes (PNG, QOI or TGA)
 # len:  length of data in bytes
-# ret:  the uploaded Texture, or a decode error
-pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Error] {
+# space: how sampling interprets the decoded RGBA8 bytes
+# ret:  the uploaded Texture, or a decode/upload error
+pub fun texture_from_bytes_as(d: *Device, data: *u8, len: usize,
+                              space: ColorSpace) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
     var dec: Decoded;
-    val r: Result[bool, Error] = decode(data, len, ?pa, ?dec);
+    val r: Result[bool, Error] = decode(data, len, space, ?pa, ?dec);
     if (is_err[bool, Error](r)) {
         ret err[Texture, Error](unwrap_err[bool, Error](r));
     }
 
-    # A decoded PNG, QOI or TGA is colour authored for display, by construction: the
-    # formats have no notion of storing a normal map or a mask.
-    val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height, COLOR_SRGB);
+    val tr: Result[Texture, Error] = texture(d, dec.pixels, dec.width, dec.height, dec.space);
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(dec.width::u32, dec.height::u32));
     ret tr;
 }
 
-# load an image file and upload it as a Texture
+# Decode encoded image bytes and upload them as sRGB colour.
 #
-# reads the whole file, decodes it (PNG, QOI or TGA), and uploads. the CPU
-# pixels are freed before returning.
+# This is the source-compatible form of texture_from_bytes_as. Existing callers
+# keep the display-colour interpretation they had before explicit spaces were
+# added.
 # ---
+# d:    the upload context
+# data: encoded image bytes (PNG, QOI or TGA)
+# len:  length of data in bytes
+# ret:  the uploaded sRGB Texture, or a decode/upload error
+pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Error] {
+    ret texture_from_bytes_as(d, data, len, COLOR_SRGB);
+}
+
+# Load an image file in an explicit colour space.
+#
+# Resolves the path through boom.vfs, reads the whole file, decodes PNG, QOI or
+# TGA to RGBA8, and uploads it. The file and decoded pixels are not retained.
+# COLOR_LINEAR is for data maps whose channels must reach the shader unchanged.
+# ---
+# d:    the upload context
 # path: filesystem path to a PNG, QOI or TGA image
-# ret:  the uploaded Texture, or a read/decode error
+# space: how sampling interprets the decoded RGBA8 bytes
+# ret:  the uploaded Texture, or a read/decode/upload error
 # THE PATH IS VIRTUAL. `res://art/sheet.qoi` resolves through boom.vfs, the same
 # as boom.audio.sound_load and boom.graphics.text.font_load. A path with no
 # scheme is passed through unchanged, so an absolute or relative filesystem path
@@ -219,7 +246,7 @@ pub fun texture_from_bytes(d: *Device, data: *u8, len: usize) Result[Texture, Er
 # These three loaders took raw paths while the audio and font ones did not, which
 # meant the same spelling loaded a sound and failed for a texture with nothing
 # but "no such file or directory" to go on.
-pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
+pub fun texture_load_as(d: *Device, path: str, space: ColorSpace) Result[Texture, Error] {
     var pa: allo.Allocator;
     page.make(?pa);
 
@@ -239,9 +266,21 @@ pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
     }
     var buf: vec.Vector[u8] = unwrap_ok[vec.Vector[u8], str](br);
 
-    val res: Result[Texture, Error] = texture_from_bytes(d, buf.data, buf.len);
+    val res: Result[Texture, Error] = texture_from_bytes_as(d, buf.data, buf.len, space);
     vec.dnit[u8](?buf);
     ret res;
+}
+
+# Load an image file as sRGB colour.
+#
+# This is the source-compatible form of texture_load_as. Use the explicit form
+# with COLOR_LINEAR for normal, roughness, metallic, occlusion and mask maps.
+# ---
+# d:    the upload context
+# path: virtual or filesystem path to a PNG, QOI or TGA image
+# ret:  the uploaded sRGB Texture, or a read/decode/upload error
+pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
+    ret texture_load_as(d, path, COLOR_SRGB);
 }
 
 # the image view a descriptor binds this texture through
@@ -312,12 +351,40 @@ test "texture: decode round-trips a qoi image" {
     var pa: allo.Allocator;
     page.make(?pa);
     var dec: Decoded;
-    val r: Result[bool, Error] = decode(?enc[0], n, ?pa, ?dec);
+    val r: Result[bool, Error] = decode(?enc[0], n, COLOR_SRGB, ?pa, ?dec);
     if (is_err[bool, Error](r)) { ret 2; }
     if (dec.width != 2 || dec.height != 2) { ret 3; }
     if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 4; }
     if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0) { ret 5; }
+    if (dec.space != COLOR_SRGB) { ret 6; }
+    if (image_format(dec.space) != vk.FORMAT_R8G8B8A8_SRGB) { ret 7; }
     allo.deallocate[u8](?pa, dec.pixels, img.image_byte_len(2, 2));
+    ret 0;
+}
+
+test "texture: decoded data retains an explicit linear colour space" {
+    var src_px: [4]u8 = [4]u8{128, 64, 32, 255};
+    var srcimg: img.Image;
+    srcimg.pixels     = ?src_px[0];
+    srcimg.width      = 1;
+    srcimg.height     = 1;
+    srcimg.channels   = 4;
+    srcimg.colorspace = 0;
+
+    var enc: [64]u8;
+    val n: usize = img.qoi_encode(?srcimg, ?enc[0], 64);
+    if (n == 0) { ret 1; }
+
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var linear: Decoded;
+    val r: Result[bool, Error] = decode(?enc[0], n, COLOR_LINEAR, ?pa, ?linear);
+    if (is_err[bool, Error](r)) { ret 2; }
+    if (linear.pixels[0] != 128 || linear.pixels[1] != 64
+        || linear.pixels[2] != 32 || linear.pixels[3] != 255) { ret 3; }
+    if (linear.space != COLOR_LINEAR) { ret 4; }
+    if (image_format(linear.space) != vk.FORMAT_R8G8B8A8_UNORM) { ret 5; }
+    allo.deallocate[u8](?pa, linear.pixels, img.image_byte_len(1, 1));
     ret 0;
 }
 
@@ -346,7 +413,7 @@ test "texture: decode round-trips a png image" {
     var pa: allo.Allocator;
     page.make(?pa);
     var dec: Decoded;
-    val r: Result[bool, Error] = decode(?enc[0], n, ?pa, ?dec);
+    val r: Result[bool, Error] = decode(?enc[0], n, COLOR_SRGB, ?pa, ?dec);
     if (is_err[bool, Error](r)) { ret 4; }
     if (dec.width != 2 || dec.height != 2) { ret 5; }
     if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 6; }
@@ -361,7 +428,7 @@ test "texture: unsupported format reports cleanly" {
     var pa: allo.Allocator;
     page.make(?pa);
     var dec: Decoded;
-    val r: Result[bool, Error] = decode(?junk[0], 8, ?pa, ?dec);
+    val r: Result[bool, Error] = decode(?junk[0], 8, COLOR_SRGB, ?pa, ?dec);
     if (!is_err[bool, Error](r)) { ret 1; }
     ret 0;
 }
