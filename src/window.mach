@@ -259,6 +259,16 @@ pub fun window_is_valid(w: *Window) bool {
     ret glfw.window_is_valid(w.handle);
 }
 
+# Set the smallest client area the platform may resize a window to.
+# ---
+# w:      open window to constrain
+# width:  minimum client width in screen coordinates
+# height: minimum client height in screen coordinates
+pub fun window_set_min_size(w: *Window, width: i32, height: i32) {
+    if (!window_is_valid(w) || width <= 0 || height <= 0) { ret; }
+    glfw.set_window_size_limits(w.handle, width, height, glfw.DONT_CARE, glfw.DONT_CARE);
+}
+
 # route this window's input into a queue
 #
 # where the platform callbacks deliver input
