@@ -211,6 +211,7 @@ use boom.math.transform.transform_matrix;
 # draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
+# Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:      glfw.Window;
     vk:          Vk;
@@ -232,6 +233,16 @@ pub rec Renderer {
     culled:      usize;
     draws:       usize;
     srgb:        bool;
+    ready_vk:    bool;
+    ready_dev:   bool;
+    ready_swap:  bool;
+    ready_frame: bool;
+    ready_near:  bool;
+    ready_linear: bool;
+    ready_pipes: bool;
+    ready_desc:  bool;
+    ready_white: bool;
+    ready_stream: bool;
 }
 
 # initialize a renderer against a window
@@ -253,18 +264,32 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.dropped     = 0;
     r.culled      = 0;
     r.draws       = 0;
+    r.ready_vk     = false;
+    r.ready_dev    = false;
+    r.ready_swap   = false;
+    r.ready_frame  = false;
+    r.ready_near   = false;
+    r.ready_linear = false;
+    r.ready_pipes  = false;
+    r.ready_desc   = false;
+    r.ready_white  = false;
+    r.ready_stream = false;
 
     val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
     if (is_err[bool, Error](vr)) { ret vr; }
+    r.ready_vk = true;
 
     val dr: Result[bool, Error] = device_init(?r.dev, ?r.vk);
-    if (is_err[bool, Error](dr)) { ret dr; }
+    if (is_err[bool, Error](dr)) { renderer_rollback(r); ret dr; }
+    r.ready_dev = true;
 
     val sr: Result[bool, Error] = swapchain_init(?r.swap, ?r.vk, width::u32, height::u32);
-    if (is_err[bool, Error](sr)) { ret sr; }
+    if (is_err[bool, Error](sr)) { renderer_rollback(r); ret sr; }
+    r.ready_swap = true;
 
     val fr: Result[bool, Error] = frame_init(?r.frame, ?r.vk, ?r.swap);
-    if (is_err[bool, Error](fr)) { ret fr; }
+    if (is_err[bool, Error](fr)) { renderer_rollback(r); ret fr; }
+    r.ready_frame = true;
 
     # The colour pipeline assumes the sRGB encode happens exactly once, at the
     # surface: textures are sampled through sRGB formats so the shader works in
@@ -275,17 +300,19 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.srgb = format_is_srgb(r.swap.format);
 
     val samr: Result[bool, Error] = sampler_init(?r.nearest, ?r.vk, true);
-    if (is_err[bool, Error](samr)) { ret samr; }
+    if (is_err[bool, Error](samr)) { renderer_rollback(r); ret samr; }
+    r.ready_near = true;
     val saml: Result[bool, Error] = sampler_init(?r.linear, ?r.vk, false);
     if (is_err[bool, Error](saml)) {
-        sampler_dnit(r.nearest, ?r.vk);
-        r.nearest = nil;
+        renderer_rollback(r);
         ret saml;
     }
+    r.ready_linear = true;
 
     # Pipelines are built on demand, keyed by program and vertex layout, because
     # a .glb decides its own layout. See boom.graphics.cache.
     cache_init(?r.pipes);
+    r.ready_pipes = true;
     r.ui_format = vertex_format_ui();
 
     # The descriptor pool needs a set layout before any pipeline exists, so the
@@ -297,11 +324,13 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, r.frame.pass,
                                       ?window_compatibility, PROGRAM_UI, ?r.ui_format);
     if (two_d == nil) {
+        renderer_rollback(r);
         ret err[bool, Error](error("could not build the 2D pipeline"));
     }
 
     val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, two_d.set_layout);
-    if (is_err[bool, Error](der)) { ret der; }
+    if (is_err[bool, Error](der)) { renderer_rollback(r); ret der; }
+    r.ready_desc = true;
 
     # Every fragment stage samples, so a draw with no texture of its own needs
     # something valid bound. One opaque white texel makes an untextured mesh
@@ -313,14 +342,17 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     # correct if the fallback ever becomes something other than pure white.
     val wr: Result[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1, COLOR_SRGB);
     if (is_err[Texture, Error](wr)) {
+        renderer_rollback(r);
         ret err[bool, Error](unwrap_err[Texture, Error](wr));
     }
     r.white = unwrap_ok[Texture, Error](wr);
+    r.ready_white = true;
 
     # The per-frame arena for geometry that is rebuilt every frame: every 2D
     # draw boom makes goes through it.
     val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
-    if (is_err[bool, Error](str_r)) { ret str_r; }
+    if (is_err[bool, Error](str_r)) { renderer_rollback(r); ret str_r; }
+    r.ready_stream = true;
 
     ret ok[bool, Error](true);
 }
@@ -516,19 +548,35 @@ pub fun renderer_culled(r: *Renderer) usize {
 # ---
 # r: renderer to shut down; must not be used afterward
 pub fun renderer_dnit(r: *Renderer) {
-    # Nothing may be destroyed while the GPU is still reading it, and at
-    # shutdown a frame is usually still in flight.
-    vk.vkDeviceWaitIdle(r.vk.device);
-    stream_dnit(?r.stream, ?r.vk);
-    texture_delete(?r.dev, ?r.white);
-    descriptors_dnit(?r.desc, ?r.vk);
-    cache_dnit(?r.pipes, ?r.vk);
-    sampler_dnit(r.linear, ?r.vk);
-    sampler_dnit(r.nearest, ?r.vk);
-    frame_dnit(?r.frame, ?r.vk);
-    swapchain_dnit(?r.swap, ?r.vk);
-    device_dnit(?r.dev);
-    vk_dnit(?r.vk);
+    renderer_rollback(r);
+}
+
+fun renderer_rollback(r: *Renderer) {
+    if (r == nil) { ret; }
+
+    # A live device may still be reading any of the later stages.
+    if (r.ready_dev) { vk.vkDeviceWaitIdle(r.vk.device); }
+
+    if (r.ready_stream) { stream_dnit(?r.stream, ?r.vk); r.ready_stream = false; }
+    if (r.ready_white)  { texture_delete(?r.dev, ?r.white); r.ready_white = false; }
+    if (r.ready_desc)   { descriptors_dnit(?r.desc, ?r.vk); r.ready_desc = false; }
+    if (r.ready_pipes)  { cache_dnit(?r.pipes, ?r.vk); r.ready_pipes = false; }
+    if (r.ready_linear) { sampler_dnit(r.linear, ?r.vk); r.ready_linear = false; }
+    if (r.ready_near)   { sampler_dnit(r.nearest, ?r.vk); r.ready_near = false; }
+    if (r.ready_frame)  { frame_dnit(?r.frame, ?r.vk); r.ready_frame = false; }
+    if (r.ready_swap)   { swapchain_dnit(?r.swap, ?r.vk); r.ready_swap = false; }
+    if (r.ready_dev)    { device_dnit(?r.dev); r.ready_dev = false; }
+    if (r.ready_vk)     { vk_dnit(?r.vk); r.ready_vk = false; }
+    r.drawing = false;
+}
+
+test "renderer: zero state teardown is idempotent" {
+    var r: Renderer;
+    r.drawing = true;
+    renderer_dnit(?r);
+    renderer_dnit(?r);
+    if (r.drawing) { ret 1; }
+    ret 0;
 }
 
 # how a pass is configured before it begins
