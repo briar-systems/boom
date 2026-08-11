@@ -72,6 +72,14 @@ Back, or call `context_stop` when the application chooses to quit.
 return. Physics worlds are application-owned and advanced explicitly from a
 fixed tick, so pausing one simulation never requires changing the core loop.
 
+## Physics
+
+`boom.physics.Physics` wraps mach-phys without placing a world in the engine
+context. Create the worlds the application needs, call `physics_step` from a
+fixed tick with `timestep_dt_seconds(?ctx.step)`, and inspect the resulting
+contacts with `physics_contact_count` and `physics_contact`. Contacts retain
+boom body ids and math types; they are not mixed into the window input queue.
+
 ## Graphics
 
 `boom.graphics` is a render facade over the ecosystem libraries: a game draws
