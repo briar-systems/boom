@@ -242,9 +242,9 @@ fun build_checker(px: *u8) {
 # would make this predict a mirrored silhouette and agree with a renderer that
 # had the same mistake twice.
 fun project(vp: *gm.Mat4, x: f32, y: f32, z: f32, out_x: *f32, out_y: *f32) {
-    val cx: f32 = vp.m[0] * x + vp.m[4] * y + vp.m[8]  * z + vp.m[12];
-    val cy: f32 = vp.m[1] * x + vp.m[5] * y + vp.m[9]  * z + vp.m[13];
-    val cw: f32 = vp.m[3] * x + vp.m[7] * y + vp.m[11] * z + vp.m[15];
+    val cx: f32 = vp.m[0][0] * x + vp.m[1][0] * y + vp.m[2][0] * z + vp.m[3][0];
+    val cy: f32 = vp.m[0][1] * x + vp.m[1][1] * y + vp.m[2][1] * z + vp.m[3][1];
+    val cw: f32 = vp.m[0][3] * x + vp.m[1][3] * y + vp.m[2][3] * z + vp.m[3][3];
     @out_x = ((cx / cw) * 0.5 + 0.5) * CHECK_W::f32;
     @out_y = ((cy / cw) * 0.5 + 0.5) * CHECK_H::f32;
 }

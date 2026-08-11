@@ -52,8 +52,8 @@ pub fun transform_matrix(t: *Transform) Mat4 {
 test "transform: identity maps a point to itself" {
     var t: Transform = transform_identity();
     var m: Mat4 = transform_matrix(?t);
-    if (m.m[0] != 1.0 || m.m[5] != 1.0 || m.m[10] != 1.0 || m.m[15] != 1.0) { ret 1; }
-    if (m.m[12] != 0.0 || m.m[13] != 0.0 || m.m[14] != 0.0) { ret 2; }
+    if (m.m[0][0] != 1.0 || m.m[1][1] != 1.0 || m.m[2][2] != 1.0 || m.m[3][3] != 1.0) { ret 1; }
+    if (m.m[3][0] != 0.0 || m.m[3][1] != 0.0 || m.m[3][2] != 0.0) { ret 2; }
     ret 0;
 }
 
@@ -62,7 +62,7 @@ test "transform: translation and scale compose into the model matrix" {
     t.position = vec3(5.0, 0.0, 0.0);
     t.scale = vec3(2.0, 2.0, 2.0);
     var m: Mat4 = transform_matrix(?t);
-    if (m.m[0] != 2.0 || m.m[5] != 2.0 || m.m[10] != 2.0) { ret 1; }
-    if (m.m[12] != 5.0) { ret 2; }
+    if (m.m[0][0] != 2.0 || m.m[1][1] != 2.0 || m.m[2][2] != 2.0) { ret 1; }
+    if (m.m[3][0] != 5.0) { ret 2; }
     ret 0;
 }

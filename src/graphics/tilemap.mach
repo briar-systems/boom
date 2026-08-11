@@ -166,10 +166,10 @@ pub fun tilemap_span(layer: *TileLayer, view: Rect) TileSpan {
     if (view.w <= 0.0 || view.h <= 0.0)  { ret s; }
 
     val ts: f32 = layer.tile_size;
-    s.col0 = span_lo((view.x - layer.origin.x) / ts, layer.cols);
-    s.col1 = span_hi((view.x + view.w - layer.origin.x) / ts, layer.cols);
-    s.row0 = span_lo((view.y - layer.origin.y) / ts, layer.rows);
-    s.row1 = span_hi((view.y + view.h - layer.origin.y) / ts, layer.rows);
+    s.col0 = span_lo((view.x - layer.origin[0]) / ts, layer.cols);
+    s.col1 = span_hi((view.x + view.w - layer.origin[0]) / ts, layer.cols);
+    s.row0 = span_lo((view.y - layer.origin[1]) / ts, layer.rows);
+    s.row1 = span_hi((view.y + view.h - layer.origin[1]) / ts, layer.rows);
     ret s;
 }
 
@@ -202,7 +202,7 @@ pub fun tilemap_at(layer: *TileLayer, col: usize, row: usize) u16 {
 # Where a cell is drawn, in the pass's units.
 pub fun tilemap_cell_rect(layer: *TileLayer, col: usize, row: usize) Rect {
     val ts: f32 = layer.tile_size;
-    ret rect(layer.origin.x + col::f32 * ts, layer.origin.y + row::f32 * ts, ts, ts);
+    ret rect(layer.origin[0] + col::f32 * ts, layer.origin[1] + row::f32 * ts, ts, ts);
 }
 
 # The source rectangle a tile index samples.

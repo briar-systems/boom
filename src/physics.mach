@@ -14,9 +14,8 @@
 # allows. The core loop deliberately does neither: pause, rollback, prediction,
 # and multiple worlds all need control over when a world advances.
 #
-# Mach-phys uses f32x4 vectors and boom's math uses a three-field record, so
-# this module converts at the boundary. The conversion is here rather than in
-# either library because neither should depend on the other's vector type.
+# Boom and mach-phys share the native f32x4 representation, so values cross the
+# private subsystem boundary without conversion.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -24,7 +23,6 @@ use std.types.bool.false;
 use std.types.size.usize;
 use phys: phys.world;
 use pbody: phys.body;
-use pvec: phys.vec;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
 use boom.math.transform.Transform;
@@ -68,20 +66,10 @@ pub rec Physics {
     count:   usize;
 }
 
-# Convert a boom vector to the simulation's representation.
-fun to_phys(v: Vec3) pvec.Vec3 {
-    ret pvec.vec3(v.x, v.y, v.z);
-}
-
-# Convert a simulation vector back to boom's representation.
-fun from_phys(v: pvec.Vec3) Vec3 {
-    ret vec3(v[0], v[1], v[2]);
-}
-
 # Create a physics subsystem under the given gravity.
 pub fun physics_new(gravity: Vec3) Physics {
     var p: Physics;
-    p.world = phys.world_new(to_phys(gravity));
+    p.world = phys.world_new(gravity);
     p.count = 0;
     var i: usize = 0;
     for (i < 256) { p.tracked[i].used = false; i = i + 1; }
@@ -98,8 +86,8 @@ pub fun physics_new(gravity: Vec3) Physics {
 # mass: Mass in kilograms; zero or less makes the body static.
 pub fun physics_add(p: *Physics, t: *Transform, position: Vec3, half: Vec3, mass: f32) BodyId {
     var b: pbody.Body;
-    if (mass > 0.0) { b = pbody.body_dynamic(to_phys(position), to_phys(half), mass); }
-    or              { b = pbody.body_static(to_phys(position), to_phys(half)); }
+    if (mass > 0.0) { b = pbody.body_dynamic(position, half, mass); }
+    or              { b = pbody.body_static(position, half); }
 
     val id: phys.BodyId = phys.world_add(?p.world, b);
     if (id == phys.NO_BODY) { ret NO_BODY; }
@@ -137,7 +125,7 @@ pub fun physics_remove(p: *Physics, id: BodyId) bool {
 pub fun physics_set_velocity(p: *Physics, id: BodyId, v: Vec3) bool {
     val b: *pbody.Body = body_of(p, id);
     if (b == nil) { ret false; }
-    b.velocity = to_phys(v);
+    b.velocity = v;
     ret true;
 }
 
@@ -145,7 +133,7 @@ pub fun physics_set_velocity(p: *Physics, id: BodyId, v: Vec3) bool {
 pub fun physics_velocity(p: *Physics, id: BodyId) Vec3 {
     val b: *pbody.Body = body_of(p, id);
     if (b == nil) { ret vec3(0.0, 0.0, 0.0); }
-    ret from_phys(b.velocity);
+    ret b.velocity;
 }
 
 # Set a body's restitution, from 0 fully damped to 1 fully elastic.
@@ -189,7 +177,7 @@ pub fun physics_step(p: *Physics, dt: f32) {
         if (p.tracked[i].used && p.tracked[i].transform != nil) {
             val b: *pbody.Body = phys.world_body(?p.world, p.tracked[i].id);
             if (b != nil) {
-                p.tracked[i].transform.position = from_phys(b.position);
+                p.tracked[i].transform.position = b.position;
             }
         }
         i = i + 1;
@@ -218,7 +206,7 @@ pub fun physics_contact(p: *Physics, index: usize, out: *Contact) bool {
     if (a == NO_BODY || b == NO_BODY) { ret false; }
     out.a      = a;
     out.b      = b;
-    out.normal = from_phys(c.normal);
+    out.normal = c.normal;
     out.depth  = c.depth;
     ret true;
 }
@@ -238,7 +226,7 @@ test "physics: a stepped body writes back to its transform" {
     # The renderer reads this transform, so it must hold the body's position,
     # not merely differ from the starting value. Semi-implicit Euler under
     # -10 m/s^2 for 0.1s puts the body at 99.9.
-    if (t.position.y < 99.89 || t.position.y > 99.91) { ret 1; }
+    if (t.position[1] < 99.89 || t.position[1] > 99.91) { ret 1; }
     ret 0;
 }
 
@@ -246,7 +234,7 @@ test "physics: a body with no transform is simulated without crashing" {
     var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
     val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
     physics_step(?p, 0.1);
-    if (physics_velocity(?p, id).y >= 0.0) { ret 1; }
+    if (physics_velocity(?p, id)[1] >= 0.0) { ret 1; }
     ret 0;
 }
 
@@ -293,11 +281,11 @@ test "physics: velocity round-trips and removal stops the body" {
     val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
 
     if (!physics_set_velocity(?p, id, vec3(3.0, 0.0, 0.0))) { ret 1; }
-    if (physics_velocity(?p, id).x != 3.0)                  { ret 1; }
+    if (physics_velocity(?p, id)[0] != 3.0)                  { ret 1; }
 
     if (!physics_remove(?p, id))    { ret 1; }
     if (physics_remove(?p, id))     { ret 1; }
-    if (physics_velocity(?p, id).x != 0.0) { ret 1; }
+    if (physics_velocity(?p, id)[0] != 0.0) { ret 1; }
     ret 0;
 }
 
@@ -308,7 +296,7 @@ test "physics: a static body is not moved by gravity" {
     physics_step(?p, 0.1);
     # A static body must not move, and the transform must still have been
     # written rather than left untouched by coincidence.
-    if (t.position.y != 0.0) { ret 1; }
-    if (t.position.x != 0.0) { ret 1; }
+    if (t.position[1] != 0.0) { ret 1; }
+    if (t.position[0] != 0.0) { ret 1; }
     ret 0;
 }

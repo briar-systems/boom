@@ -1058,8 +1058,8 @@ fun on_dnit(ctx: *Context) {
     # true, and the pixel comparison goes on passing while measuring nothing.
     # So the geometry is checked here rather than asserted in a comment.
     print.println("shadow probe geometry:");
-    val lx: f32 = g.block.l1_pos.x;
-    val ly: f32 = g.block.l1_pos.y;
+    val lx: f32 = g.block.l1_pos[0];
+    val ly: f32 = g.block.l1_pos[1];
     val da: f32 = dist2(ax::f32, ay::f32, lx, ly);
     val db: f32 = dist2(bx::f32, by::f32, lx, ly);
     print.printlnf("  distances to the static light: {} and {}",
@@ -1067,18 +1067,18 @@ fun on_dnit(ctx: *Context) {
     check(g, da > db * 0.94 && da < db * 1.06,
           "both probe points are the same distance from the light");
     check(g, seg_crosses(ax::f32, ay::f32, lx, ly,
-                         g.block.wall0.x, g.block.wall0.y,
-                         g.block.wall0.z, g.block.wall0.w),
+                         g.block.wall0[0], g.block.wall0[1],
+                         g.block.wall0[2], g.block.wall0[3]),
           "a wall is between the light and the shadowed point");
     check(g, !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall0.x, g.block.wall0.y,
-                          g.block.wall0.z, g.block.wall0.w)
+                          g.block.wall0[0], g.block.wall0[1],
+                          g.block.wall0[2], g.block.wall0[3])
           && !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall1.x, g.block.wall1.y,
-                          g.block.wall1.z, g.block.wall1.w)
+                          g.block.wall1[0], g.block.wall1[1],
+                          g.block.wall1[2], g.block.wall1[3])
           && !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall2.x, g.block.wall2.y,
-                          g.block.wall2.z, g.block.wall2.w),
+                          g.block.wall2[0], g.block.wall2[1],
+                          g.block.wall2[2], g.block.wall2[3]),
           "no wall is between the light and the open point");
 
     print.println("lighting and shadow:");

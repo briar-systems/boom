@@ -17,6 +17,7 @@ use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_translation;
 use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
 use boom.math.quat.Quat;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_matrix;
@@ -145,9 +146,9 @@ fun fixture_chain(sk: *Skeleton) {
     sk.order[1] = 1;
     var i: usize = 0;
     for (i < 2) {
-        sk.rest[i].position = Vec3{x: 0.0, y: 0.0, z: 0.0};
-        sk.rest[i].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
-        sk.rest[i].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
+        sk.rest[i].position = vec3(0.0, 0.0, 0.0);
+        sk.rest[i].rotation = f32x4{0.0, 0.0, 0.0, 1.0};
+        sk.rest[i].scale    = vec3(1.0, 1.0, 1.0);
         sk.inverse_bind[i]  = mat4_identity();
         i = i + 1;
     }
@@ -158,18 +159,18 @@ test "skeleton: composition propagates a parent transform to its child" {
     fixture_chain(?sk);
 
     var locals: [2]Transform;
-    locals[0].position = Vec3{x: 2.0, y: 0.0, z: 0.0};
-    locals[0].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
-    locals[0].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
-    locals[1].position = Vec3{x: 1.0, y: 0.0, z: 0.0};
-    locals[1].rotation = Quat{x: 0.0, y: 0.0, z: 0.0, w: 1.0};
-    locals[1].scale    = Vec3{x: 1.0, y: 1.0, z: 1.0};
+    locals[0].position = vec3(2.0, 0.0, 0.0);
+    locals[0].rotation = f32x4{0.0, 0.0, 0.0, 1.0};
+    locals[0].scale    = vec3(1.0, 1.0, 1.0);
+    locals[1].position = vec3(1.0, 0.0, 0.0);
+    locals[1].rotation = f32x4{0.0, 0.0, 0.0, 1.0};
+    locals[1].scale    = vec3(1.0, 1.0, 1.0);
 
     var pose: Pose;
     skeleton_pose(?sk, ?locals[0], ?pose);
     if (pose.count != 2) { ret 1; }
-    if (pose.matrices[0].m[12] != 2.0) { ret 2; }
-    if (pose.matrices[1].m[12] != 3.0) { ret 3; }
+    if (pose.matrices[0].m[3][0] != 2.0) { ret 2; }
+    if (pose.matrices[1].m[3][0] != 3.0) { ret 3; }
     ret 0;
 }
 
@@ -186,7 +187,7 @@ test "skeleton: the palette tail is identity, not whatever was on the stack" {
     # a zeroed stack that happens to look right.
     var i: usize = 0;
     for (i < MAX_JOINTS) {
-        pose.matrices[i] = mat4_translation(Vec3{x: 99.0, y: 99.0, z: 99.0});
+        pose.matrices[i] = mat4_translation(vec3(99.0, 99.0, 99.0));
         i = i + 1;
     }
 
@@ -194,13 +195,13 @@ test "skeleton: the palette tail is identity, not whatever was on the stack" {
     if (pose.count != 2) { ret 1; }
 
     val last: *Mat4 = ?pose.matrices[MAX_JOINTS - 1];
-    if (last.m[0] != 1.0 || last.m[5] != 1.0 || last.m[10] != 1.0 || last.m[15] != 1.0) { ret 2; }
-    if (last.m[12] != 0.0 || last.m[13] != 0.0 || last.m[14] != 0.0) { ret 3; }
+    if (last.m[0][0] != 1.0 || last.m[1][1] != 1.0 || last.m[2][2] != 1.0 || last.m[3][3] != 1.0) { ret 2; }
+    if (last.m[3][0] != 0.0 || last.m[3][1] != 0.0 || last.m[3][2] != 0.0) { ret 3; }
 
     # The first joint past the real ones, which is the index an out-of-range
     # JOINTS_0 value most often lands on.
     val next: *Mat4 = ?pose.matrices[2];
-    if (next.m[12] != 0.0 || next.m[15] != 1.0) { ret 4; }
+    if (next.m[3][0] != 0.0 || next.m[3][3] != 1.0) { ret 4; }
     ret 0;
 }
 
@@ -216,11 +217,11 @@ test "skeleton: the palette is exactly what the shader's storage block holds" {
 test "skeleton: the inverse bind matrix folds into the skinning matrix" {
     var sk: Skeleton;
     fixture_chain(?sk);
-    sk.inverse_bind[1] = mat4_translation(Vec3{x: 0.0 - 3.0, y: 0.0, z: 0.0});
+    sk.inverse_bind[1] = mat4_translation(vec3(0.0 - 3.0, 0.0, 0.0));
 
     var pose: Pose;
     skeleton_rest_pose(?sk, ?pose);
     # rest globals are identity, so joint 1's skinning matrix is its inverse bind
-    if (pose.matrices[1].m[12] != 0.0 - 3.0) { ret 1; }
+    if (pose.matrices[1].m[3][0] != 0.0 - 3.0) { ret 1; }
     ret 0;
 }

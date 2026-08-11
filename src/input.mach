@@ -904,7 +904,7 @@ test "input: the stick deadzone is radial, not per axis" {
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val d: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
-    if (d.x == 0.0 && d.y == 0.0) { ret 1; }
+    if (d[0] == 0.0 && d[1] == 0.0) { ret 1; }
 
     # And the reverse: each component over the deadzone individually is fine.
     axes[PAD_AXIS_LEFT_X::usize] = 0.1;
@@ -912,7 +912,7 @@ test "input: the stick deadzone is radial, not per axis" {
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val c: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
-    if (c.x != 0.0 || c.y != 0.0) { ret 2; }
+    if (c[0] != 0.0 || c[1] != 0.0) { ret 2; }
     ret 0;
 }
 
@@ -929,22 +929,22 @@ test "input: a stick leaves the deadzone from zero and clamps at one" {
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val slow: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
-    if (slow.x <= 0.0)   { ret 1; }
-    if (slow.x >= 0.01)  { ret 2; }
+    if (slow[0] <= 0.0)   { ret 1; }
+    if (slow[0] >= 0.01)  { ret 2; }
 
     # Full deflection is exactly 1, and a corner past it does not exceed 1.
     axes[PAD_AXIS_LEFT_X::usize] = 1.0;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val full: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
-    if (full.x != 1.0) { ret 3; }
+    if (full[0] != 1.0) { ret 3; }
 
     axes[PAD_AXIS_LEFT_X::usize] = 1.0;
     axes[PAD_AXIS_LEFT_Y::usize] = 1.0;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val corner: Vec2 = pad_stick(?i, 0, PAD_STICK_LEFT);
-    val mag: f32 = sqrtf(corner.x * corner.x + corner.y * corner.y);
+    val mag: f32 = sqrtf(corner[0] * corner[0] + corner[1] * corner[1]);
     if (mag > 1.001) { ret 4; }
     ret 0;
 }

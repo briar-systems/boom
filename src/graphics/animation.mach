@@ -20,6 +20,7 @@ use boom.graphics.skeleton.Pose;
 use boom.graphics.skeleton.skeleton_pose;
 use boom.graphics.skeleton.skeleton_rest_pose;
 use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
 use boom.math.quat.Quat;
 use boom.math.quat.quat_slerp;
 use boom.math.transform.Transform;
@@ -151,14 +152,12 @@ fun channel_vec3(ch: *Channel, t: f32) Vec3 {
     var a: f32 = 0.0;
     val k: usize = channel_span(ch, t, ?a);
     val b0: usize = k * ch.stride;
-    val v0: Vec3 = Vec3{x: ch.values[b0], y: ch.values[b0 + 1], z: ch.values[b0 + 2]};
+    val v0: Vec3 = vec3(ch.values[b0], ch.values[b0 + 1], ch.values[b0 + 2]);
     if (ch.interp == INTERP_STEP || a == 0.0 || k + 1 >= ch.count) { ret v0; }
     val b1: usize = (k + 1) * ch.stride;
-    ret Vec3{
-        x: v0.x + (ch.values[b1] - v0.x) * a,
-        y: v0.y + (ch.values[b1 + 1] - v0.y) * a,
-        z: v0.z + (ch.values[b1 + 2] - v0.z) * a,
-    };
+    ret vec3(v0[0] + (ch.values[b1] - v0[0]) * a,
+                v0[1] + (ch.values[b1 + 1] - v0[1]) * a,
+                v0[2] + (ch.values[b1 + 2] - v0[2]) * a);
 }
 
 # sample a rotation channel at time t, slerping between keyframes
@@ -166,10 +165,10 @@ fun channel_quat(ch: *Channel, t: f32) Quat {
     var a: f32 = 0.0;
     val k: usize = channel_span(ch, t, ?a);
     val b0: usize = k * ch.stride;
-    val q0: Quat = Quat{x: ch.values[b0], y: ch.values[b0 + 1], z: ch.values[b0 + 2], w: ch.values[b0 + 3]};
+    val q0: Quat = f32x4{ch.values[b0], ch.values[b0 + 1], ch.values[b0 + 2], ch.values[b0 + 3]};
     if (ch.interp == INTERP_STEP || a == 0.0 || k + 1 >= ch.count) { ret q0; }
     val b1: usize = (k + 1) * ch.stride;
-    val q1: Quat = Quat{x: ch.values[b1], y: ch.values[b1 + 1], z: ch.values[b1 + 2], w: ch.values[b1 + 3]};
+    val q1: Quat = f32x4{ch.values[b1], ch.values[b1 + 1], ch.values[b1 + 2], ch.values[b1 + 3]};
     ret quat_slerp(q0, q1, a);
 }
 
@@ -283,12 +282,12 @@ test "animation: rotation channel slerps between its keyframes" {
     ch.stride = 4;
 
     val q0: Quat = channel_quat(?ch, 0.0);
-    if (q0.w - 1.0 > 0.001 || q0.w - 1.0 < 0.0 - 0.001) { ret 1; }
+    if (q0[3] - 1.0 > 0.001 || q0[3] - 1.0 < 0.0 - 0.001) { ret 1; }
     # halfway lands on a 45 degree turn about z: sin(22.5), cos(22.5)
     val mid: Quat = channel_quat(?ch, 1.0);
-    if (mid.z - 0.38268343 > 0.002 || mid.z - 0.38268343 < 0.0 - 0.002) { ret 2; }
+    if (mid[2] - 0.38268343 > 0.002 || mid[2] - 0.38268343 < 0.0 - 0.002) { ret 2; }
     val q1: Quat = channel_quat(?ch, 2.0);
-    if (q1.z - 0.70710678 > 0.001 || q1.z - 0.70710678 < 0.0 - 0.001) { ret 3; }
+    if (q1[2] - 0.70710678 > 0.001 || q1[2] - 0.70710678 < 0.0 - 0.001) { ret 3; }
     ret 0;
 }
 
@@ -310,11 +309,11 @@ test "animation: translation channel interpolates and clamps at the ends" {
     ch.stride = 3;
 
     val a: Vec3 = channel_vec3(?ch, 0.25);
-    if (a.x != 1.0) { ret 1; }
+    if (a[0] != 1.0) { ret 1; }
     val b: Vec3 = channel_vec3(?ch, 0.0 - 5.0);
-    if (b.x != 0.0) { ret 2; }
+    if (b[0] != 0.0) { ret 2; }
     val c: Vec3 = channel_vec3(?ch, 9.0);
-    if (c.x != 4.0) { ret 3; }
+    if (c[0] != 4.0) { ret 3; }
     ret 0;
 }
 
@@ -336,8 +335,8 @@ test "animation: step interpolation holds the earlier keyframe" {
     ch.stride = 3;
 
     val a: Vec3 = channel_vec3(?ch, 0.75);
-    if (a.x != 0.0) { ret 1; }
+    if (a[0] != 0.0) { ret 1; }
     val b: Vec3 = channel_vec3(?ch, 1.0);
-    if (b.x != 8.0) { ret 2; }
+    if (b[0] != 8.0) { ret 2; }
     ret 0;
 }

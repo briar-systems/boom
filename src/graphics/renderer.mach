@@ -769,10 +769,10 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         var clears: [5]vk.ClearValue;
         var cvi: usize = 0;
         for (cvi < p.targets) {
-            clears[cvi].color.float32[0] = d.clear_color.x;
-            clears[cvi].color.float32[1] = d.clear_color.y;
-            clears[cvi].color.float32[2] = d.clear_color.z;
-            clears[cvi].color.float32[3] = d.clear_color.w;
+            clears[cvi].color.float32[0] = d.clear_color[0];
+            clears[cvi].color.float32[1] = d.clear_color[1];
+            clears[cvi].color.float32[2] = d.clear_color[2];
+            clears[cvi].color.float32[3] = d.clear_color[3];
             cvi = cvi + 1;
         }
         # Depth clears to 1.0, the far plane. Clearing to 0 would make every
@@ -1524,13 +1524,13 @@ test "renderer: an overlay pass maps pixels to clip space" {
     # getting one of the two wrong leaves the other looking right.
     if (p.width != 800 || p.height != 600) { ret 1; }
 
-    val top:    f32 = p.projection.m[5] * 0.0   + p.projection.m[13];
-    val bottom: f32 = p.projection.m[5] * 600.0 + p.projection.m[13];
+    val top:    f32 = p.projection.m[1][1] * 0.0   + p.projection.m[3][1];
+    val bottom: f32 = p.projection.m[1][1] * 600.0 + p.projection.m[3][1];
     if (top + 1.0 > 0.0001 || top + 1.0 < 0.0 - 0.0001)          { ret 2; }
     if (bottom - 1.0 > 0.0001 || bottom - 1.0 < 0.0 - 0.0001)    { ret 3; }
 
-    val left:  f32 = p.projection.m[0] * 0.0   + p.projection.m[12];
-    val right: f32 = p.projection.m[0] * 800.0 + p.projection.m[12];
+    val left:  f32 = p.projection.m[0][0] * 0.0   + p.projection.m[3][0];
+    val right: f32 = p.projection.m[0][0] * 800.0 + p.projection.m[3][0];
     if (left + 1.0 > 0.0001 || left + 1.0 < 0.0 - 0.0001)        { ret 4; }
     if (right - 1.0 > 0.0001 || right - 1.0 < 0.0 - 0.0001)      { ret 5; }
     ret 0;
@@ -1553,7 +1553,7 @@ test "renderer: a scene pass takes its matrices from the camera" {
     var p: Pass = pass_begin(?r, ?d);
     # An identity view would mean the camera position was ignored, which
     # draws the scene from the origin no matter where the camera is.
-    if (p.view.m[14] == 0.0) { ret 1; }
+    if (p.view.m[3][2] == 0.0) { ret 1; }
     ret 0;
 }
 

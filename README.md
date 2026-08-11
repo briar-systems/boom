@@ -252,9 +252,9 @@ for translation and scale, slerp for rotation), composes the local joint
 transforms up the hierarchy into joint-world matrices, and multiplies by the
 inverse bind matrices to form the skinning palette
 (`boom.graphics.skeleton`, `boom.graphics.animation`); `boom.graphics.model`
-is the loader. The interim scalar math (`boom.math`: `Vec3`, `Mat4`, `Quat`,
-`Transform`, ...) stands in for the shared `mach-math`, which is deferred until
-the compiler has SIMD vector types, so that swap stays a localized change.
+is the loader. The shared math layer (`boom.math`: `Vec3`, `Mat4`, `Quat`,
+`Transform`, ...) uses native SIMD vectors throughout, including four
+column-major `f32x4` values for a matrix.
 
 `examples/animation` is a runnable consumer: it loads a two-bone bar
 (`assets/bar.glb`) and plays its bend clip, turning the model so the bend reads

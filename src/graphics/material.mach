@@ -147,7 +147,7 @@ pub fun material_texture_named(m: *Material, name: str) *Texture {
 
 test "material: base color defaults to white" {
     var m: Material = material();
-    if (m.base_color.x != 1.0 || m.base_color.w != 1.0) { ret 1; }
+    if (m.base_color[0] != 1.0 || m.base_color[3] != 1.0) { ret 1; }
     if (m.texture_count != 0) { ret 2; }
     ret 0;
 }

@@ -1033,12 +1033,12 @@ test "mesh: bounds come from the POSITION attribute, wherever it sits" {
     v[9] = 0.0 - 5.0; v[10] = 0.0; v[11] = 7.0;
 
     val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
-    if (b.min.x != 0.0 - 5.0) { ret 3; }
-    if (b.max.x != 10.0)      { ret 4; }
-    if (b.min.y != 0.0)       { ret 5; }
-    if (b.max.y != 20.0)      { ret 6; }
-    if (b.min.z != 7.0)       { ret 7; }
-    if (b.max.z != 30.0)      { ret 8; }
+    if (b.min[0] != 0.0 - 5.0) { ret 3; }
+    if (b.max[0] != 10.0)      { ret 4; }
+    if (b.min[1] != 0.0)       { ret 5; }
+    if (b.max[1] != 20.0)      { ret 6; }
+    if (b.min[2] != 7.0)       { ret 7; }
+    if (b.max[2] != 30.0)      { ret 8; }
     ret 0;
 }
 
@@ -1052,8 +1052,8 @@ test "mesh: a two-component position gives a flat box, not an empty one" {
     v[2] = 3.0; v[3] = 4.0;
     val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
     if (aabb_is_empty(?b)) { ret 2; }
-    if (b.min.x != 1.0 || b.max.x != 3.0) { ret 3; }
-    if (b.min.z != 0.0 || b.max.z != 0.0) { ret 4; }
+    if (b.min[0] != 1.0 || b.max[0] != 3.0) { ret 3; }
+    if (b.min[2] != 0.0 || b.max[2] != 0.0) { ret 4; }
     ret 0;
 }
 

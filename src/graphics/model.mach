@@ -42,9 +42,11 @@ use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use vfs: boom.vfs;
 use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
 use boom.math.quat.Quat;
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_identity;
+use boom.math.mat.mat4_ptr;
 use boom.math.transform.Transform;
 use gp: gltf.parse;
 use gd: gltf.doc;
@@ -171,9 +173,9 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) Result
         if (node.has_matrix) {
             ret err[bool, Error](error("joint node uses a matrix transform, which is not yet supported"));
         }
-        sk.rest[j].position = Vec3{x: node.translation[0], y: node.translation[1], z: node.translation[2]};
-        sk.rest[j].rotation = Quat{x: node.rotation[0], y: node.rotation[1], z: node.rotation[2], w: node.rotation[3]};
-        sk.rest[j].scale    = Vec3{x: node.scale[0], y: node.scale[1], z: node.scale[2]};
+        sk.rest[j].position = vec3(node.translation[0], node.translation[1], node.translation[2]);
+        sk.rest[j].rotation = f32x4{node.rotation[0], node.rotation[1], node.rotation[2], node.rotation[3]};
+        sk.rest[j].scale    = vec3(node.scale[0], node.scale[1], node.scale[2]);
         sk.parents[j]       = 0 - 1;
         sk.inverse_bind[j]  = mat4_identity();
         j = j + 1;
@@ -211,9 +213,10 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) Result
         if (icnt < n) { ret err[bool, Error](error("fewer inverse bind matrices than joints")); }
         var k: usize = 0;
         for (k < n) {
+            val matrix: *f32 = mat4_ptr(?sk.inverse_bind[k]);
             var m: usize = 0;
             for (m < 16) {
-                sk.inverse_bind[k].m[m] = ibm[k * 16 + m];
+                matrix[m] = ibm[k * 16 + m];
                 m = m + 1;
             }
             k = k + 1;
@@ -607,7 +610,7 @@ test "model: skeleton and animation extract from a skinned, animated glb" {
     if (sk.parents[0] != 0 - 1) { arena.dnit(?ar); ret 4; }
     if (sk.parents[1] != 0) { arena.dnit(?ar); ret 5; }
     if (sk.order[0] != 0 || sk.order[1] != 1) { arena.dnit(?ar); ret 6; }
-    if (sk.rest[1].position.x != 1.0) { arena.dnit(?ar); ret 7; }
+    if (sk.rest[1].position[0] != 1.0) { arena.dnit(?ar); ret 7; }
 
     val srr: Result[*gd.Skin, str] = slice.get[gd.Skin](loaded.document.skins, 0);
     if (is_err[*gd.Skin, str](srr)) { arena.dnit(?ar); ret 8; }
@@ -626,8 +629,8 @@ test "model: skeleton and animation extract from a skinned, animated glb" {
     pl.looping = 0;
     animation_player_advance(?pl, 1.0);
     # joint 0 turned 90 degrees about z: skinning column 0 becomes (0, 1, 0)
-    if (pl.pose.matrices[0].m[1] < 0.99) { arena.dnit(?ar); ret 14; }
-    if (pl.pose.matrices[0].m[0] > 0.01 || pl.pose.matrices[0].m[0] < 0.0 - 0.01) { arena.dnit(?ar); ret 15; }
+    if (pl.pose.matrices[0].m[0][1] < 0.99) { arena.dnit(?ar); ret 14; }
+    if (pl.pose.matrices[0].m[0][0] > 0.01 || pl.pose.matrices[0].m[0][0] < 0.0 - 0.01) { arena.dnit(?ar); ret 15; }
 
     arena.dnit(?ar);
     ret 0;

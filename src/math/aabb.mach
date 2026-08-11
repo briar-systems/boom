@@ -45,17 +45,17 @@ pub fun aabb_empty() Aabb {
 
 # Whether a box has had anything added to it.
 pub fun aabb_is_empty(b: *Aabb) bool {
-    ret b.min.x > b.max.x || b.min.y > b.max.y || b.min.z > b.max.z;
+    ret b.min[0] > b.max[0] || b.min[1] > b.max[1] || b.min[2] > b.max[2];
 }
 
 # Grow a box to contain a point.
 pub fun aabb_add(b: *Aabb, p: Vec3) {
-    if (p.x < b.min.x) { b.min.x = p.x; }
-    if (p.y < b.min.y) { b.min.y = p.y; }
-    if (p.z < b.min.z) { b.min.z = p.z; }
-    if (p.x > b.max.x) { b.max.x = p.x; }
-    if (p.y > b.max.y) { b.max.y = p.y; }
-    if (p.z > b.max.z) { b.max.z = p.z; }
+    if (p[0] < b.min[0]) { b.min[0] = p[0]; }
+    if (p[1] < b.min[1]) { b.min[1] = p[1]; }
+    if (p[2] < b.min[2]) { b.min[2] = p[2]; }
+    if (p[0] > b.max[0]) { b.max[0] = p[0]; }
+    if (p[1] > b.max[1]) { b.max[1] = p[1]; }
+    if (p[2] > b.max[2]) { b.max[2] = p[2]; }
 }
 
 # Grow a box to contain another.
@@ -70,16 +70,16 @@ pub fun aabb_union(b: *Aabb, o: *Aabb) {
 
 # The point at the middle of a box.
 pub fun aabb_center(b: *Aabb) Vec3 {
-    ret vec3((b.min.x + b.max.x) * 0.5,
-             (b.min.y + b.max.y) * 0.5,
-             (b.min.z + b.max.z) * 0.5);
+    ret vec3((b.min[0] + b.max[0]) * 0.5,
+             (b.min[1] + b.max[1]) * 0.5,
+             (b.min[2] + b.max[2]) * 0.5);
 }
 
 # Half the box's size on each axis.
 pub fun aabb_extent(b: *Aabb) Vec3 {
-    ret vec3((b.max.x - b.min.x) * 0.5,
-             (b.max.y - b.min.y) * 0.5,
-             (b.max.z - b.min.z) * 0.5);
+    ret vec3((b.max[0] - b.min[0]) * 0.5,
+             (b.max[1] - b.min[1]) * 0.5,
+             (b.max[2] - b.min[2]) * 0.5);
 }
 
 # The smallest axis-aligned box containing a transformed box.
@@ -100,14 +100,14 @@ pub fun aabb_transform(b: *Aabb, m: *Mat4) Aabb {
     val c: Vec3 = aabb_center(b);
     val e: Vec3 = aabb_extent(b);
 
-    # Column-major, matching boom.math.mat: m[0], m[4], m[8] are the x row.
-    val cx: f32 = m.m[0] * c.x + m.m[4] * c.y + m.m[8]  * c.z + m.m[12];
-    val cy: f32 = m.m[1] * c.x + m.m[5] * c.y + m.m[9]  * c.z + m.m[13];
-    val cz: f32 = m.m[2] * c.x + m.m[6] * c.y + m.m[10] * c.z + m.m[14];
+    # column-major, matching boom.math.mat: m[column][row]
+    val cx: f32 = m.m[0][0] * c[0] + m.m[1][0] * c[1] + m.m[2][0]  * c[2] + m.m[3][0];
+    val cy: f32 = m.m[0][1] * c[0] + m.m[1][1] * c[1] + m.m[2][1]  * c[2] + m.m[3][1];
+    val cz: f32 = m.m[0][2] * c[0] + m.m[1][2] * c[1] + m.m[2][2] * c[2] + m.m[3][2];
 
-    val ex: f32 = absf(m.m[0]) * e.x + absf(m.m[4]) * e.y + absf(m.m[8])  * e.z;
-    val ey: f32 = absf(m.m[1]) * e.x + absf(m.m[5]) * e.y + absf(m.m[9])  * e.z;
-    val ez: f32 = absf(m.m[2]) * e.x + absf(m.m[6]) * e.y + absf(m.m[10]) * e.z;
+    val ex: f32 = absf(m.m[0][0]) * e[0] + absf(m.m[1][0]) * e[1] + absf(m.m[2][0])  * e[2];
+    val ey: f32 = absf(m.m[0][1]) * e[0] + absf(m.m[1][1]) * e[1] + absf(m.m[2][1])  * e[2];
+    val ez: f32 = absf(m.m[0][2]) * e[0] + absf(m.m[1][2]) * e[1] + absf(m.m[2][2]) * e[2];
 
     ret Aabb{min: vec3(cx - ex, cy - ey, cz - ez),
              max: vec3(cx + ex, cy + ey, cz + ez)};
@@ -128,9 +128,9 @@ test "aabb: an empty box contains nothing and is grown by its first point" {
 
     aabb_add(?b, vec3(5.0, 6.0, 7.0));
     if (aabb_is_empty(?b))  { ret 2; }
-    if (b.min.x != 5.0 || b.max.x != 5.0) { ret 3; }
-    if (b.min.y != 6.0 || b.max.y != 6.0) { ret 4; }
-    if (b.min.z != 7.0 || b.max.z != 7.0) { ret 5; }
+    if (b.min[0] != 5.0 || b.max[0] != 5.0) { ret 3; }
+    if (b.min[1] != 6.0 || b.max[1] != 6.0) { ret 4; }
+    if (b.min[2] != 7.0 || b.max[2] != 7.0) { ret 5; }
     ret 0;
 }
 
@@ -138,12 +138,12 @@ test "aabb: adding points grows the box to hold all of them" {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(1.0, 2.0, 3.0));
     aabb_add(?b, vec3(0.0 - 4.0, 8.0, 0.0));
-    if (b.min.x != 0.0 - 4.0) { ret 1; }
-    if (b.max.x != 1.0)       { ret 2; }
-    if (b.min.y != 2.0)       { ret 3; }
-    if (b.max.y != 8.0)       { ret 4; }
-    if (b.min.z != 0.0)       { ret 5; }
-    if (b.max.z != 3.0)       { ret 6; }
+    if (b.min[0] != 0.0 - 4.0) { ret 1; }
+    if (b.max[0] != 1.0)       { ret 2; }
+    if (b.min[1] != 2.0)       { ret 3; }
+    if (b.max[1] != 8.0)       { ret 4; }
+    if (b.min[2] != 0.0)       { ret 5; }
+    if (b.max[2] != 3.0)       { ret 6; }
     ret 0;
 }
 
@@ -156,8 +156,8 @@ test "aabb: a union with an empty box changes nothing" {
     aabb_add(?b, vec3(1.0, 1.0, 1.0));
     var e: Aabb = aabb_empty();
     aabb_union(?b, ?e);
-    if (b.min.x != 0.0) { ret 1; }
-    if (b.max.x != 1.0) { ret 2; }
+    if (b.min[0] != 0.0) { ret 1; }
+    if (b.max[0] != 1.0) { ret 2; }
     ret 0;
 }
 
@@ -167,10 +167,10 @@ test "aabb: a translation moves the box and does not resize it" {
     aabb_add(?b, vec3(1.0, 1.0, 1.0));
     var m: Mat4 = mat4_translation(vec3(10.0, 0.0, 0.0));
     val t: Aabb = aabb_transform(?b, ?m);
-    if (!near(t.min.x, 9.0))  { ret 1; }
-    if (!near(t.max.x, 11.0)) { ret 2; }
-    if (!near(t.min.y, 0.0 - 1.0)) { ret 3; }
-    if (!near(t.max.y, 1.0))       { ret 4; }
+    if (!near(t.min[0], 9.0))  { ret 1; }
+    if (!near(t.max[0], 11.0)) { ret 2; }
+    if (!near(t.min[1], 0.0 - 1.0)) { ret 3; }
+    if (!near(t.max[1], 1.0))       { ret 4; }
     ret 0;
 }
 
@@ -187,10 +187,10 @@ test "aabb: a rotation grows the box, conservatively" {
     var m: Mat4 = mat4_from_quat(q);
     val t: Aabb = aabb_transform(?b, ?m);
 
-    if (!near_eps(t.max.x, 1.41421356, 0.001)) { ret 1; }
-    if (!near_eps(t.max.y, 1.41421356, 0.001)) { ret 2; }
+    if (!near_eps(t.max[0], 1.41421356, 0.001)) { ret 1; }
+    if (!near_eps(t.max[1], 1.41421356, 0.001)) { ret 2; }
     # z is the rotation axis, so it is untouched.
-    if (!near_eps(t.max.z, 1.0, 0.001))        { ret 3; }
+    if (!near_eps(t.max[2], 1.0, 0.001))        { ret 3; }
     ret 0;
 }
 
@@ -200,9 +200,9 @@ test "aabb: a scale scales the box about its centre" {
     aabb_add(?b, vec3(2.0, 2.0, 2.0));
     var m: Mat4 = mat4_scale(vec3(3.0, 1.0, 1.0));
     val t: Aabb = aabb_transform(?b, ?m);
-    if (!near(t.min.x, 0.0)) { ret 1; }
-    if (!near(t.max.x, 6.0)) { ret 2; }
-    if (!near(t.max.y, 2.0)) { ret 3; }
+    if (!near(t.min[0], 0.0)) { ret 1; }
+    if (!near(t.max[0], 6.0)) { ret 2; }
+    if (!near(t.max[1], 2.0)) { ret 3; }
     ret 0;
 }
 
