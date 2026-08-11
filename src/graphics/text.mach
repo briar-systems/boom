@@ -46,6 +46,7 @@ use fs:     std.filesystem;
 use vector: std.collections.vector;
 use finfo:  font.info;
 use fglyf:  font.glyf;
+use floca:  font.loca;
 use fraster: font.raster;
 use vfs: boom.vfs;
 
@@ -76,15 +77,19 @@ val GUTTER:       usize = 1;
 
 # One glyph's placement in the atlas and its metrics
 # ---
-# cell:    index into the atlas grid
-# advance: pen movement after drawing, in pixels
-# w:       rendered width in pixels
-# h:       rendered height in pixels
+# cell:     index into the atlas grid
+# advance:  pen movement after drawing, in pixels
+# offset_x: horizontal bearing from the pen to the atlas cell
+# offset_y: vertical bearing from the line top to the atlas cell
+# w:        rendered width in pixels
+# h:        rendered height in pixels
 rec Glyph {
-    cell:    usize;
-    advance: f32;
-    w:       f32;
-    h:       f32;
+    cell:     usize;
+    advance:  f32;
+    offset_x: f32;
+    offset_y: f32;
+    w:        f32;
+    h:        f32;
 }
 
 # A loaded face at one logical pixel size
@@ -98,6 +103,8 @@ rec Glyph {
 # cell_h:       atlas cell height in raster texels
 # cols:         cells per atlas row
 # height:       logical pixel height used for measurement and drawing
+# ascent:       logical line-top-to-baseline distance
+# descent:      logical baseline-to-line-bottom distance, normally negative
 # raster_scale: atlas texels per logical pixel
 # valid:        whether the face loaded
 pub rec Font {
@@ -107,6 +114,8 @@ pub rec Font {
     cell_h:       usize;
     cols:         usize;
     height:       f32;
+    ascent:       f32;
+    descent:      f32;
     raster_scale: f32;
     valid:        bool;
 }
@@ -166,6 +175,8 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
     f.cell_h = cell;
     f.cols   = 16;
     f.height = pixels;
+    f.ascent = face.ascent::f32 * logical_scale;
+    f.descent = face.descent::f32 * logical_scale;
     f.raster_scale = raster_scale;
 
     val rows:   usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
@@ -195,6 +206,8 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
     for (g < GLYPH_COUNT) {
         val cp: u32 = FIRST_CP + g::u32;
         f.glyphs[g].cell = g;
+        f.glyphs[g].offset_x = 0.0;
+        f.glyphs[g].offset_y = 0.0;
         f.glyphs[g].w    = 0.0;
         f.glyphs[g].h    = 0.0;
 
@@ -204,16 +217,28 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
             var lsb: i16 = 0;
             if (finfo.glyph_hmetrics(?face, gi, ?adv, ?lsb)) {
                 f.glyphs[g].advance = adv::f32 * logical_scale;
+                f.glyphs[g].offset_x = lsb::f32 * logical_scale;
             }
+
+            var info: fglyf.GlyphInfo;
+            val has_info: bool = glyph_info(?face, gi, ?info);
 
             var k: usize = 0;
             for (k < cell * cell) { cov[k] = 0; k = k + 1; }
 
             if (finfo.render_glyph(?face, gi, glyph_scale, ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
                                    ?edges[0], MAX_EDGES, cov, cell::u16, cell::u16)) {
-                f.glyphs[g].w = cell::f32 / raster_scale;
-                f.glyphs[g].h = cell::f32 / raster_scale;
-                blit_cell(rgba, aw, cov, cell, g, f.cols);
+                val visible: bool = blit_cell(rgba, aw, cov, cell, g, f.cols);
+                if (visible && has_info) {
+                    f.glyphs[g].w = cell::f32 / raster_scale;
+                    f.glyphs[g].h = cell::f32 / raster_scale;
+                    f.glyphs[g].offset_y = baseline_offset(
+                        f.ascent,
+                        f.glyphs[g].h,
+                        info.y_min,
+                        logical_scale,
+                    );
+                }
             }
         }
         g = g + 1;
@@ -280,15 +305,18 @@ fun clear_atlas(rgba: *u8, pixels: usize) {
 }
 
 # Copy one coverage bitmap into the padded atlas cell as white-with-alpha.
-fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, cols: usize) {
+fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8,
+              cell: usize, index: usize, cols: usize) bool {
     val stride: usize = cell + GUTTER * 2;
     val cx: usize = (index % cols) * stride + GUTTER;
     val cy: usize = (index / cols) * stride + GUTTER;
+    var visible: bool = false;
     var y: usize = 0;
     for (y < cell) {
         var x: usize = 0;
         for (x < cell) {
             val o: usize = ((cy + y) * atlas_w + (cx + x)) * 4;
+            if (cov[y * cell + x] != 0) { visible = true; }
             rgba[o]     = 255;
             rgba[o + 1] = 255;
             rgba[o + 2] = 255;
@@ -297,6 +325,22 @@ fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8, cell: usize, index: usize, co
         }
         y = y + 1;
     }
+    ret visible;
+}
+
+fun glyph_info(f: *finfo.Font, glyph: u16, out: *fglyf.GlyphInfo) bool {
+    var start: u32 = 0;
+    var end: u32 = 0;
+    if (!floca.glyph_range(f.data, f.len, f.loca_off,
+        f.index_to_loc_format, glyph, ?start, ?end)) { ret false; }
+    if (start == end) { ret false; }
+    ret fglyf.glyph_header(f.data, f.len,
+        f.glyf_off + start::usize, out);
+}
+
+fun baseline_offset(ascent: f32, cell_height: f32,
+                    y_min: i16, scale: f32) f32 {
+    ret ascent - cell_height - y_min::f32 * scale;
 }
 
 # Release the atlas texture
@@ -343,8 +387,9 @@ fun cell_uv(f: *Font, slot: usize) Rect {
     ret rect(u, v, f.cell_w::f32 / aw, f.cell_h::f32 / ah);
 }
 
-fun glyph_dest(f: *Font, x: f32, y: f32) Rect {
-    ret rect(x, y, f.cell_w::f32 / f.raster_scale,
+fun glyph_dest(f: *Font, glyph: *Glyph, x: f32, y: f32) Rect {
+    ret rect(x + glyph.offset_x, y + glyph.offset_y,
+            f.cell_w::f32 / f.raster_scale,
             f.cell_h::f32 / f.raster_scale);
 }
 
@@ -355,9 +400,10 @@ fun logical_cell_size(pixels: f32) usize {
 
 # Draw a string into a pass, returning the pen x after the last glyph
 #
-# `x`/`y` are the top-left of the first cell in the pass's coordinate space,
-# which for an overlay pass is pixels. one sprite quad per glyph against one
-# texture, so a caller may draw many strings without a bind between them.
+# `x`/`y` are the top-left of the line box in the pass's coordinate space,
+# which for an overlay pass is pixels. Glyph bearings place every atlas cell
+# against the line's shared baseline. One sprite quad per glyph against one
+# texture lets a caller draw many strings without a bind between them.
 # ---
 # p:    the pass to draw into, normally an overlay pass
 # f:    the loaded face
@@ -377,7 +423,7 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
             # A space has an advance and no coverage, so skipping the quad
             # saves a draw call per space without changing the layout
             if (f.glyphs[sl].w > 0.0) {
-                val dest: Rect = glyph_dest(f, pen, y);
+                val dest: Rect = glyph_dest(f, ?f.glyphs[sl], pen, y);
                 pass_draw_sprite_uv(p, ?f.atlas, dest, cell_uv(f, sl), tint);
             }
             pen = pen + f.glyphs[sl].advance;
@@ -400,12 +446,16 @@ fun test_font(advance: f32) Font {
     f.cell_h = 16;
     f.cols   = 16;
     f.height = 12.0;
+    f.ascent = 9.0;
+    f.descent = 0.0 - 3.0;
     f.raster_scale = 1.0;
     f.valid  = true;
     var g: usize = 0;
     for (g < GLYPH_COUNT) {
         f.glyphs[g].cell    = g;
         f.glyphs[g].advance = advance;
+        f.glyphs[g].offset_x = 0.0;
+        f.glyphs[g].offset_y = 0.0;
         f.glyphs[g].w       = 16.0;
         f.glyphs[g].h       = 16.0;
         g = g + 1;
@@ -462,10 +512,21 @@ test "text: oversampling preserves logical glyph geometry" {
     f.cell_w = logical_cell_size(16.0) * 2;
     f.cell_h = logical_cell_size(16.0) * 2;
     f.raster_scale = 2.0;
-    val d: Rect = glyph_dest(?f, 3.0, 5.0);
+    val d: Rect = glyph_dest(?f, ?f.glyphs[0], 3.0, 5.0);
     if (d.x != 3.0 || d.y != 5.0) { ret 2; }
     if (d.w != 22.0 || d.h != 22.0) { ret 3; }
     if (text_measure(?f, "abc") != 21.0) { ret 4; }
+    ret 0;
+}
+
+test "text: glyph cells preserve one baseline across vertical bearings" {
+    val uppercase: f32 = baseline_offset(9.0, 16.0, 0, 1.0);
+    val descender: f32 = baseline_offset(9.0, 16.0, 0 - 3, 1.0);
+    if (uppercase != 0.0 - 7.0 || descender != 0.0 - 4.0) { ret 1; }
+
+    val uppercase_baseline: f32 = uppercase + 16.0;
+    val descender_baseline: f32 = descender + 13.0;
+    if (uppercase_baseline != 9.0 || descender_baseline != 9.0) { ret 2; }
     ret 0;
 }
 
@@ -506,6 +567,14 @@ test "text: glyph coverage stays inside a white transparent gutter" {
     # The two-by-two coverage starts one texel inside the four-by-four slot.
     if (rgba[23] != 32 || rgba[27] != 64) { ret 3; }
     if (rgba[39] != 128 || rgba[43] != 255) { ret 4; }
+    ret 0;
+}
+
+test "text: empty coverage remains advance-only" {
+    var rgba: [64]u8;
+    var cov: [4]u8;
+    clear_atlas(?rgba[0], 16);
+    if (blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1)) { ret 1; }
     ret 0;
 }
 
