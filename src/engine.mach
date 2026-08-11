@@ -30,6 +30,16 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
     }
 }
 
+fun tick_pending(ctx: *Context, app: *App) {
+    for (ctx.running && timestep_step(?ctx.step)) {
+        # fold input exactly once per tick, immediately before the tick sees
+        # it. a frame running three ticks shows a press to the first only, and
+        # a frame running none leaves it pending for whichever tick is next.
+        inp.input_begin_tick(?ctx.input);
+        invoke(app.f_tick, ctx);
+    }
+}
+
 # drive the app's lifecycle over an initialized context
 #
 # calls f_init once, then loops until the context is stopped or the
@@ -66,14 +76,7 @@ pub fun run(ctx: *Context, app: *App) i64 {
         or { clock_tick(?ctx.clock); }
 
         timestep_add(?ctx.step, ctx.clock.delta);
-        for (ctx.running && timestep_step(?ctx.step)) {
-            # fold input exactly once per tick, immediately before the tick
-            # sees it. this is what makes an edge belong to one tick: a frame
-            # running three ticks shows the press to the first only, and a
-            # frame running none leaves it pending for whichever tick is next.
-            inp.input_begin_tick(?ctx.input);
-            invoke(app.f_tick, ctx);
-        }
+        tick_pending(ctx, app);
 
         if (ctx.running) {
             ctx.alpha = timestep_alpha(?ctx.step);
@@ -88,4 +91,37 @@ pub fun run(ctx: *Context, app: *App) i64 {
 
     invoke(app.f_dnit, ctx);
     ret ctx.status;
+}
+
+use std.types.bool.true;
+use boom.context.context_stop;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.timestep.timestep_new;
+
+fun stop_on_tick(ctx: *Context) {
+    val ticks: *i64 = context_user(ctx)::*i64;
+    @ticks = @ticks + 1;
+    context_stop(ctx);
+}
+
+test "engine: stopping a tick leaves catch-up work pending" {
+    var ticks: i64 = 0;
+    var ctx: Context;
+    ctx.running = true;
+    ctx.input = inp.input_new();
+    ctx.step = timestep_new(10, 100);
+    timestep_add(?ctx.step, 35);
+    context_set_user(?ctx, (?ticks)::ptr);
+
+    var app: App;
+    app.f_init = nil::fun(*Context);
+    app.f_tick = stop_on_tick;
+    app.f_draw = nil::fun(*Context);
+    app.f_dnit = nil::fun(*Context);
+
+    tick_pending(?ctx, ?app);
+    if (ticks != 1) { ret 1; }
+    if (ctx.step.accumulator != 25) { ret 2; }
+    ret 0;
 }
