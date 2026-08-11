@@ -51,6 +51,8 @@ use fs:     std.filesystem;
 use vector: std.collections.vector;
 use atomic: std.sync.atomic;
 use thread: std.sync.thread;
+use memory: std.memory;
+use os:     std.system.os;
 use audio;
 use vfs: boom.vfs;
 use boom.math.sqrtf;
@@ -129,6 +131,8 @@ pub rec VoiceId {
 # frames:  scratch capacity in frames
 # chans:   device channel count
 # rate:    device sample rate, kept so a clip can be conformed to it at load
+# ready:   device and mixer storage are initialized
+# started: callback may read voice streams
 pub rec Audio {
     a:       *allo.Allocator;
     device:  audio.Device;
@@ -141,6 +145,7 @@ pub rec Audio {
     chans:   usize;
     rate:    u32;
     ready:   bool;
+    started: bool;
 }
 
 # The voice id that names nothing
@@ -205,6 +210,7 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
     s.a      = a;
     s.master = 1.0;
     s.ready  = false;
+    s.started = false;
 
     var cl: usize = 0;
     for (cl < MAX_CLASSES) { s.limits[cl] = 0; cl = cl + 1; }
@@ -246,7 +252,25 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
     }
 
     s.ready = true;
+    s.started = true;
     ret ok[bool, str](true);
+}
+
+# Stop and join the audio callback before borrowed sounds are released.
+#
+# Playback stays stopped until the mixer is deinitialized. Quiescing is
+# idempotent and retires every voice after the callback has stopped reading.
+pub fun audio_quiesce(s: *Audio) {
+    if (!s.ready || !s.started) { ret; }
+    audio.stop(?s.device);
+    s.started = false;
+
+    # stop waits for the callback, so no stream is being read here
+    var v: usize = 0;
+    for (v < MAX_VOICES) {
+        atomic.store(?s.voices[v].state, FREE);
+        v = v + 1;
+    }
 }
 
 # Stop the device and release the mixer's own memory
@@ -255,7 +279,7 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
 # sound_free is where that decision belongs.
 pub fun audio_dnit(s: *Audio) {
     if (!s.ready) { ret; }
-    audio.stop(?s.device);
+    audio_quiesce(s);
     audio.close(?s.device);
     allo.deallocate[f32](s.a, s.scratch, s.frames * s.chans);
     s.ready = false;
@@ -295,6 +319,39 @@ pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) Result[Sound, str] {
     val cr: Result[audio.Buffer, str] = conform(s, ?decoded);
     if (is_err[audio.Buffer, str](cr)) {
         audio.dnit(?decoded);
+        ret err[Sound, str](unwrap_err[audio.Buffer, str](cr));
+    }
+
+    var snd: Sound;
+    snd.buffer = unwrap_ok[audio.Buffer, str](cr);
+    snd.valid  = true;
+    ret ok[Sound, str](snd);
+}
+
+# Copy a decoded clip into a device-conformed Sound.
+#
+# The source is borrowed only for this call. The returned Sound owns an
+# independent copy, so an asset store may release or reload its decoded buffer
+# without affecting playback.
+# ---
+# s:   mixer whose allocator and device format own the returned sound
+# src: decoded source buffer, borrowed for this call
+# ret: independent device-conformed sound, or an allocation/conform error
+pub fun sound_from_buffer(s: *Audio, src: *audio.Buffer) Result[Sound, str] {
+    if (s == nil || src == nil || src.format.channels == 0) {
+        ret err[Sound, str]("sound needs a mixer and a valid source buffer");
+    }
+
+    val br: Result[audio.Buffer, str] = audio.init(s.a, src.format, src.frames);
+    if (is_err[audio.Buffer, str](br)) {
+        ret err[Sound, str](unwrap_err[audio.Buffer, str](br));
+    }
+    var owned: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+    memory.copy[f32](owned.samples, src.samples, audio.sample_count(@src));
+
+    val cr: Result[audio.Buffer, str] = conform(s, ?owned);
+    if (is_err[audio.Buffer, str](cr)) {
+        audio.dnit(?owned);
         ret err[Sound, str](unwrap_err[audio.Buffer, str](cr));
     }
 
@@ -415,12 +472,57 @@ fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
     ret ok[audio.Buffer, str](out);
 }
 
-# Release a decoded clip
+# Release a decoded clip after retiring every voice that borrows it.
 #
-# Stop anything playing it first: a voice streaming a freed buffer reads
-# released memory on the audio thread, which is the worst place to find out.
-pub fun sound_free(snd: *Sound) {
-    if (!snd.valid) { ret; }
+# The game thread owns sound lifetime and calls this serially with audio_play.
+# A playing voice is handed back through STOPPING, then the call waits for the
+# audio callback to acknowledge FREE before releasing the sample storage.
+# ---
+# s:   mixer that created and may be playing the sound
+# snd: sound to stop and release
+pub fun sound_free(s: *Audio, snd: *Sound) {
+    if (s == nil || snd == nil || !snd.valid) { ret; }
+
+    var v: usize = 0;
+    if (s.ready) {
+        for (v < MAX_VOICES) {
+            if (atomic.load(?s.voices[v].state) == PLAYING
+                && s.voices[v].stream.samples == snd.buffer.samples) {
+                var expected: i64 = PLAYING;
+                atomic.cas(?s.voices[v].state, ?expected, STOPPING);
+            }
+            v = v + 1;
+        }
+
+        if (!s.started) {
+            # No callback can be reading a stream after quiesce or before startup.
+            v = 0;
+            for (v < MAX_VOICES) {
+                if (atomic.load(?s.voices[v].state) == STOPPING
+                    && s.voices[v].stream.samples == snd.buffer.samples) {
+                    atomic.store(?s.voices[v].state, FREE);
+                }
+                v = v + 1;
+            }
+        }
+        or {
+            # A callback changes STOPPING to FREE before touching the stream.
+            var waiting: bool = true;
+            for (waiting) {
+                waiting = false;
+                v = 0;
+                for (v < MAX_VOICES) {
+                    if (atomic.load(?s.voices[v].state) == STOPPING
+                        && s.voices[v].stream.samples == snd.buffer.samples) {
+                        waiting = true;
+                    }
+                    v = v + 1;
+                }
+                if (waiting) { os.sleep(1000000); }
+            }
+        }
+    }
+
     audio.dnit(?snd.buffer);
     snd.valid = false;
 }
@@ -456,7 +558,7 @@ pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
 # class:   the budget this voice counts against, below MAX_CLASSES
 pub fun audio_play_ex(s: *Audio, snd: *Sound, gain: f32, pan: f32, rate: f32,
                       looping: bool, class: usize) VoiceId {
-    if (!s.ready || !snd.valid)  { ret voice_none(); }
+    if (!s.ready || !s.started || !snd.valid)  { ret voice_none(); }
     if (class >= MAX_CLASSES)    { ret voice_none(); }
 
     # ADMISSION CONTROL, NOT STEALING. A class at its budget refuses the new
@@ -610,9 +712,11 @@ fun test_audio(a: *allo.Allocator, chans: usize) Audio {
     s.chans  = chans;
     s.frames = 64;
     s.ready  = true;
+    s.started = false;
     var v: usize = 0;
     for (v < MAX_VOICES) {
         s.voices[v].state = FREE;
+        s.voices[v].stream.samples = nil;
         s.voices[v].gain  = 1.0;
         s.gens[v]         = 1;
         v = v + 1;
@@ -812,6 +916,7 @@ fun conform_fixture(s: *Audio, a: *allo.Allocator, rate: u32, chans: usize) {
     s.rate  = rate;
     s.chans = chans;
     s.ready = false;
+    s.started = false;
 }
 
 # Write one little-endian integer into a byte fixture.
@@ -877,21 +982,65 @@ test "audio: borrowed WAV bytes decode and conform into an owned sound" {
     val sr: Result[Sound, str] = sound_from_bytes(?s, ?bytes[0], 48);
     if (is_err[Sound, str](sr)) { ret 1; }
     var snd: Sound = unwrap_ok[Sound, str](sr);
-    if (!snd.valid || snd.buffer.frames != 2) { sound_free(?snd); ret 2; }
-    if (snd.buffer.format.channels != 2)      { sound_free(?snd); ret 3; }
+    if (!snd.valid || snd.buffer.frames != 2) { sound_free(?s, ?snd); ret 2; }
+    if (snd.buffer.format.channels != 2)      { sound_free(?s, ?snd); ret 3; }
     if (!near(snd.buffer.samples[0], 0.0)
         || !near(snd.buffer.samples[1], 0.0)
         || !near(snd.buffer.samples[2], 0.5)
         || !near(snd.buffer.samples[3], 0.5)) {
-        sound_free(?snd);
+        sound_free(?s, ?snd);
         ret 4;
     }
 
     # The owned sample buffer survives destruction of the encoded span.
     var i: usize = 0;
     for (i < 48) { bytes[i] = 0; i = i + 1; }
-    if (!near(snd.buffer.samples[2], 0.5)) { sound_free(?snd); ret 5; }
-    sound_free(?snd);
+    if (!near(snd.buffer.samples[2], 0.5)) { sound_free(?s, ?snd); ret 5; }
+    sound_free(?s, ?snd);
+    ret 0;
+}
+
+test "audio: a decoded asset becomes an independent sound" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 48000, 2);
+
+    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val br: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (is_err[audio.Buffer, str](br)) { ret 1; }
+    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+
+    val sr: Result[Sound, str] = sound_from_buffer(?s, ?src);
+    if (is_err[Sound, str](sr)) { audio.dnit(?src); ret 2; }
+    var snd: Sound = unwrap_ok[Sound, str](sr);
+    if (snd.buffer.samples == src.samples) { ret 3; }
+
+    src.samples[0] = -1.0;
+    if (!near(snd.buffer.samples[0], 0.25)) { ret 4; }
+    audio.dnit(?src);
+    sound_free(?s, ?snd);
+    ret 0;
+}
+
+test "audio: releasing a sound retires every borrowing voice" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio = test_audio(?a, 2);
+
+    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val br: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (is_err[audio.Buffer, str](br)) { ret 1; }
+    var snd: Sound;
+    snd.buffer = unwrap_ok[audio.Buffer, str](br);
+    snd.valid = true;
+
+    s.voices[0].stream = audio.stream_over(?snd.buffer, true);
+    atomic.store(?s.voices[0].state, PLAYING);
+    sound_free(?s, ?snd);
+
+    if (snd.valid || atomic.load(?s.voices[0].state) != FREE) { ret 2; }
+    allo.deallocate[f32](?a, s.scratch, s.frames * s.chans);
     ret 0;
 }
 
@@ -1136,5 +1285,16 @@ test "audio: voice_none names nothing and is refused everywhere" {
     if (audio_set_gain(?s, none, 0.5)) { ret 1; }
     if (audio_set_pan(?s, none, 0.5))  { ret 2; }
     if (audio_set_rate(?s, none, 2.0)) { ret 3; }
+    ret 0;
+}
+
+test "audio: a quiesced mixer refuses new voices" {
+    var s: Audio;
+    s.ready = true;
+    s.started = false;
+    var snd: Sound;
+    snd.valid = true;
+    val id: VoiceId = audio_play(?s, ?snd, 1.0, false);
+    if (id.slot != 0 || id.gen != 0) { ret 1; }
     ret 0;
 }
