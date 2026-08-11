@@ -23,7 +23,8 @@ A game implements the `boom.app.App` hooks and hands them to the run loop. The
 `boom.context.Context` owns the window, the frame clock, the fixed-timestep
 accumulator, and the input queue; `boom.engine.run` drives the hooks around a
 poll → update → render frame, running updates at a fixed rate independent of
-the frame rate and exposing the leftover interpolation factor as `ctx.alpha`.
+the frame rate, exposing the leftover interpolation factor as `ctx.alpha`, and
+returning the context's final process status.
 
 ```mach
 use std.runtime;
@@ -42,6 +43,7 @@ fun main(argc: i64, argv: **u8) i64 {
         title:     "example",
         fixed_dt:  SECOND / 60,      # 60 Hz update
         max_frame: SECOND / 4,       # spiral-of-death clamp
+        frame_dt:  0,                # wall clock; pin for deterministic probes
     };
     if (!boom.context.context_init(?ctx, cfg)) {
         ret 1;
@@ -53,10 +55,10 @@ fun main(argc: i64, argv: **u8) i64 {
         f_draw:     draw,
         f_dnit: nil::fun(*boom.context.Context),
     };
-    boom.engine.run(?ctx, ?app);
+    val status: i64 = boom.engine.run(?ctx, ?app);
 
     boom.context.context_shutdown(?ctx);
-    ret 0;
+    ret status;
 }
 ```
 
@@ -66,6 +68,9 @@ loop skips it.
 Window-manager close requests stop the loop. Escape is otherwise an ordinary
 `KEY_ESCAPE` input owned by the application, so it can open a pause menu, act as
 Back, or call `context_stop` when the application chooses to quit.
+`context_fail` stops immediately and records a non-zero status for `run` to
+return. Physics worlds are application-owned and advanced explicitly from a
+fixed tick, so pausing one simulation never requires changing the core loop.
 
 ## Graphics
 
