@@ -1,8 +1,8 @@
 # the boom engine's public surface
 #
 # re-exports the engine modules a game consumes: the app hooks, the
-# context and its lifecycle, the run loop, the timing, input-event, log,
-# and window utilities, the shared math, and the graphics renderer.
+# context and its lifecycle, the run loop, timing and input utilities,
+# shared math, physics, audio, and the graphics renderer.
 # consumers import this as `use boom;`, or reach a subsystem directly,
 # e.g. `use boom.graphics;` or `use boom.math;`.
 
@@ -18,7 +18,6 @@ fwd boom.input;
 fwd boom.vfs;
 fwd boom.physics;
 fwd boom.audio;
-fwd boom.log;
 fwd boom.window;
 fwd boom.math;
 fwd boom.graphics;

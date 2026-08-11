@@ -8,11 +8,11 @@ boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.
 
 Early development. The engine core is in place: a context-owned lifecycle
 (`init` → `run` → `shutdown`), a fixed-timestep loop with render interpolation,
-a GLFW window with no client API, and timing, input-event, and logging
-utilities. `boom.graphics` is a Vulkan renderer built around a `Renderer` and
-render passes: opaque texture, mesh, material, and render-target handles over
-mach-vk, with 2D and 3D driven through the same pass machinery and an
-extensible vertex format underpinning meshes. Shaders are written in Mach,
+a GLFW window with no client API, and timing and input-event utilities.
+Applications use `std.log` directly. `boom.graphics` is a Vulkan renderer built
+around a `Renderer` and render passes: opaque texture, mesh, material, and
+render-target handles over mach-vk, with 2D and 3D driven through the same pass
+machinery and an extensible vertex format underpinning meshes. Shaders are written in Mach,
 compiled to SPIR-V at build time and embedded, so a shipped binary carries
 them. A skeletal animation runtime loads and plays animated glTF models with
 mach-gltf fully hidden (see [Animation](#animation)).
