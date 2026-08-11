@@ -164,7 +164,7 @@ pub val MAX_PALETTES: usize = PALETTES_PER_BLOCK * MAX_PALETTE_BLOCKS;
 
 # Bytes reserved per palette slot.
 #
-# MAX_JOINTS 4x4 matrices, which is what shaders/src/skinned_vert.mach declares
+# MAX_JOINTS 4x4 matrices, which is what src/shaders/skinned_vert.mach declares
 # as its 512-column storage block. The compile-time check in
 # boom.graphics.skeleton keeps the joint count in step with the shader.
 pub val PALETTE_BYTES: usize = 128 * 64;

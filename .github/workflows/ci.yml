@@ -54,18 +54,15 @@ jobs:
       # shader read whatever bytes are there, with no diagnostic anywhere.
       # A glob over an empty directory makes the loop body run zero times and
       # the step pass, which is exactly the state a failed shader build leaves.
-      # The expected set is DERIVED from shaders/mach.toml, not written down
-      # here. A count restated in this file is a second copy of a fact the
-      # manifest owns: it goes stale on the next shader and fails for the wrong
-      # reason, and worse, a shader that silently stopped building would still
-      # satisfy a number that had been lowered to match.
+      # The expected set is derived from the root manifest, not written down
+      # here. A count restated in this file would go stale with the next shader.
       - name: Validate the emitted SPIR-V
         run: |
           set -euo pipefail
-          expected=$(grep -oP '^out\s*=\s*"\K[^"]+\.spv' shaders/mach.toml | sort)
+          expected=$(grep -oP '^out\s*=\s*"spv/\K[^"]+\.spv' mach.toml | sort)
           actual=$(ls res/spv | sort)
           if [ "$expected" != "$actual" ]; then
-            echo "res/spv does not match the artifacts shaders/mach.toml declares"
+            echo "res/spv does not match the shader artifacts mach.toml declares"
             diff <(echo "$expected") <(echo "$actual") || true
             exit 1
           fi
@@ -78,7 +75,7 @@ jobs:
           # rebuild would ship the old module, with the source and the binary
           # disagreeing and nothing saying so.
           if ! git diff --quiet -- res/spv; then
-            echo "res/spv does not match a fresh build of shaders/src"
+            echo "res/spv does not match a fresh build of src/shaders"
             git diff --stat -- res/spv
             echo "run 'mach build .' and commit the result"
             exit 1

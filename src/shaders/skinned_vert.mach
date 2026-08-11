@@ -50,7 +50,7 @@ rec Palette {
 
 # Transform a point by a 4x4 matrix given as its four columns.
 #
-# See shaders/src/mesh_vert.mach for why the product is a combination of
+# See src/shaders/mesh_vert.mach for why the product is a combination of
 # columns rather than four dot products. Duplicated here rather than shared
 # because a SPIR-V shader cannot call a function defined in another module
 # (mach#2823).

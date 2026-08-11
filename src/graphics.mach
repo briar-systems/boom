@@ -31,7 +31,7 @@
 # lighting system, since how a surface responds to light is the game's
 # decision. See examples/shader. The shaders are Mach, compiled to SPIR-V by
 # the build-shaders step and embedded by boom.graphics.spirv; they live in
-# shaders/.
+# src/shaders/.
 #
 # AN IMMEDIATE-MODE DRAW LIST GOES THROUGH pass_draw_triangles. A sprite is one
 # rectangle placed by a model matrix, which is the wrong shape for a UI, a

@@ -27,7 +27,7 @@ use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use boom.graphics.sprite.Rect;
 
-# The mesh vertex stage's uniform block, matching shaders/src/mesh_vert.mach.
+# The mesh vertex stage's uniform block, matching src/shaders/mesh_vert.mach.
 # ---
 # mvp:   Model-view-projection, applied to the position.
 # model: Model matrix; its upper-left 3x3 is applied to the normal.
@@ -36,7 +36,7 @@ pub rec MeshUniforms {
     model: Mat4;
 }
 
-# The skinned vertex stage's uniform block, matching shaders/src/skinned_vert.mach.
+# The skinned vertex stage's uniform block, matching src/shaders/skinned_vert.mach.
 #
 # WHY THIS IS NOT MeshUniforms WITH A RENAMED FIELD. The unskinned stage gets one
 # premultiplied MVP because nothing sits between the model matrix and the vertex.

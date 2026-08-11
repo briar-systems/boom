@@ -27,12 +27,12 @@ use std.types.string.str;
 # the most joints a skeleton and its skinning palette carry
 #
 # also the size of the joint palette the skinning shader declares as a
-# storage block; shaders/src/skinned_vert.mach hardcodes the resulting column
+# storage block; src/shaders/skinned_vert.mach hardcodes the resulting column
 # count and the guard below keeps the two in sync.
 pub val MAX_JOINTS: usize = 128;
 
 $if (MAX_JOINTS != 128) {
-    $error("skeleton: shaders/src/skinned_vert.mach declares a 512-column palette; keep it in sync with MAX_JOINTS");
+    $error("skeleton: src/shaders/skinned_vert.mach declares a 512-column palette; keep it in sync with MAX_JOINTS");
 }
 
 # a skeleton's joints, their hierarchy, and their bind data

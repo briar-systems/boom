@@ -39,3 +39,8 @@ commit = "33011b6198cdf5b5a381bdb2a6923afdc93ea2ae"
 url = "https://github.com/briar-systems/mach-vk"
 ref = "branch/main"
 commit = "a52428a59ad960adf4f468315008db2e097546ec"
+
+[dep.mach-shader]
+url = "https://github.com/briar-systems/mach-shader"
+ref = "branch/main"
+commit = "e4ad3d3ffa8c5e19c270381f76623087f2d3ac18"
