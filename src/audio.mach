@@ -262,7 +262,12 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
 # idempotent and retires every voice after the callback has stopped reading.
 pub fun audio_quiesce(s: *Audio) {
     if (!s.ready || !s.started) { ret; }
-    audio.stop(?s.device);
+    val stopped: Result[bool, str] = audio.stop(?s.device);
+    if (is_err[bool, str](stopped)) {
+        # Closing is the terminal fallback: it joins the callback even when
+        # the backend refuses a normal stop. audio_dnit closes idempotently.
+        audio.close(?s.device);
+    }
     s.started = false;
 
     # stop waits for the callback, so no stream is being read here
