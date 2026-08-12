@@ -78,7 +78,7 @@ ref = "branch/main"
 
 [dep.mach-font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "branch/main"
+ref = "branch/dev"
 
 [dep.mach-phys]
 git = "https://github.com/briar-systems/mach-phys"
