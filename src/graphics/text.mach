@@ -68,6 +68,43 @@ pub val FIRST_CP: u32 = 32;
 pub val LAST_CP:  u32 = 126;
 pub val GLYPH_COUNT: usize = 95;
 
+# how glyph coverage and placement are represented
+pub def FontRaster: u8;
+
+# retain fractional raster coverage and metrics
+pub val FONT_RASTER_SMOOTH: FontRaster = 0;
+# threshold coverage and place glyphs on whole pixels
+pub val FONT_RASTER_PIXEL: FontRaster = 1;
+
+# font atlas construction policy
+# ---
+# oversample: atlas texels per logical pixel; pixel fonts require one
+# raster:     smooth coverage or binary pixel coverage
+# threshold:  first coverage value considered solid in pixel mode
+pub rec FontOptions {
+    oversample: usize;
+    raster:     FontRaster;
+    threshold:  u8;
+}
+
+# default smooth font policy
+pub fun font_options() FontOptions {
+    ret FontOptions{
+        oversample: 1,
+        raster: FONT_RASTER_SMOOTH,
+        threshold: 128,
+    };
+}
+
+# one-bit font policy for pixel-sharp interfaces
+pub fun font_pixel_options() FontOptions {
+    ret FontOptions{
+        oversample: 1,
+        raster: FONT_RASTER_PIXEL,
+        threshold: 128,
+    };
+}
+
 # Scratch bounds for one glyph's outline, sized for the demanding glyphs in a
 # normal text face rather than the worst case in any font ever made
 val MAX_POINTS:   usize = 512;
@@ -106,6 +143,7 @@ rec Glyph {
 # ascent:       logical line-top-to-baseline distance
 # descent:      logical baseline-to-line-bottom distance, normally negative
 # raster_scale: atlas texels per logical pixel
+# pixel_snap:   whether origins and metrics stay on whole pixels
 # valid:        whether the face loaded
 pub rec Font {
     atlas:        Texture;
@@ -117,6 +155,7 @@ pub rec Font {
     ascent:       f32;
     descent:      f32;
     raster_scale: f32;
+    pixel_snap:   bool;
     valid:        bool;
 }
 
@@ -135,7 +174,7 @@ pub rec Font {
 # ret:    an owned Font, or a parse/allocation/upload error
 pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
                         pixels: f32) Result[Font, Error] {
-    ret font_from_bytes_oversampled(a, d, data, len, pixels, 1);
+    ret font_from_bytes_with_options(a, d, data, len, pixels, font_options());
 }
 
 # Rasterize borrowed TrueType bytes above their logical draw resolution.
@@ -152,25 +191,49 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
 # ret:        an owned Font, or a validation/parse/allocation/upload error
 pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
                                     pixels: f32, oversample: usize) Result[Font, Error] {
+    var options: FontOptions = font_options();
+    options.oversample = oversample;
+    ret font_from_bytes_with_options(a, d, data, len, pixels, options);
+}
+
+# Rasterize borrowed TrueType bytes with an explicit atlas policy.
+#
+# Pixel fonts use binary alpha and integral placement. Their logical height and
+# raster scale must therefore both be whole pixels.
+pub fun font_from_bytes_with_options(a: *allo.Allocator, d: *Device,
+                                     data: *u8, len: usize, pixels: f32,
+                                     options: FontOptions) Result[Font, Error] {
     var f: Font;
     f.valid = false;
 
     if (pixels <= 0.0) { ret err[Font, Error](error("font pixel height must be positive")); }
-    if (oversample == 0) { ret err[Font, Error](error("font oversample must be at least one")); }
+    if (options.oversample == 0) {
+        ret err[Font, Error](error("font oversample must be at least one"));
+    }
+    if (!font_raster_is_valid(options.raster)) {
+        ret err[Font, Error](error("unknown font raster policy"));
+    }
+    if (options.raster == FONT_RASTER_PIXEL && options.threshold == 0) {
+        ret err[Font, Error](error("font pixel threshold must be positive"));
+    }
+    if (options.raster == FONT_RASTER_PIXEL
+        && (options.oversample != 1 || pixels != pixel_round(pixels))) {
+        ret err[Font, Error](error("pixel fonts require a whole height at one-times raster"));
+    }
 
     var face: finfo.Font;
     if (!finfo.init(data, len, ?face)) {
         ret err[Font, Error](error("not a TrueType font"));
     }
 
-    val raster_scale: f32 = oversample::f32;
+    val raster_scale: f32 = options.oversample::f32;
     val raster_pixels: f32 = pixels * raster_scale;
     val logical_scale: f32 = finfo.scale_for_pixel_height(?face, pixels);
     val glyph_scale: f32 = finfo.scale_for_pixel_height(?face, raster_pixels);
 
     # Scale the complete established cell, including its margin, so changing
     # atlas resolution cannot change the logical destination rectangle.
-    val cell: usize = logical_cell_size(pixels) * oversample;
+    val cell: usize = logical_cell_size(pixels) * options.oversample;
     f.cell_w = cell;
     f.cell_h = cell;
     f.cols   = 16;
@@ -178,6 +241,12 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
     f.ascent = face.ascent::f32 * logical_scale;
     f.descent = face.descent::f32 * logical_scale;
     f.raster_scale = raster_scale;
+    f.pixel_snap = options.raster == FONT_RASTER_PIXEL;
+    if (f.pixel_snap) {
+        f.height = pixel_round(f.height);
+        f.ascent = pixel_round(f.ascent);
+        f.descent = pixel_round(f.descent);
+    }
 
     val rows:   usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
     val stride: usize = cell + GUTTER * 2;
@@ -218,6 +287,10 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
             if (finfo.glyph_hmetrics(?face, gi, ?adv, ?lsb)) {
                 f.glyphs[g].advance = adv::f32 * logical_scale;
                 f.glyphs[g].offset_x = lsb::f32 * logical_scale;
+                if (f.pixel_snap) {
+                    f.glyphs[g].advance = pixel_round(f.glyphs[g].advance);
+                    f.glyphs[g].offset_x = pixel_round(f.glyphs[g].offset_x);
+                }
             }
 
             var info: fglyf.GlyphInfo;
@@ -228,7 +301,9 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
 
             if (finfo.render_glyph(?face, gi, glyph_scale, ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
                                    ?edges[0], MAX_EDGES, cov, cell::u16, cell::u16)) {
-                val visible: bool = blit_cell(rgba, aw, cov, cell, g, f.cols);
+                val visible: bool = blit_cell(
+                    rgba, aw, cov, cell, g, f.cols,
+                    options.raster, options.threshold);
                 if (visible && has_info) {
                     f.glyphs[g].w = cell::f32 / raster_scale;
                     f.glyphs[g].h = cell::f32 / raster_scale;
@@ -238,6 +313,9 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
                         info.y_min,
                         logical_scale,
                     );
+                    if (f.pixel_snap) {
+                        f.glyphs[g].offset_y = pixel_round(f.glyphs[g].offset_y);
+                    }
                 }
             }
         }
@@ -270,12 +348,20 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
 # ret:    an owned Font, or a read/parse/allocation/upload error
 pub fun font_load(a: *allo.Allocator, d: *Device, vpath: str,
                   pixels: f32) Result[Font, Error] {
-    ret font_load_oversampled(a, d, vpath, pixels, 1);
+    ret font_load_with_options(a, d, vpath, pixels, font_options());
 }
 
 # Load a face from a virtual path with a higher raster than logical resolution.
 pub fun font_load_oversampled(a: *allo.Allocator, d: *Device, vpath: str,
                               pixels: f32, oversample: usize) Result[Font, Error] {
+    var options: FontOptions = font_options();
+    options.oversample = oversample;
+    ret font_load_with_options(a, d, vpath, pixels, options);
+}
+
+# Load a face from a virtual path with an explicit atlas policy.
+pub fun font_load_with_options(a: *allo.Allocator, d: *Device, vpath: str,
+                               pixels: f32, options: FontOptions) Result[Font, Error] {
     val pr: Result[str, str] = vfs.vfs_resolve(a, vpath);
     if (is_err[str, str](pr)) { ret err[Font, Error](error(unwrap_err[str, str](pr))); }
     val real: str = unwrap_ok[str, str](pr);
@@ -285,8 +371,8 @@ pub fun font_load_oversampled(a: *allo.Allocator, d: *Device, vpath: str,
         ret err[Font, Error](error(unwrap_err[vector.Vector[u8], str](br)));
     }
     var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-    val fr: Result[Font, Error] = font_from_bytes_oversampled(
-        a, d, bytes.data, bytes.len, pixels, oversample);
+    val fr: Result[Font, Error] = font_from_bytes_with_options(
+        a, d, bytes.data, bytes.len, pixels, options);
     vector.dnit[u8](?bytes);
     ret fr;
 }
@@ -306,7 +392,8 @@ fun clear_atlas(rgba: *u8, pixels: usize) {
 
 # Copy one coverage bitmap into the padded atlas cell as white-with-alpha.
 fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8,
-              cell: usize, index: usize, cols: usize) bool {
+              cell: usize, index: usize, cols: usize,
+              raster: FontRaster, threshold: u8) bool {
     val stride: usize = cell + GUTTER * 2;
     val cx: usize = (index % cols) * stride + GUTTER;
     val cy: usize = (index / cols) * stride + GUTTER;
@@ -316,16 +403,34 @@ fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8,
         var x: usize = 0;
         for (x < cell) {
             val o: usize = ((cy + y) * atlas_w + (cx + x)) * 4;
-            if (cov[y * cell + x] != 0) { visible = true; }
+            val alpha: u8 = coverage_alpha(cov[y * cell + x], raster, threshold);
+            if (alpha != 0) { visible = true; }
             rgba[o]     = 255;
             rgba[o + 1] = 255;
             rgba[o + 2] = 255;
-            rgba[o + 3] = cov[y * cell + x];
+            rgba[o + 3] = alpha;
             x = x + 1;
         }
         y = y + 1;
     }
     ret visible;
+}
+
+fun coverage_alpha(coverage: u8, raster: FontRaster, threshold: u8) u8 {
+    if (raster == FONT_RASTER_PIXEL) {
+        if (coverage >= threshold) { ret 255; }
+        ret 0;
+    }
+    ret coverage;
+}
+
+fun font_raster_is_valid(raster: FontRaster) bool {
+    ret raster == FONT_RASTER_SMOOTH || raster == FONT_RASTER_PIXEL;
+}
+
+fun pixel_round(value: f32) f32 {
+    if (value < 0.0) { ret (value - 0.5)::i64::f32; }
+    ret (value + 0.5)::i64::f32;
 }
 
 fun glyph_info(f: *finfo.Font, glyph: u16, out: *fglyf.GlyphInfo) bool {
@@ -388,7 +493,13 @@ fun cell_uv(f: *Font, slot: usize) Rect {
 }
 
 fun glyph_dest(f: *Font, glyph: *Glyph, x: f32, y: f32) Rect {
-    ret rect(x + glyph.offset_x, y + glyph.offset_y,
+    var px: f32 = x;
+    var py: f32 = y;
+    if (f.pixel_snap) {
+        px = pixel_round(px);
+        py = pixel_round(py);
+    }
+    ret rect(px + glyph.offset_x, py + glyph.offset_y,
             f.cell_w::f32 / f.raster_scale,
             f.cell_h::f32 / f.raster_scale);
 }
@@ -415,6 +526,7 @@ fun logical_cell_size(pixels: f32) usize {
 pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     if (!f.valid || s == nil) { ret x; }
     var pen: f32 = x;
+    if (f.pixel_snap) { pen = pixel_round(pen); }
     var i: usize = 0;
     val n: usize = str_len(s);
     for (i < n) {
@@ -449,6 +561,7 @@ fun test_font(advance: f32) Font {
     f.ascent = 9.0;
     f.descent = 0.0 - 3.0;
     f.raster_scale = 1.0;
+    f.pixel_snap = false;
     f.valid  = true;
     var g: usize = 0;
     for (g < GLYPH_COUNT) {
@@ -557,7 +670,8 @@ test "text: glyph coverage stays inside a white transparent gutter" {
     var rgba: [64]u8;
     var cov: [4]u8 = [4]u8{32, 64, 128, 255};
     clear_atlas(?rgba[0], 16);
-    blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1);
+    blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1,
+        FONT_RASTER_SMOOTH, 128);
 
     # Both outer corners remain transparent white, so a linear edge sample
     # softens alpha without introducing a dark fringe.
@@ -574,7 +688,32 @@ test "text: empty coverage remains advance-only" {
     var rgba: [64]u8;
     var cov: [4]u8;
     clear_atlas(?rgba[0], 16);
-    if (blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1)) { ret 1; }
+    if (blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1,
+        FONT_RASTER_SMOOTH, 128)) { ret 1; }
+    ret 0;
+}
+
+test "text: pixel coverage is one bit at the threshold" {
+    var rgba: [64]u8;
+    var cov: [4]u8 = [4]u8{0, 127, 128, 255};
+    clear_atlas(?rgba[0], 16);
+    if (!blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1,
+        FONT_RASTER_PIXEL, 128)) { ret 1; }
+    if (rgba[23] != 0 || rgba[27] != 0) { ret 2; }
+    if (rgba[39] != 255 || rgba[43] != 255) { ret 3; }
+    ret 0;
+}
+
+test "text: pixel fonts quantize glyph placement" {
+    var f: Font = test_font(7.0);
+    f.pixel_snap = true;
+    f.glyphs[0].offset_x = 2.0;
+    f.glyphs[0].offset_y = 0.0 - 3.0;
+    val d: Rect = glyph_dest(?f, ?f.glyphs[0], 3.49, 5.51);
+    if (d.x != 5.0 || d.y != 3.0) { ret 1; }
+    if (pixel_round(1.49) != 1.0 || pixel_round(1.5) != 2.0) { ret 2; }
+    if (pixel_round(0.0 - 1.49) != 0.0 - 1.0
+        || pixel_round(0.0 - 1.5) != 0.0 - 2.0) { ret 3; }
     ret 0;
 }
 
