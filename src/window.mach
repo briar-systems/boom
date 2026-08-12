@@ -245,7 +245,12 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     var attached: glfw.Monitor = glfw.no_monitor();
     var mx: i32 = 0;
     var my: i32 = 0;
-    val video: *Vidmode = glfw.get_video_mode(monitor);
+    var video: *Vidmode = nil;
+    if (glfw.monitor_is_valid(monitor)) { video = glfw.get_video_mode(monitor); }
+    if (mode != WINDOW_MODE_WINDOWED && video == nil) {
+        glfw.terminate();
+        ret Window{handle: glfw.no_window(), width: 0, height: 0};
+    }
     if (mode != WINDOW_MODE_WINDOWED && video != nil) {
         open_width = video.width;
         open_height = video.height;
@@ -266,7 +271,10 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         ret Window{handle: win, width: 0, height: 0};
     }
 
-    var restore: WindowBounds = centered_bounds(monitor, width, height);
+    var restore: WindowBounds = WindowBounds{x: 0, y: 0, width: width, height: height};
+    if (glfw.monitor_is_valid(monitor)) {
+        restore = centered_bounds(monitor, width, height);
+    }
     if (mode == WINDOW_MODE_BORDERLESS) {
         glfw.set_window_attrib(win, glfw.DECORATED, glfw.FALSE);
         glfw.set_window_pos(win, mx, my);
@@ -313,8 +321,9 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
     }
 
     val monitor: glfw.Monitor = monitor_for_window(w);
+    if (!glfw.monitor_is_valid(monitor)) { ret false; }
     val video: *Vidmode = glfw.get_video_mode(monitor);
-    if (!glfw.monitor_is_valid(monitor) || video == nil) { ret false; }
+    if (video == nil) { ret false; }
 
     var mx: i32 = 0;
     var my: i32 = 0;
@@ -333,6 +342,7 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
         glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.FALSE);
         glfw.set_window_monitor(w.handle, glfw.no_monitor(), mx, my,
             video.width, video.height, glfw.DONT_CARE);
+        glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.FALSE);
     }
     or {
         glfw.set_window_monitor(w.handle, monitor, 0, 0,
