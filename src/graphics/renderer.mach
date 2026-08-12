@@ -77,6 +77,7 @@ use boom.graphics.frame.frame_init;
 use boom.graphics.frame.frame_begin;
 use boom.graphics.frame.frame_end;
 use boom.graphics.frame.frame_rebuild_targets;
+use boom.graphics.frame.frame_release_targets;
 use boom.graphics.frame.frame_suspend_pass;
 use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_dnit;
@@ -407,17 +408,27 @@ pub fun renderer_height(r: *Renderer) i32 {
 # r:      renderer to update
 # width:  the new framebuffer width in pixels
 # height: the new framebuffer height in pixels
-pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
-    if (width <= 0 || height <= 0) { ret; }
+pub fun renderer_resize(r: *Renderer, width: i32, height: i32) Result[bool, Error] {
+    ret renderer_rebuild(r, width, height, false);
+}
+
+fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
+                     force: bool) Result[bool, Error] {
+    if (width <= 0 || height <= 0) { ret ok[bool, Error](true); }
 
     # Already the right size, so there is nothing to rebuild. Without this the
     # per-frame check below would idle the device and recreate every swapchain
     # image on every frame, which is a rebuild storm rather than a resize.
-    if (width == r.width && height == r.height && r.swap.ready) { ret; }
+    if (!force && width == r.width && height == r.height && r.swap.ready) {
+        ret ok[bool, Error](true);
+    }
 
+    vk.vkDeviceWaitIdle(r.vk.device);
+    frame_release_targets(?r.frame, ?r.vk);
     val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32);
-    if (is_err[bool, Error](sr)) { ret; }
-    frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
+    if (is_err[bool, Error](sr)) { ret sr; }
+    val fr: Result[bool, Error] = frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
+    if (is_err[bool, Error](fr)) { ret fr; }
 
     # THE SURFACE DECIDES, NOT THE REQUEST. A surface reporting a concrete
     # currentExtent overrides whatever size was asked for, which is the usual
@@ -431,6 +442,7 @@ pub fun renderer_resize(r: *Renderer, width: i32, height: i32) {
     # correction back.
     r.width  = r.swap.width::i32;
     r.height = r.swap.height::i32;
+    ret ok[bool, Error](true);
 }
 
 # begin this renderer's frame
@@ -471,8 +483,10 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     glfw.get_framebuffer_size(r.window, ?fw, ?fh);
     # Zero in either dimension is a minimized window: a legal state, and not one
     # a swapchain can be built for, so the frame is skipped rather than rebuilt.
-    if (fw > 0 && fh > 0 && (fw != r.width || fh != r.height)) {
-        renderer_resize(r, fw, fh);
+    if (fw <= 0 || fh <= 0) { ret ok[bool, Error](true); }
+    if (fw != r.width || fh != r.height) {
+        val rr: Result[bool, Error] = renderer_resize(r, fw, fh);
+        if (is_err[bool, Error](rr)) { ret rr; }
     }
 
     var began: bool = false;
@@ -480,7 +494,8 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     if (is_err[bool, Error](br)) { ret br; }
 
     if (!began) {
-        renderer_resize(r, r.width, r.height);
+        val rr: Result[bool, Error] = renderer_rebuild(r, fw, fh, true);
+        if (is_err[bool, Error](rr)) { ret rr; }
         ret ok[bool, Error](true);
     }
 
@@ -508,7 +523,10 @@ pub fun renderer_end_frame(r: *Renderer) Result[bool, Error] {
     var ended: bool = false;
     val er: Result[bool, Error] = frame_end(?r.frame, ?r.vk, ?r.swap, ?ended);
     if (is_err[bool, Error](er)) { ret er; }
-    if (!ended) { renderer_resize(r, r.width, r.height); }
+    if (!ended) {
+        val rr: Result[bool, Error] = renderer_rebuild(r, r.width, r.height, true);
+        if (is_err[bool, Error](rr)) { ret rr; }
+    }
     ret ok[bool, Error](true);
 }
 

@@ -71,6 +71,7 @@ fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
 pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bool, Error] {
     s.ready = false;
     s.count = 0;
+    s.handle = nil;
 
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
 
@@ -143,14 +144,15 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
 
     var got: u32 = 0;
     if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil))) {
+        swapchain_dnit(s, v);
         ret err[bool, Error](error("could not count swapchain images"));
     }
     if (got::usize > MAX_IMAGES) { got = MAX_IMAGES::u32; }
     if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]))) {
+        swapchain_dnit(s, v);
         ret err[bool, Error](error("could not fetch swapchain images"));
     }
 
-    s.count  = got;
     s.format = v.color_format;
     s.width  = w;
     s.height = h;
@@ -175,8 +177,10 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
         vci.subresourceRange.layerCount     = 1;
 
         if (vk.vkCreateImageView(v.device, ?vci, nil, ?s.views[i]) != vk.SUCCESS) {
+            swapchain_dnit(s, v);
             ret err[bool, Error](error("could not create a swapchain image view"));
         }
+        s.count = s.count + 1;
         i = i + 1;
     }
 
@@ -189,13 +193,16 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
 # The images are owned by the swapchain and must not be destroyed here; the
 # views are ours and must be destroyed first.
 pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
-    if (!s.ready) { ret; }
     var i: u32 = 0;
     for (i < s.count) {
         vk.vkDestroyImageView(v.device, s.views[i], nil);
+        s.views[i] = nil;
         i = i + 1;
     }
-    vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
+    if (s.handle != nil) {
+        vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
+        s.handle = nil;
+    }
     s.count = 0;
     s.ready = false;
 }

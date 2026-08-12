@@ -223,7 +223,10 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] 
     var i: u32 = 0;
     for (i < s.count) {
         val dr: Result[bool, Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
-        if (is_err[bool, Error](dr)) { ret dr; }
+        if (is_err[bool, Error](dr)) {
+            frame_release_targets(f, v);
+            ret dr;
+        }
 
         var views: [2]vk.ImageView;
         views[0] = s.views[i];
@@ -239,6 +242,8 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] 
         fci.height          = s.height;
         fci.layers          = 1;
         if (vk.vkCreateFramebuffer(v.device, ?fci, nil, ?f.framebuffers[i]) != vk.SUCCESS) {
+            depth_attachment_dnit(?f.depths[i], v);
+            frame_release_targets(f, v);
             ret err[bool, Error](error("vkCreateFramebuffer failed"));
         }
         f.fb_count = f.fb_count + 1;
