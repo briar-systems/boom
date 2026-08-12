@@ -40,6 +40,9 @@ pub val WINDOW_MODE_BORDERLESS: WindowMode = 1;
 pub val WINDOW_MODE_FULLSCREEN: WindowMode = 2;
 
 # windowed client bounds in screen coordinates
+# ---
+# x/y:          client origin on the virtual desktop
+# width/height: client size, independent of framebuffer scale
 pub rec WindowBounds {
     x:      i32;
     y:      i32;
@@ -52,6 +55,9 @@ pub rec WindowBounds {
 # handle: the underlying GLFW window, nil-handled when creation failed
 # width:  current framebuffer width in pixels
 # height: current framebuffer height in pixels
+# mode: semantic presentation mode, including detached borderless windows
+# windowed: ordinary client bounds retained across fullscreen transitions
+# min_width/min_height: client limits applied when restoring windowed mode
 pub rec Window {
     handle: glfw.Window;
     width:  i32;
@@ -232,6 +238,11 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
 }
 
 # open a window in one explicit presentation mode
+# ---
+# width/height: ordinary windowed client size in screen coordinates
+# title:        window title, UTF-8
+# mode:         initial windowed, borderless, or fullscreen policy
+# ret:          opened Window sized in framebuffer pixels, nil on failure
 pub fun window_open_mode(width: i32, height: i32, title: str,
                          mode: WindowMode) Window {
     if (!glfw.init()) {
@@ -298,6 +309,9 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
 }
 
 # whether a value names a supported window mode
+# ---
+# mode: value to validate
+# ret:  true for windowed, borderless, or fullscreen
 pub fun window_mode_is_valid(mode: WindowMode) bool {
     ret mode == WINDOW_MODE_WINDOWED
         || mode == WINDOW_MODE_BORDERLESS
@@ -305,12 +319,19 @@ pub fun window_mode_is_valid(mode: WindowMode) bool {
 }
 
 # the current semantic window mode
+# ---
+# w:   window to query
+# ret: retained mode, or windowed for a nil window
 pub fun window_mode(w: *Window) WindowMode {
     if (w == nil) { ret WINDOW_MODE_WINDOWED; }
     ret w.mode;
 }
 
 # change the live window mode without recreating the Vulkan surface
+# ---
+# w:    live window to update outside an open render frame
+# mode: requested presentation mode
+# ret:  true when the request was applied or already active
 pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
     if (!window_is_valid(w) || !window_mode_is_valid(mode)) { ret false; }
     if (w.mode == mode) { ret true; }

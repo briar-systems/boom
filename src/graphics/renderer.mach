@@ -408,6 +408,7 @@ pub fun renderer_height(r: *Renderer) i32 {
 # r:      renderer to update
 # width:  the new framebuffer width in pixels
 # height: the new framebuffer height in pixels
+# ret:    success, or the first swapchain or framebuffer rebuild error
 pub fun renderer_resize(r: *Renderer, width: i32, height: i32) Result[bool, Error] {
     ret renderer_rebuild(r, width, height, false);
 }
