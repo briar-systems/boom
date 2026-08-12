@@ -76,14 +76,24 @@ pub val FONT_RASTER_SMOOTH: FontRaster = 0;
 # threshold coverage and place glyphs on whole pixels
 pub val FONT_RASTER_PIXEL: FontRaster = 1;
 
+# how the requested font size maps onto the face's design space
+pub def FontSizeMode: u8;
+
+# requested pixels span the face's ascent through descent
+pub val FONT_SIZE_LINE_HEIGHT: FontSizeMode = 0;
+# requested pixels span one em, matching conventional font-size APIs
+pub val FONT_SIZE_EM: FontSizeMode = 1;
+
 # font atlas construction policy
 # ---
 # oversample: atlas texels per logical pixel; pixel fonts require one
 # raster:     smooth coverage or binary pixel coverage
+# size_mode:  whether the requested size describes the line or em square
 # threshold:  first coverage value considered solid in pixel mode
 pub rec FontOptions {
     oversample: usize;
     raster:     FontRaster;
+    size_mode:  FontSizeMode;
     threshold:  u8;
 }
 
@@ -92,15 +102,17 @@ pub fun font_options() FontOptions {
     ret FontOptions{
         oversample: 1,
         raster: FONT_RASTER_SMOOTH,
+        size_mode: FONT_SIZE_LINE_HEIGHT,
         threshold: 128,
     };
 }
 
-# one-bit font policy for pixel-sharp interfaces
+# one-bit, em-sized font policy for pixel-sharp interfaces
 pub fun font_pixel_options() FontOptions {
     ret FontOptions{
         oversample: 1,
         raster: FONT_RASTER_PIXEL,
+        size_mode: FONT_SIZE_EM,
         threshold: 128,
     };
 }
@@ -139,7 +151,7 @@ rec Glyph {
 # cell_w:       atlas cell width in raster texels
 # cell_h:       atlas cell height in raster texels
 # cols:         cells per atlas row
-# height:       logical pixel height used for measurement and drawing
+# height:       logical ascent-to-descent height used for layout
 # ascent:       logical line-top-to-baseline distance
 # descent:      logical baseline-to-line-bottom distance, normally negative
 # raster_scale: atlas texels per logical pixel
@@ -198,8 +210,8 @@ pub fun font_from_bytes_oversampled(a: *allo.Allocator, d: *Device, data: *u8, l
 
 # Rasterize borrowed TrueType bytes with an explicit atlas policy.
 #
-# Pixel fonts use binary alpha and integral placement. Their logical height and
-# raster scale must therefore both be whole pixels.
+# Pixel fonts use binary alpha, integral placement, and conventional em sizing.
+# Their requested size and raster scale must therefore both be whole pixels.
 pub fun font_from_bytes_with_options(a: *allo.Allocator, d: *Device,
                                      data: *u8, len: usize, pixels: f32,
                                      options: FontOptions) Result[Font, Error] {
@@ -212,6 +224,9 @@ pub fun font_from_bytes_with_options(a: *allo.Allocator, d: *Device,
     }
     if (!font_raster_is_valid(options.raster)) {
         ret err[Font, Error](error("unknown font raster policy"));
+    }
+    if (!font_size_mode_is_valid(options.size_mode)) {
+        ret err[Font, Error](error("unknown font size policy"));
     }
     if (options.raster == FONT_RASTER_PIXEL && options.threshold == 0) {
         ret err[Font, Error](error("font pixel threshold must be positive"));
@@ -227,17 +242,18 @@ pub fun font_from_bytes_with_options(a: *allo.Allocator, d: *Device,
     }
 
     val raster_scale: f32 = options.oversample::f32;
-    val raster_pixels: f32 = pixels * raster_scale;
-    val logical_scale: f32 = finfo.scale_for_pixel_height(?face, pixels);
-    val glyph_scale: f32 = finfo.scale_for_pixel_height(?face, raster_pixels);
+    val logical_scale: f32 = font_scale(?face, pixels, options.size_mode);
+    val glyph_scale: f32 = logical_scale * raster_scale;
+    val line_height: f32 =
+        (face.ascent::i32 - face.descent::i32)::f32 * logical_scale;
 
     # Scale the complete established cell, including its margin, so changing
     # atlas resolution cannot change the logical destination rectangle.
-    val cell: usize = logical_cell_size(pixels) * options.oversample;
+    val cell: usize = logical_cell_size(line_height) * options.oversample;
     f.cell_w = cell;
     f.cell_h = cell;
     f.cols   = 16;
-    f.height = pixels;
+    f.height = line_height;
     f.ascent = face.ascent::f32 * logical_scale;
     f.descent = face.descent::f32 * logical_scale;
     f.raster_scale = raster_scale;
@@ -428,6 +444,15 @@ fun font_raster_is_valid(raster: FontRaster) bool {
     ret raster == FONT_RASTER_SMOOTH || raster == FONT_RASTER_PIXEL;
 }
 
+fun font_size_mode_is_valid(mode: FontSizeMode) bool {
+    ret mode == FONT_SIZE_LINE_HEIGHT || mode == FONT_SIZE_EM;
+}
+
+fun font_scale(face: *finfo.Font, pixels: f32, mode: FontSizeMode) f32 {
+    if (mode == FONT_SIZE_EM) { ret finfo.scale_for_em_size(face, pixels); }
+    ret finfo.scale_for_pixel_height(face, pixels);
+}
+
 fun pixel_round(value: f32) f32 {
     if (value < 0.0) { ret (value - 0.5)::i64::f32; }
     ret (value + 0.5)::i64::f32;
@@ -598,6 +623,22 @@ test "text: borrowed invalid font bytes return a parse error before upload" {
     var bytes: [4]u8 = [4]u8{0, 1, 2, 3};
     val r: Result[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 4, 16.0);
     if (!is_err[Font, Error](r)) { ret 1; }
+    ret 0;
+}
+
+test "text: pixel policy preserves an em-aligned design grid" {
+    val options: FontOptions = font_pixel_options();
+    if (options.raster != FONT_RASTER_PIXEL
+        || options.size_mode != FONT_SIZE_EM) { ret 1; }
+
+    var face: finfo.Font;
+    face.units_per_em = 550;
+    face.ascent = 550;
+    face.descent = 0 - 150;
+    val scale: f32 = font_scale(?face, 11.0, options.size_mode);
+    if (scale != 0.02) { ret 2; }
+    if (50.0 * scale != 1.0) { ret 3; }
+    if ((face.ascent::i32 - face.descent::i32)::f32 * scale != 14.0) { ret 4; }
     ret 0;
 }
 
