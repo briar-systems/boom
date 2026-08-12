@@ -34,15 +34,17 @@ pub def WindowMode: u8;
 
 # decorated, compositor-managed window
 pub val WINDOW_MODE_WINDOWED: WindowMode = 0;
-# undecorated window covering one monitor
+# undecorated window requesting coverage of one monitor
 pub val WINDOW_MODE_BORDERLESS: WindowMode = 1;
-# monitor-attached fullscreen window
+# monitor-attached fullscreen window; exact exclusivity is platform-defined
 pub val WINDOW_MODE_FULLSCREEN: WindowMode = 2;
 
 # windowed client bounds in screen coordinates
 # ---
-# x/y:          client origin on the virtual desktop
-# width/height: client size, independent of framebuffer scale
+# x:      client origin on the virtual desktop
+# y:      client origin on the virtual desktop
+# width:  client size, independent of framebuffer scale
+# height: client size, independent of framebuffer scale
 pub rec WindowBounds {
     x:      i32;
     y:      i32;
@@ -56,13 +58,16 @@ pub rec WindowBounds {
 # width:  current framebuffer width in pixels
 # height: current framebuffer height in pixels
 # mode: semantic presentation mode, including detached borderless windows
+# monitor: output retained when the platform cannot report window placement
 # windowed: ordinary client bounds retained across fullscreen transitions
-# min_width/min_height: client limits applied when restoring windowed mode
+# min_width:  client limit applied when restoring windowed mode
+# min_height: client limit applied when restoring windowed mode
 pub rec Window {
     handle: glfw.Window;
     width:  i32;
     height: i32;
     mode:   WindowMode;
+    monitor: glfw.Monitor;
     windowed: WindowBounds;
     min_width:  i32;
     min_height: i32;
@@ -239,7 +244,8 @@ pub fun window_open(width: i32, height: i32, title: str) Window {
 
 # open a window in one explicit presentation mode
 # ---
-# width/height: ordinary windowed client size in screen coordinates
+# width:        ordinary windowed client width in screen coordinates
+# height:       ordinary windowed client height in screen coordinates
 # title:        window title, UTF-8
 # mode:         initial windowed, borderless, or fullscreen policy
 # ret:          opened Window sized in framebuffer pixels, nil on failure
@@ -304,7 +310,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     var fw: i32 = width;
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
-    ret Window{handle: win, width: fw, height: fh, mode: mode,
+    ret Window{handle: win, width: fw, height: fh, mode: mode, monitor: monitor,
         windowed: restore, min_width: 1, min_height: 1};
 }
 
@@ -371,6 +377,7 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
     }
 
     w.mode = mode;
+    w.monitor = monitor;
     window_refresh_size(w);
     ret true;
 }
@@ -514,6 +521,9 @@ fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
     var area: WindowBounds;
     glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
     var frame: WindowBounds;
+    # Wayland deliberately withholds server-decoration extents and placement;
+    # GLFW reports zeroes there and the compositor remains authoritative. The
+    # normal restore size still fits the work area without guessing at chrome.
     glfw.get_window_frame_size(handle, ?frame.x, ?frame.y, ?frame.width, ?frame.height);
     val fitted: WindowBounds = clamp_bounds(bounds, area, frame, min_width, min_height);
     glfw.set_window_size(handle, fitted.width, fitted.height);
@@ -536,6 +546,10 @@ fun clamp_bounds(bounds: WindowBounds, area: WindowBounds, frame: WindowBounds,
 }
 
 fun monitor_for_window(w: *Window) glfw.Monitor {
+    if (w.mode != WINDOW_MODE_WINDOWED && monitor_connected(w.monitor)) {
+        ret w.monitor;
+    }
+
     var wx: i32 = w.windowed.x;
     var wy: i32 = w.windowed.y;
     var ww: i32 = w.windowed.width;
@@ -562,6 +576,18 @@ fun monitor_for_window(w: *Window) glfw.Monitor {
         i = i + 1;
     }
     ret best;
+}
+
+fun monitor_connected(monitor: glfw.Monitor) bool {
+    if (!glfw.monitor_is_valid(monitor)) { ret false; }
+    var count: i32 = 0;
+    val handles: *ptr = glfw.get_monitors(?count);
+    var i: i32 = 0;
+    for (handles != nil && i < count) {
+        if (handles[i] == monitor.handle) { ret true; }
+        i = i + 1;
+    }
+    ret false;
 }
 
 fun overlap_area(ax: i32, ay: i32, aw: i32, ah: i32,

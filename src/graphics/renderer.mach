@@ -420,7 +420,8 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
     # Already the right size, so there is nothing to rebuild. Without this the
     # per-frame check below would idle the device and recreate every swapchain
     # image on every frame, which is a rebuild storm rather than a resize.
-    if (!force && width == r.width && height == r.height && r.swap.ready) {
+    if (!force && width == r.width && height == r.height
+        && r.swap.ready && r.frame.fb_count > 0) {
         ret ok[bool, Error](true);
     }
 
@@ -485,7 +486,7 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     # Zero in either dimension is a minimized window: a legal state, and not one
     # a swapchain can be built for, so the frame is skipped rather than rebuilt.
     if (fw <= 0 || fh <= 0) { ret ok[bool, Error](true); }
-    if (fw != r.width || fh != r.height) {
+    if (renderer_needs_rebuild(r, fw, fh)) {
         val rr: Result[bool, Error] = renderer_resize(r, fw, fh);
         if (is_err[bool, Error](rr)) { ret rr; }
     }
@@ -512,6 +513,12 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     r.drawing = true;
     @out_ok = true;
     ret ok[bool, Error](true);
+}
+
+fun renderer_needs_rebuild(r: *Renderer, width: i32, height: i32) bool {
+    if (width <= 0 || height <= 0) { ret false; }
+    ret width != r.width || height != r.height
+        || !r.swap.ready || r.frame.fb_count == 0;
 }
 
 # end the frame, submit it, and present
@@ -595,6 +602,19 @@ test "renderer: zero state teardown is idempotent" {
     renderer_dnit(?r);
     renderer_dnit(?r);
     if (r.drawing) { ret 1; }
+    ret 0;
+}
+
+test "renderer: failed target rebuild remains retryable" {
+    var r: Renderer;
+    r.width = 1280;
+    r.height = 720;
+    if (!renderer_needs_rebuild(?r, 1280, 720)) { ret 1; }
+    r.swap.ready = true;
+    if (!renderer_needs_rebuild(?r, 1280, 720)) { ret 2; }
+    r.frame.fb_count = 2;
+    if (renderer_needs_rebuild(?r, 1280, 720)) { ret 3; }
+    if (!renderer_needs_rebuild(?r, 1920, 1080)) { ret 4; }
     ret 0;
 }
 

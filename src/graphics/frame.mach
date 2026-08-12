@@ -224,6 +224,7 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] 
     for (i < s.count) {
         val dr: Result[bool, Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
         if (is_err[bool, Error](dr)) {
+            depth_attachment_dnit(?f.depths[i], v);
             frame_release_targets(f, v);
             ret dr;
         }
