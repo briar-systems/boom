@@ -57,9 +57,10 @@ pub rec WindowBounds {
 # handle: the underlying GLFW window, nil-handled when creation failed
 # width:  current framebuffer width in pixels
 # height: current framebuffer height in pixels
-# mode: semantic presentation mode, including detached borderless windows
+# mode: semantic presentation mode, including platform-specific borderless
 # monitor: output retained when the platform cannot report window placement
 # windowed: ordinary client bounds retained across fullscreen transitions
+# windowed_maximized: whether ordinary mode restores through the compositor
 # min_width:  client limit applied when restoring windowed mode
 # min_height: client limit applied when restoring windowed mode
 pub rec Window {
@@ -69,6 +70,7 @@ pub rec Window {
     mode:   WindowMode;
     monitor: glfw.Monitor;
     windowed: WindowBounds;
+    windowed_maximized: bool;
     min_width:  i32;
     min_height: i32;
 }
@@ -273,12 +275,26 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         open_height = video.height;
         glfw.get_monitor_pos(monitor, ?mx, ?my);
     }
-    if (mode == WINDOW_MODE_FULLSCREEN) { attached = monitor; }
+    if (mode == WINDOW_MODE_FULLSCREEN
+        || (mode == WINDOW_MODE_BORDERLESS && platform_wayland())) {
+        attached = monitor;
+    }
+
+    var restore: WindowBounds = WindowBounds{x: 0, y: 0, width: width, height: height};
+    if (glfw.monitor_is_valid(monitor)) {
+        restore = centered_bounds(monitor, width, height);
+    }
+    val restore_maximized: bool = mode == WINDOW_MODE_WINDOWED
+        && windowed_should_maximize(restore, monitor);
 
     glfw.default_window_hints();
     glfw.window_hint(glfw.CLIENT_API, glfw.NO_API);
     if (mode == WINDOW_MODE_BORDERLESS) {
         glfw.window_hint(glfw.DECORATED, glfw.FALSE);
+        glfw.window_hint(glfw.RESIZABLE, glfw.FALSE);
+    }
+    if (restore_maximized) {
+        glfw.window_hint(glfw.MAXIMIZED, glfw.TRUE);
     }
 
     val win: glfw.Window = glfw.create_window(
@@ -288,17 +304,17 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         ret Window{handle: win, width: 0, height: 0};
     }
 
-    var restore: WindowBounds = WindowBounds{x: 0, y: 0, width: width, height: height};
-    if (glfw.monitor_is_valid(monitor)) {
-        restore = centered_bounds(monitor, width, height);
-    }
     if (mode == WINDOW_MODE_BORDERLESS) {
         glfw.set_window_attrib(win, glfw.DECORATED, glfw.FALSE);
-        glfw.set_window_pos(win, mx, my);
+        glfw.set_window_attrib(win, glfw.RESIZABLE, glfw.FALSE);
+        if (!platform_wayland()) { glfw.set_window_pos(win, mx, my); }
     }
     or (mode == WINDOW_MODE_WINDOWED) {
-        glfw.set_window_pos(win, restore.x, restore.y);
-        restore = fit_windowed(win, restore, monitor, 1, 1);
+        if (restore_maximized) { glfw.maximize_window(win); }
+        or {
+            glfw.set_window_pos(win, restore.x, restore.y);
+            restore = fit_windowed(win, restore, monitor, 1, 1);
+        }
     }
 
     glfw.set_key_callback(win, on_key);
@@ -311,7 +327,8 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
     ret Window{handle: win, width: fw, height: fh, mode: mode, monitor: monitor,
-        windowed: restore, min_width: 1, min_height: 1};
+        windowed: restore, windowed_maximized: restore_maximized,
+        min_width: 1, min_height: 1};
 }
 
 # whether a value names a supported window mode
@@ -343,8 +360,14 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
     if (w.mode == mode) { ret true; }
 
     if (w.mode == WINDOW_MODE_WINDOWED) {
-        glfw.get_window_pos(w.handle, ?w.windowed.x, ?w.windowed.y);
-        glfw.get_window_size(w.handle, ?w.windowed.width, ?w.windowed.height);
+        w.windowed_maximized = glfw.get_window_attrib(
+            w.handle, glfw.MAXIMIZED) == glfw.TRUE;
+        if (!w.windowed_maximized) {
+            if (!platform_wayland()) {
+                glfw.get_window_pos(w.handle, ?w.windowed.x, ?w.windowed.y);
+            }
+            glfw.get_window_size(w.handle, ?w.windowed.width, ?w.windowed.height);
+        }
     }
 
     val monitor: glfw.Monitor = monitor_for_window(w);
@@ -361,19 +384,34 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
         glfw.set_window_monitor(w.handle, glfw.no_monitor(),
             w.windowed.x, w.windowed.y,
             w.windowed.width, w.windowed.height, glfw.DONT_CARE);
+        glfw.set_window_attrib(w.handle, glfw.RESIZABLE, glfw.TRUE);
         glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.TRUE);
-        w.windowed = fit_windowed(w.handle, w.windowed, monitor,
-            w.min_width, w.min_height);
+        if (w.windowed_maximized || windowed_should_maximize(w.windowed, monitor)) {
+            w.windowed_maximized = true;
+            glfw.maximize_window(w.handle);
+        }
+        or {
+            w.windowed = fit_windowed(w.handle, w.windowed, monitor,
+                w.min_width, w.min_height);
+        }
     }
     or (mode == WINDOW_MODE_BORDERLESS) {
         glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.FALSE);
-        glfw.set_window_monitor(w.handle, glfw.no_monitor(), mx, my,
-            video.width, video.height, glfw.DONT_CARE);
+        if (platform_wayland()) {
+            glfw.set_window_monitor(w.handle, monitor, 0, 0,
+                video.width, video.height, video.refreshRate);
+        }
+        or {
+            glfw.set_window_monitor(w.handle, glfw.no_monitor(), mx, my,
+                video.width, video.height, glfw.DONT_CARE);
+        }
+        glfw.set_window_attrib(w.handle, glfw.RESIZABLE, glfw.FALSE);
         glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.FALSE);
     }
     or {
         glfw.set_window_monitor(w.handle, monitor, 0, 0,
             video.width, video.height, video.refreshRate);
+        glfw.set_window_attrib(w.handle, glfw.RESIZABLE, glfw.FALSE);
     }
 
     w.mode = mode;
@@ -521,14 +559,30 @@ fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
     var area: WindowBounds;
     glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
     var frame: WindowBounds;
-    # Wayland deliberately withholds server-decoration extents and placement;
-    # GLFW reports zeroes there and the compositor remains authoritative. The
-    # normal restore size still fits the work area without guessing at chrome.
+    # wayland deliberately withholds server-decoration extents and placement;
+    # glfw reports zeroes there and the compositor remains authoritative. A
+    # smaller restore remains its request rather than guessing at hidden chrome.
     glfw.get_window_frame_size(handle, ?frame.x, ?frame.y, ?frame.width, ?frame.height);
     val fitted: WindowBounds = clamp_bounds(bounds, area, frame, min_width, min_height);
     glfw.set_window_size(handle, fitted.width, fitted.height);
     glfw.set_window_pos(handle, fitted.x, fitted.y);
     ret fitted;
+}
+
+fun windowed_should_maximize(bounds: WindowBounds,
+                             monitor: glfw.Monitor) bool {
+    if (!platform_wayland() || !glfw.monitor_is_valid(monitor)) { ret false; }
+    var area: WindowBounds;
+    glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
+    ret bounds_reach_area(bounds, area);
+}
+
+fun bounds_reach_area(bounds: WindowBounds, area: WindowBounds) bool {
+    ret bounds.width >= area.width || bounds.height >= area.height;
+}
+
+fun platform_wayland() bool {
+    ret glfw.get_platform() == glfw.PLATFORM_WAYLAND;
 }
 
 fun clamp_bounds(bounds: WindowBounds, area: WindowBounds, frame: WindowBounds,
@@ -546,7 +600,8 @@ fun clamp_bounds(bounds: WindowBounds, area: WindowBounds, frame: WindowBounds,
 }
 
 fun monitor_for_window(w: *Window) glfw.Monitor {
-    if (w.mode != WINDOW_MODE_WINDOWED && monitor_connected(w.monitor)) {
+    if (monitor_connected(w.monitor)
+        && prefer_retained_monitor(platform_wayland(), w.mode)) {
         ret w.monitor;
     }
 
@@ -576,6 +631,10 @@ fun monitor_for_window(w: *Window) glfw.Monitor {
         i = i + 1;
     }
     ret best;
+}
+
+fun prefer_retained_monitor(wayland: bool, mode: WindowMode) bool {
+    ret wayland || mode != WINDOW_MODE_WINDOWED;
 }
 
 fun monitor_connected(monitor: glfw.Monitor) bool {
@@ -652,6 +711,24 @@ test "window: monitor overlap selects only visible pixels" {
     if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000) { ret 1; }
     if (overlap_area(1800, 100, 400, 400, 1920, 0, 1920, 1080) != 112000) { ret 2; }
     if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0) { ret 3; }
+    ret 0;
+}
+
+test "window: client bounds reaching a work area require compositor fitting" {
+    val area: WindowBounds = WindowBounds{x: 0, y: 0, width: 1280, height: 720};
+    if (!bounds_reach_area(
+        WindowBounds{x: 0, y: 0, width: 1280, height: 720}, area)) { ret 1; }
+    if (!bounds_reach_area(
+        WindowBounds{x: 0, y: 0, width: 960, height: 720}, area)) { ret 2; }
+    if (bounds_reach_area(
+        WindowBounds{x: 0, y: 0, width: 960, height: 540}, area)) { ret 3; }
+    ret 0;
+}
+
+test "window: wayland keeps its explicit monitor without global positions" {
+    if (!prefer_retained_monitor(true, WINDOW_MODE_WINDOWED)) { ret 1; }
+    if (!prefer_retained_monitor(false, WINDOW_MODE_BORDERLESS)) { ret 2; }
+    if (prefer_retained_monitor(false, WINDOW_MODE_WINDOWED)) { ret 3; }
     ret 0;
 }
 
