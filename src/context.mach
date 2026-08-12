@@ -11,10 +11,12 @@
 # rather than reaching for module globals.
 
 use boom.window.Window;
-use boom.window.window_open;
+use boom.window.window_open_mode;
 use boom.window.window_close;
 use boom.window.window_is_valid;
 use boom.window.window_set_event_sink;
+use boom.window.WindowMode;
+use boom.window.window_mode_is_valid;
 use boom.clock.Clock;
 use boom.clock.clock_new;
 use boom.timestep.Timestep;
@@ -38,6 +40,7 @@ use std.types.string.str;
 # max_frame: largest frame time folded into the accumulator at once
 # frame_dt:  when non-zero, the delta every frame is told it took, instead of
 #            the wall clock. See below.
+# mode:      initial window presentation mode
 #
 # WHY A GAME WOULD PIN ITS FRAME DELTA. The loop feeds the wall-clock delta into
 # the fixed-step accumulator, so the number of ticks a run executes depends on
@@ -59,6 +62,7 @@ pub rec Config {
     fixed_dt:  Duration;
     max_frame: Duration;
     frame_dt:  Duration;
+    mode:      WindowMode;
 }
 
 # whether a configuration can drive the frame loop
@@ -69,7 +73,8 @@ pub rec Config {
 # cfg: configuration to validate
 # ret: true when context_init can use the timing values safely
 pub fun config_is_valid(cfg: Config) bool {
-    ret cfg.fixed_dt > 0 && cfg.max_frame >= cfg.fixed_dt && cfg.frame_dt >= 0;
+    ret cfg.fixed_dt > 0 && cfg.max_frame >= cfg.fixed_dt && cfg.frame_dt >= 0
+        && window_mode_is_valid(cfg.mode);
 }
 
 # the live state of a running engine
@@ -121,7 +126,7 @@ pub fun context_init(ctx: *Context, cfg: Config) bool {
 
     ctx.events = queue_new();
     ctx.input   = inp.input_new();
-    ctx.window = window_open(cfg.width, cfg.height, cfg.title);
+    ctx.window = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
     if (!window_is_valid(?ctx.window)) {
         ret false;
     }
@@ -241,6 +246,7 @@ test "context: timing configuration rejects invalid loops" {
         fixed_dt:  10,
         max_frame: 20,
         frame_dt:  0,
+        mode:      window.WINDOW_MODE_WINDOWED,
     };
     if (!config_is_valid(base)) { ret 1; }
 

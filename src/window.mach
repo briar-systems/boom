@@ -13,6 +13,7 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use glfw.glfw;
+use glfw.c.Vidmode;
 use boom.event.EventQueue;
 use boom.event.Event;
 use boom.event.queue_push;
@@ -22,11 +23,29 @@ use boom.event.KEY;
 use boom.event.MOUSE_BUTTON;
 use boom.event.MOUSE_MOVE;
 use boom.event.SCROLL;
+use boom.event.RESIZE;
 use inp: boom.input;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
+
+pub def WindowMode: u8;
+
+# decorated, compositor-managed window
+pub val WINDOW_MODE_WINDOWED: WindowMode = 0;
+# undecorated window covering one monitor
+pub val WINDOW_MODE_BORDERLESS: WindowMode = 1;
+# monitor-attached fullscreen window
+pub val WINDOW_MODE_FULLSCREEN: WindowMode = 2;
+
+# windowed client bounds in screen coordinates
+pub rec WindowBounds {
+    x:      i32;
+    y:      i32;
+    width:  i32;
+    height: i32;
+}
 
 # a platform window
 # ---
@@ -37,6 +56,10 @@ pub rec Window {
     handle: glfw.Window;
     width:  i32;
     height: i32;
+    mode:   WindowMode;
+    windowed: WindowBounds;
+    min_width:  i32;
+    min_height: i32;
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -84,6 +107,15 @@ fun on_scroll(handle: ptr, dx: f64, dy: f64) {
     if (s == nil) { ret; }
     inp.input_scroll_event(s.input, dx, dy);
     queue_push(s.queue, Event{kind: SCROLL, a: dx::i64, b: dy::i64, c: 0, d: 0});
+}
+
+fun on_framebuffer_size(handle: ptr, width: i32, height: i32) {
+    deliver_resize(sink_of(glfw.window_from_handle(handle)), width, height);
+}
+
+fun deliver_resize(s: *Sink, width: i32, height: i32) {
+    if (s == nil) { ret; }
+    queue_push(s.queue, Event{kind: RESIZE, a: width::i64, b: height::i64, c: 0, d: 0});
 }
 
 # the sink installed on a window, or nil before one is set
@@ -196,27 +228,119 @@ fun map_button(b: i32) inp.Button {
 # title:  window title, UTF-8
 # ret:    the opened Window sized in framebuffer pixels, nil-handled on failure
 pub fun window_open(width: i32, height: i32, title: str) Window {
+    ret window_open_mode(width, height, title, WINDOW_MODE_WINDOWED);
+}
+
+# open a window in one explicit presentation mode
+pub fun window_open_mode(width: i32, height: i32, title: str,
+                         mode: WindowMode) Window {
     if (!glfw.init()) {
         ret Window{handle: glfw.no_window(), width: 0, height: 0};
     }
 
-    glfw.window_hint(glfw.CLIENT_API, glfw.NO_API);
+    if (!window_mode_is_valid(mode)) { mode = WINDOW_MODE_WINDOWED; }
+    val monitor: glfw.Monitor = glfw.get_primary_monitor();
+    var open_width: i32 = width;
+    var open_height: i32 = height;
+    var attached: glfw.Monitor = glfw.no_monitor();
+    var mx: i32 = 0;
+    var my: i32 = 0;
+    val video: *Vidmode = glfw.get_video_mode(monitor);
+    if (mode != WINDOW_MODE_WINDOWED && video != nil) {
+        open_width = video.width;
+        open_height = video.height;
+        glfw.get_monitor_pos(monitor, ?mx, ?my);
+    }
+    if (mode == WINDOW_MODE_FULLSCREEN) { attached = monitor; }
 
-    val win: glfw.Window = glfw.open_window(width, height, title);
+    glfw.default_window_hints();
+    glfw.window_hint(glfw.CLIENT_API, glfw.NO_API);
+    if (mode == WINDOW_MODE_BORDERLESS) {
+        glfw.window_hint(glfw.DECORATED, glfw.FALSE);
+    }
+
+    val win: glfw.Window = glfw.create_window(
+        open_width, open_height, title, attached, glfw.no_window());
     if (!glfw.window_is_valid(win)) {
         glfw.terminate();
         ret Window{handle: win, width: 0, height: 0};
+    }
+
+    var restore: WindowBounds = centered_bounds(monitor, width, height);
+    if (mode == WINDOW_MODE_BORDERLESS) {
+        glfw.set_window_pos(win, mx, my);
+    }
+    or (mode == WINDOW_MODE_WINDOWED) {
+        glfw.set_window_pos(win, restore.x, restore.y);
+        restore = fit_windowed(win, restore, monitor, 1, 1);
     }
 
     glfw.set_key_callback(win, on_key);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_scroll_callback(win, on_scroll);
+    glfw.set_framebuffer_size_callback(win, on_framebuffer_size);
 
     var fw: i32 = width;
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
-    ret Window{handle: win, width: fw, height: fh};
+    ret Window{handle: win, width: fw, height: fh, mode: mode,
+        windowed: restore, min_width: 1, min_height: 1};
+}
+
+# whether a value names a supported window mode
+pub fun window_mode_is_valid(mode: WindowMode) bool {
+    ret mode == WINDOW_MODE_WINDOWED
+        || mode == WINDOW_MODE_BORDERLESS
+        || mode == WINDOW_MODE_FULLSCREEN;
+}
+
+# the current semantic window mode
+pub fun window_mode(w: *Window) WindowMode {
+    if (w == nil) { ret WINDOW_MODE_WINDOWED; }
+    ret w.mode;
+}
+
+# change the live window mode without recreating the Vulkan surface
+pub fun window_set_mode(w: *Window, mode: WindowMode) bool {
+    if (!window_is_valid(w) || !window_mode_is_valid(mode)) { ret false; }
+    if (w.mode == mode) { ret true; }
+
+    if (w.mode == WINDOW_MODE_WINDOWED) {
+        glfw.get_window_pos(w.handle, ?w.windowed.x, ?w.windowed.y);
+        glfw.get_window_size(w.handle, ?w.windowed.width, ?w.windowed.height);
+    }
+
+    val monitor: glfw.Monitor = monitor_for_window(w);
+    val video: *Vidmode = glfw.get_video_mode(monitor);
+    if (!glfw.monitor_is_valid(monitor) || video == nil) { ret false; }
+
+    var mx: i32 = 0;
+    var my: i32 = 0;
+    glfw.get_monitor_pos(monitor, ?mx, ?my);
+    glfw.restore_window(w.handle);
+
+    if (mode == WINDOW_MODE_WINDOWED) {
+        glfw.set_window_monitor(w.handle, glfw.no_monitor(),
+            w.windowed.x, w.windowed.y,
+            w.windowed.width, w.windowed.height, glfw.DONT_CARE);
+        glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.TRUE);
+        w.windowed = fit_windowed(w.handle, w.windowed, monitor,
+            w.min_width, w.min_height);
+    }
+    or (mode == WINDOW_MODE_BORDERLESS) {
+        glfw.set_window_attrib(w.handle, glfw.DECORATED, glfw.FALSE);
+        glfw.set_window_monitor(w.handle, glfw.no_monitor(), mx, my,
+            video.width, video.height, glfw.DONT_CARE);
+    }
+    or {
+        glfw.set_window_monitor(w.handle, monitor, 0, 0,
+            video.width, video.height, video.refreshRate);
+    }
+
+    w.mode = mode;
+    window_refresh_size(w);
+    ret true;
 }
 
 # refresh the recorded size from the platform
@@ -266,6 +390,8 @@ pub fun window_is_valid(w: *Window) bool {
 # height: minimum client height in screen coordinates
 pub fun window_set_min_size(w: *Window, width: i32, height: i32) {
     if (!window_is_valid(w) || width <= 0 || height <= 0) { ret; }
+    w.min_width = width;
+    w.min_height = height;
     glfw.set_window_size_limits(w.handle, width, height, glfw.DONT_CARE, glfw.DONT_CARE);
 }
 
@@ -326,9 +452,104 @@ pub fun window_poll() {
 # ---
 # w: window to close
 pub fun window_close(w: *Window) {
+    if (w == nil || !glfw.window_is_valid(w.handle)) { ret; }
+    glfw.set_window_user_pointer(w.handle, nil);
     glfw.destroy_window(w.handle);
+    w.handle = glfw.no_window();
+    w.width = 0;
+    w.height = 0;
     glfw.terminate();
 }
+
+fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds {
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var w: i32 = width;
+    var h: i32 = height;
+    glfw.get_monitor_workarea(monitor, ?x, ?y, ?w, ?h);
+    ret clamp_bounds(WindowBounds{
+        x: x + (w - width) / 2,
+        y: y + (h - height) / 2,
+        width: width,
+        height: height,
+    }, WindowBounds{x: x, y: y, width: w, height: h},
+       WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
+}
+
+fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
+                 monitor: glfw.Monitor, min_width: i32,
+                 min_height: i32) WindowBounds {
+    var area: WindowBounds;
+    glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
+    var frame: WindowBounds;
+    glfw.get_window_frame_size(handle, ?frame.x, ?frame.y, ?frame.width, ?frame.height);
+    val fitted: WindowBounds = clamp_bounds(bounds, area, frame, min_width, min_height);
+    glfw.set_window_size(handle, fitted.width, fitted.height);
+    glfw.set_window_pos(handle, fitted.x, fitted.y);
+    ret fitted;
+}
+
+fun clamp_bounds(bounds: WindowBounds, area: WindowBounds, frame: WindowBounds,
+                 min_width: i32, min_height: i32) WindowBounds {
+    var out: WindowBounds = bounds;
+    val available_width: i32 = max_value(1, area.width - frame.x - frame.width);
+    val available_height: i32 = max_value(1, area.height - frame.y - frame.height);
+    out.width = clamp_value(out.width, min_value(min_width, available_width), available_width);
+    out.height = clamp_value(out.height, min_value(min_height, available_height), available_height);
+    val left: i32 = area.x + frame.x;
+    val top: i32 = area.y + frame.y;
+    out.x = clamp_value(out.x, left, area.x + area.width - frame.width - out.width);
+    out.y = clamp_value(out.y, top, area.y + area.height - frame.height - out.height);
+    ret out;
+}
+
+fun monitor_for_window(w: *Window) glfw.Monitor {
+    var wx: i32 = w.windowed.x;
+    var wy: i32 = w.windowed.y;
+    var ww: i32 = w.windowed.width;
+    var wh: i32 = w.windowed.height;
+    if (w.mode != WINDOW_MODE_WINDOWED) {
+        glfw.get_window_pos(w.handle, ?wx, ?wy);
+        glfw.get_window_size(w.handle, ?ww, ?wh);
+    }
+
+    var count: i32 = 0;
+    val handles: *ptr = glfw.get_monitors(?count);
+    var best: glfw.Monitor = glfw.get_primary_monitor();
+    var best_area: i64 = 0;
+    var i: i32 = 0;
+    for (handles != nil && i < count) {
+        val current: glfw.Monitor = glfw.monitor_from_handle(handles[i]);
+        var x: i32 = 0;
+        var y: i32 = 0;
+        var width: i32 = 0;
+        var height: i32 = 0;
+        glfw.get_monitor_workarea(current, ?x, ?y, ?width, ?height);
+        val overlap: i64 = overlap_area(wx, wy, ww, wh, x, y, width, height);
+        if (overlap > best_area) { best = current; best_area = overlap; }
+        i = i + 1;
+    }
+    ret best;
+}
+
+fun overlap_area(ax: i32, ay: i32, aw: i32, ah: i32,
+                 bx: i32, by: i32, bw: i32, bh: i32) i64 {
+    val left: i32 = max_value(ax, bx);
+    val top: i32 = max_value(ay, by);
+    val right: i32 = min_value(ax + aw, bx + bw);
+    val bottom: i32 = min_value(ay + ah, by + bh);
+    if (right <= left || bottom <= top) { ret 0; }
+    ret (right - left)::i64 * (bottom - top)::i64;
+}
+
+fun clamp_value(value: i32, minimum: i32, maximum: i32) i32 {
+    if (value < minimum) { ret minimum; }
+    if (value > maximum) { ret maximum; }
+    ret value;
+}
+
+fun min_value(a: i32, b: i32) i32 { if (a < b) { ret a; } ret b; }
+fun max_value(a: i32, b: i32) i32 { if (a > b) { ret a; } ret b; }
 
 test "window: Escape is delivered as application input" {
     var q: EventQueue = queue_new();
@@ -344,6 +565,35 @@ test "window: Escape is delivered as application input" {
     if (!queue_pop(?q, ?e)) { ret 3; }
     if (e.kind != KEY || e.a != inp.KEY_ESCAPE::i64
         || e.b != glfw.PRESS::i64) { ret 4; }
+    ret 0;
+}
+
+test "window: framebuffer changes are delivered in pixels" {
+    var q: EventQueue = queue_new();
+    var input: inp.Input = inp.input_new();
+    var sink: Sink = Sink{queue: ?q, input: ?input};
+    deliver_resize(?sink, 1920, 1052);
+    var e: Event;
+    if (!queue_pop(?q, ?e)) { ret 1; }
+    if (e.kind != RESIZE || e.a != 1920 || e.b != 1052) { ret 2; }
+    ret 0;
+}
+
+test "window: decorated client bounds stay inside the work area" {
+    val fitted: WindowBounds = clamp_bounds(
+        WindowBounds{x: 0, y: 0, width: 1920, height: 1080},
+        WindowBounds{x: 0, y: 0, width: 1920, height: 1080},
+        WindowBounds{x: 0, y: 28, width: 0, height: 4},
+        640, 360);
+    if (fitted.x != 0 || fitted.y != 28) { ret 1; }
+    if (fitted.width != 1920 || fitted.height != 1048) { ret 2; }
+    ret 0;
+}
+
+test "window: monitor overlap selects only visible pixels" {
+    if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000) { ret 1; }
+    if (overlap_area(1800, 100, 400, 400, 1920, 0, 1920, 1080) != 112000) { ret 2; }
+    if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0) { ret 3; }
     ret 0;
 }
 
