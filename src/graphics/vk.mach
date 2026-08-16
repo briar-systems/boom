@@ -94,6 +94,13 @@ pub rec Vk {
     ready:           bool;
 }
 
+use A: std.allocator;
+use std.allocator.page;
+use std.collections.vector.Vector;
+use Vec: std.collections.vector;
+val VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: str = "VK_KHR_portability_enumeration";
+val VK_KHR_PORTABILITY_SUBSET_NAME: str = "VK_KHR_portability_subset";
+
 # Create the instance, surface, device, and queues for a window.
 #
 # The window must have been created with the client API hint set to none;
@@ -113,10 +120,23 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
 
     # The surface extensions GLFW requires for this platform. An instance
     # created without them cannot present.
-    var ext_count: u32 = 0;
-    val exts: **u8 = glfw.required_instance_extensions(?ext_count);
-    if (exts == nil || ext_count == 0) {
+    var _ext_count: u32 = 0;
+    val _exts: **u8 = glfw.required_instance_extensions(?ext_count);
+    if (_exts == nil || _ext_count == 0) {
         ret err[bool, Error](error("GLFW reported no required instance extensions"));
+    }
+
+    var al: A.Allocator;
+    page.make(?a);
+    var exts: Vector[str] = Vec.init[str](?al);
+    fin { Vec.dnit[str](?exts); }
+    var i: u32 = 0;
+    for (i < _ext_count) {
+        Vec.push[str](?exts, _exts[i]);
+        i = i + 1;
+    }
+    $if ($mach.build.os == $mach.os.darwin) {
+        Vec.push[str](?exts, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
     }
 
     var app: vk.ApplicationInfo;
@@ -131,12 +151,12 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     var ici: vk.InstanceCreateInfo;
     ici.sType                   = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ici.pNext                   = nil;
-    ici.flags                   = 0;
+    ici.flags                   = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     ici.pApplicationInfo        = ?app;
     ici.enabledLayerCount       = 0;
     ici.ppEnabledLayerNames     = nil;
-    ici.enabledExtensionCount   = ext_count;
-    ici.ppEnabledExtensionNames = exts;
+    ici.enabledExtensionCount   = exts.len::u32;
+    ici.ppEnabledExtensionNames = exts.data;
 
     if (vk.vkCreateInstance(?ici, nil, ?v.instance) != vk.SUCCESS) {
         ret err[bool, Error](error("vkCreateInstance failed"));
@@ -335,7 +355,15 @@ fun create_device(v: *Vk) Result[bool, Error] {
         qcount = 2;
     }
 
-    var swapchain_ext: *u8 = vk.KHR_SWAPCHAIN_EXTENSION_NAME::*u8;
+    var al: A.Allocator;
+    page.make(?al);
+    var exts: Vector[str] = Vec.init[str](?al);
+    fin { Vec.dnit[str](?exts); }
+
+    Vec.push[str](?exts, vk.KHR_SWAPCHAIN_EXTENSION_NAME);
+    $if ($mach.build.os == $mach.os.darwin) {
+        Vec.push[str](?exts, VK_KHR_PORTABILITY_SUBSET_NAME);
+    }
 
     # NO OPTIONAL FEATURES, AND THAT IS A CLAIM ABOUT THE SHADERS. A device is
     # created with every optional feature off, and using one that was not
@@ -364,8 +392,8 @@ fun create_device(v: *Vk) Result[bool, Error] {
     dci.pQueueCreateInfos       = ?qci[0];
     dci.enabledLayerCount       = 0;
     dci.ppEnabledLayerNames     = nil;
-    dci.enabledExtensionCount   = 1;
-    dci.ppEnabledExtensionNames = ?swapchain_ext;
+    dci.enabledExtensionCount   = exts.len::u32;
+    dci.ppEnabledExtensionNames = exts.data;
     dci.pEnabledFeatures        = nil;
 
     if (vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device) != vk.SUCCESS) {
