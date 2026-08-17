@@ -321,3 +321,9 @@ mach test .
 
 Building a game that links against boom's window layer needs GLFW available to
 the linker; the library build and the test suite do not.
+## Old darwin !!!
+If it crashes when run after compilation
+You can test add it to `.zshrc`
+```zsh
+export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
+```

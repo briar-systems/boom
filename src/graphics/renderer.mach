@@ -1023,7 +1023,9 @@ pub fun batch_flush(p: *Pass) {
         # sample the right coordinates in the wrong atlas. The material supplies
         # the companion channels at 5, 6 and 7; it does not get to replace the
         # sheet the geometry was built for.
-        views2d[0] = texture_view(tex);
+        if (p.batch.texture != nil) {
+            views2d[0] = texture_view(tex);
+        }
     }
     or {
         fill_views(r, ?views2d[0], tex);

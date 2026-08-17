@@ -98,8 +98,9 @@ use A: std.allocator;
 use std.allocator.page;
 use std.collections.vector.Vector;
 use Vec: std.collections.vector;
-val VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: str = "VK_KHR_portability_enumeration";
-val VK_KHR_PORTABILITY_SUBSET_NAME: str = "VK_KHR_portability_subset";
+pub val VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 1;
+pub val VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: str = "VK_KHR_portability_enumeration";
+pub val VK_KHR_PORTABILITY_SUBSET_NAME: str = "VK_KHR_portability_subset";
 
 # Create the instance, surface, device, and queues for a window.
 #
@@ -121,13 +122,13 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     # The surface extensions GLFW requires for this platform. An instance
     # created without them cannot present.
     var _ext_count: u32 = 0;
-    val _exts: **u8 = glfw.required_instance_extensions(?ext_count);
+    val _exts: **u8 = glfw.required_instance_extensions(?_ext_count);
     if (_exts == nil || _ext_count == 0) {
         ret err[bool, Error](error("GLFW reported no required instance extensions"));
     }
 
     var al: A.Allocator;
-    page.make(?a);
+    page.make(?al);
     var exts: Vector[str] = Vec.init[str](?al);
     fin { Vec.dnit[str](?exts); }
     var i: u32 = 0;
@@ -151,12 +152,15 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     var ici: vk.InstanceCreateInfo;
     ici.sType                   = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ici.pNext                   = nil;
-    ici.flags                   = vk.INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    ici.flags                   = 0;
     ici.pApplicationInfo        = ?app;
     ici.enabledLayerCount       = 0;
     ici.ppEnabledLayerNames     = nil;
     ici.enabledExtensionCount   = exts.len::u32;
     ici.ppEnabledExtensionNames = exts.data;
+    $if ($mach.build.os == $mach.os.darwin) {
+        ici.flags               = ici.flags | VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
 
     if (vk.vkCreateInstance(?ici, nil, ?v.instance) != vk.SUCCESS) {
         ret err[bool, Error](error("vkCreateInstance failed"));
@@ -359,7 +363,6 @@ fun create_device(v: *Vk) Result[bool, Error] {
     page.make(?al);
     var exts: Vector[str] = Vec.init[str](?al);
     fin { Vec.dnit[str](?exts); }
-
     Vec.push[str](?exts, vk.KHR_SWAPCHAIN_EXTENSION_NAME);
     $if ($mach.build.os == $mach.os.darwin) {
         Vec.push[str](?exts, VK_KHR_PORTABILITY_SUBSET_NAME);
