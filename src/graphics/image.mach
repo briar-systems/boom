@@ -438,6 +438,7 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
 # ---
 # i:    the image to read, in SHADER_READ_ONLY_OPTIMAL
 # v:    the device, drained before the copy is recorded
+# pool: a command pool for the one-shot copy
 # out:  destination for image_raw_bytes bytes
 # len:  size of out in bytes, checked against the image
 pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) Result[bool, Error] {
