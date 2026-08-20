@@ -384,6 +384,21 @@ pub fun render_target_raw_bytes_at(t: *RenderTarget, i: usize) usize {
 # The bytes are in the first colour attachment's four-byte format. A surface
 # target may be B8G8R8A8 or R8G8B8A8; render_target_bgra reports which. Wider
 # formats are refused here and read with render_target_read_raw_at instead.
+#
+# A DEBUGGING AND TOOLING FACILITY, NOT A FRAME OPERATION. The read drains the
+# device before it copies, so everything the GPU has been given retires first
+# and the pipeline refills from empty afterwards. That stall is what buys a
+# picture that is whole rather than one assembled while a pass was still writing
+# it, and it is worth paying for a screenshot, a rendering test, or a probe a
+# developer is watching. A shipping game does not read a target every frame.
+#
+# IT REPORTS THE LAST SUBMITTED FRAME. A pass records into the frame's command
+# buffer and renderer_end_frame is what submits it, so a read taken between
+# renderer_begin_frame and renderer_end_frame does not include what the open
+# frame has drawn: it hands back the frame before it, complete. Draining cannot
+# change that and neither can anything else here, since those commands are not
+# on the queue yet. End the frame first when the current one's draws are the
+# point.
 # ---
 # d:   the upload context the target was created against
 # t:   the target to read
@@ -405,6 +420,16 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) R
 # RGBA8 attachments occupy four bytes per texel. RENDER_RGBA16_FLOAT occupies
 # eight bytes per texel as four IEEE 754 half-floats. Query the required size
 # with render_target_raw_bytes_at before allocating the destination.
+#
+# Carries the stall and the last-submitted-frame contract render_target_read
+# describes, which govern every readback rather than that one entry point.
+# ---
+# d:   the upload context the target was created against
+# t:   the target to read
+# i:   the attachment index, below the target's count
+# out: destination for render_target_raw_bytes_at bytes
+# len: size of out in bytes
+# ret: true, or a readback error
 pub fun render_target_read_raw_at(d: *Device, t: *RenderTarget, i: usize,
                                   out: *u8, len: usize) Result[bool, Error] {
     if (!t.ready) {
@@ -446,7 +471,9 @@ pub fun render_target_delete(d: *Device, t: *RenderTarget) {
 #
 # creation needs a device, so these cover the argument checks and the
 # teardown ordering, which is where a mistake destroys an object that is
-# still referenced by another.
+# still referenced by another. A readback's checks are ordering too: they
+# run before the device is drained, so a read that cannot succeed does not
+# stall the pipeline to say so.
 
 test "target: non-positive dimensions are refused before allocating" {
     var d: Device;
@@ -543,5 +570,75 @@ test "target: an attachment index past the count returns the first" {
 
     # And the single-attachment accessor is the first one.
     if (render_target_texture(?t) != render_target_texture_at(?t, 0)) { ret 5; }
+    ret 0;
+}
+
+test "target: a read of a target that was never created is refused" {
+    # Answered from the handle, before the drain and before a staging buffer
+    # exists. The device here never came up, which is what proves the read got
+    # nowhere near it.
+    var v: Vk;
+    v.ready = false;
+    var d: Device;
+    d.vk    = ?v;
+    d.ready = true;
+
+    var t: RenderTarget;
+    t.ready       = false;
+    t.color_count = 1;
+
+    var out: [16]u8;
+    if (!is_err[bool, Error](render_target_read(?d, ?t, ?out[0], 16)))           { ret 1; }
+    if (!is_err[bool, Error](render_target_read_raw_at(?d, ?t, 0, ?out[0], 16))) { ret 2; }
+    ret 0;
+}
+
+test "target: a raw read past the attachment count is refused" {
+    # render_target_texture_at clamps a bad index because sampling the wrong
+    # picture is recoverable. A read cannot clamp: the caller sized its
+    # destination from render_target_raw_bytes_at for the attachment it named,
+    # so quietly copying a different one either overflows that buffer or fills
+    # it with the wrong image and reports success.
+    var v: Vk;
+    v.ready = false;
+    var d: Device;
+    d.vk    = ?v;
+    d.ready = true;
+
+    var t: RenderTarget;
+    t.ready       = true;
+    t.color_count = 1;
+
+    var out: [16]u8;
+    if (!is_err[bool, Error](render_target_read_raw_at(?d, ?t, 1, ?out[0], 16)))  { ret 1; }
+    if (!is_err[bool, Error](render_target_read_raw_at(?d, ?t, 99, ?out[0], 16))) { ret 2; }
+    ret 0;
+}
+
+test "target: the packed read refuses a format it cannot pack" {
+    # RENDER_RGBA16_FLOAT is eight bytes a texel and render_target_read promises
+    # four. The attachment is otherwise ready to be copied, so this check is the
+    # only thing standing between the call and a copy that would deliver half a
+    # picture and report success.
+    var v: Vk;
+    v.ready = false;
+    var d: Device;
+    d.vk    = ?v;
+    d.ready = true;
+
+    var t: RenderTarget;
+    t.ready       = true;
+    t.color_count = 1;
+    t.formats[0]  = RENDER_RGBA16_FLOAT;
+    t.colors[0].image.format = vk.FORMAT_R16G16B16A16_SFLOAT;
+    t.colors[0].image.width  = 2;
+    t.colors[0].image.height = 2;
+    t.colors[0].image.ready  = true;
+
+    var out: [32]u8;
+    if (!is_err[bool, Error](render_target_read(?d, ?t, ?out[0], 32))) { ret 1; }
+    # And the size the raw form needs comes from the target rather than from a
+    # caller assuming four bytes: 2 * 2 * 8.
+    if (render_target_raw_bytes_at(?t, 0) != 32) { ret 2; }
     ret 0;
 }

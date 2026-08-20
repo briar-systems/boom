@@ -28,6 +28,7 @@ use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_write;
@@ -428,8 +429,15 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
 # The image is left in the layout it was found in. A read that left it in
 # TRANSFER_SRC would make every later sample read an image in a layout its
 # descriptor does not describe.
+#
+# A READ IS A STALL, and inherently so: the device is drained before the copy is
+# recorded, the copy is submitted on its own, and the queue is waited on before
+# the host reads the mapping. That is three synchronization points around four
+# bytes a pixel, which is what a screenshot costs. It belongs in a test, a tool,
+# or a key a developer presses, not in a frame a player is waiting on.
 # ---
 # i:    the image to read, in SHADER_READ_ONLY_OPTIMAL
+# v:    the device, drained before the copy is recorded
 # out:  destination for image_raw_bytes bytes
 # len:  size of out in bytes, checked against the image
 pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) Result[bool, Error] {
@@ -437,6 +445,27 @@ pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize
     val size: usize = image_raw_bytes(i);
     if (size == 0) { ret err[bool, Error](error("this image format does not support raw readback")); }
     if (len < size) { ret err[bool, Error](error("the destination is smaller than the image")); }
+
+    # THE COPY MUST NOT OVERLAP THE WORK THAT DREW THIS IMAGE. A game reads a
+    # target while frames are in flight, and a submission is only ordered
+    # against earlier ones where it begins: the queue is free to still be
+    # writing this image's texels as colour attachment output while the copy
+    # reads them. The result is a picture assembled from two moments, which is
+    # worse than a wrong one because it looks plausible. Measured from a game
+    # with every animation frozen, two reads of one unchanging target came back
+    # different.
+    #
+    # The barrier below cannot close that. It names sampling as the image's
+    # prior use, because sampling is the only prior use this module can see, so
+    # a colour write still in flight is not in its first synchronization scope
+    # at all. Draining the device is what orders the two, and it is the same
+    # conservative wait every public delete performs; see vk_wait_idle.
+    #
+    # A read therefore observes everything SUBMITTED and nothing later. A pass
+    # records into the frame's command buffer and renderer_end_frame submits it,
+    # so a read taken while a frame is open sees the frame before it, whole,
+    # rather than the one being recorded.
+    vk_wait_idle(v);
 
     var staging: Buffer;
     val sr: Result[bool, Error] = buffer_init(?staging, v, size::u64,
