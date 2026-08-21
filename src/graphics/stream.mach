@@ -195,7 +195,13 @@ fun block_create(s: *VertexStream, v: *Vk, frame: usize, need: usize) bool {
     val br: Result[bool, Error] = buffer_init(?s.blocks[frame][n].buf, v, size::u64,
         vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](br)) { ret false; }
+    # Torn down rather than abandoned, as the map failure below already is:
+    # buffer_init reports failure as readily after the buffer object exists as
+    # before it, and the block stays not-live, so nothing later would destroy it.
+    if (is_err[bool, Error](br)) {
+        buffer_dnit(?s.blocks[frame][n].buf, v);
+        ret false;
+    }
 
     val m: ptr = buffer_map(?s.blocks[frame][n].buf, v);
     if (m == nil) {

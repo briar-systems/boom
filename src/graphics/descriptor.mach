@@ -275,6 +275,18 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
     var b: *SlotBlock = ?d.blocks[bi];
     b.pool = nil;
 
+    # EVERY HANDLE NILLED BEFORE ANYTHING IS CREATED, so a failure part way
+    # through can be unwound by asking what exists. Without it slot_block_destroy
+    # would read uninitialized memory as a handle and destroy it.
+    var z: usize = 0;
+    for (z < MAX_FRAMES_IN_FLIGHT) {
+        b.rings[z].handle = nil;
+        b.rings[z].memory = nil;
+        b.rings[z].mapped = nil;
+        b.mapped[z]       = nil;
+        z = z + 1;
+    }
+
     val total: u32 = (SLOTS_PER_BLOCK * MAX_FRAMES_IN_FLIGHT)::u32;
 
     # A pool is sized per descriptor type, not per set, and a set consumes what
@@ -304,7 +316,10 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
     ci.poolSizeCount = 3;
     ci.pPoolSizes    = ?sizes[0];
 
-    if (vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?b.pool) != vk.SUCCESS) { ret false; }
+    if (vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?b.pool) != vk.SUCCESS) {
+        slot_block_destroy(b, v);
+        ret false;
+    }
 
     # Allocated in batches rather than one call: vkAllocateDescriptorSets takes
     # an array of layouts as long as the set count, and 1024 of them is a large
@@ -325,7 +340,10 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
         ai.descriptorPool     = b.pool;
         ai.descriptorSetCount = batch::u32;
         ai.pSetLayouts        = ?layouts[0];
-        if (vk.vkAllocateDescriptorSets(v.device, ?ai, ?b.sets[done]) != vk.SUCCESS) { ret false; }
+        if (vk.vkAllocateDescriptorSets(v.device, ?ai, ?b.sets[done]) != vk.SUCCESS) {
+            slot_block_destroy(b, v);
+            ret false;
+        }
         done = done + batch;
     }
 
@@ -335,14 +353,45 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
             (SLOTS_PER_BLOCK * SLOT_BYTES)::u64,
             vk.BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (is_err[bool, Error](rr)) { ret false; }
+        if (is_err[bool, Error](rr)) {
+            slot_block_destroy(b, v);
+            ret false;
+        }
         b.mapped[f] = buffer_map(?b.rings[f], v);
-        if (b.mapped[f] == nil) { ret false; }
+        if (b.mapped[f] == nil) {
+            slot_block_destroy(b, v);
+            ret false;
+        }
         f = f + 1;
     }
 
     d.bcount = d.bcount + 1;
     ret true;
+}
+
+# Destroy whatever part of a block was built.
+#
+# WHY A HALF-BUILT BLOCK HAD TO BE ABANDONED BEFORE. d.bcount is what
+# descriptors_dnit iterates and it is only incremented once the block is whole,
+# so a block that failed after its pool was created was a pool nothing would
+# ever destroy: the handle outlived every reference to it, and a device running
+# out of memory mid-frame -- the only way to get here -- leaked the pool it had
+# just been unable to fill.
+#
+# Written over what exists rather than over how far creation got, so it serves
+# every failure point without a state machine saying which one.
+fun slot_block_destroy(b: *SlotBlock, v: *Vk) {
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        b.mapped[f] = nil;
+        buffer_dnit(?b.rings[f], v);
+        f = f + 1;
+    }
+    if (b.pool != nil) {
+        # The sets are owned by the pool and go with it.
+        vk.vkDestroyDescriptorPool(v.device, b.pool, nil);
+        b.pool = nil;
+    }
 }
 
 # Create the first block and the per-frame palette rings.
@@ -442,7 +491,13 @@ fun palette_block_create(d: *Descriptors, v: *Vk, frame: usize) bool {
         (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64,
         vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](pr)) { ret false; }
+    # Torn down rather than abandoned, as the map failure below already is:
+    # buffer_init reports failure as readily after the buffer object exists as
+    # before it, and d.pcount is not advanced, so nothing later would destroy it.
+    if (is_err[bool, Error](pr)) {
+        buffer_dnit(?d.pals[frame][n], v);
+        ret false;
+    }
 
     val m: ptr = buffer_map(?d.pals[frame][n], v);
     if (m == nil) {

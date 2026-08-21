@@ -77,6 +77,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two descriptor calls whose answers were discarded outright all count now; the
   discarded ones could leave a set bound with descriptors nothing had written.
 
+- graphics: a descriptor block, palette ring or vertex arena block whose
+  creation failed part way is destroyed rather than abandoned. The counter a
+  teardown iterates is only advanced once a block is whole, so a block that
+  failed after its pool or its buffer existed left a handle nothing would ever
+  destroy. Only reachable when the device runs out of memory, which is the
+  moment least able to afford leaking what it just failed to fill.
+
 - graphics: `render_target_read` and `render_target_read_raw_at` wait for the
   device before copying, so a target read while the game is running returns a
   complete image instead of one the GPU was part way through writing.
