@@ -1092,6 +1092,10 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     or {
         p.view = mat4_identity();
         if (d.camera2d != nil) {
+            # The camera folds into the projection rather than riding in the
+            # view, because the 2D program takes a single matrix: its vertices
+            # arrive already placed, so there is no model transform to combine
+            # a separate view with.
             p.projection = camera2d_matrix(d.camera2d, p.width::f32, p.height::f32);
         }
         or {
@@ -1126,6 +1130,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
             clears[cvi].color.float32[3] = d.clear_color[3];
             cvi = cvi + 1;
         }
+        # Depth clears to 1.0, the far plane. Clearing to 0 would make every
+        # fragment fail the less-than test and the target come out empty.
         clears[p.targets].depthStencil.depth   = 1.0;
         clears[p.targets].depthStencil.stencil = 0;
 
@@ -1138,6 +1144,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         rbi.renderArea.offset.y      = 0;
         rbi.renderArea.extent.width  = d.target.width::u32;
         rbi.renderArea.extent.height = d.target.height::u32;
+        # A loading pass declares no clear, and passing values for one is both
+        # meaningless and a validation error.
         rbi.clearValueCount          = 0;
         rbi.pClearValues             = nil;
         if (d.clear != 0) {
