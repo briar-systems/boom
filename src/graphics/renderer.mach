@@ -1079,7 +1079,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
 
         # For window passes, if clear is requested, use vkCmdClearAttachments
         # to clear the screen mid-pass, since the RenderPass is already active.
-        if (d.clear != 0) {
+        # Added a check for p.cmd != nil to prevent issues arising from an empty environment in unit tests.
+        if (d.clear != 0 && p.cmd != nil) {
             clear_mid_pass(?p, d.clear_color);
         }
     }
