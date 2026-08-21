@@ -246,6 +246,7 @@ fwd boom.graphics.renderer.renderer_present_mode;
 fwd boom.graphics.renderer.renderer_present_mode_requested;
 fwd boom.graphics.renderer.renderer_present_mode_supported;
 fwd boom.graphics.renderer.renderer_dropped;
+fwd boom.graphics.renderer.renderer_refused;
 fwd boom.graphics.renderer.renderer_draws;
 fwd boom.graphics.renderer.renderer_culled;
 # A full stall of the graphics pipeline, for tooling that coordinates several
