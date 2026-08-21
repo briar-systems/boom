@@ -32,7 +32,11 @@
 # draws with pass_draw_shaded. The pipelines that needs are built under the
 # Shader, keyed by render-pass compatibility and the vertex layout each draw
 # actually uses, so a game never names a Pipeline or a RenderPass. Its shading
-# parameters go in the block set by pass_set_user, which arrives at binding 4.
+# parameters go in the block set by pass_set_user, which arrives at binding 4
+# and is copied into each draw's slot; anything larger than that block goes in
+# the frame's storage buffer, which renderer_storage_write fills and which
+# arrives at binding 8 as one buffer the whole frame shares. See
+# boom.graphics.storage for why those are two things rather than one.
 #
 # A 3D draw takes a uniform slot. GL set named uniforms on the bound program
 # between draws; a Vulkan draw reads a buffer range that must already hold
@@ -105,6 +109,17 @@ use boom.graphics.stream.stream_dropped;
 use boom.graphics.stream.stream_blocks;
 use boom.graphics.stream.stream_reserved;
 use boom.graphics.stream.stream_dnit;
+use boom.graphics.storage.FrameStorage;
+use boom.graphics.storage.storage_init;
+use boom.graphics.storage.storage_begin_frame;
+use boom.graphics.storage.storage_write;
+use boom.graphics.storage.storage_reserve;
+use boom.graphics.storage.storage_buffer;
+use boom.graphics.storage.storage_capacity;
+use boom.graphics.storage.storage_used;
+use boom.graphics.storage.storage_buffers;
+use boom.graphics.storage.storage_refused;
+use boom.graphics.storage.storage_dnit;
 use boom.graphics.batch.Batch2D;
 use boom.graphics.batch.batch_reset;
 use boom.graphics.batch.batch_breaks;
@@ -211,11 +226,16 @@ use boom.math.transform.transform_matrix;
 # pipes:   the pipeline cache, keyed by program and vertex layout
 # white:   a 1x1 opaque white texture, bound when a draw has no texture of
 #          its own, since every fragment stage samples
+# store:   the frame's storage buffer, the bulk data a game's own shading reads
 # width:   the target width in pixels
 # height:  the target height in pixels
 # frame_index: which in-flight frame is being recorded
 # drawing: whether a frame is currently open
-# dropped: draws refused this frame because the ring ran out
+# dropped: draws refused this frame, because a resource ran out or because
+#          their parameters could not be uploaded
+# refused: uniform blocks refused this frame for not fitting the slot's user
+#          region, which is a different fault from a dropped draw and is
+#          counted separately so the two are told apart
 # culled:  draws skipped this frame because they were outside the view
 # draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
@@ -235,12 +255,14 @@ pub rec Renderer {
     pipes:       PipelineCache;
     white:       Texture;
     stream:      VertexStream;
+    store:       FrameStorage;
     ui_format:   VertexFormat;
     width:       i32;
     height:      i32;
     frame_index: usize;
     drawing:     bool;
     dropped:     usize;
+    refused:     usize;
     culled:      usize;
     draws:       usize;
     srgb:        bool;
@@ -255,6 +277,7 @@ pub rec Renderer {
     ready_desc:  bool;
     ready_white: bool;
     ready_stream: bool;
+    ready_store: bool;
 }
 
 # initialize a renderer against a window
@@ -302,6 +325,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     r.drawing     = false;
     r.frame_index = 0;
     r.dropped     = 0;
+    r.refused     = 0;
     r.culled      = 0;
     r.draws       = 0;
     r.present     = present;
@@ -315,6 +339,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     r.ready_desc   = false;
     r.ready_white  = false;
     r.ready_stream = false;
+    r.ready_store  = false;
 
     val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
     if (is_err[bool, Error](vr)) { ret vr; }
@@ -394,6 +419,14 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
     if (is_err[bool, Error](str_r)) { renderer_rollback(r); ret str_r; }
     r.ready_stream = true;
+
+    # The frame's storage buffer. Created here rather than on the first write,
+    # because binding 8 is in every set layout and a set bound with it unwritten
+    # is undefined behaviour: there has to be a buffer to name before the first
+    # draw, whether or not a game ever fills it.
+    val sto_r: Result[bool, Error] = storage_init(?r.store, ?r.vk);
+    if (is_err[bool, Error](sto_r)) { renderer_rollback(r); ret sto_r; }
+    r.ready_store = true;
 
     ret ok[bool, Error](true);
 }
@@ -592,6 +625,7 @@ pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
 pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     @out_ok = false;
     r.dropped = 0;
+    r.refused = 0;
     r.culled  = 0;
     r.draws   = 0;
 
@@ -642,6 +676,10 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     # GPU is done with everything this frame's command buffer read last time, so
     # its arena is free again.
     stream_begin(?r.stream, r.frame_index);
+    # And its storage buffer, for the same reason. The capacity survives; only
+    # the write mark is rewound, so a frame that needed room for forty lights
+    # does not allocate for them again.
+    storage_begin_frame(?r.store, r.frame_index);
     r.drawing = true;
     @out_ok = true;
     ret ok[bool, Error](true);
@@ -694,16 +732,41 @@ pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
 }
 
-# how many draws were refused this frame because the uniform ring ran out
+# how many draws were refused this frame
 #
 # zero in normal operation. a non-zero count means the frame drew fewer
 # things than it asked to, which is otherwise invisible: the missing draws
 # simply do not appear.
+#
+# WHAT COUNTS AS ONE. A draw that could not take a uniform slot or a palette
+# slot, one whose geometry did not fit the vertex arena, one whose pipeline
+# could not be built, one submitted to a multi-attachment pass through a
+# built-in program, and one whose uniforms could not be uploaded. That last
+# class used to return without counting, and it is the worst of them to lose: a
+# full-screen stage that does not run leaves everything downstream reading
+# whatever its target already held, no layer reports anything, and from outside
+# it is indistinguishable from the shading being wrong.
 # ---
 # r:   the renderer
 # ret: the number of dropped draws in the most recent frame
 pub fun renderer_dropped(r: *Renderer) usize {
     ret r.dropped;
+}
+
+# how many uniform blocks were refused this frame for not fitting
+#
+# Separate from renderer_dropped because the cause is different and the fix is
+# different: a dropped draw means the frame asked for more than the renderer
+# had, and this means a game handed pass_set_user more than USER_BYTES. The
+# draws that follow such a refusal still happen, reading whatever their slot's
+# user region last held, so the picture is wrong rather than missing.
+#
+# A payload larger than the block is what renderer_storage_write exists for.
+# ---
+# r:   the renderer
+# ret: blocks refused in the most recent frame
+pub fun renderer_refused(r: *Renderer) usize {
+    ret r.refused;
 }
 
 # Draw calls recorded in the most recent frame.
@@ -739,6 +802,7 @@ fun renderer_rollback(r: *Renderer) {
     # A live device may still be reading any of the later stages.
     if (r.ready_dev) { vk.vkDeviceWaitIdle(r.vk.device); }
 
+    if (r.ready_store)  { storage_dnit(?r.store, ?r.vk); r.ready_store = false; }
     if (r.ready_stream) { stream_dnit(?r.stream, ?r.vk); r.ready_stream = false; }
     if (r.ready_white)  { texture_delete(?r.dev, ?r.white); r.ready_white = false; }
     if (r.ready_desc)   { descriptors_dnit(?r.desc, ?r.vk); r.ready_desc = false; }
@@ -1293,7 +1357,15 @@ pub fun batch_flush(p: *Pass) {
 
     var u: ScreenUniforms;
     u.projection = p.projection;
-    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) { ret; }
+    # COUNTED, NOT SILENT. A draw whose uniforms could not be uploaded must not
+    # be recorded, and refusing to record it is correct; saying nothing about it
+    # is what made a stage that did not run indistinguishable from a shading
+    # bug, because everything downstream then reads whatever its target already
+    # held and no validation layer fires.
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
 
     # The game's own block, exactly as the mesh path writes it.
     #
@@ -1308,7 +1380,10 @@ pub fun batch_flush(p: *Pass) {
     # that survives a look at the screen.
     if (p.user != nil) {
         if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
-                                       p.user, p.user_len)) { ret; }
+                                       p.user, p.user_len)) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
     }
 
     # The 2D program always samples, so an untextured run gets the renderer's
@@ -1322,9 +1397,17 @@ pub fun batch_flush(p: *Pass) {
     var samplers2d: [4]vk.Sampler;
     fill_views_batch(r, ?views2d[0], p.mat2d, tex, had_texture);
     fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
-    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(ScreenUniforms)::u64, ?views2d[0], ?samplers2d[0],
-                          0, 0);
+    # A set that was not written must not be bound: the shader would read
+    # descriptors nothing filled. The answer used to be discarded here, which is
+    # the same silence the uploads above had.
+    if (!descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+                               $size_of(ScreenUniforms)::u64, ?views2d[0], ?samplers2d[0],
+                               0, 0,
+                               storage_buffer(?r.store, r.frame_index),
+                               storage_capacity(?r.store, r.frame_index)::u64)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
 
     var pipe: *Pipeline = nil;
     if (p.shader2d != nil) {
@@ -1339,7 +1422,10 @@ pub fun batch_flush(p: *Pass) {
         ret;
     }
     pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+    if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
 
     var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
     if (buf == nil) {
@@ -1549,6 +1635,12 @@ pub fun pass_set_material(p: *Pass, mat: *Material) {
 #
 # Passing nil clears it, and the following draws read an undefined block if
 # their shader declares binding 4.
+#
+# TOO LARGE IS COUNTED AS WELL AS REFUSED. A game that ignores the answer used
+# to get nothing at all: the block was not set, the draws that followed read
+# whatever the slot last held, and the picture was wrong in a way that looked
+# like the shading rather than like a budget. renderer_refused reports it, and
+# renderer_storage_write is where a payload that does not fit belongs.
 # ---
 # p:   the open pass
 # data: the block's bytes, or nil to clear
@@ -1561,7 +1653,10 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
         p.user_len = 0;
         ret true;
     }
-    if (len == 0 || len > USER_BYTES) { ret false; }
+    if (len == 0 || len > USER_BYTES) {
+        p.renderer.refused = p.renderer.refused + 1;
+        ret false;
+    }
     p.user     = data;
     p.user_len = len;
     ret true;
@@ -1662,7 +1757,13 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         var su: SkinnedUniforms;
         su.view_proj = vp;
         su.model     = model;
-        if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?su):~*u8, $size_of(SkinnedUniforms))) { ret; }
+        # Counted for the reason batch_flush's is: a draw refused for a failed
+        # upload is a draw that does not appear, and one that says nothing looks
+        # exactly like a shading bug from outside.
+        if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?su):~*u8, $size_of(SkinnedUniforms))) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
     }
     or {
         # The unskinned shader reads one matrix, so the view and projection are
@@ -1672,7 +1773,10 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         var u: MeshUniforms;
         u.mvp   = mvp;
         u.model = model;
-        if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(MeshUniforms))) { ret; }
+        if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(MeshUniforms))) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
     }
 
     # The base colour goes in the slot's second aligned sub-slot, which is what
@@ -1684,14 +1788,20 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     var basec: TintUniforms;
     basec.colour = tint;
     if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
-                                   (?basec):~*u8, $size_of(TintUniforms))) { ret; }
+                                   (?basec):~*u8, $size_of(TintUniforms))) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
 
     # The game's own block, if this pass has one. Copied per draw rather than
     # held by reference, so a game may change the struct between draws and each
     # draw keeps what it was submitted with.
     if (p.user != nil) {
         if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
-                                       p.user, p.user_len)) { ret; }
+                                       p.user, p.user_len)) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
     }
 
     # Every fragment stage samples, so an untextured draw gets the renderer's
@@ -1706,9 +1816,14 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     var samplers: [4]vk.Sampler;
     fill_views_mat(r, ?views[0], mat, src);
     fill_samplers_mat(r, ?samplers[0], mat);
-    descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                          $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
-                          base_off::u64, $size_of(TintUniforms)::u64);
+    if (!descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+                               $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
+                               base_off::u64, $size_of(TintUniforms)::u64,
+                               storage_buffer(?r.store, r.frame_index),
+                               storage_capacity(?r.store, r.frame_index)::u64)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
 
     var program: Program = PROGRAM_MESH;
     if (skinned) {
@@ -1723,8 +1838,16 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         # gives the shader's array of columns a natural 16-byte stride, so the
         # palette uploads as a copy rather than a repack.
         if (!descriptors_write_palette(?r.desc, r.frame_index, pal,
-                                       (pose_matrices(pose)):~*u8, MAX_JOINTS * 64)) { ret; }
-        descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal);
+                                       (pose_matrices(pose)):~*u8, MAX_JOINTS * 64)) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
+        # A skinned draw whose binding 3 was not written reads a palette nothing
+        # filled, which places the character by whatever the descriptor held.
+        if (!descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal)) {
+            r.dropped = r.dropped + 1;
+            ret;
+        }
     }
 
     var pipe: *Pipeline = nil;
@@ -1745,7 +1868,10 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     }
 
     pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+    if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
     mesh_draw(m, p.cmd);
     r.draws = r.draws + 1;
 }
@@ -1922,6 +2048,121 @@ pub fun renderer_stream_reserved(r: *Renderer) usize {
     ret stream_reserved(?r.stream, r.frame_index);
 }
 
+# fill this frame's storage buffer, which every draw in the frame reads
+#
+# WHAT THIS IS FOR. A draw's own parameters go in the block pass_set_user
+# delivers, which is one aligned range and therefore sixteen vec4s. A list does
+# not fit that shape: a traced light is two vec4, so six lights fit after a
+# header, and a scene with lamps, hostiles and projectiles is forty. This is
+# where that list goes. It arrives at binding 8, under std430 rather than
+# std140, as one buffer the whole frame shares.
+#
+# ONE BUFFER, NOT A COPY PER DRAW, which is the whole point and is also the one
+# thing to hold in mind. The bytes are not snapshotted per draw the way the user
+# block is: every draw in the frame, including draws already recorded, reads
+# whatever the buffer holds when the frame executes. Fill it once as the frame
+# opens. Per-draw values belong in the user block; the array both draws index
+# into belongs here.
+#
+# ONLY WITH A FRAME OPEN. Between frames the GPU may still be reading this
+# frame's buffer, and the fence that proves otherwise is waited on inside
+# renderer_begin_frame. A write before that is a data race whose symptom is a
+# list that flickers between two frames' contents under load.
+#
+# The buffer grows to fit and keeps what it grew to, so a game that writes a
+# larger payload than last frame is not refused; see renderer_storage_reserve
+# for why a game may still want to say the size up front.
+# ---
+# r:   the renderer, with a frame open
+# src: the bytes to copy
+# len: how many
+# ret: false when no frame is open or the buffer could not grow, in which case
+#      nothing was written and renderer_storage_refused counts it
+pub fun renderer_storage_write(r: *Renderer, src: *u8, len: usize) bool {
+    ret renderer_storage_write_at(r, 0, src, len);
+}
+
+# fill part of this frame's storage buffer, at a byte offset
+#
+# For a game packing several arrays into the one buffer: a header at 0, a light
+# list after it, a decal list after that. The offset is a byte offset and the
+# layout is the game's business, exactly as it is for the user block, so what it
+# has to match is what the shader declares under std430.
+#
+# Everything renderer_storage_write says applies here, including that the buffer
+# is the frame's rather than the draw's.
+# ---
+# r:      the renderer, with a frame open
+# offset: where in the buffer the bytes go
+# src:    the bytes to copy
+# len:    how many
+pub fun renderer_storage_write_at(r: *Renderer, offset: usize, src: *u8, len: usize) bool {
+    if (!r.drawing) { ret false; }
+    ret storage_write(?r.store, ?r.vk, r.frame_index, offset, src, len);
+}
+
+# grow every frame's storage buffer to at least this many bytes
+#
+# WHY A GAME CALLS THIS. The descriptor's range is the buffer's whole capacity,
+# so it is also the largest storage block a shader may legally declare. A game
+# whose shader declares an array of 256 lights but whose scene currently holds
+# four writes far less than it declares, and the capacity has to be reserved
+# rather than discovered: a block larger than the range is invalid usage that
+# the validation layers report and a driver may honour anyway, which is the
+# shape of bug that works here and fails elsewhere.
+#
+# So a game reserves what its shader declares, once, at start-up. That also
+# moves the allocation off the first frame that needs the room, which is the
+# frame least able to afford it.
+#
+# Safe to call with no frame open, and with one: growing does not disturb the
+# buffer the GPU is reading, because the one being replaced is retained.
+# ---
+# r:     the renderer
+# bytes: the capacity to guarantee
+# ret:   false when the buffer could not grow, which renderer_storage_refused
+#        counts
+pub fun renderer_storage_reserve(r: *Renderer, bytes: usize) bool {
+    if (!r.ready_store) { ret false; }
+    ret storage_reserve(?r.store, ?r.vk, bytes);
+}
+
+# the current frame's storage capacity, in bytes
+#
+# Also the descriptor's range, and therefore the largest storage block a shader
+# may declare. See renderer_storage_reserve.
+pub fun renderer_storage_capacity(r: *Renderer) usize {
+    ret storage_capacity(?r.store, r.frame_index);
+}
+
+# bytes written into the current frame's storage buffer this frame
+#
+# What the payload actually costs, against the capacity above. Rewound each
+# frame, so this is the frame being recorded rather than a high-water mark.
+pub fun renderer_storage_used(r: *Renderer) usize {
+    ret storage_used(?r.store, r.frame_index);
+}
+
+# how many storage buffers the current frame has allocated over its life
+#
+# One in a game that reserved what it needed or never outgrew the starting size.
+# A number that climbs while the game runs means the payload is still growing,
+# and every step of that growth is a buffer retained until the renderer is torn
+# down.
+pub fun renderer_storage_buffers(r: *Renderer) usize {
+    ret storage_buffers(?r.store, r.frame_index);
+}
+
+# writes refused because the storage buffer could not grow
+#
+# Zero in normal operation, and counted over the renderer's life rather than per
+# frame so a game polling once at shutdown still sees them. Anything else means
+# a shader read bytes the game believed it had written, which is otherwise
+# indistinguishable from the shading being wrong.
+pub fun renderer_storage_refused(r: *Renderer) usize {
+    ret storage_refused(?r.store);
+}
+
 # --------------------------------------------------------------------- tests
 #
 # a renderer needs a device and a surface, so these cover the pure parts:
@@ -2042,21 +2283,56 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     # draw left there, which shades wrongly rather than not at all, and does it
     # only for the fields past the cut. Refusing leaves the previous block in
     # place and reports it, so the caller finds out at the call that is wrong.
+    var r: Renderer;
+    r.refused = 0;
     var p: Pass;
+    p.renderer = ?r;
     p.user     = nil;
     p.user_len = 0;
     var block: [512]u8;
 
     if (pass_set_user(?p, ?block[0], USER_BYTES + 1)) { ret 1; }
     if (p.user != nil || p.user_len != 0)             { ret 2; }
+    # AND COUNTED. A caller that ignores the answer used to get no sign at all:
+    # the draws that followed read whatever their slot's user region last held,
+    # which looks like the shading being wrong rather than like a budget.
+    if (renderer_refused(?r) != 1)                    { ret 7; }
 
     # A block of exactly the advertised size is accepted.
     if (!pass_set_user(?p, ?block[0], USER_BYTES))    { ret 3; }
     if (p.user != ?block[0] || p.user_len != USER_BYTES) { ret 4; }
+    if (renderer_refused(?r) != 1)                       { ret 8; }
 
     # And nil clears it rather than being treated as a zero-length block.
     if (!pass_set_user(?p, nil, 0)) { ret 5; }
     if (p.user != nil)              { ret 6; }
+    if (renderer_refused(?r) != 1)  { ret 9; }
+    ret 0;
+}
+
+test "renderer: a storage write outside an open frame is refused" {
+    # Between frames the GPU may still be reading the buffer this write would
+    # land in, and the fence that proves otherwise is waited on inside
+    # renderer_begin_frame. Allowing it would make a payload written from a
+    # loading screen or a tick handler race the frame in flight, which flickers
+    # under load and looks correct the moment the GPU catches up.
+    var r: Renderer;
+    r.drawing     = false;
+    r.frame_index = 0;
+    r.store.ready = true;
+    var bytes: [64]u8;
+    if (renderer_storage_write(?r, ?bytes[0], 64))       { ret 1; }
+    if (renderer_storage_write_at(?r, 0, ?bytes[0], 64)) { ret 2; }
+    ret 0;
+}
+
+test "renderer: reserving before the storage exists is refused, not a fault" {
+    # A game may reserve at start-up, and start-up is also where a renderer that
+    # failed to come up is still zeroed. Reaching for a device through it would
+    # be a fault rather than an answer.
+    var r: Renderer;
+    r.ready_store = false;
+    if (renderer_storage_reserve(?r, 4096)) { ret 1; }
     ret 0;
 }
 

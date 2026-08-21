@@ -40,6 +40,7 @@ use boom.graphics.vertex.COMP_U16;
 use boom.graphics.vertex.COMP_U32;
 use boom.graphics.vertex.COMP_I8;
 use boom.graphics.vertex.COMP_I16;
+use boom.graphics.storage.FRAME_STORAGE_BINDING;
 
 # The format returned when an attribute cannot be expressed in Vulkan.
 pub val FORMAT_UNSUPPORTED: i32 = 0;
@@ -254,14 +255,19 @@ pub val BINDING_SAMPLER: Binding = 2;
 pub val BINDING_STORAGE: Binding = 3;
 
 # The most bindings one descriptor set describes.
-pub val MAX_BINDINGS: usize = 8;
+#
+# The next power of two past what set_layout_full uses, so the binding after the
+# frame storage is one more entry rather than a change to every array that
+# mirrors this number. A set layout is described once per pipeline and a pool is
+# sized per kind, so the unused entries cost nothing at draw time.
+pub val MAX_BINDINGS: usize = 16;
 
 # A descriptor set layout description.
 # ---
 # kinds: The kind at each binding number, BINDING_NONE where unused.
 # count: One past the highest binding number used.
 pub rec SetLayout {
-    kinds: [8]Binding;
+    kinds: [16]Binding;
     count: u32;
 }
 
@@ -341,6 +347,11 @@ pub fun set_layout_full() SetLayout {
     set_layout_at(?l, 5, BINDING_SAMPLER);
     set_layout_at(?l, 6, BINDING_SAMPLER);
     set_layout_at(?l, 7, BINDING_SAMPLER);
+    # Binding 8 is the frame's storage buffer, declared in every layout for the
+    # same reason binding 4 is: one buffer the whole frame shares, bound to
+    # every set so a game shader that reads it and a built-in one that does not
+    # are interchangeable at the same pipeline layout.
+    set_layout_at(?l, FRAME_STORAGE_BINDING, BINDING_STORAGE);
     ret l;
 }
 
@@ -370,7 +381,7 @@ pub fun set_layout_count(l: *SetLayout, kind: Binding) u32 {
 
 # Create the Vulkan descriptor set layout for a description.
 fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[bool, Error] {
-    var bindings: [8]vk.DescriptorSetLayoutBinding;
+    var bindings: [16]vk.DescriptorSetLayoutBinding;
     var n: u32 = 0;
     var i: u32 = 0;
     for (i < l.count) {
@@ -861,12 +872,13 @@ test "pipeline: teardown on a pipeline that was never created is a no-op" {
 test "pipeline: the full layout declares every binding a stage may read" {
     var l: SetLayout = set_layout_full();
     # The vertex stage's transforms at 0, a material's first texture at 1, the
-    # tint at 2, the joint palette at 3, the game's own block at 4, and a
-    # material's remaining three textures at 5, 6 and 7. A layout stopping short
+    # tint at 2, the joint palette at 3, the game's own block at 4, a material's
+    # remaining three textures at 5, 6 and 7, and the frame's storage buffer at
+    # 8. A layout stopping short
     # does not fail loudly: the shader reads a descriptor that was never
     # written, and before this covered four samplers it read a uniform buffer's
     # bytes as an image with only the validation layers saying so.
-    if (l.count != 8)                     { ret 1; }
+    if (l.count != 9)                     { ret 1; }
     if (l.kinds[0] != BINDING_UNIFORM)    { ret 2; }
     if (l.kinds[1] != BINDING_SAMPLER)    { ret 3; }
     if (l.kinds[2] != BINDING_UNIFORM)    { ret 4; }
@@ -875,6 +887,7 @@ test "pipeline: the full layout declares every binding a stage may read" {
     if (l.kinds[5] != BINDING_SAMPLER)    { ret 7; }
     if (l.kinds[6] != BINDING_SAMPLER)    { ret 8; }
     if (l.kinds[7] != BINDING_SAMPLER)    { ret 9; }
+    if (l.kinds[FRAME_STORAGE_BINDING::usize] != BINDING_STORAGE) { ret 10; }
     ret 0;
 }
 
@@ -886,13 +899,14 @@ test "pipeline: the mesh layout declares only its one uniform" {
 }
 
 test "pipeline: a layout counts descriptors per kind, not per set" {
-    # What the pool has to be sized by. The full set holds three uniforms and
-    # four samplers, so a pool sized at one of each per set runs out at the
-    # first draw. descriptor.mach's pool sizes are derived from these numbers
-    # and must move when they do.
+    # What the pool has to be sized by. The full set holds three uniforms, four
+    # samplers and two storage buffers, so a pool sized at one of each per set
+    # runs out at the first draw. descriptor.mach's pool sizes are derived from
+    # these numbers and must move when they do.
     var sp: SetLayout = set_layout_full();
     if (set_layout_count(?sp, BINDING_UNIFORM) != 3) { ret 1; }
     if (set_layout_count(?sp, BINDING_SAMPLER) != 4) { ret 2; }
+    if (set_layout_count(?sp, BINDING_STORAGE) != 2) { ret 5; }
 
     var me: SetLayout = set_layout_mesh();
     if (set_layout_count(?me, BINDING_UNIFORM) != 1) { ret 3; }
@@ -929,6 +943,13 @@ test "pipeline: a material's texture index maps to its binding" {
     if (sampler_binding(1) != 5) { ret 2; }
     if (sampler_binding(2) != 6) { ret 3; }
     if (sampler_binding(3) != 7) { ret 4; }
+    # And none of them lands on the frame storage, which is what a fifth texture
+    # would do if it were added by extending this run rather than past it.
+    var si: usize = 0;
+    for (si < 4) {
+        if (sampler_binding(si) == FRAME_STORAGE_BINDING) { ret 6; }
+        si = si + 1;
+    }
 
     # Every one of them is a sampler in the layout it indexes into, which is the
     # property that made the old second-sampler probe read a uniform buffer as

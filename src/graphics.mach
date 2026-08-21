@@ -46,6 +46,15 @@
 # bounded number of draws, and renderer_dropped reports any it refused
 # rather than letting them silently not appear.
 #
+# A GAME'S OWN SHADING HAS TWO BUDGETS. pass_set_user sets the block that
+# arrives at binding 4: a draw's own parameters, copied into that draw's
+# slot as it is submitted, at most USER_BYTES, which is sixteen vec4s.
+# renderer_storage_write fills the buffer that arrives at binding 8: one
+# buffer the whole frame shares, filled once after renderer_begin_frame and
+# read by every draw, under std430 and as large as the game writes. A list
+# goes in the second, because two vec4 per light leaves six lights in the
+# first. See boom.graphics.storage.
+#
 # A mesh is described by a VertexFormat (boom.graphics.vertex): a declared
 # list of attributes rather than a fixed vertex struct, and a pipeline
 # derives its vertex input state from that same format so the two cannot
@@ -246,6 +255,7 @@ fwd boom.graphics.renderer.renderer_present_mode;
 fwd boom.graphics.renderer.renderer_present_mode_requested;
 fwd boom.graphics.renderer.renderer_present_mode_supported;
 fwd boom.graphics.renderer.renderer_dropped;
+fwd boom.graphics.renderer.renderer_refused;
 fwd boom.graphics.renderer.renderer_draws;
 fwd boom.graphics.renderer.renderer_culled;
 # A full stall of the graphics pipeline, for tooling that coordinates several
@@ -306,6 +316,27 @@ fwd boom.graphics.renderer.pass_set_material;
 fwd boom.graphics.renderer.pass_draw_shaded;
 fwd boom.graphics.renderer.pass_draw_shaded_skinned;
 fwd boom.graphics.descriptor.USER_BYTES;
+
+# Bulk per-frame data for a game's own shading, larger than a uniform block
+# holds. One buffer the whole frame shares, arriving at FRAME_STORAGE_BINDING
+# under std430, which is where a light list, a decal list or any other array the
+# draws index into belongs. USER_BYTES is the budget for a draw's own
+# parameters; this is the budget for everything that is not per draw. See
+# boom.graphics.storage.
+fwd boom.graphics.storage.FRAME_STORAGE_BINDING;
+fwd boom.graphics.storage.STORAGE_BYTES;
+fwd boom.graphics.storage.STORAGE_MAX_BYTES;
+fwd boom.graphics.storage.MAX_STORAGE_BUFFERS;
+fwd boom.graphics.storage.FrameStorage;
+fwd boom.graphics.storage.NO_STORAGE_SIZE;
+fwd boom.graphics.storage.storage_size_for;
+fwd boom.graphics.renderer.renderer_storage_write;
+fwd boom.graphics.renderer.renderer_storage_write_at;
+fwd boom.graphics.renderer.renderer_storage_reserve;
+fwd boom.graphics.renderer.renderer_storage_capacity;
+fwd boom.graphics.renderer.renderer_storage_used;
+fwd boom.graphics.renderer.renderer_storage_buffers;
+fwd boom.graphics.renderer.renderer_storage_refused;
 
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;
@@ -395,6 +426,7 @@ fwd boom.graphics.pipeline.Binding;
 fwd boom.graphics.pipeline.BINDING_NONE;
 fwd boom.graphics.pipeline.BINDING_UNIFORM;
 fwd boom.graphics.pipeline.BINDING_SAMPLER;
+fwd boom.graphics.pipeline.BINDING_STORAGE;
 fwd boom.graphics.pipeline.MAX_BINDINGS;
 fwd boom.graphics.pipeline.SetLayout;
 fwd boom.graphics.pipeline.set_layout;
