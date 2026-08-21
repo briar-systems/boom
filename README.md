@@ -351,9 +351,20 @@ mach test .
 
 Building a game that links against boom's window layer needs GLFW available to
 the linker; the library build and the test suite do not.
-## Old darwin !!!
-If it crashes when run after compilation
-You can test add it to `.zshrc`
-```zsh
+
+## macOS
+
+Apple ships Metal and no Vulkan driver, so a macOS build runs against
+[MoltenVK](https://github.com/KhronosGroup/MoltenVK), which translates Vulkan to
+Metal underneath. boom enables the portability extensions that arrangement
+requires, so nothing about the build differs.
+
+Older Intel machines need one environment variable set before the binary runs.
+MoltenVK builds its descriptor sets out of Metal argument buffers by default,
+and the Metal driver for the Intel HD 5000 generation mishandles them, so a
+binary that builds and links cleanly crashes inside the driver instead of
+drawing. Turning that path off avoids it:
+
+```sh
 export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
 ```
