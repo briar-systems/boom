@@ -58,6 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   owns binding 1, so a material naming a different sheet still cannot redirect
   uvs that were normalised against the run's own.
 
+- graphics: a pass rendering to the window clears to the colour it was given.
+  `PassDesc.clear` and `clear_color` were read on the offscreen path only: a
+  window pass took the colour, dropped it, and left standing the black the
+  frame had cleared to on load, with nothing at the call site to say the
+  request had gone nowhere. A game asking for a background colour had been
+  getting black for as long as it had asked, and it took a bug report from
+  outside the project to notice. The frame's render pass has been recording
+  since `renderer_begin_frame`, so the load-time clear is spent before any pass
+  opens and the window clear is a `vkCmdClearAttachments` recorded into the
+  open pass instead. That is not free the way a clear on load is, and it erases
+  what earlier passes in the same frame drew, which is what asking a pass to
+  clear means: `pass_overlay` and `pass_world` still declare no clear, so an
+  overlay does not wipe the scene under it. Depth is cleared with the colour,
+  as it already is for an offscreen target.
+
 ## [0.16.0] - 2026-08-10
 
 ### Added
