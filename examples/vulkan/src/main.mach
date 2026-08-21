@@ -127,6 +127,19 @@ fun fail(step: str, r: Result[bool, gfx.Error]) bool {
     ret true;
 }
 
+# What a present mode is called, for the report.
+fun present_name(mode: gfx.PresentMode) str {
+    if (mode == gfx.PRESENT_MAILBOX)   { ret "mailbox"; }
+    if (mode == gfx.PRESENT_IMMEDIATE) { ret "immediate"; }
+    ret "vsync";
+}
+
+# A yes or no, for the report.
+fun yesno(b: bool) str {
+    if (b) { ret "yes"; }
+    ret "no";
+}
+
 # A unit cube's 24 vertices in the canonical standard layout.
 #
 # Built in code rather than loaded, so the test exercises the upload path with
@@ -552,6 +565,28 @@ fun main(argc: i64, argv: **u8) i64 {
     }
 
     p.printlnf("ok   ran {} frames, {} skipped for a swapchain rebuild", presented, skipped);
+
+    # THE PRESENT MODE IS A REQUEST, and vsync is the only one a driver must
+    # honour. Reporting which was taken keeps a fallback from being read as a
+    # slow renderer: under vsync every frame reads as the display interval no
+    # matter what it cost, so a frame time measured there is the display's
+    # rather than the game's.
+    p.printlnf("ok   present mode: {} requested, {} in use",
+               present_name(gfx.renderer_present_mode_requested(?r)),
+               present_name(gfx.renderer_present_mode(?r)));
+    p.printlnf("     this surface offers mailbox: {}, immediate: {}",
+               yesno(gfx.renderer_present_mode_supported(?r, gfx.PRESENT_MAILBOX)),
+               yesno(gfx.renderer_present_mode_supported(?r, gfx.PRESENT_IMMEDIATE)));
+
+    # Changing it with the renderer running is the settings-menu case, and it is
+    # the one worth exercising here: the swapchain and its framebuffers are
+    # rebuilt underneath a renderer that keeps every texture, mesh, pipeline and
+    # descriptor it already holds. Everything drawn below this line goes through
+    # the rebuilt swapchain, including the readback, which is what proves the
+    # rebuild left a renderer that still draws the right picture.
+    if (fail("renderer_set_present_mode", gfx.renderer_set_present_mode(?r, gfx.PRESENT_IMMEDIATE))) { ret 1; }
+    p.printlnf("ok   present mode changed with the renderer live: {} in use",
+               present_name(gfx.renderer_present_mode(?r)));
 
     # ------------------------------------------------------- what was drawn
     #

@@ -71,6 +71,12 @@ use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.swapchain_init;
 use boom.graphics.swapchain.swapchain_rebuild;
 use boom.graphics.swapchain.swapchain_dnit;
+use boom.graphics.swapchain.PresentMode;
+use boom.graphics.swapchain.PRESENT_VSYNC;
+use boom.graphics.swapchain.PRESENT_MAILBOX;
+use boom.graphics.swapchain.PRESENT_IMMEDIATE;
+use boom.graphics.swapchain.present_mode_valid;
+use boom.graphics.swapchain.present_mode_supported;
 use boom.graphics.vk.format_is_srgb;
 use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.frame_init;
@@ -212,6 +218,8 @@ use boom.math.transform.transform_matrix;
 # draws:   draw calls recorded this frame, after batching
 # srgb:    whether the surface encodes sRGB on write; false means the colour
 #          pipeline is missing its final encode and output is dark
+# present: the present mode that was asked for, which the surface may not have
+#          honoured; the one in use lives on the swapchain
 # Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:      glfw.Window;
@@ -234,6 +242,7 @@ pub rec Renderer {
     culled:      usize;
     draws:       usize;
     srgb:        bool;
+    present:     PresentMode;
     ready_vk:    bool;
     ready_dev:   bool;
     ready_swap:  bool;
@@ -250,6 +259,10 @@ pub rec Renderer {
 #
 # the window must have been opened with boom.window.window_open, which
 # creates no GL context: a window carrying one cannot back a Vulkan surface.
+#
+# presents with PRESENT_VSYNC, which every implementation supports.
+# renderer_init_with_present asks for another, and renderer_set_present_mode
+# changes it later without the renderer being torn down.
 # ---
 # r:      renderer to initialize
 # window: the window to present to
@@ -257,6 +270,30 @@ pub rec Renderer {
 # height: the window framebuffer height in pixels
 # ret:    true on success, or the first step that failed
 pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32) Result[bool, Error] {
+    ret renderer_init_with_present(r, window, width, height, PRESENT_VSYNC);
+}
+
+# initialize a renderer against a window, presenting a chosen way
+#
+# the mode is a request. a surface that does not offer it falls back to
+# PRESENT_VSYNC, and renderer_present_mode reports what was actually taken;
+# renderer_present_mode_supported answers the question ahead of the attempt.
+# ---
+# r:       renderer to initialize
+# window:  the window to present to
+# width:   the window framebuffer width in pixels
+# height:  the window framebuffer height in pixels
+# present: how finished frames should reach the display
+# ret:     true on success, or the first step that failed
+pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32, height: i32,
+                                   present: PresentMode) Result[bool, Error] {
+    # Checked before anything is created, so a mode restored from a settings
+    # file that names nothing fails here rather than being silently presented
+    # as vsync by a renderer that then reports vsync back.
+    if (!present_mode_valid(present)) {
+        ret err[bool, Error](error("unknown present mode"));
+    }
+
     r.window      = window;
     r.width       = width;
     r.height      = height;
@@ -265,6 +302,7 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     r.dropped     = 0;
     r.culled      = 0;
     r.draws       = 0;
+    r.present     = present;
     r.ready_vk     = false;
     r.ready_dev    = false;
     r.ready_swap   = false;
@@ -284,7 +322,7 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
     if (is_err[bool, Error](dr)) { renderer_rollback(r); ret dr; }
     r.ready_dev = true;
 
-    val sr: Result[bool, Error] = swapchain_init(?r.swap, ?r.vk, width::u32, height::u32);
+    val sr: Result[bool, Error] = swapchain_init(?r.swap, ?r.vk, width::u32, height::u32, r.present);
     if (is_err[bool, Error](sr)) { renderer_rollback(r); ret sr; }
     r.ready_swap = true;
 
@@ -427,7 +465,7 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
 
     vk.vkDeviceWaitIdle(r.vk.device);
     frame_release_targets(?r.frame, ?r.vk);
-    val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32);
+    val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32, r.present);
     if (is_err[bool, Error](sr)) { ret sr; }
     val fr: Result[bool, Error] = frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
     if (is_err[bool, Error](fr)) { ret fr; }
@@ -445,6 +483,98 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
     r.width  = r.swap.width::i32;
     r.height = r.swap.height::i32;
     ret ok[bool, Error](true);
+}
+
+# choose how finished frames reach the display, with the game running
+#
+# THIS IS A SETTINGS-MENU OPERATION, so it does not tear the renderer down:
+# every texture, mesh, font and pipeline the game has loaded survives it. A
+# swapchain is bound to its present mode the way it is bound to its extent, so
+# the mode is changed by rebuilding it, down the path a resize already takes.
+# The device is idled, the frame loop's framebuffers are released, the swapchain
+# is rebuilt, and the framebuffers are rebuilt against it.
+#
+# The request is remembered even when the rebuild fails, because the failure
+# leaves no swapchain and the per-frame check will try again; retrying with the
+# mode the player chose is the point. It is remembered even when the surface
+# refuses the mode, so a game saving the choice saves the choice rather than the
+# substitution.
+# ---
+# r:       the renderer
+# present: how finished frames should reach the display
+# ret:     success, or the first swapchain or framebuffer rebuild error
+pub fun renderer_set_present_mode(r: *Renderer, present: PresentMode) Result[bool, Error] {
+    if (!present_mode_valid(present)) {
+        ret err[bool, Error](error("unknown present mode"));
+    }
+    if (!r.ready_swap) {
+        ret err[bool, Error](error("cannot set a present mode before the renderer is initialized"));
+    }
+    if (!present_mode_changed(r, present)) { ret ok[bool, Error](true); }
+
+    r.present = present;
+    # Forced, because the extent is unchanged and the size check alone would
+    # find nothing to do.
+    ret renderer_rebuild(r, r.width, r.height, true);
+}
+
+# whether a present-mode request differs from the one the renderer is driving
+#
+# Pure and separate for the reason renderer_needs_rebuild is: a settings screen
+# writes its values back every frame it is open, and a swapchain rebuilt every
+# frame is not distinguishable from a hang.
+#
+# Compared against what was REQUESTED, not against what the swapchain settled
+# for. On a surface with no MAILBOX those two differ for as long as the game
+# runs, so comparing against the mode in use would rebuild forever on exactly
+# the hardware the fallback exists for.
+fun present_mode_changed(r: *Renderer, present: PresentMode) bool {
+    ret present != r.present;
+}
+
+# how finished frames are actually reaching the display
+#
+# The requested mode unless the surface did not offer it, in which case
+# PRESENT_VSYNC: the only mode every implementation must support. Worth reading
+# after asking for MAILBOX or IMMEDIATE, because a game profiling itself under
+# an unnoticed fallback is measuring the display's refresh rate and reading it
+# as its own frame rate.
+# ---
+# r:   the renderer
+# ret: the mode the swapchain was created with
+pub fun renderer_present_mode(r: *Renderer) PresentMode {
+    ret r.swap.present;
+}
+
+# the present mode that was asked for
+#
+# Differs from renderer_present_mode only where the surface refused it. A
+# settings screen displays this one: writing the mode in use back to disk would
+# replace the player's MAILBOX with the vsync some driver fell back to, and the
+# choice would never return on hardware able to honour it.
+# ---
+# r:   the renderer
+# ret: the mode last requested, at init or through renderer_set_present_mode
+pub fun renderer_present_mode_requested(r: *Renderer) PresentMode {
+    ret r.present;
+}
+
+# whether the surface can present this way
+#
+# For a menu that offers what it can actually deliver rather than one that
+# accepts a choice and quietly ignores it. PRESENT_VSYNC is always true, since
+# every implementation must support it; the other two are the surface's answer.
+#
+# Also how a game expresses a second choice. The fallback here is to vsync and
+# never to the other optional mode, because MAILBOX and IMMEDIATE differ in
+# whether the image tears; a game that would rather tear than wait when MAILBOX
+# is missing asks this and picks IMMEDIATE itself.
+# ---
+# r:    the renderer
+# mode: the mode to ask about
+# ret:  true when a request for that mode would be honoured
+pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
+    ret present_mode_supported(?r.vk, mode);
 }
 
 # begin this renderer's frame
@@ -615,6 +745,54 @@ test "renderer: failed target rebuild remains retryable" {
     r.frame.fb_count = 2;
     if (renderer_needs_rebuild(?r, 1280, 720)) { ret 3; }
     if (!renderer_needs_rebuild(?r, 1920, 1080)) { ret 4; }
+    ret 0;
+}
+
+test "renderer: a present mode request has to name a mode" {
+    var r: Renderer;
+    # Ready, so the refusal is the argument check and not the state check: a
+    # value restored from a settings file is refused wherever the renderer
+    # happens to be in its life.
+    r.ready_swap = true;
+    r.present    = PRESENT_VSYNC;
+    if (!is_err[bool, Error](renderer_set_present_mode(?r, 200))) { ret 1; }
+    # Refused rather than partly applied, so the menu and the renderer still
+    # agree afterwards.
+    if (r.present != PRESENT_VSYNC) { ret 2; }
+
+    var w: glfw.Window;
+    if (!is_err[bool, Error](renderer_init_with_present(?r, w, 640, 480, 200))) { ret 3; }
+    ret 0;
+}
+
+test "renderer: a present mode cannot be set before there is a swapchain" {
+    var r: Renderer;
+    r.ready_swap = false;
+    r.present    = PRESENT_VSYNC;
+    # There is nothing to rebuild, and recording the request anyway would leave
+    # a renderer that never opened claiming to be presenting a mode.
+    if (!is_err[bool, Error](renderer_set_present_mode(?r, PRESENT_MAILBOX))) { ret 1; }
+    if (r.present != PRESENT_VSYNC) { ret 2; }
+    ret 0;
+}
+
+test "renderer: the requested present mode outlives the surface refusing it" {
+    var r: Renderer;
+    r.present      = PRESENT_MAILBOX;
+    r.swap.present = PRESENT_VSYNC;
+    # The two answer different questions, and a settings screen needs both:
+    # writing the mode in use back to disk would replace the player's MAILBOX
+    # with the vsync this driver fell back to, and the choice would never return
+    # on hardware able to honour it.
+    if (renderer_present_mode(?r) != PRESENT_VSYNC)             { ret 1; }
+    if (renderer_present_mode_requested(?r) != PRESENT_MAILBOX) { ret 2; }
+    # Asking again for the mode already requested is not a change, even though
+    # the swapchain is not in it. Comparing against the mode in use instead
+    # would rebuild the swapchain every frame a settings screen was open, and
+    # only ever on the hardware that could not honour the request.
+    if (present_mode_changed(?r, PRESENT_MAILBOX))    { ret 3; }
+    if (!present_mode_changed(?r, PRESENT_IMMEDIATE)) { ret 4; }
+    if (!present_mode_changed(?r, PRESENT_VSYNC))     { ret 5; }
     ret 0;
 }
 

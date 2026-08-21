@@ -158,6 +158,21 @@ actually opened. A `false` there is a swapchain that went out of date and was
 rebuilt, which every window resize causes; the correct response is to skip the
 frame, not to treat it as an error.
 
+**The present mode is the game's, and it can change while the game runs.**
+`renderer_init` presents with `PRESENT_VSYNC`. `renderer_init_with_present`
+asks instead for `PRESENT_MAILBOX` (uncapped, no tearing, frames overtaken
+before they are shown are discarded) or `PRESENT_IMMEDIATE` (uncapped, tears,
+and the mode to profile under, since vsync reports every frame as the display
+interval regardless of what it cost). `renderer_set_present_mode` is what a
+settings screen calls: it rebuilds the swapchain, and every texture, mesh,
+font and pipeline the game has loaded survives. Vsync is the only mode a Vulkan
+implementation is required to support, so the other two are requests.
+`renderer_present_mode_supported` answers ahead of the attempt,
+`renderer_present_mode` reports the mode actually in use after a fallback, and
+`renderer_present_mode_requested` reports the one asked for, which is the one to
+save: writing back the mode in use would replace a player's `PRESENT_MAILBOX`
+with the vsync one machine fell back to.
+
 Operations that can fail return `Result[T, Error]`, where `Error`
 (`boom.graphics.error`) carries its message inline in a fixed buffer, so a
 failure needs neither a heap allocation nor a global.

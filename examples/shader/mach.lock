@@ -27,8 +27,8 @@ commit = "ebf2bb0722d47a412c820bdeb419ceec65921882"
 
 [dep.mach-font]
 url = "https://github.com/briar-systems/mach-font"
-ref = "branch/main"
-commit = "f0df249a554271953a16d830b7f1725665deb4ed"
+ref = "branch/dev"
+commit = "da30f3dc54436c36afee5997d817c6965d403a6f"
 
 [dep.mach-phys]
 url = "https://github.com/briar-systems/mach-phys"
