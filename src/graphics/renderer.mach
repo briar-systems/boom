@@ -1078,10 +1078,10 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.targets = 1;
         p.compatibility = pass_compatibility_one(r.vk.color_format);
 
-        # For window passes, if clear is requested, use vkCmdClearAttachments
-        # to clear the screen mid-pass, since the RenderPass is already active.
-        # Added a check for p.cmd != nil to prevent issues arising from an empty environment in unit tests.
-        if (d.clear != 0 && p.cmd != nil) {
+        # The frame's render pass has been recording since frame_begin, so the
+        # one chance to clear on load is already spent and what is left is to
+        # clear the attachments in place. clear_mid_pass says what that costs.
+        if (d.clear != 0) {
             clear_mid_pass(?p, d.clear_color);
         }
     }
@@ -1938,7 +1938,13 @@ test "renderer: a scene pass takes its matrices from the camera" {
     c.target   = vec3(0.0, 0.0, 0.0);
     c.up       = vec3(0.0, 1.0, 0.0);
 
+    # Driven for its matrices, which is as much as a Renderer with no device
+    # can answer. The clear is turned off because a clearing window pass
+    # records into the frame's command buffer and this one has never had one:
+    # the alternative is pass_begin carrying a nil check that exists for a test
+    # which never opened a frame, and the engine does not answer to that.
     var d: PassDesc = pass_scene(?c);
+    d.clear = 0;
     var p: Pass = pass_begin(?r, ?d);
     # An identity view would mean the camera position was ignored, which
     # draws the scene from the origin no matter where the camera is.
