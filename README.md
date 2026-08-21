@@ -153,6 +153,21 @@ attachment (`BLEND_OPAQUE`), compose with source alpha (`BLEND_SOURCE_ALPHA`),
 or sum overlapping contributions (`BLEND_ADDITIVE`). Additive mode sums alpha
 as well as RGB, and the selected mode applies to every attachment in the pass.
 
+**Reading a target back is a stall, and that is the point.** `render_target_read`
+copies the first colour attachment into host memory as packed RGBA8 and
+`render_target_read_raw_at` copies any attachment in its native format, which is
+the operation behind a screenshot, a rendering test, or a probe that checks a
+pass drew what it claimed. Both drain the device before copying, so the image is
+whole rather than one a pass was still writing, and that drain is a full
+pipeline stall: a debugging and tooling facility, not something a shipping frame
+does. A read reports the last frame that was *submitted*. Passes record into the
+frame's command buffer and `renderer_end_frame` is what submits it, so a read
+taken between `renderer_begin_frame` and `renderer_end_frame` hands back the
+previous frame complete rather than the one being recorded; end the frame first
+when the current one's draws are the point. `renderer_wait_idle` performs the
+same drain on its own, for tooling that reads several targets in a row or times
+work that would otherwise still be in flight.
+
 `renderer_begin_frame` reports through an out parameter whether a frame was
 actually opened. A `false` there is a swapchain that went out of date and was
 rebuilt, which every window resize causes; the correct response is to skip the

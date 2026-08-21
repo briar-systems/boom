@@ -64,6 +64,7 @@ use boom.graphics.error.error;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.vk_init;
 use boom.graphics.vk.vk_dnit;
+use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.device.device_init;
 use boom.graphics.device.device_dnit;
@@ -666,6 +667,30 @@ pub fun renderer_end_frame(r: *Renderer) Result[bool, Error] {
         if (is_err[bool, Error](rr)) { ret rr; }
     }
     ret ok[bool, Error](true);
+}
+
+# wait until the GPU has finished everything this renderer has submitted
+#
+# A FULL PIPELINE STALL, PAID TWICE. The CPU blocks until every frame in flight
+# has retired, and then the GPU has nothing queued and refills from empty. A
+# game that calls this every frame has given up the overlap the frame loop
+# exists to provide and will see it in its frame times.
+#
+# It is here because tooling needs it and there is no other way for a game to
+# ask for it. A readback drains the device itself (see render_target_read), so
+# reads are correct without this, but a game reading several targets in a row
+# can drain once here and let the reads that follow find the queue already
+# idle. It is also what a measurement needs: with work still in flight, a timer
+# around a draw records how far the CPU ran ahead of the GPU rather than what
+# the GPU did.
+#
+# It does not flush the open frame. Passes record into a command buffer that
+# renderer_end_frame submits, and waiting cannot retire work that has not been
+# handed over, so a read that must include the current frame ends it first.
+# ---
+# r: the renderer to drain
+pub fun renderer_wait_idle(r: *Renderer) {
+    vk_wait_idle(?r.vk);
 }
 
 # how many draws were refused this frame because the uniform ring ran out
@@ -1873,5 +1898,16 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     # And nil clears it rather than being treated as a zero-length block.
     if (!pass_set_user(?p, nil, 0)) { ret 5; }
     if (p.user != nil)              { ret 6; }
+    ret 0;
+}
+
+test "renderer: draining a renderer that never came up is a no-op" {
+    # A game drains before a readback, and start-up is allowed to have failed
+    # before it gets there. vkDeviceWaitIdle on a device that was never created
+    # is a call through a loader that was never resolved, so the guard is the
+    # difference between a stall of nothing and a jump to a null function.
+    var r: Renderer;
+    r.vk.ready = false;
+    renderer_wait_idle(?r);
     ret 0;
 }
