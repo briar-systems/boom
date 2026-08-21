@@ -994,9 +994,11 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
     }
 
     # 2. Prepare depth/stencil attachment clear info.
-    # Clear both depth and stencil to prevent residual data in future stencil tests.
+    # DEPTH ONLY. Every attachment boom builds uses DEPTH_FORMAT, which is
+    # D32_SFLOAT and carries no stencil component, so naming the stencil aspect
+    # here is a validation error rather than a harmless extra.
     var depth_att: vk.ClearAttachment;
-    depth_att.aspectMask = vk.IMAGE_ASPECT_DEPTH_BIT | vk.IMAGE_ASPECT_STENCIL_BIT;
+    depth_att.aspectMask = vk.IMAGE_ASPECT_DEPTH_BIT;
     depth_att.colorAttachment = 0; # Meaningless for depth, but required by the struct.
     depth_att.clearValue.depthStencil.depth   = 1.0;
     depth_att.clearValue.depthStencil.stencil = 0;
