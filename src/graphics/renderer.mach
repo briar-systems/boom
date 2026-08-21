@@ -979,55 +979,54 @@ pub rec Pass {
 # attachments while a RenderPass is running. It does not interrupt the
 # RenderPass and is safe for all pass types.
 fun clear_mid_pass(p: *Pass, color: Vec4) {
-    # 1. Prepare color attachment clear infos.
-    # The engine supports up to MAX_COLOR_ATTACHMENTS (4) color attachments.
-    var color_atts: [4]vk.ClearAttachment;
+    # ONE ENTRY PER ATTACHMENT THE PASS WRITES, and depth last, matching the
+    # order pass_create declared. Four colours and a depth, which is as many as
+    # any pass boom builds has.
+    #
+    # The colours are written over p.targets rather than over the one the window
+    # has, so this stays a clear of the open pass rather than a clear of the
+    # window that happens to be called through a pass. An attachment left out
+    # keeps what is already in it and nothing reports the omission, which on a
+    # multi-attachment pass is the last frame's G-buffer showing through the
+    # sheets that were missed.
+    var atts: [5]vk.ClearAttachment;
     var i: usize = 0;
     for (i < p.targets) {
-        color_atts[i].aspectMask = vk.IMAGE_ASPECT_COLOR_BIT;
-        color_atts[i].colorAttachment = i::u32;
-        color_atts[i].clearValue.color.float32[0] = color[0];
-        color_atts[i].clearValue.color.float32[1] = color[1];
-        color_atts[i].clearValue.color.float32[2] = color[2];
-        color_atts[i].clearValue.color.float32[3] = color[3];
+        atts[i].aspectMask                  = vk.IMAGE_ASPECT_COLOR_BIT;
+        atts[i].colorAttachment             = i::u32;
+        atts[i].clearValue.color.float32[0] = color[0];
+        atts[i].clearValue.color.float32[1] = color[1];
+        atts[i].clearValue.color.float32[2] = color[2];
+        atts[i].clearValue.color.float32[3] = color[3];
         i = i + 1;
     }
 
-    # 2. Prepare depth/stencil attachment clear info.
+    # Depth goes with the colour, because that is what clearing already means
+    # everywhere else: a target's clearing pass and the window's own both clear
+    # both on load. Colour alone would leave the draws that follow depth-tested
+    # against geometry that is no longer on the screen.
+    #
     # DEPTH ONLY. Every attachment boom builds uses DEPTH_FORMAT, which is
     # D32_SFLOAT and carries no stencil component, so naming the stencil aspect
     # here is a validation error rather than a harmless extra.
-    var depth_att: vk.ClearAttachment;
-    depth_att.aspectMask = vk.IMAGE_ASPECT_DEPTH_BIT;
-    depth_att.colorAttachment = 0; # Meaningless for depth, but required by the struct.
-    depth_att.clearValue.depthStencil.depth   = 1.0;
-    depth_att.clearValue.depthStencil.stencil = 0;
+    atts[p.targets].aspectMask                      = vk.IMAGE_ASPECT_DEPTH_BIT;
+    # Read only for a colour clear, and the struct offers nowhere else to put it.
+    atts[p.targets].colorAttachment                 = 0;
+    atts[p.targets].clearValue.depthStencil.depth   = 1.0;
+    atts[p.targets].clearValue.depthStencil.stencil = 0;
 
-    # 3. Assemble the attachment array (colors first, depth last).
-    var atts: [5]vk.ClearAttachment; # 4 colors + 1 depth
-    var att_count: u32 = 0;
-    i = 0;
-    for (i < p.targets) {
-        atts[att_count] = color_atts[i];
-        att_count = att_count + 1;
-        i = i + 1;
-    }
-    atts[att_count] = depth_att;
-    att_count = att_count + 1;
+    var rect: vk.ClearRect;
+    rect.rect.offset.x      = 0;
+    rect.rect.offset.y      = 0;
+    rect.rect.extent.width  = p.width::u32;
+    rect.rect.extent.height = p.height::u32;
+    rect.baseArrayLayer     = 0;
+    rect.layerCount         = 1;
 
-    # 4. Prepare the clear rect (covering the whole screen).
-    var clear_rect: vk.ClearRect;
-    clear_rect.rect.offset.x      = 0;
-    clear_rect.rect.offset.y      = 0;
-    clear_rect.rect.extent.width  = p.width::u32;
-    clear_rect.rect.extent.height = p.height::u32;
-    clear_rect.baseArrayLayer     = 0;
-    clear_rect.layerCount         = 1;
-
-    # 5. Execute the mid-pass clear.
-    # rectCount is 1. Vulkan spec states that if attachmentCount > rectCount,
-    # the extra attachments use the last rect in the array.
-    vk.vkCmdClearAttachments(p.cmd, att_count, ?atts[0], 1, ?clear_rect);
+    # ONE RECT, NOT ONE PER ATTACHMENT. The rects are regions cleared in every
+    # attachment named rather than a list paired with them, so a single rect
+    # over the whole extent is what makes this stand in for a clear on load.
+    vk.vkCmdClearAttachments(p.cmd, (p.targets + 1)::u32, ?atts[0], 1, ?rect);
 }
 
 # begin a pass
