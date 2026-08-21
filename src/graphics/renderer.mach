@@ -983,25 +983,51 @@ pub rec Pass {
 # an offscreen excursion, so by the time any pass opens, the load-time clear is
 # spent. For a window pass this is the only way left to honour one.
 fun clear_mid_pass(p: *Pass, color: Vec4) {
-    # ONE ENTRY PER ATTACHMENT THE PASS WRITES, and depth last, matching the
-    # order pass_create declared. Four colours and a depth, which is as many as
-    # any pass boom builds has.
-    #
-    # The colours are written over p.targets rather than over the one the window
-    # has, so this stays a clear of the open pass rather than a clear of the
-    # window that happens to be called through a pass. An attachment left out
-    # keeps what is already in it and nothing reports the omission, which on a
-    # multi-attachment pass is the last frame's G-buffer showing through the
-    # sheets that were missed.
+    # Four colours and a depth, which is as many attachments as any pass boom
+    # builds has.
     var atts: [5]vk.ClearAttachment;
+    val n: usize = clear_attachments(p.targets, color, ?atts[0]);
+
+    var rect: vk.ClearRect;
+    rect.rect.offset.x      = 0;
+    rect.rect.offset.y      = 0;
+    rect.rect.extent.width  = p.width::u32;
+    rect.rect.extent.height = p.height::u32;
+    rect.baseArrayLayer     = 0;
+    rect.layerCount         = 1;
+
+    # ONE RECT, NOT ONE PER ATTACHMENT. The rects are regions cleared in every
+    # attachment named rather than a list paired off against them, so a single
+    # rect over the whole extent is what makes this stand in for a clear on load.
+    vk.vkCmdClearAttachments(p.cmd, n::u32, ?atts[0], 1, ?rect);
+}
+
+# The attachments a mid-pass clear names, and how many it filled in.
+#
+# Split out and pure so it can be tested, because this is the part that is wrong
+# silently. An attachment missing from the array is simply not cleared, and an
+# aspect named that the attachment does not have is a validation error the
+# picture gives no sign of: both look like a clear that worked on the machine
+# they were written on.
+#
+# Written over targets rather than over the one attachment the window has, so
+# this stays a clear of whatever pass is open. Leaving the rest out on a
+# multi-attachment pass would show as the last frame's G-buffer through the
+# sheets that were missed.
+#
+# Unlike the clear-value array a render pass begins with, this one is not
+# positional: each entry names its own aspect and, for a colour, its own
+# attachment index. The order still follows pass_create's, colours then depth,
+# because every other attachment array in boom reads that way.
+fun clear_attachments(targets: usize, color: Vec4, out: *vk.ClearAttachment) usize {
     var i: usize = 0;
-    for (i < p.targets) {
-        atts[i].aspectMask                  = vk.IMAGE_ASPECT_COLOR_BIT;
-        atts[i].colorAttachment             = i::u32;
-        atts[i].clearValue.color.float32[0] = color[0];
-        atts[i].clearValue.color.float32[1] = color[1];
-        atts[i].clearValue.color.float32[2] = color[2];
-        atts[i].clearValue.color.float32[3] = color[3];
+    for (i < targets) {
+        out[i].aspectMask                  = vk.IMAGE_ASPECT_COLOR_BIT;
+        out[i].colorAttachment             = i::u32;
+        out[i].clearValue.color.float32[0] = color[0];
+        out[i].clearValue.color.float32[1] = color[1];
+        out[i].clearValue.color.float32[2] = color[2];
+        out[i].clearValue.color.float32[3] = color[3];
         i = i + 1;
     }
 
@@ -1013,24 +1039,13 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
     # DEPTH ONLY. Every attachment boom builds uses DEPTH_FORMAT, which is
     # D32_SFLOAT and carries no stencil component, so naming the stencil aspect
     # here is a validation error rather than a harmless extra.
-    atts[p.targets].aspectMask                      = vk.IMAGE_ASPECT_DEPTH_BIT;
+    out[targets].aspectMask                      = vk.IMAGE_ASPECT_DEPTH_BIT;
     # Read only for a colour clear, and the struct offers nowhere else to put it.
-    atts[p.targets].colorAttachment                 = 0;
-    atts[p.targets].clearValue.depthStencil.depth   = 1.0;
-    atts[p.targets].clearValue.depthStencil.stencil = 0;
+    out[targets].colorAttachment                 = 0;
+    out[targets].clearValue.depthStencil.depth   = 1.0;
+    out[targets].clearValue.depthStencil.stencil = 0;
 
-    var rect: vk.ClearRect;
-    rect.rect.offset.x      = 0;
-    rect.rect.offset.y      = 0;
-    rect.rect.extent.width  = p.width::u32;
-    rect.rect.extent.height = p.height::u32;
-    rect.baseArrayLayer     = 0;
-    rect.layerCount         = 1;
-
-    # ONE RECT, NOT ONE PER ATTACHMENT. The rects are regions cleared in every
-    # attachment named rather than a list paired with them, so a single rect
-    # over the whole extent is what makes this stand in for a clear on load.
-    vk.vkCmdClearAttachments(p.cmd, (p.targets + 1)::u32, ?atts[0], 1, ?rect);
+    ret targets + 1;
 }
 
 # begin a pass
@@ -1975,6 +1990,30 @@ test "renderer: pass descriptions differ in what they clear and project" {
     # An overlay that cleared would erase the scene it is drawn over.
     if (s.clear == 0)       { ret 3; }
     if (o.clear != 0)       { ret 4; }
+    ret 0;
+}
+
+test "renderer: a mid-pass clear names every attachment and no aspect it lacks" {
+    var atts: [5]vk.ClearAttachment;
+
+    val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0), ?atts[0]);
+    if (one != 2)                                        { ret 1; }
+    if (atts[0].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 2; }
+    if (atts[0].colorAttachment != 0)                    { ret 3; }
+    if (atts[0].clearValue.color.float32[1] != 0.5)      { ret 4; }
+    # DEPTH_FORMAT is D32_SFLOAT and has no stencil component, so naming the
+    # stencil aspect would fail validation on every clearing window pass while
+    # clearing nothing that exists.
+    if (atts[1].aspectMask != vk.IMAGE_ASPECT_DEPTH_BIT) { ret 5; }
+    if (atts[1].clearValue.depthStencil.depth != 1.0)    { ret 6; }
+
+    # A pass with four sheets clears four. Clearing only the first would leave
+    # the rest holding the previous frame, which is a picture, just the wrong one.
+    val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0), ?atts[0]);
+    if (four != 5)                                       { ret 7; }
+    if (atts[3].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 8; }
+    if (atts[3].colorAttachment != 3)                    { ret 9; }
+    if (atts[4].aspectMask != vk.IMAGE_ASPECT_DEPTH_BIT) { ret 10; }
     ret 0;
 }
 
