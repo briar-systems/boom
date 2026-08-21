@@ -228,7 +228,14 @@ fun storage_grow(s: *FrameStorage, v: *Vk, frame: usize, need: usize) bool {
     val br: Result[bool, Error] = buffer_init(?s.bufs[frame][n].buf, v, size::u64,
         vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](br)) { ret false; }
+    # Torn down on failure rather than abandoned. buffer_init fails after the
+    # buffer object exists as readily as before it, and the entry stays not-live
+    # so nothing later would destroy it: the handle would outlive every
+    # reference to it and be reported at device teardown or not at all.
+    if (is_err[bool, Error](br)) {
+        buffer_dnit(?s.bufs[frame][n].buf, v);
+        ret false;
+    }
 
     val m: ptr = buffer_map(?s.bufs[frame][n].buf, v);
     if (m == nil) {
