@@ -321,8 +321,9 @@ column-major `f32x4` values for a matrix.
 in 3D, all through boom handles.
 
 First pass, documented rather than gold-plated: one active clip at a time (no
-blend tree), a bounded joint count for the palette (`MAX_JOINTS`, 128) and a bounded number
-of skinned draws per frame (`MAX_PALETTES`, 32),
+blend tree), a bounded joint count for the palette (`MAX_JOINTS`, 128) and a
+bounded number of skinned draws per frame (`MAX_PALETTES`, 512: the ring starts
+at 32 and grows a block at a time up to that, retaining what it grew),
 and linear or step interpolation. The loader uses the first skin, requires
 joint nodes in TRS form, and rejects cubic-spline samplers. Blending, IK,
 retargeting, a larger or configurable palette, matrix-form joints, and
