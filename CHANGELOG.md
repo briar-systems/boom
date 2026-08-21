@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: a game chooses how finished frames reach the display.
+  `PRESENT_VSYNC` waits for the display, `PRESENT_MAILBOX` renders uncapped
+  without tearing, and `PRESENT_IMMEDIATE` renders uncapped and tears, which is
+  the mode to profile under: under vsync every frame reads as the display
+  interval no matter what it cost. `renderer_init_with_present` selects one at
+  start-up and `renderer_set_present_mode` changes it with the game running,
+  rebuilding the swapchain rather than requiring the renderer to be torn down
+  and every resource reloaded. Vsync is the only mode Vulkan requires an
+  implementation to support, so anything else is a request:
+  `renderer_present_mode_supported` asks in advance,
+  `renderer_present_mode` reports the mode actually in use, and
+  `renderer_present_mode_requested` reports the one asked for, which is the one
+  a settings screen saves. `renderer_init` is unchanged and presents with vsync.
+
 - graphics: `renderer_wait_idle` blocks until the GPU has finished everything
   the renderer has submitted. A full pipeline stall, for tooling that
   coordinates several readbacks without paying the drain in each one, or that
