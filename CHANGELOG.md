@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- graphics: a game chooses how finished frames reach the display.
+  `PRESENT_VSYNC` waits for the display, `PRESENT_MAILBOX` renders uncapped
+  without tearing, and `PRESENT_IMMEDIATE` renders uncapped and tears, which is
+  the mode to profile under: under vsync every frame reads as the display
+  interval no matter what it cost. `renderer_init_with_present` selects one at
+  start-up and `renderer_set_present_mode` changes it with the game running,
+  rebuilding the swapchain rather than requiring the renderer to be torn down
+  and every resource reloaded. Vsync is the only mode Vulkan requires an
+  implementation to support, so anything else is a request:
+  `renderer_present_mode_supported` asks in advance,
+  `renderer_present_mode` reports the mode actually in use, and
+  `renderer_present_mode_requested` reports the one asked for, which is the one
+  a settings screen saves. `renderer_init` is unchanged and presents with vsync.
+
+- graphics: `renderer_wait_idle` blocks until the GPU has finished everything
+  the renderer has submitted. A full pipeline stall, for tooling that
+  coordinates several readbacks without paying the drain in each one, or that
+  measures GPU work which would otherwise still be in flight.
+
+### Fixed
+- graphics: `render_target_read` and `render_target_read_raw_at` wait for the
+  device before copying, so a target read while the game is running returns a
+  complete image instead of one the GPU was part way through writing.
+  Previously the copy was submitted alongside the frames still in flight and
+  ordered against nothing, and consecutive reads of an unchanging target could
+  differ. A read reports the last frame that was submitted, so one taken between
+  `renderer_begin_frame` and `renderer_end_frame` does not include the open
+  frame's draws.
+
 ## [0.16.0] - 2026-08-10
 
 ### Added

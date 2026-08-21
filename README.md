@@ -153,10 +153,40 @@ attachment (`BLEND_OPAQUE`), compose with source alpha (`BLEND_SOURCE_ALPHA`),
 or sum overlapping contributions (`BLEND_ADDITIVE`). Additive mode sums alpha
 as well as RGB, and the selected mode applies to every attachment in the pass.
 
+**Reading a target back is a stall, and that is the point.** `render_target_read`
+copies the first colour attachment into host memory as packed RGBA8 and
+`render_target_read_raw_at` copies any attachment in its native format, which is
+the operation behind a screenshot, a rendering test, or a probe that checks a
+pass drew what it claimed. Both drain the device before copying, so the image is
+whole rather than one a pass was still writing, and that drain is a full
+pipeline stall: a debugging and tooling facility, not something a shipping frame
+does. A read reports the last frame that was *submitted*. Passes record into the
+frame's command buffer and `renderer_end_frame` is what submits it, so a read
+taken between `renderer_begin_frame` and `renderer_end_frame` hands back the
+previous frame complete rather than the one being recorded; end the frame first
+when the current one's draws are the point. `renderer_wait_idle` performs the
+same drain on its own, for tooling that reads several targets in a row or times
+work that would otherwise still be in flight.
+
 `renderer_begin_frame` reports through an out parameter whether a frame was
 actually opened. A `false` there is a swapchain that went out of date and was
 rebuilt, which every window resize causes; the correct response is to skip the
 frame, not to treat it as an error.
+
+**The present mode is the game's, and it can change while the game runs.**
+`renderer_init` presents with `PRESENT_VSYNC`. `renderer_init_with_present`
+asks instead for `PRESENT_MAILBOX` (uncapped, no tearing, frames overtaken
+before they are shown are discarded) or `PRESENT_IMMEDIATE` (uncapped, tears,
+and the mode to profile under, since vsync reports every frame as the display
+interval regardless of what it cost). `renderer_set_present_mode` is what a
+settings screen calls: it rebuilds the swapchain, and every texture, mesh,
+font and pipeline the game has loaded survives. Vsync is the only mode a Vulkan
+implementation is required to support, so the other two are requests.
+`renderer_present_mode_supported` answers ahead of the attempt,
+`renderer_present_mode` reports the mode actually in use after a fallback, and
+`renderer_present_mode_requested` reports the one asked for, which is the one to
+save: writing back the mode in use would replace a player's `PRESENT_MAILBOX`
+with the vsync one machine fell back to.
 
 Operations that can fail return `Result[T, Error]`, where `Error`
 (`boom.graphics.error`) carries its message inline in a fixed buffer, so a

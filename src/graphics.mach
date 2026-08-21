@@ -214,6 +214,7 @@ fwd boom.graphics.sprite.rect_overlaps;
 
 fwd boom.graphics.renderer.Renderer;
 fwd boom.graphics.renderer.renderer_init;
+fwd boom.graphics.renderer.renderer_init_with_present;
 fwd boom.graphics.renderer.renderer_resize;
 fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
@@ -230,9 +231,26 @@ fwd boom.graphics.fit.fit_unproject;
 fwd boom.graphics.renderer.renderer_width;
 fwd boom.graphics.renderer.renderer_height;
 fwd boom.graphics.renderer.renderer_is_srgb;
+# How finished frames reach the display. Vsync is the only mode a Vulkan
+# implementation is required to support, so the other two are requests: ask
+# renderer_present_mode_supported before, or renderer_present_mode after. See
+# boom.graphics.swapchain.
+fwd boom.graphics.swapchain.PresentMode;
+fwd boom.graphics.swapchain.PRESENT_VSYNC;
+fwd boom.graphics.swapchain.PRESENT_MAILBOX;
+fwd boom.graphics.swapchain.PRESENT_IMMEDIATE;
+fwd boom.graphics.swapchain.present_mode_valid;
+fwd boom.graphics.swapchain.present_mode_supported;
+fwd boom.graphics.renderer.renderer_set_present_mode;
+fwd boom.graphics.renderer.renderer_present_mode;
+fwd boom.graphics.renderer.renderer_present_mode_requested;
+fwd boom.graphics.renderer.renderer_present_mode_supported;
 fwd boom.graphics.renderer.renderer_dropped;
 fwd boom.graphics.renderer.renderer_draws;
 fwd boom.graphics.renderer.renderer_culled;
+# A full stall of the graphics pipeline, for tooling that coordinates several
+# readbacks or measures what the GPU did. See render_target_read.
+fwd boom.graphics.renderer.renderer_wait_idle;
 fwd boom.graphics.renderer.renderer_stream_dropped;
 fwd boom.graphics.renderer.renderer_stream_blocks;
 fwd boom.graphics.renderer.renderer_stream_reserved;
