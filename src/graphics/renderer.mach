@@ -971,13 +971,17 @@ pub rec Pass {
     user_len:   usize;
 }
 
-# Clear the screen attachments mid-pass, akin to glClear.
+# Clear the attachments of a render pass that is already recording.
 #
-# Why this exists: when target is nil, the window's RenderPass is already
-# begun in frame_begin. We cannot use LoadOp::Clear without restarting the
-# RenderPass. vkCmdClearAttachments is the standard Vulkan way to clear
-# attachments while a RenderPass is running. It does not interrupt the
-# RenderPass and is safe for all pass types.
+# ONLY LEGAL WITH A RENDER PASS OPEN. It is not a clear on load by another
+# spelling: that one is folded into the beginning of the pass and costs nothing,
+# and this is work recorded between draws which erases whatever earlier passes
+# in the same frame put in these attachments. Erasing them is what asking to
+# clear means, but which of the two is being paid for is worth knowing.
+#
+# The window's render pass begins in frame_begin and is only ever suspended for
+# an offscreen excursion, so by the time any pass opens, the load-time clear is
+# spent. For a window pass this is the only way left to honour one.
 fun clear_mid_pass(p: *Pass, color: Vec4) {
     # ONE ENTRY PER ATTACHMENT THE PASS WRITES, and depth last, matching the
     # order pass_create declared. Four colours and a depth, which is as many as
@@ -1041,9 +1045,20 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
 # resumes the window's through its load variant, so the excursion does not
 # erase what the frame has already drawn.
 #
-# a window pass cannot clear: the frame's render pass already cleared on
-# load, and clearing again mid-pass would erase earlier passes. clear is
-# honoured for an offscreen target, which begins a render pass of its own.
+# a window pass clears through vkCmdClearAttachments, because the frame's
+# render pass has been recording since frame_begin and its one load-time clear
+# is already spent. that is not free the way a clear on load is, and it erases
+# what earlier passes in the same frame drew, which is what asking a pass to
+# clear means. an offscreen target still clears on load, since it begins a
+# render pass of its own.
+#
+# the request used to be ignored here: a window pass read clear_color, dropped
+# it, and left the frame's own clear to black standing. of honouring a request,
+# refusing it, and ignoring it, ignoring is the worst, because it is the one the
+# caller cannot see. the call site reads correctly, the window is black, and
+# there is nothing to search for. an outside report is what found it, and a game
+# on this engine had been asking for a dark background and getting black for as
+# long as it had been asking.
 # ---
 # r: the renderer
 # d: the pass description
