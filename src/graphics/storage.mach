@@ -1,0 +1,653 @@
+# The per-frame storage buffer: bulk data a game's own shading reads.
+#
+# WHY THIS EXISTS ALONGSIDE THE UNIFORM SLOT. A draw's slot carries what that
+# draw is parameterised by, and the game's own part of it is one aligned range:
+# boom.graphics.descriptor.USER_BYTES, sixteen vec4s. That is the right size for
+# a directional light, a fog term or a time value, and the wrong shape for a
+# list. A traced light list is two vec4 per light, so six lights fit after a
+# header, and a scene with lamps, hostiles and projectiles is forty. The
+# workarounds are to batch the list across several full-screen passes, which
+# scales in full-screen passes, or to encode it into a texture and sample it,
+# which is a storage buffer with the type information thrown away.
+#
+# ONE BUFFER PER FRAME, NOT A SLOT PER DRAW. The whole point is that the payload
+# is larger than a slot, so copying it per draw would defeat the exercise: a
+# frame with forty lights and two hundred draws would upload the list two
+# hundred times. A game fills this once as the frame opens and every draw in the
+# frame reads the same bytes at binding 8.
+#
+# THAT IS A DIFFERENT CONTRACT FROM pass_set_user, and the difference is the one
+# thing a game has to hold in mind. The user block is copied into each draw's
+# slot as the draw is submitted, so changing it between two draws gives the two
+# draws different values. This is one buffer for the whole frame: rewriting it
+# changes what every draw in the frame reads, including draws already recorded.
+# Per-draw parameters belong in the user block; the bulk array both draws index
+# into belongs here.
+#
+# ONE BUFFER PER FRAME IN FLIGHT. The CPU runs up to MAX_FRAMES_IN_FLIGHT frames
+# ahead, so the GPU is still reading the previous frame's contents while this
+# one is written. Sharing a buffer between them is a data race with nothing
+# expressing it, and its symptom is a light list that flickers between two
+# frames' contents under load and looks correct the moment you stop to inspect
+# it. The frame index the renderer already threads through its descriptor ring
+# selects the buffer, so the two advance together.
+#
+# THE BUFFER GROWS AND IS NEVER SHRUNK, and that is deliberate rather than
+# lazy. A flat capacity is the failure the palette ring and the vertex arena
+# both had: work is refused in submission order, so the payload lost is whatever
+# was written last, silently. Capping how many lights a game may have is also
+# not boom's decision to make, which is the whole reason this module exists. So
+# a write past the end allocates a larger buffer, copies what the frame has
+# already written into it, and keeps the one it replaced.
+#
+# THE REPLACED BUFFER IS RETAINED, NOT FREED. Draws already recorded this frame
+# hold descriptor sets naming it, and destroying a buffer the GPU may still read
+# is a use-after-free the validation layers report far from its cause. Freeing
+# at the next frame boundary would be legal and would only mean allocating it
+# again the next time the same frame needs the room. Growth is therefore paid
+# once, in the first frames, and never again; a game with forty lights pays for
+# forty lights, once.
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+use std.types.size.usize;
+use std.types.result.Result;
+use std.types.result.ok;
+use std.types.result.err;
+use std.types.result.is_err;
+use mem: std.memory;
+use vk;
+use boom.graphics.error.Error;
+use boom.graphics.error.error;
+use boom.graphics.vk.Vk;
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_unmap;
+use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+
+# The binding number the frame's storage buffer occupies.
+#
+# Past every binding a draw's own descriptors use, because it is not one of
+# them: bindings 0 through 7 name ranges of the draw's uniform slot and the
+# textures its material carries, and this names one buffer the whole frame
+# shares. Placing it after them means adding a fifth texture or a fourth uniform
+# range moves nothing, and a game shader that declares it does not have to be
+# rewritten when they do. See boom.graphics.pipeline.set_layout_full.
+pub val FRAME_STORAGE_BINDING: u32 = 8;
+
+# Bytes a frame's buffer holds before anything grows.
+#
+# 64 KiB is 4096 vec4s, which is two thousand lights and far more than a frame
+# usually carries. It is the starting size rather than the only size, so a game
+# that wants more gets more and a game that wants less pays 128 KiB across both
+# frames in flight for the room it did not use.
+pub val STORAGE_BYTES: usize = 65536;
+
+# The largest a frame's buffer may grow to.
+#
+# NOT A BUDGET, AND NOT THE KIND OF CAP THE PALETTE RING ARGUES AGAINST. That
+# cap rationed a resource a game legitimately wanted more of and dropped the
+# work that asked. This one is a gigabyte: 67 million vec4s in a single frame,
+# which is not a light list, a decal list or a tile field but a mistake in the
+# arithmetic that produced the length. Doubling into it also cannot overflow the
+# schedule below, which is the other thing an unbounded need would do.
+#
+# A request past it is refused and counted rather than clamped, because a
+# clamped one would hand back a buffer that silently holds part of the payload.
+pub val STORAGE_MAX_BYTES: usize = 1073741824;
+
+# How many buffers one frame may allocate over its life.
+#
+# The schedule doubles, so this bounds the total growth rather than the count of
+# writes: reaching sixteen from 64 KiB would mean a frame whose payload passed
+# two gigabytes, which the cap above refuses first. It exists so the array has a
+# size, not as a limit a real game meets.
+pub val MAX_STORAGE_BUFFERS: usize = 16;
+
+# What storage_size_for answers when a need cannot be met.
+pub val NO_STORAGE_SIZE: usize = 0;
+
+# One host-visible span a frame's payload lives in.
+# ---
+# buf:    the storage buffer
+# mapped: its persistent mapping. Mapped once at creation, because a map and an
+#         unmap around every frame are two driver calls to arrive back at the
+#         same pointer.
+# size:   its capacity in bytes
+# live:   whether it has been created
+pub rec StorageBuffer {
+    buf:    Buffer;
+    mapped: *u8;
+    size:   usize;
+    live:   bool;
+}
+
+# A growing per-frame storage buffer, one chain per frame in flight.
+# ---
+# bufs:    the chains, indexed by frame then buffer. The last one a frame has
+#          created is the one it writes and the one draws are bound to; the
+#          earlier ones are retained because recorded draws still name them.
+# count:   how many buffers each frame has created
+# used:    the highest byte each frame has written this frame, for reporting
+# refused: writes refused because the buffer could not grow, over the whole life
+#          of the storage rather than per frame, so a game polling it once at
+#          shutdown still sees them
+# ready:   whether creation completed
+pub rec FrameStorage {
+    bufs:    [2][16]StorageBuffer;
+    count:   [2]usize;
+    used:    [2]usize;
+    refused: usize;
+    ready:   bool;
+}
+
+# The capacity that replaces `current` when `need` bytes must fit.
+#
+# Doubling rather than sizing exactly to the need, because a game whose light
+# count creeps up by one per frame would otherwise allocate a buffer every frame
+# and reach MAX_STORAGE_BUFFERS in sixteen of them. Doubling makes the number of
+# allocations logarithmic in the final size, so it is a handful over the life of
+# the game whatever shape the growth has.
+#
+# Pure, so the schedule can be checked without a device. This is the arithmetic
+# that decides whether a payload fits, and a mistake here is a buffer one byte
+# short of what the shader reads.
+pub fun storage_size_for(current: usize, need: usize) usize {
+    if (need > STORAGE_MAX_BYTES) { ret NO_STORAGE_SIZE; }
+
+    var size: usize = STORAGE_BYTES;
+    if (current > size) { size = current; }
+    for (size < need) { size = size * 2; }
+    ret size;
+}
+
+# Create one buffer per frame in flight.
+#
+# Eagerly rather than on first write, so a device out of host-visible memory is
+# reported when the renderer is built rather than midway through a frame, and so
+# every descriptor set has a valid buffer to name from the first draw onwards.
+pub fun storage_init(s: *FrameStorage, v: *Vk) Result[bool, Error] {
+    s.ready   = false;
+    s.refused = 0;
+
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        s.count[f] = 0;
+        s.used[f]  = 0;
+        var b: usize = 0;
+        for (b < MAX_STORAGE_BUFFERS) {
+            s.bufs[f][b].live   = false;
+            s.bufs[f][b].mapped = nil;
+            s.bufs[f][b].size   = 0;
+            b = b + 1;
+        }
+        if (!storage_grow(s, v, f, STORAGE_BYTES)) {
+            storage_dnit(s, v);
+            ret err[bool, Error](error("could not create a per-frame storage buffer"));
+        }
+        f = f + 1;
+    }
+
+    s.ready = true;
+    ret ok[bool, Error](true);
+}
+
+# Replace a frame's buffer with one large enough for `need` bytes.
+#
+# The bytes the frame has already written are carried into the new buffer, so a
+# game that writes a header, draws, and then writes an array does not lose the
+# header to the growth the array caused. The buffer being replaced is left
+# alone: the draws already recorded name it, and it is destroyed with the rest
+# at storage_dnit.
+fun storage_grow(s: *FrameStorage, v: *Vk, frame: usize, need: usize) bool {
+    if (frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
+    val n: usize = s.count[frame];
+    if (n >= MAX_STORAGE_BUFFERS) { ret false; }
+
+    var have: usize = 0;
+    if (n > 0) { have = s.bufs[frame][n - 1].size; }
+
+    val size: usize = storage_size_for(have, need);
+    if (size == NO_STORAGE_SIZE) { ret false; }
+
+    # HOST_COHERENT as well as HOST_VISIBLE, so a write is visible to the GPU
+    # without an explicit flush. Without it every write would need a
+    # vkFlushMappedMemoryRanges over exactly the bytes touched, and a missed
+    # flush is invisible on hardware whose host memory happens to be coherent
+    # anyway.
+    val br: Result[bool, Error] = buffer_init(?s.bufs[frame][n].buf, v, size::u64,
+        vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](br)) { ret false; }
+
+    val m: ptr = buffer_map(?s.bufs[frame][n].buf, v);
+    if (m == nil) {
+        buffer_dnit(?s.bufs[frame][n].buf, v);
+        ret false;
+    }
+
+    var dst: *u8 = m:~*u8;
+
+    # ZEROED ONCE, AT CREATION. A fresh allocation's contents are undefined, so
+    # a shader reading past what the game wrote would otherwise see whatever the
+    # driver handed back, which differs between machines and between runs. That
+    # is a game's bug either way, but one that reads as zeros everywhere is one
+    # that can be found. It is not repeated per frame: a memset of megabytes
+    # every frame would cost more than the payload it precedes.
+    mem.zero[u8](dst, size);
+
+    if (n > 0 && s.used[frame] > 0) {
+        var carry: usize = s.used[frame];
+        if (carry > have) { carry = have; }
+        mem.copy[u8](dst, s.bufs[frame][n - 1].mapped, carry);
+    }
+
+    s.bufs[frame][n].mapped = dst;
+    s.bufs[frame][n].size   = size;
+    s.bufs[frame][n].live   = true;
+    s.count[frame] = n + 1;
+    ret true;
+}
+
+# Grow every frame's buffer to at least `bytes`.
+#
+# WHY A GAME CALLS THIS RATHER THAN LETTING THE WRITES GROW IT. A descriptor's
+# range is the buffer's whole capacity, and a shader declaring a storage block
+# larger than that range is invalid usage the validation layers report and a
+# driver may honour anyway. A game whose shader declares a 256-light array but
+# whose scene currently has four lights writes far less than it declares, so the
+# capacity has to be reserved rather than discovered. Reserve what the shader
+# declares, once, at start-up.
+#
+# It also removes the allocation from the frame that first needs the room, which
+# is the frame least able to afford it.
+#
+# Every frame in flight is grown, not the open one: the other frame reaches the
+# same payload one frame later and would otherwise allocate then. Growing a
+# buffer the GPU is reading is safe because the one it replaces is retained.
+pub fun storage_reserve(s: *FrameStorage, v: *Vk, bytes: usize) bool {
+    if (!s.ready) { ret false; }
+    if (bytes == 0) { ret true; }
+
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        if (storage_capacity(s, f) < bytes) {
+            if (!storage_grow(s, v, f, bytes)) {
+                s.refused = s.refused + 1;
+                ret false;
+            }
+        }
+        f = f + 1;
+    }
+    ret true;
+}
+
+# Reset a frame's write mark. Called once as the frame opens.
+#
+# The capacity is untouched: what a frame needed once it will need again, and
+# the buffer is the thing this module exists to stop reallocating. Only the mark
+# used for reporting and for the carry on growth is rewound.
+pub fun storage_begin_frame(s: *FrameStorage, frame: usize) {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret; }
+    s.used[frame] = 0;
+}
+
+# Copy bytes into a frame's storage buffer at a byte offset, growing it to fit.
+#
+# The offset is a byte offset into the buffer and the layout is the game's
+# business: boom copies the bytes and never looks at them, exactly as it does
+# for the user block. What the game does have to match is what its shader
+# declares, under std430 rather than std140 because this is a storage buffer.
+#
+# Returns false when the buffer could not grow, which is counted. A refused
+# write is the failure this module exists to make visible, so it is never
+# partial: nothing is copied rather than the prefix that happened to fit.
+# ---
+# frame:  which frame in flight is being recorded
+# offset: where in the buffer the bytes go
+# src:    the bytes to copy
+# len:    how many
+pub fun storage_write(s: *FrameStorage, v: *Vk, frame: usize, offset: usize,
+                      src: *u8, len: usize) bool {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) {
+        s.refused = s.refused + 1;
+        ret false;
+    }
+    if (src == nil || len == 0) {
+        s.refused = s.refused + 1;
+        ret false;
+    }
+
+    val end: usize = offset + len;
+    # An offset near the top of the address space wraps rather than overflowing
+    # into a diagnosis, and the bounds check below would then pass on a range
+    # that does not exist.
+    if (end < offset) {
+        s.refused = s.refused + 1;
+        ret false;
+    }
+
+    if (end > storage_capacity(s, frame)) {
+        if (!storage_grow(s, v, frame, end)) {
+            s.refused = s.refused + 1;
+            ret false;
+        }
+    }
+
+    var dst: *u8 = s.bufs[frame][s.count[frame] - 1].mapped;
+    mem.copy[u8](?dst[offset], src, len);
+    if (end > s.used[frame]) { s.used[frame] = end; }
+    ret true;
+}
+
+# The buffer a frame's draws are bound to.
+#
+# The last one the frame created, which is the one storage_write fills. Returns
+# nil before storage_init, which the descriptor layer refuses rather than
+# binding, because a set with an unwritten storage descriptor is undefined
+# behaviour in Vulkan even where the shader never reads it.
+pub fun storage_buffer(s: *FrameStorage, frame: usize) vk.Buffer {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret nil; }
+    if (s.count[frame] == 0) { ret nil; }
+    ret s.bufs[frame][s.count[frame] - 1].buf.handle;
+}
+
+# The capacity of the buffer a frame's draws are bound to.
+#
+# This is also the descriptor's range, so it is the largest storage block a
+# shader may declare. See storage_reserve.
+pub fun storage_capacity(s: *FrameStorage, frame: usize) usize {
+    if (frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
+    if (s.count[frame] == 0) { ret 0; }
+    ret s.bufs[frame][s.count[frame] - 1].size;
+}
+
+# The highest byte a frame has written this frame, for reporting.
+pub fun storage_used(s: *FrameStorage, frame: usize) usize {
+    if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
+    ret s.used[frame];
+}
+
+# How many buffers a frame has allocated over its life.
+#
+# One in a game that reserved what it needed or never outgrew the starting size.
+# A number that climbs while the game runs means the payload is still growing,
+# which is worth knowing before MAX_STORAGE_BUFFERS is reached.
+pub fun storage_buffers(s: *FrameStorage, frame: usize) usize {
+    if (frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
+    ret s.count[frame];
+}
+
+# Writes and reservations refused because the buffer could not grow.
+#
+# Zero in normal operation. Anything else means a shader read bytes the game
+# believed it had written, which is otherwise indistinguishable from the shading
+# being wrong.
+pub fun storage_refused(s: *FrameStorage) usize {
+    ret s.refused;
+}
+
+# Unmap and destroy every buffer, retained ones included.
+pub fun storage_dnit(s: *FrameStorage, v: *Vk) {
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        var b: usize = 0;
+        for (b < MAX_STORAGE_BUFFERS) {
+            if (s.bufs[f][b].live) {
+                if (s.bufs[f][b].mapped != nil) {
+                    buffer_unmap(?s.bufs[f][b].buf, v);
+                    s.bufs[f][b].mapped = nil;
+                }
+                buffer_dnit(?s.bufs[f][b].buf, v);
+                s.bufs[f][b].live = false;
+            }
+            s.bufs[f][b].size = 0;
+            b = b + 1;
+        }
+        s.count[f] = 0;
+        s.used[f]  = 0;
+        f = f + 1;
+    }
+    s.ready = false;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Creating a buffer needs a device. What is testable without one is the growth
+# schedule, the bounds arithmetic and the per-frame indexing, which is where a
+# mistake hands a shader a buffer shorter than the payload or lets one frame
+# write into the buffer the other is being drawn from.
+
+test "storage: the schedule doubles until the need fits" {
+    # A schedule that grew by a fixed step would allocate a buffer per frame for
+    # a payload creeping up by one light, and reach MAX_STORAGE_BUFFERS in
+    # sixteen frames.
+    if (storage_size_for(0, 0) != STORAGE_BYTES)                    { ret 1; }
+    if (storage_size_for(STORAGE_BYTES, STORAGE_BYTES + 1)
+        != STORAGE_BYTES * 2)                                       { ret 2; }
+    if (storage_size_for(STORAGE_BYTES, STORAGE_BYTES * 4)
+        != STORAGE_BYTES * 4)                                       { ret 3; }
+    if (storage_size_for(STORAGE_BYTES, STORAGE_BYTES * 4 + 1)
+        != STORAGE_BYTES * 8)                                       { ret 4; }
+    ret 0;
+}
+
+test "storage: a schedule never returns less than the need" {
+    # The one property that matters: a capacity short of the payload is a shader
+    # reading past the end of its block, which no layer reports and which draws.
+    var need: usize = 1;
+    for (need < STORAGE_BYTES * 64) {
+        if (storage_size_for(STORAGE_BYTES, need) < need) { ret 1; }
+        need = need * 3;
+    }
+    ret 0;
+}
+
+test "storage: growth never shrinks what a frame already has" {
+    # The replaced buffer is retained but not read from again, so a schedule
+    # that answered smaller than the current capacity would move the payload
+    # into a buffer that cannot hold what the frame had already written.
+    if (storage_size_for(STORAGE_BYTES * 8, 16) != STORAGE_BYTES * 8) { ret 1; }
+    if (storage_size_for(STORAGE_BYTES * 8, STORAGE_BYTES * 8)
+        != STORAGE_BYTES * 8)                                         { ret 2; }
+    ret 0;
+}
+
+test "storage: a need past the ceiling is refused rather than clamped" {
+    # Clamping would hand back a buffer holding part of the payload, and the
+    # shader would read the rest as whatever the tail contains.
+    if (storage_size_for(0, STORAGE_MAX_BYTES + 1) != NO_STORAGE_SIZE) { ret 1; }
+    if (storage_size_for(0, STORAGE_MAX_BYTES) != STORAGE_MAX_BYTES)   { ret 2; }
+    ret 0;
+}
+
+test "storage: the ceiling is reachable by doubling from the base" {
+    # A base that did not divide the ceiling would leave the last doubling
+    # overshooting it, and storage_size_for would answer a size the ceiling
+    # forbids.
+    var size: usize = STORAGE_BYTES;
+    for (size < STORAGE_MAX_BYTES) { size = size * 2; }
+    if (size != STORAGE_MAX_BYTES) { ret 1; }
+    ret 0;
+}
+
+test "storage: a write is refused before the storage is created" {
+    # Refused rather than copied into a nil mapping, which is a fault in the
+    # middle of a frame rather than a number a game can read.
+    var s: FrameStorage;
+    var v: Vk;
+    s.ready   = false;
+    s.refused = 0;
+    var bytes: [16]u8;
+    if (storage_write(?s, ?v, 0, 0, ?bytes[0], 16)) { ret 1; }
+    if (s.refused != 1)                             { ret 2; }
+    if (storage_buffer(?s, 0) != nil)               { ret 3; }
+    ret 0;
+}
+
+test "storage: a frame past the ring is refused rather than indexing off it" {
+    var s: FrameStorage;
+    var v: Vk;
+    s.ready   = true;
+    s.refused = 0;
+    var bytes: [16]u8;
+    if (storage_write(?s, ?v, MAX_FRAMES_IN_FLIGHT, 0, ?bytes[0], 16)) { ret 1; }
+    if (storage_buffer(?s, MAX_FRAMES_IN_FLIGHT) != nil)               { ret 2; }
+    if (storage_capacity(?s, MAX_FRAMES_IN_FLIGHT) != 0)               { ret 3; }
+    if (storage_buffers(?s, MAX_FRAMES_IN_FLIGHT) != 0)                { ret 4; }
+    ret 0;
+}
+
+test "storage: a write that fits lands at its offset and moves the mark" {
+    # No device, so the buffer is a stack array standing in for the mapping.
+    # What is under test is the offset arithmetic: a write landing anywhere else
+    # is a payload the shader indexes correctly and finds the wrong bytes in.
+    var s: FrameStorage;
+    var v: Vk;
+    var backing: [256]u8;
+    var i: usize = 0;
+    for (i < 256) { backing[i] = 0; i = i + 1; }
+
+    s.ready     = true;
+    s.refused   = 0;
+    s.count[0]  = 1;
+    s.used[0]   = 0;
+    s.bufs[0][0].live   = true;
+    s.bufs[0][0].mapped = ?backing[0];
+    s.bufs[0][0].size   = 256;
+
+    var src: [4]u8;
+    src[0] = 1; src[1] = 2; src[2] = 3; src[3] = 4;
+    if (!storage_write(?s, ?v, 0, 64, ?src[0], 4)) { ret 1; }
+    if (backing[64] != 1 || backing[67] != 4)      { ret 2; }
+    # Nothing before the offset is touched, so a header written earlier survives
+    # an array written after it.
+    if (backing[63] != 0 || backing[68] != 0)      { ret 3; }
+    if (storage_used(?s, 0) != 68)                 { ret 4; }
+
+    # The mark is a high-water mark, so an earlier write does not lower it.
+    if (!storage_write(?s, ?v, 0, 0, ?src[0], 4))  { ret 5; }
+    if (storage_used(?s, 0) != 68)                 { ret 6; }
+    if (s.refused != 0)                            { ret 7; }
+    ret 0;
+}
+
+test "storage: a write past the capacity with no device is refused, not truncated" {
+    # The ceiling case: growth is unavailable, so exhaustion has to be
+    # reportable. Copying the prefix that fit would give the shader a list whose
+    # last entries are whatever the tail held.
+    var s: FrameStorage;
+    var v: Vk;
+    var backing: [64]u8;
+    v.ready = false;
+
+    s.ready    = true;
+    s.refused  = 0;
+    s.count[0] = 1;
+    s.used[0]  = 0;
+    s.bufs[0][0].live   = true;
+    s.bufs[0][0].mapped = ?backing[0];
+    s.bufs[0][0].size   = 64;
+
+    var src: [8]u8;
+    if (storage_write(?s, ?v, 0, 60, ?src[0], 8)) { ret 1; }
+    if (s.refused != 1)                           { ret 2; }
+    if (storage_used(?s, 0) != 0)                 { ret 3; }
+    # The byte one past the end of the range is still the last legal one.
+    if (!storage_write(?s, ?v, 0, 56, ?src[0], 8)) { ret 4; }
+    ret 0;
+}
+
+test "storage: an offset that wraps the address space is refused" {
+    # offset + len wrapping to a small number would pass the capacity check and
+    # then copy through a pointer far outside the mapping.
+    var s: FrameStorage;
+    var v: Vk;
+    var backing: [64]u8;
+    s.ready    = true;
+    s.refused  = 0;
+    s.count[0] = 1;
+    s.bufs[0][0].live   = true;
+    s.bufs[0][0].mapped = ?backing[0];
+    s.bufs[0][0].size   = 64;
+
+    var src: [8]u8;
+    if (storage_write(?s, ?v, 0, 0xFFFFFFFFFFFFFFF8, ?src[0], 16)) { ret 1; }
+    if (s.refused != 1)                                            { ret 2; }
+    ret 0;
+}
+
+test "storage: each frame writes its own buffer" {
+    # Two frames are in flight, so the CPU fills one while the GPU reads the
+    # other. Sharing a buffer would make this frame's light list land in the
+    # middle of what the GPU is still drawing from, which flickers under load
+    # and looks right the moment the GPU catches up.
+    var s: FrameStorage;
+    var v: Vk;
+    var a: [64]u8;
+    var b: [64]u8;
+    var i: usize = 0;
+    for (i < 64) { a[i] = 0; b[i] = 0; i = i + 1; }
+
+    s.ready    = true;
+    s.refused  = 0;
+    s.count[0] = 1;
+    s.count[1] = 1;
+    s.used[0]  = 0;
+    s.used[1]  = 0;
+    s.bufs[0][0].live = true; s.bufs[0][0].mapped = ?a[0]; s.bufs[0][0].size = 64;
+    s.bufs[1][0].live = true; s.bufs[1][0].mapped = ?b[0]; s.bufs[1][0].size = 64;
+
+    var src: [4]u8;
+    src[0] = 9; src[1] = 9; src[2] = 9; src[3] = 9;
+    if (!storage_write(?s, ?v, 0, 0, ?src[0], 4)) { ret 1; }
+    if (a[0] != 9) { ret 2; }
+    if (b[0] != 0) { ret 3; }
+
+    # And the marks are per frame, so opening one does not rewind the other.
+    storage_begin_frame(?s, 0);
+    if (storage_used(?s, 0) != 0) { ret 4; }
+    if (!storage_write(?s, ?v, 1, 0, ?src[0], 4)) { ret 5; }
+    if (storage_used(?s, 1) != 4) { ret 6; }
+    storage_begin_frame(?s, 0);
+    if (storage_used(?s, 1) != 4) { ret 7; }
+    ret 0;
+}
+
+test "storage: a frame is bound to the last buffer it created" {
+    # The retained ones are still named by draws recorded before the growth, so
+    # they stay in the array. Binding one of them for a later draw would hand
+    # the shader the payload as it stood before it grew.
+    var s: FrameStorage;
+    var older: [16]u8;
+    var newer: [32]u8;
+    s.ready    = true;
+    s.count[0] = 2;
+    s.bufs[0][0].live = true; s.bufs[0][0].mapped = ?older[0]; s.bufs[0][0].size = 16;
+    s.bufs[0][1].live = true; s.bufs[0][1].mapped = ?newer[0]; s.bufs[0][1].size = 32;
+
+    if (storage_capacity(?s, 0) != 32) { ret 1; }
+    if (storage_buffers(?s, 0) != 2)   { ret 2; }
+    ret 0;
+}
+
+test "storage: teardown on storage that was never created is a no-op" {
+    var s: FrameStorage;
+    var v: Vk;
+    v.ready = false;
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        s.count[f] = 0;
+        var b: usize = 0;
+        for (b < MAX_STORAGE_BUFFERS) { s.bufs[f][b].live = false; b = b + 1; }
+        f = f + 1;
+    }
+    s.ready = true;
+    storage_dnit(?s, ?v);
+    storage_dnit(?s, ?v);
+    if (s.ready) { ret 1; }
+    ret 0;
+}

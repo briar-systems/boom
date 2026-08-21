@@ -308,6 +308,26 @@ fwd boom.graphics.renderer.pass_draw_shaded;
 fwd boom.graphics.renderer.pass_draw_shaded_skinned;
 fwd boom.graphics.descriptor.USER_BYTES;
 
+# Bulk per-frame data for a game's own shading, larger than a uniform block
+# holds. One buffer the whole frame shares, arriving at FRAME_STORAGE_BINDING
+# under std430, which is where a light list, a decal list or any other array the
+# draws index into belongs. USER_BYTES is the budget for a draw's own
+# parameters; this is the budget for everything that is not per draw. See
+# boom.graphics.storage.
+fwd boom.graphics.storage.FRAME_STORAGE_BINDING;
+fwd boom.graphics.storage.STORAGE_BYTES;
+fwd boom.graphics.storage.STORAGE_MAX_BYTES;
+fwd boom.graphics.storage.MAX_STORAGE_BUFFERS;
+fwd boom.graphics.storage.FrameStorage;
+fwd boom.graphics.storage.storage_size_for;
+fwd boom.graphics.renderer.renderer_storage_write;
+fwd boom.graphics.renderer.renderer_storage_write_at;
+fwd boom.graphics.renderer.renderer_storage_reserve;
+fwd boom.graphics.renderer.renderer_storage_capacity;
+fwd boom.graphics.renderer.renderer_storage_used;
+fwd boom.graphics.renderer.renderer_storage_buffers;
+fwd boom.graphics.renderer.renderer_storage_refused;
+
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;
 fwd boom.graphics.assets.Assets;
@@ -396,6 +416,7 @@ fwd boom.graphics.pipeline.Binding;
 fwd boom.graphics.pipeline.BINDING_NONE;
 fwd boom.graphics.pipeline.BINDING_UNIFORM;
 fwd boom.graphics.pipeline.BINDING_SAMPLER;
+fwd boom.graphics.pipeline.BINDING_STORAGE;
 fwd boom.graphics.pipeline.MAX_BINDINGS;
 fwd boom.graphics.pipeline.SetLayout;
 fwd boom.graphics.pipeline.set_layout;
