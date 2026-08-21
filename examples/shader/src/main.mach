@@ -17,10 +17,24 @@
 # in them. That is the whole arrangement being demonstrated: a game carries a
 # spirv project of its own, and the engine takes two byte buffers.
 #
-# The fragment stage shades entirely from binding 4, the block gfx.pass_set_user
-# delivers, so the right-hand cube is evidence rather than decoration: if that
-# descriptor were not reaching the shader it would be flat, black, or different
-# every frame, not subtly off.
+# The fragment stage shades entirely from what the game supplies, so the
+# right-hand cube is evidence rather than decoration: if either descriptor were
+# not reaching the shader it would be flat, black, or different every frame, not
+# subtly off. It reads two things, and the difference between them is the point:
+#
+#   - binding 4, the block gfx.pass_set_user delivers, holds the pass's own
+#     parameters. It is copied into each draw's uniform slot as the draw is
+#     submitted, so two draws in one frame can be given different blocks. It is
+#     gfx.USER_BYTES, which is 256 bytes: sixteen vec4s.
+#
+#   - binding 8, the buffer gfx.renderer_storage_write fills, holds the light
+#     list. It is ONE buffer the whole frame shares, filled once as the frame
+#     opens, and it is what a payload larger than a slot goes in. This example
+#     draws thirty-two lights at two vec4 each, which is sixty-four vec4s: four
+#     times what the block could carry, and the reason the buffer exists.
+#
+# The probe below checks the second of those by reading an entry back rather
+# than by looking at it. See PROBE MODE in shaders/src/game_frag.mach.
 #
 # The assets are the cube example's, referenced rather than copied: two binary
 # files duplicated in a repository is two files to keep in step. Run it from this
@@ -65,13 +79,40 @@ val GAME_FRAG_SPV: [_]u8;
 # Its layout is the game's business: boom copies the bytes and never looks at
 # them. The only rule is that it fits in gfx.USER_BYTES and matches what the
 # shader declares, and the usual std140 rules apply, which is why the direction
-# is a vec4 rather than a vec3. The matching declaration is `rec Light` in
+# is a vec4 rather than a vec3. The matching declaration is `rec Params` in
 # shaders/src/game_frag.mach, and nothing checks that the two agree: a mismatch
 # reads the colour out of the direction's padding and still draws.
-rec Light {
+rec Params {
     direction: gm.Vec4;
     colour:    gm.Vec4;
+    # x: how many lights the storage buffer holds. y: an entry to read straight
+    # out of that buffer instead of shading, or a negative number to shade.
+    control:   gm.Vec4;
 }
+
+# One light in the list the storage buffer carries.
+#
+# Two vec4: a position with its radius in w, then a colour. std430 rather than
+# std140, because this is a storage buffer, which is what makes an array of
+# these a straight copy with a natural 16-byte stride rather than a repack.
+rec Light {
+    place: gm.Vec4;
+    tint:  gm.Vec4;
+}
+
+# How many lights this example draws.
+#
+# Thirty-two, at two vec4 each, is sixty-four vec4s. gfx.USER_BYTES is sixteen,
+# so six lights fit in the block once the header is in and this needs five times
+# that. It is not a large scene; it is the size at which the block runs out.
+val LIGHT_COUNT: usize = 32;
+
+# The entry the probe reads back out of the storage buffer.
+#
+# Odd, so it is a colour rather than a position, and past the sixteenth, which
+# is the whole point: an entry a uniform block could not have carried. 41 is
+# light 20's colour.
+val PROBE_ENTRY: usize = 41;
 
 # ---
 # renderer:  the window's renderer, which owns the device
@@ -82,7 +123,10 @@ rec Light {
 # camera:    the 3D viewpoint
 # left:      the built-in cube's placement
 # right:     the shaded cube's placement
-# light:     the block the game shader would read
+# params:    the block the game shader reads at binding 4
+# lights:    the light list the game shader reads at binding 8, LIGHT_COUNT of
+#            them; the array size is a literal because a record field's is, so
+#            the two have to be moved together
 # ready:     whether init succeeded
 # paused:    whether the spin is advancing
 rec Game {
@@ -94,7 +138,8 @@ rec Game {
     camera:   gfx.Camera;
     left:     gm.Transform;
     right:    gm.Transform;
-    light:    Light;
+    params:   Params;
+    lights:   [32]Light;
     ready:    u8;
     paused:   bool;
 
@@ -115,6 +160,15 @@ rec Game {
     hdr_probe: gfx.RenderTarget;
     hdr_ok:    bool;
     hdr_kept:  bool;
+
+    # THE STORAGE-BUFFER PROBE. A 2x2 float target the game shader writes one
+    # entry of the light list into, in probe mode, on the first frame. Reading
+    # it back and comparing against the bytes the host wrote is what turns "the
+    # buffer reached the shader" from something to look at into something to
+    # check, and a float target is what carries the value back unrounded.
+    lit_probe: gfx.RenderTarget;
+    lit_ok:    bool;
+    lit_kept:  bool;
     drawn:    usize;
 }
 
@@ -183,6 +237,18 @@ fun on_init(ctx: *Context) {
     g.hdr_probe = unwrap_ok[gfx.RenderTarget, gfx.Error](hp);
     g.hdr_ok = true;
 
+    g.lit_ok   = false;
+    g.lit_kept = false;
+    val ldesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RENDER_RGBA16_FLOAT, 1);
+    val lp: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?ldesc);
+    if (is_err[gfx.RenderTarget, gfx.Error](lp)) {
+        var le: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](lp);
+        print.eprintlnf("light probe target error: {}", gfx.error_msg(?le));
+        ret;
+    }
+    g.lit_probe = unwrap_ok[gfx.RenderTarget, gfx.Error](lp);
+    g.lit_ok = true;
+
     val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
     if (is_err[gfx.Mesh, gfx.Error](loaded)) {
         var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](loaded);
@@ -218,8 +284,36 @@ fun on_init(ctx: *Context) {
         ret;
     }
 
-    g.light.direction = gm.vec4(0.4, 0.8, 0.45, 0.0);
-    g.light.colour    = gm.vec4(1.0, 0.96, 0.88, 1.0);
+    g.params.direction = gm.vec4(0.4, 0.8, 0.45, 0.0);
+    g.params.colour    = gm.vec4(1.0, 0.96, 0.88, 1.0);
+    g.params.control   = gm.vec4(LIGHT_COUNT::f32, 0.0 - 1.0, 0.0, 0.0);
+
+    # RESERVE WHAT THE SHADER DECLARES, ONCE. The descriptor's range is the
+    # buffer's whole capacity, so it is also the largest storage block a shader
+    # may legally declare: `rec Lights` in shaders/src/game_frag.mach is 128
+    # f32x4, and a range shorter than that is invalid usage the layers report
+    # and a driver may honour anyway. The starting capacity is already larger,
+    # so this changes nothing today and keeps being true if either number moves.
+    if (!gfx.renderer_storage_reserve(?g.renderer, 128 * $size_of(gm.Vec4))) {
+        print.eprintln("could not reserve the storage buffer");
+        ret;
+    }
+
+    # The list itself. Colours are fixed and positions are animated, so the
+    # entry the probe reads back is stable across the run: a probe comparing
+    # against a value that moves proves only that something arrived.
+    var li: usize = 0;
+    for (li < LIGHT_COUNT) {
+        val t: f32 = li::f32 / LIGHT_COUNT::f32;
+        g.lights[li].place = gm.vec4(0.0, 0.0, 0.0, 2.2);
+        g.lights[li].tint  = gm.vec4(0.35 + 0.65 * t, 0.55 * (1.0 - t), 0.9 - 0.4 * t, 1.0);
+        li = li + 1;
+    }
+
+    # One beacon with an exactly representable colour, so the probe compares
+    # halves against halves rather than against something the conversion moved.
+    # 0.5, 0.25 and 1.0 are 0x3800, 0x3400 and 0x3C00.
+    g.lights[PROBE_ENTRY / 2].tint = gm.vec4(0.5, 0.25, 1.0, 1.0);
 
     val aspect: f32 = w::f32 / h::f32;
     g.camera = gfx.camera_perspective(
@@ -271,6 +365,65 @@ fun on_draw(ctx: *Context) {
         ret;
     }
     if (!opened) { ret; }
+
+    # FILL THE BUFFER ONCE, HERE. Every draw in the frame reads the same bytes,
+    # so this is not per draw and must not be: a payload larger than a uniform
+    # slot copied per draw is the cost this binding exists to remove. It also
+    # has to be after renderer_begin_frame, which is where the fence proving the
+    # GPU has finished with this frame's buffer is waited on.
+    #
+    # The lights orbit, so the positions differ every frame and the buffer is
+    # genuinely rewritten rather than filled once at start-up and forgotten.
+    var li: usize = 0;
+    for (li < LIGHT_COUNT) {
+        val a: f32 = spin + li::f32 * 0.196;
+        val r: f32 = 1.9 + 0.35 * gm.sinf(a * 3.0);
+        g.lights[li].place = gm.vec4(1.4 + r * gm.cosf(a),
+                                     r * gm.sinf(a),
+                                     0.9 * gm.cosf(a * 2.0),
+                                     2.2);
+        li = li + 1;
+    }
+    if (!gfx.renderer_storage_write(?g.renderer, (?g.lights[0]):~*u8,
+                                    LIGHT_COUNT * $size_of(Light))) {
+        print.eprintln("the light list could not be written");
+    }
+
+    # THE STORAGE-BUFFER PROBE, on the first frame only.
+    #
+    # The shader is asked for one entry of the buffer instead of a shaded pixel,
+    # and on_dnit compares the pixel against the bytes written above. The entry
+    # is past the sixteenth, so a uniform block could not have carried it, which
+    # is what makes this a check of the storage buffer rather than of anything
+    # that happened to be bound.
+    #
+    # The block at binding 4 is what carries the request, and it is a different
+    # value here than in the scene pass below even though both draws are in the
+    # same frame. That is the difference between the two: the block is copied
+    # per draw, and the buffer is the frame's.
+    if (g.lit_ok && g.drawn == 0) {
+        var ld: gfx.PassDesc = gfx.pass_overlay();
+        ld.target      = ?g.lit_probe;
+        ld.clear       = 1;
+        ld.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+        var lpass: gfx.Pass = gfx.pass_begin(?g.renderer, ?ld);
+
+        g.params.control = gm.vec4(LIGHT_COUNT::f32, PROBE_ENTRY::f32, 0.0, 0.0);
+        if (!gfx.pass_set_user(?lpass, (?g.params):~*u8, $size_of(Params))) {
+            print.eprintln("the params block does not fit in a uniform slot");
+        }
+
+        # A pixel-space pass, so the cube is placed in pixels and scaled well
+        # past the 2x2 target: every pixel is covered, which is what makes the
+        # readback a comparison rather than a coin toss.
+        var cover: gm.Transform = gm.transform_identity();
+        cover.position = gm.vec3(1.0, 1.0, 0.0);
+        cover.scale    = gm.vec3(64.0, 64.0, 1.0);
+        gfx.pass_draw_shaded(?lpass, ?g.mesh, ?g.material, ?cover, ?g.shader);
+        gfx.pass_end(?lpass);
+
+        g.params.control = gm.vec4(LIGHT_COUNT::f32, 0.0 - 1.0, 0.0, 0.0);
+    }
 
     # Open and close a pass into the four-attachment target every frame. This
     # is what puts the multi-attachment render pass, its framebuffer and its
@@ -334,9 +487,10 @@ fun on_draw(ctx: *Context) {
 
     # The game's. The block is set once and read by every draw that follows, so
     # a game with one light sets it here and a game with per-object parameters
-    # sets it again before each draw.
-    if (!gfx.pass_set_user(?p, (?g.light):~*u8, $size_of(Light))) {
-        print.eprintln("the light block does not fit in a uniform slot");
+    # sets it again before each draw. The light list it names is already in the
+    # frame's storage buffer, written once at the top of this function.
+    if (!gfx.pass_set_user(?p, (?g.params):~*u8, $size_of(Params))) {
+        print.eprintln("the params block does not fit in a uniform slot");
     }
     gfx.pass_draw_shaded(?p, ?g.mesh, ?g.material, ?g.right, ?g.shader);
 
@@ -349,9 +503,20 @@ fun on_draw(ctx: *Context) {
     }
 
     # A shaded draw that could not build its pipeline is dropped and counted, so
-    # the failure is a number rather than a cube that is quietly missing.
+    # the failure is a number rather than a cube that is quietly missing. So is
+    # a draw whose uniforms could not be uploaded, which used to return in
+    # silence and is the reason a stage that did not run was indistinguishable
+    # from one that ran wrongly.
     if (gfx.renderer_dropped(?g.renderer) != 0) {
         print.eprintln("warning: draws were dropped");
+    }
+    # A block that did not fit is a different fault: the draws still happened,
+    # reading whatever their slot's user region last held.
+    if (gfx.renderer_refused(?g.renderer) != 0) {
+        print.eprintln("warning: a uniform block was refused for not fitting");
+    }
+    if (gfx.renderer_storage_refused(?g.renderer) != 0) {
+        print.eprintln("warning: a storage write was refused");
     }
 }
 
@@ -359,11 +524,21 @@ fun on_dnit(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (g.ready == 0) { ret; }
 
-    # One per render pass and vertex layout the shader was drawn with, so one
-    # here. A number that climbs with the frame count would mean the cache is
-    # not being hit and every frame is building a pipeline.
+    # One per render pass and vertex layout the shader was drawn with, so two
+    # here: the window's pass and the float probe's. A number that climbs with
+    # the frame count would mean the cache is not being hit and every frame is
+    # building a pipeline.
     print.printlnf("drew {} frames; the shader built {} pipeline(s)",
                    g.drawn, gfx.shader_pipelines(?g.shader));
+
+    # What the storage buffer cost. The capacity is what it grew to and keeps,
+    # the used count is what this frame actually wrote, and a buffer count above
+    # one means the payload outgrew the reservation while the game ran.
+    print.printlnf("storage: {} of {} bytes used, {} buffer(s), {} refused",
+                   gfx.renderer_storage_used(?g.renderer),
+                   gfx.renderer_storage_capacity(?g.renderer),
+                   gfx.renderer_storage_buffers(?g.renderer),
+                   gfx.renderer_storage_refused(?g.renderer));
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
@@ -410,6 +585,40 @@ fun on_dnit(ctx: *Context) {
             or              { print.println("HDR PROBE FAIL: float target clipped or changed 2.0"); }
         }
         gfx.render_target_delete(d, ?g.hdr_probe);
+    }
+
+    # THE STORAGE-BUFFER PROBE, read back and compared.
+    #
+    # The shader wrote entry PROBE_ENTRY of the light list out as a colour, and
+    # the host wrote (0.5, 0.25, 1.0, 1.0) there, whose halves are 0x3800,
+    # 0x3400, 0x3C00 and 0x3C00. Exact values, so this is a comparison rather
+    # than a tolerance: anything else means the buffer did not arrive, arrived
+    # at the wrong offset, or arrived with the wrong stride.
+    if (g.lit_ok) {
+        var lraw: [32]u8;
+        val lr: Result[bool, gfx.Error] = gfx.render_target_read_raw_at(
+            d, ?g.lit_probe, 0, ?lraw[0], 32);
+        if (is_err[bool, gfx.Error](lr)) {
+            var lre: gfx.Error = unwrap_err[bool, gfx.Error](lr);
+            print.eprintlnf("light probe read error: {}", gfx.error_msg(?lre));
+        }
+        or {
+            g.lit_kept = lraw[0] == 0x00 && lraw[1] == 0x38
+                      && lraw[2] == 0x00 && lraw[3] == 0x34
+                      && lraw[4] == 0x00 && lraw[5] == 0x3C
+                      && lraw[6] == 0x00 && lraw[7] == 0x3C;
+            if (g.lit_kept) {
+                print.printlnf("STORAGE PROBE OK: entry {} of the light list read back exactly",
+                               PROBE_ENTRY);
+            }
+            or {
+                print.printlnf("STORAGE PROBE FAIL: entry {} read back as {} {} {} {} {} {} {} {}",
+                               PROBE_ENTRY,
+                               lraw[0], lraw[1], lraw[2], lraw[3],
+                               lraw[4], lraw[5], lraw[6], lraw[7]);
+            }
+        }
+        gfx.render_target_delete(d, ?g.lit_probe);
     }
 
     if (g.gbuf_ok) { gfx.render_target_delete(d, ?g.gbuf); }
@@ -481,5 +690,8 @@ fun main(argc: i64, argv: **u8) i64 {
     # that prints FAIL and exits 0 is a check nothing can act on.
     if (game.probe_ok && (game.probe_lit < 1000 || game.probe_lit > 1100)) { ret 1; }
     if (game.hdr_ok && !game.hdr_kept) { ret 1; }
+    # The storage buffer is the thing this example exists to demonstrate, so a
+    # run in which it did not arrive must fail rather than print and exit 0.
+    if (game.lit_ok && !game.lit_kept) { ret 1; }
     ret 0;
 }
