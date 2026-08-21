@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   growth is paid in the first frames and never again. Reserve at least what the
   shader declares with `renderer_storage_reserve`: the descriptor's range is the
   capacity, and a block larger than the range is invalid usage a driver may
-  honour anyway. `renderer_storage_capacity`, `renderer_storage_used`,
+  honour anyway. It grows no further than `STORAGE_MAX_BYTES`, which is the
+  smallest `maxStorageBufferRange` any Vulkan implementation may report rather
+  than a budget: the descriptor names the whole buffer, so a capacity past that
+  is one a conforming device is entitled to reject.
+  `renderer_storage_capacity`, `renderer_storage_used`,
   `renderer_storage_buffers` and `renderer_storage_refused` report what it costs
   and whether anything was lost. The distinction from `pass_set_user` is that a
   block is copied per draw and this is the frame's, so per-draw parameters stay

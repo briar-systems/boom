@@ -90,21 +90,28 @@ pub val STORAGE_BYTES: usize = 65536;
 #
 # NOT A BUDGET, AND NOT THE KIND OF CAP THE PALETTE RING ARGUES AGAINST. That
 # cap rationed a resource a game legitimately wanted more of and dropped the
-# work that asked. This one is a gigabyte: 67 million vec4s in a single frame,
-# which is not a light list, a decal list or a tile field but a mistake in the
-# arithmetic that produced the length. Doubling into it also cannot overflow the
-# schedule below, which is the other thing an unbounded need would do.
+# work that asked. This one is a device limit rather than a policy: 128 MiB is
+# the smallest maxStorageBufferRange any Vulkan implementation may report, and
+# the whole buffer is what the descriptor's range names, so a capacity past it
+# is a descriptor a conforming device is entitled to reject. Growing past it
+# would work on the machine it was written on and fail on someone else's, which
+# is the failure UNIFORM_ALIGN exists to avoid on the other side of the set.
+#
+# It is also 8.4 million vec4s in a single frame, which is not a light list, a
+# decal list or a tile field but a mistake in the arithmetic that produced the
+# length. A game that genuinely needs more needs the device's own limit queried
+# and the payload split, which is a different design and not one to guess at.
 #
 # A request past it is refused and counted rather than clamped, because a
 # clamped one would hand back a buffer that silently holds part of the payload.
-pub val STORAGE_MAX_BYTES: usize = 1073741824;
+pub val STORAGE_MAX_BYTES: usize = 134217728;
 
 # How many buffers one frame may allocate over its life.
 #
 # The schedule doubles, so this bounds the total growth rather than the count of
-# writes: reaching sixteen from 64 KiB would mean a frame whose payload passed
-# two gigabytes, which the cap above refuses first. It exists so the array has a
-# size, not as a limit a real game meets.
+# writes: 64 KiB reaches the ceiling above in eleven doublings, so twelve is
+# every buffer a frame can ever hold and sixteen leaves the array room if either
+# size moves. It exists so the array has a size, not as a limit anything meets.
 pub val MAX_STORAGE_BUFFERS: usize = 16;
 
 # What storage_size_for answers when a need cannot be met.
@@ -467,10 +474,38 @@ test "storage: a need past the ceiling is refused rather than clamped" {
 test "storage: the ceiling is reachable by doubling from the base" {
     # A base that did not divide the ceiling would leave the last doubling
     # overshooting it, and storage_size_for would answer a size the ceiling
-    # forbids.
+    # forbids. Counting the steps is the other half: every one of them is a
+    # buffer the frame retains, so the array has to be able to hold them all or
+    # a frame would run out of entries before it ran out of capacity.
     var size: usize = STORAGE_BYTES;
-    for (size < STORAGE_MAX_BYTES) { size = size * 2; }
-    if (size != STORAGE_MAX_BYTES) { ret 1; }
+    var steps: usize = 1;
+    for (size < STORAGE_MAX_BYTES) {
+        size = size * 2;
+        steps = steps + 1;
+    }
+    if (size != STORAGE_MAX_BYTES)    { ret 1; }
+    if (steps > MAX_STORAGE_BUFFERS)  { ret 2; }
+    ret 0;
+}
+
+test "storage: every capacity is a legal storage descriptor" {
+    # Two device rules, neither of which this can query. The range a descriptor
+    # names is the whole buffer, so a capacity past the smallest
+    # maxStorageBufferRange any implementation may report is a descriptor a
+    # conforming device is entitled to reject: it would work where it was
+    # written and fail elsewhere.
+    #
+    # And 256 is the largest minStorageBufferOffsetAlignment reported anywhere,
+    # so a capacity that is a multiple of it keeps a future binding at an offset
+    # inside the buffer legal without a device query. The offset is zero today;
+    # this is what stops a change to the base size from quietly closing that off.
+    var size: usize = STORAGE_BYTES;
+    for (size <= STORAGE_MAX_BYTES) {
+        if (size > 134217728)  { ret 1; }
+        if ((size % 256) != 0) { ret 2; }
+        size = size * 2;
+    }
+    if ((STORAGE_BYTES % 256) != 0) { ret 3; }
     ret 0;
 }
 
