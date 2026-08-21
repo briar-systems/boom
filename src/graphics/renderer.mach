@@ -971,6 +971,63 @@ pub rec Pass {
     user_len:   usize;
 }
 
+# Clear the screen attachments mid-pass, akin to glClear.
+#
+# Why this exists: when target is nil, the window's RenderPass is already
+# begun in frame_begin. We cannot use LoadOp::Clear without restarting the
+# RenderPass. vkCmdClearAttachments is the standard Vulkan way to clear
+# attachments while a RenderPass is running. It does not interrupt the
+# RenderPass and is safe for all pass types.
+fun clear_mid_pass(p: *Pass, color: Vec4) {
+    # 1. Prepare color attachment clear infos.
+    # The engine supports up to MAX_COLOR_ATTACHMENTS (4) color attachments.
+    var color_atts: [4]vk.ClearAttachment;
+    var i: usize = 0;
+    for (i < p.targets) {
+        color_atts[i].aspectMask = vk.IMAGE_ASPECT_COLOR_BIT;
+        color_atts[i].colorAttachment = i::u32;
+        color_atts[i].clearValue.color.float32[0] = color[0];
+        color_atts[i].clearValue.color.float32[1] = color[1];
+        color_atts[i].clearValue.color.float32[2] = color[2];
+        color_atts[i].clearValue.color.float32[3] = color[3];
+        i = i + 1;
+    }
+
+    # 2. Prepare depth/stencil attachment clear info.
+    # Clear both depth and stencil to prevent residual data in future stencil tests.
+    var depth_att: vk.ClearAttachment;
+    depth_att.aspectMask = vk.IMAGE_ASPECT_DEPTH_BIT | vk.IMAGE_ASPECT_STENCIL_BIT;
+    depth_att.colorAttachment = 0; # Meaningless for depth, but required by the struct.
+    depth_att.clearValue.depthStencil.depth   = 1.0;
+    depth_att.clearValue.depthStencil.stencil = 0;
+
+    # 3. Assemble the attachment array (colors first, depth last).
+    var atts: [5]vk.ClearAttachment; # 4 colors + 1 depth
+    var att_count: u32 = 0;
+    i = 0;
+    for (i < p.targets) {
+        atts[att_count] = color_atts[i];
+        att_count = att_count + 1;
+        i = i + 1;
+    }
+    atts[att_count] = depth_att;
+    att_count = att_count + 1;
+
+    # 4. Prepare the clear rect (covering the whole screen).
+    var clear_rect: vk.ClearRect;
+    clear_rect.rect.offset.x      = 0;
+    clear_rect.rect.offset.y      = 0;
+    clear_rect.rect.extent.width  = p.width::u32;
+    clear_rect.rect.extent.height = p.height::u32;
+    clear_rect.baseArrayLayer     = 0;
+    clear_rect.layerCount         = 1;
+
+    # 5. Execute the mid-pass clear.
+    # rectCount is 1. Vulkan spec states that if attachmentCount > rectCount,
+    # the extra attachments use the last rect in the array.
+    vk.vkCmdClearAttachments(p.cmd, att_count, ?atts[0], 1, ?clear_rect);
+}
+
 # begin a pass
 #
 # resolves the viewport from the target (or the window) and builds the view
@@ -1019,6 +1076,12 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.pass    = r.frame.pass;
         p.targets = 1;
         p.compatibility = pass_compatibility_one(r.vk.color_format);
+
+        # For window passes, if clear is requested, use vkCmdClearAttachments
+        # to clear the screen mid-pass, since the RenderPass is already active.
+        if (d.clear != 0) {
+            clear_mid_pass(?p, d.clear_color);
+        }
     }
 
     if (d.perspective != 0) {
@@ -1028,10 +1091,6 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     or {
         p.view = mat4_identity();
         if (d.camera2d != nil) {
-            # The camera folds into the projection rather than riding in the
-            # view, because the 2D program takes a single matrix: its vertices
-            # arrive already placed, so there is no model transform to combine
-            # a separate view with.
             p.projection = camera2d_matrix(d.camera2d, p.width::f32, p.height::f32);
         }
         or {
@@ -1066,8 +1125,6 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
             clears[cvi].color.float32[3] = d.clear_color[3];
             cvi = cvi + 1;
         }
-        # Depth clears to 1.0, the far plane. Clearing to 0 would make every
-        # fragment fail the less-than test and the target come out empty.
         clears[p.targets].depthStencil.depth   = 1.0;
         clears[p.targets].depthStencil.stencil = 0;
 
@@ -1080,8 +1137,6 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         rbi.renderArea.offset.y      = 0;
         rbi.renderArea.extent.width  = d.target.width::u32;
         rbi.renderArea.extent.height = d.target.height::u32;
-        # A loading pass declares no clear, and passing values for one is both
-        # meaningless and a validation error.
         rbi.clearValueCount          = 0;
         rbi.pClearValues             = nil;
         if (d.clear != 0) {
