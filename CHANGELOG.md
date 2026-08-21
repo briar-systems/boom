@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: a per-frame storage buffer, for data a shader needs more of than a
+  uniform block holds. A draw's game-supplied block is one aligned region, so
+  `USER_BYTES` is 256 bytes and sixteen vec4s, and a list does not fit that
+  shape: a traced light is two vec4, which leaves six lights after a header
+  where a scene has forty. `renderer_storage_write` fills one buffer per frame
+  in flight and every draw in the frame reads it at binding 8, under std430,
+  which is the point: copying a payload larger than a slot into each draw's slot
+  would defeat the exercise. `renderer_storage_write_at` packs several arrays
+  into it. The buffer grows to whatever a game writes and keeps what it grew to,
+  retaining the buffer it replaced because draws already recorded name it, so
+  growth is paid in the first frames and never again. Reserve at least what the
+  shader declares with `renderer_storage_reserve`: the descriptor's range is the
+  capacity, and a block larger than the range is invalid usage a driver may
+  honour anyway. `renderer_storage_capacity`, `renderer_storage_used`,
+  `renderer_storage_buffers` and `renderer_storage_refused` report what it costs
+  and whether anything was lost. The distinction from `pass_set_user` is that a
+  block is copied per draw and this is the frame's, so per-draw parameters stay
+  in the block and the array the draws index into goes here.
+
+- graphics: `renderer_refused` counts uniform blocks `pass_set_user` turned away
+  for being larger than `USER_BYTES`. A caller that ignored the answer used to
+  get no sign at all, and the draws that followed read whatever their slot's
+  user region last held.
+
 - graphics: a game chooses how finished frames reach the display.
   `PRESENT_VSYNC` waits for the display, `PRESENT_MAILBOX` renders uncapped
   without tearing, and `PRESENT_IMMEDIATE` renders uncapped and tears, which is
@@ -38,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   README explains.
 
 ### Fixed
+- graphics: a draw refused because its uniforms could not be uploaded is counted
+  in `renderer_dropped` instead of returning in silence. Refusing to record a
+  draw whose parameters could not be written is correct; saying nothing about it
+  is not. A full-screen stage that does not run leaves everything downstream
+  reading whatever its target already held, nothing is logged, and no validation
+  layer fires, so from outside it is indistinguishable from the shading being
+  wrong. It cost a day in a consumer before the block size was the suspect. The
+  slot writes on both the mesh and the batched paths, the palette upload, and
+  two descriptor calls whose answers were discarded outright all count now; the
+  discarded ones could leave a set bound with descriptors nothing had written.
+
 - graphics: `render_target_read` and `render_target_read_raw_at` wait for the
   device before copying, so a target read while the game is running returns a
   complete image instead of one the GPU was part way through writing.

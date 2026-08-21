@@ -122,6 +122,36 @@ writes its own slot of a per-frame ring. A frame therefore has a bounded number
 of draws, and `renderer_dropped` reports any it refused rather than letting them
 silently not appear.
 
+**A game's own shading has two budgets, and the difference between them
+matters.** boom ships one lit program as a default and does not intend to grow a
+lighting system, so a game that wants its own supplies a `Shader` and feeds it
+through these two:
+
+- `pass_set_user` sets the block that arrives at **binding 4**. It is a draw's
+  own parameters, copied into that draw's uniform slot as the draw is submitted,
+  so two draws in one frame can be given different blocks. It is `USER_BYTES`,
+  which is 256 bytes: sixteen `vec4`s. A block larger than that is refused, and
+  `renderer_refused` counts the refusal rather than leaving the following draws
+  quietly reading whatever their slot last held.
+
+- `renderer_storage_write` fills the buffer that arrives at **binding 8**. It is
+  one buffer the whole frame shares, filled once after `renderer_begin_frame`,
+  read by every draw in the frame, and laid out under std430 rather than std140.
+  This is where anything larger than sixteen `vec4`s goes: a light list is two
+  `vec4` per light, so six fit in the block after a header and forty do not fit
+  at all. It grows to whatever a game writes and keeps what it grew to, so the
+  first frames pay for the growth and no later frame does. Reserve at least what
+  the shader declares with `renderer_storage_reserve`: the descriptor's range is
+  the buffer's capacity, so a block larger than the capacity is invalid usage
+  that a driver may honour anyway. `renderer_storage_refused` counts writes the
+  buffer could not grow for, and `renderer_storage_capacity`,
+  `renderer_storage_used` and `renderer_storage_buffers` report what it costs.
+
+`examples/shader` uses both in the same frame: thirty-two point lights in the
+storage buffer, the ambient term and the light count in the block, and a probe
+that renders one entry of the list back out into a float target and compares it
+against the bytes it wrote.
+
 ### Renderer and passes
 
 The `Renderer` is the core abstraction. A game creates one (or several), then
