@@ -9,8 +9,9 @@
 # Two cubes are drawn side by side, spinning together. The left one goes through
 # gfx.pass_draw_material and boom's built-in program: one hardcoded directional
 # light. The right one goes through a gfx.Shader, and it is meant to look
-# DIFFERENT -- a rim light in a colour the game chose. Identical cubes would
-# mean the game's fragment stage was not the one that ran.
+# DIFFERENT -- thirty-two coloured point lights orbiting it, from a list the
+# game keeps. Identical cubes would mean the game's fragment stage was not the
+# one that ran.
 #
 # THE SHADERS ARE THIS EXAMPLE'S OWN, in shaders/, compiled to SPIR-V by a build
 # step and embedded below. boom does not compile them and does not know what is
