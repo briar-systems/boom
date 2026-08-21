@@ -167,6 +167,7 @@ use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.material.Material;
 use boom.graphics.material.material_texture;
+use boom.graphics.material.material_add_texture;
 use boom.graphics.material.TEXTURE_LINEAR;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
@@ -1181,6 +1182,13 @@ pub fun batch_flush(p: *Pass) {
     val first: u32 = p.batch.first;
     val block: usize = p.batch.block;
     var tex:   *Texture = p.batch.texture;
+    # WHETHER THE RUN NAMED A TEXTURE, ANSWERED HERE BECAUSE NOTHING BELOW CAN.
+    # The reset on the next line clears the batch, and the white-texel default
+    # further down replaces a nil `tex`, so by the descriptor fill an untextured
+    # run and a run that sampled the white texel are the same value. Binding 1
+    # is filled differently for the two, so the question has to be asked while
+    # there is still something to ask.
+    val had_texture: bool = p.batch.texture != nil;
     # The run is closed before anything that can fail, so an early return below
     # cannot leave it open to be drawn a second time by the next flush.
     batch_reset(?p.batch);
@@ -1217,21 +1225,8 @@ pub fun batch_flush(p: *Pass) {
     # tells the descriptor layer binding 2 is not part of this draw.
     var views2d:    [4]vk.ImageView;
     var samplers2d: [4]vk.Sampler;
-    if (p.mat2d != nil) {
-        fill_views_mat(r, ?views2d[0], p.mat2d, tex);
-        fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
-        # THE RUN'S OWN TEXTURE OWNS BINDING 1, ALWAYS. A batched run's UVs were
-        # normalised against the texture the sprites were pushed with, so a
-        # material whose first texture is a different sheet makes every vertex
-        # sample the right coordinates in the wrong atlas. The material supplies
-        # the companion channels at 5, 6 and 7; it does not get to replace the
-        # sheet the geometry was built for.
-        views2d[0] = texture_view(tex);
-    }
-    or {
-        fill_views(r, ?views2d[0], tex);
-        fill_samplers_mat(r, ?samplers2d[0], nil);
-    }
+    fill_views_batch(r, ?views2d[0], p.mat2d, tex, had_texture);
+    fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
     descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
                           $size_of(ScreenUniforms)::u64, ?views2d[0], ?samplers2d[0],
                           0, 0);
@@ -1370,6 +1365,43 @@ fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *
     }
 }
 
+# Fill a batched 2D run's sampler views.
+#
+# A TEXTURED RUN'S OWN TEXTURE OWNS BINDING 1. A batched run's UVs were
+# normalised against the texture the sprites were pushed with, so a material
+# whose first texture is a different sheet makes every vertex sample the right
+# coordinates in the wrong atlas. The material supplies the companion channels
+# at 5, 6 and 7; it does not get to replace the sheet the geometry was built
+# for.
+#
+# AN UNTEXTURED RUN LEAVES BINDING 1 TO THE MATERIAL, and that is not a
+# concession to it. pass_set_material is how a run whose sprites carry no
+# texture of their own is given one: the sprites are pushed with nil, the
+# material names the atlas, and binding 1 is the only place that atlas can
+# arrive. Overriding it for such a run binds the renderer's white texel instead,
+# because white is what an untextured run has already been defaulted to, and a
+# shader sampling it reads 1.0 everywhere. That does not look like a missing
+# texture, it looks like a saturated frame: examples/lighting wrote a white
+# G-buffer and every check comparing two of its texels read 255.
+#
+# The flag rather than a nil test on `tex`, because the caller has already
+# replaced a nil with the white texel and by here the two cannot be told apart.
+# ---
+# r:           the renderer, for its white texel
+# out:         MAX_SAMPLERS views to fill
+# mat:         the material bound on the pass, or nil
+# tex:         the run's texture, already defaulted to the white texel
+# had_texture: whether the run named a texture of its own
+fun fill_views_batch(r: *Renderer, out: *vk.ImageView, mat: *Material, tex: *Texture,
+                     had_texture: bool) {
+    if (mat == nil) {
+        fill_views(r, out, tex);
+        ret;
+    }
+    fill_views_mat(r, out, mat, tex);
+    if (had_texture) { out[0] = texture_view(tex); }
+}
+
 # Fill the sampler array parallel to a draw's image views.
 fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: *Material) {
     var i: usize = 0;
@@ -1398,7 +1430,9 @@ pub fun pass_set_shader(p: *Pass, sh: *Shader) {
 # texture a sprite carries.
 #
 # The sprite's own texture stays the first binding, so a material supplying only
-# companion channels does not have to repeat it.
+# companion channels does not have to repeat it. A run whose sprites were pushed
+# without a texture has none to keep, and takes the material's first binding
+# instead, which is how such a run names its atlas at all.
 pub fun pass_set_material(p: *Pass, mat: *Material) {
     if (p.mat2d == mat) { ret; }
     batch_flush(p);
@@ -1898,6 +1932,56 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     # And nil clears it rather than being treated as a zero-length block.
     if (!pass_set_user(?p, nil, 0)) { ret 5; }
     if (p.user != nil)              { ret 6; }
+    ret 0;
+}
+
+test "renderer: a material owns binding 1 only for an untextured run" {
+    # The case that shipped broken, and it shipped because nothing here ever
+    # chose a binding. A run pushed with nil takes its atlas from the pass
+    # material, so binding the run's own texture over it binds the white texel
+    # the run was defaulted to, and every sampler reads 1.0. Which view each
+    # binding gets is decided on the CPU, so no device is involved and only the
+    # identity of the views matters.
+    var r: Renderer;
+    var sheet: Texture;
+    var atlas: Texture;
+
+    # Three distinct non-nil views. The addresses stand in for image handles and
+    # are never dereferenced; what matters is which one binding 1 ends up with.
+    var handles: [3]u8;
+    r.white.image.view = (?handles[0]):~vk.ImageView;
+    sheet.image.view   = (?handles[1]):~vk.ImageView;
+    atlas.image.view   = (?handles[2]):~vk.ImageView;
+
+    var mat: Material;
+    mat.base_color    = vec4(1.0, 1.0, 1.0, 1.0);
+    mat.texture_count = 0;
+    if (!material_add_texture(?mat, "albedo", ?atlas)) { ret 1; }
+
+    # An untextured run under a material. `tex` arrives already defaulted to the
+    # white texel, which is exactly the value a nil test at the guard would be
+    # fooled by, so it is passed that way here.
+    var views: [4]vk.ImageView;
+    fill_views_batch(?r, ?views[0], ?mat, ?r.white, false);
+    if (views[0] != texture_view(?atlas)) { ret 2; }
+
+    # A textured run under the same material keeps its own sheet, because its
+    # uvs were normalised against that sheet and not against the material's.
+    fill_views_batch(?r, ?views[0], ?mat, ?sheet, true);
+    if (views[0] != texture_view(?sheet)) { ret 3; }
+
+    # No material: the run's own texture at binding 1 and the white texel in the
+    # companion channels, so a shader sampling a slot nothing set reads a known
+    # value rather than whatever the previous draw left in that descriptor.
+    fill_views_batch(?r, ?views[0], nil, ?sheet, true);
+    if (views[0] != texture_view(?sheet))   { ret 4; }
+    if (views[1] != texture_view(?r.white)) { ret 5; }
+
+    # And no material and no texture is the flat-colour case a solid rectangle
+    # or a glyph takes: white at binding 1, so `colour * texel` is the vertex
+    # colour.
+    fill_views_batch(?r, ?views[0], nil, ?r.white, false);
+    if (views[0] != texture_view(?r.white)) { ret 6; }
     ret 0;
 }
 

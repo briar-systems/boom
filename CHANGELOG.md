@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   coordinates several readbacks without paying the drain in each one, or that
   measures GPU work which would otherwise still be in flight.
 
+- graphics: the renderer comes up on macOS. Apple ships no Vulkan driver, so a
+  macOS build runs against MoltenVK, and the loader refuses to hand an instance
+  a translation layer unless the application says it can cope with one: the
+  instance now enables `VK_KHR_portability_enumeration` and sets the matching
+  enumeration flag, and the device enables `VK_KHR_portability_subset`, which
+  the spec requires of any device advertising it. All of it is compiled in on
+  Darwin only and no other platform changes. Older Intel machines also need
+  `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` in the environment, which the
+  README explains.
+
 ### Fixed
 - graphics: `render_target_read` and `render_target_read_raw_at` wait for the
   device before copying, so a target read while the game is running returns a
@@ -36,6 +46,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   differ. A read reports the last frame that was submitted, so one taken between
   `renderer_begin_frame` and `renderer_end_frame` does not include the open
   frame's draws.
+
+- graphics: a batched 2D run pushed without a texture of its own takes its atlas
+  from the material bound with `pass_set_material` again, instead of the
+  renderer's white texel. 0.12.0 gave a run's own texture binding 1
+  unconditionally, and a run pushed with `nil` has no such texture: what it got
+  bound was the white texel it had already been defaulted to, so every sampler
+  read 1.0. Not a blank picture, a saturated one, which is why it survived a
+  look at the screen. `examples/lighting` wrote a white G-buffer and ten of its
+  pixel checks came back reading 255 or 0. A run that does carry a texture still
+  owns binding 1, so a material naming a different sheet still cannot redirect
+  uvs that were normalised against the run's own.
 
 ## [0.16.0] - 2026-08-10
 
