@@ -46,6 +46,15 @@
 # bounded number of draws, and renderer_dropped reports any it refused
 # rather than letting them silently not appear.
 #
+# A GAME'S OWN SHADING HAS TWO BUDGETS. pass_set_user sets the block that
+# arrives at binding 4: a draw's own parameters, copied into that draw's
+# slot as it is submitted, at most USER_BYTES, which is sixteen vec4s.
+# renderer_storage_write fills the buffer that arrives at binding 8: one
+# buffer the whole frame shares, filled once after renderer_begin_frame and
+# read by every draw, under std430 and as large as the game writes. A list
+# goes in the second, because two vec4 per light leaves six lights in the
+# first. See boom.graphics.storage.
+#
 # A mesh is described by a VertexFormat (boom.graphics.vertex): a declared
 # list of attributes rather than a fixed vertex struct, and a pipeline
 # derives its vertex input state from that same format so the two cannot
@@ -319,6 +328,7 @@ fwd boom.graphics.storage.STORAGE_BYTES;
 fwd boom.graphics.storage.STORAGE_MAX_BYTES;
 fwd boom.graphics.storage.MAX_STORAGE_BUFFERS;
 fwd boom.graphics.storage.FrameStorage;
+fwd boom.graphics.storage.NO_STORAGE_SIZE;
 fwd boom.graphics.storage.storage_size_for;
 fwd boom.graphics.renderer.renderer_storage_write;
 fwd boom.graphics.renderer.renderer_storage_write_at;

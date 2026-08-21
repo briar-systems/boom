@@ -32,7 +32,11 @@
 # draws with pass_draw_shaded. The pipelines that needs are built under the
 # Shader, keyed by render-pass compatibility and the vertex layout each draw
 # actually uses, so a game never names a Pipeline or a RenderPass. Its shading
-# parameters go in the block set by pass_set_user, which arrives at binding 4.
+# parameters go in the block set by pass_set_user, which arrives at binding 4
+# and is copied into each draw's slot; anything larger than that block goes in
+# the frame's storage buffer, which renderer_storage_write fills and which
+# arrives at binding 8 as one buffer the whole frame shares. See
+# boom.graphics.storage for why those are two things rather than one.
 #
 # A 3D draw takes a uniform slot. GL set named uniforms on the bound program
 # between draws; a Vulkan draw reads a buffer range that must already hold
