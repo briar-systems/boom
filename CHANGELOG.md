@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- graphics: `texture_upload_region` overwrites a rectangle of a texture that is
+  already live, keeping everything it does not cover. The glyph atlas fills one
+  cell at a time this way; re-uploading a whole page per glyph would cost
+  megabytes per character. Unlike a fresh upload it transitions from
+  `SHADER_READ_ONLY_OPTIMAL` rather than `UNDEFINED`, because a partial write has
+  to preserve the rest of the image and the `UNDEFINED` path legally discards it.
+  Dimensions do not change: growing a texture a recorded quad samples would move
+  that quad's source rectangle, so a caller that needs more space makes another
+  texture.
+
+- graphics: `font_preload` rasterizes and admits every codepoint in a string
+  without drawing it, moving the first-use cost of a screen of text to load.
+  `text_height` and `text_lines` report the block a string draws as.
+
 - graphics: a per-frame storage buffer, for data a shader needs more of than a
   uniform block holds. A draw's game-supplied block is one aligned region, so
   `USER_BYTES` is 256 bytes and sixteen vec4s, and a list does not fit that
@@ -65,7 +79,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` in the environment, which the
   README explains.
 
+### Changed
+- graphics: `font_delete` takes only the `Font`. A face now retains the device it
+  was created against, so passing one in could only disagree with it.
+
+- graphics: `FIRST_CP`, `LAST_CP` and `GLYPH_COUNT` are gone, along with the
+  fixed `[95]Glyph` table behind them. A face's coverage is no longer a range
+  that can be named at compile time. `font_glyph_count`, `font_page_count` and
+  `font_missing` report what the atlas actually holds.
+
+- graphics: `text_measure` reports the widest line rather than the sum of every
+  advance in the string. The two answers are the same for text with no line
+  break, and the old one sized a panel to the concatenation of its lines.
+
 ### Fixed
+- graphics: `text_draw` and `text_measure` display non-English text. The atlas
+  covered ASCII 32 to 126 and the string was walked one byte at a time, so every
+  byte of every multi-byte UTF-8 sequence fell outside the table and was
+  dropped: `"Hello\n\u4f60\u597d \u4e16\u754c!"` drew `"Hello !"`. Strings are
+  decoded as UTF-8 now and any codepoint the face has a glyph for draws, so CJK,
+  Cyrillic, Greek and accented Latin all render. A codepoint the face does not
+  cover draws its `.notdef` box rather than nothing, and malformed bytes draw
+  U+FFFD instead of stalling the walk.
+
+  A wider fixed table was not the fix. A CJK face carries twenty thousand glyphs
+  or more, so rasterizing every one at load costs seconds and tens of megabytes
+  to draw a frame counter. A glyph is admitted the first time it is asked for
+  and kept for the face's life, which leaves repeated text costing no
+  per-frame rasterization the way the fixed table did. `font_preload` moves that
+  first-use cost to load for text a game knows in advance.
+
+  The atlas is paged and a page never resizes, because a sprite quad bakes its
+  UVs when it is appended and the batch is not drawn until the pass ends, so
+  growing a page mid-frame would silently move the source rectangle of every
+  quad already recorded against it. A full page is retired and a new one opened,
+  which costs one batch break. Past `MAX_PAGES` a codepoint keeps its correct
+  advance and draws blank, and `font_missing` says how many.
+
+- graphics: `\n` starts a new line box instead of being dropped. It is codepoint
+  10, below the old table's floor, so it vanished with everything else outside
+  it. `text_height` and `text_lines` report the block a string draws as, and
+  other control characters contribute neither a quad nor an advance so a tab
+  cannot put a `.notdef` box in the middle of a line.
+
+- graphics: the glyph outline scratch is sized from the face's own `maxp`
+  maxima instead of a fixed 512 points and 1024 edges. Those were sized for a
+  Latin face; a dense Han glyph passes both and mach-font reports the overflow
+  by rendering nothing, which looked exactly like a missing glyph. The edge
+  bound is derived from how far the rasterizer subdivides a curve at the cell
+  size rather than guessed.
+
+- graphics: a `Font` owns a copy of its encoded bytes. It rasterizes long after
+  load now, so borrowing the caller's span for the face's life would have
+  broken the documented promise that `font_from_bytes` releases it at return.
+
 - graphics: a draw refused because its uniforms could not be uploaded is counted
   in `renderer_dropped` instead of returning in silence. Refusing to record a
   draw whose parameters could not be written is correct; saying nothing about it
