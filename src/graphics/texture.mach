@@ -22,6 +22,7 @@ use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
 use boom.graphics.image.Image;
 use boom.graphics.image.image_upload;
+use boom.graphics.image.image_upload_region;
 use boom.graphics.image.ColorSpace;
 use boom.graphics.image.COLOR_SRGB;
 use boom.graphics.image.COLOR_LINEAR;
@@ -281,6 +282,39 @@ pub fun texture_load_as(d: *Device, path: str, space: ColorSpace) Result[Texture
 # ret:  the uploaded sRGB Texture, or a read/decode/upload error
 pub fun texture_load(d: *Device, path: str) Result[Texture, Error] {
     ret texture_load_as(d, path, COLOR_SRGB);
+}
+
+# overwrite a rectangle of an already-uploaded texture
+#
+# The texture keeps everything the rectangle does not cover, which is what
+# separates this from uploading a new texture: a glyph atlas is filled one cell
+# at a time as a game asks for codepoints, and re-uploading the whole page per
+# glyph would cost megabytes per character.
+#
+# THE TEXTURE'S DIMENSIONS DO NOT CHANGE. A sprite quad bakes its UVs into the
+# frame's vertex arena when it is appended and the batch is not drawn until the
+# pass ends, so resizing a texture that a recorded quad samples would silently
+# move every earlier quad's source rectangle. Growing a texture is therefore not
+# offered at all; a caller that needs more space makes another texture.
+# ---
+# d:      the upload context the texture was created against
+# t:      the texture to write into
+# pixels: width * height * 4 RGBA8 bytes, tightly packed
+# x:      left edge of the destination rectangle in texels
+# y:      top edge of the destination rectangle in texels
+# width:  rectangle width in texels
+# height: rectangle height in texels
+# ret:    true on success, or a staging/submit/bounds error
+pub fun texture_upload_region(d: *Device, t: *Texture, pixels: *u8,
+                              x: i32, y: i32, width: i32, height: i32) Result[bool, Error] {
+    if (!d.ready) {
+        ret err[bool, Error](error("the upload context is not initialized"));
+    }
+    if (x < 0 || y < 0 || width <= 0 || height <= 0) {
+        ret err[bool, Error](error("texture region dimensions must be positive"));
+    }
+    ret image_upload_region(?t.image, d.vk, d.pool, pixels,
+                            x::u32, y::u32, width::u32, height::u32);
 }
 
 # the image view a descriptor binds this texture through

@@ -106,6 +106,20 @@ The `font_from_bytes_oversampled` and `font_load_oversampled` variants keep
 logical text dimensions unchanged while rasterizing extra coverage for scaled
 or high-density interfaces.
 
+**Text is UTF-8 and the atlas fills on demand.** `text_draw` and `text_measure`
+decode their string as UTF-8 and draw any codepoint the face has a glyph for, so
+Chinese, Japanese, Korean, Cyrillic, Greek and accented Latin all render. A
+glyph is rasterized and uploaded the first time it is asked for and kept for the
+face's life, because a CJK face carries twenty thousand glyphs and rasterizing
+them at load would cost seconds and tens of megabytes to draw a frame counter.
+`font_preload` moves that first-use cost to load for text a game knows in
+advance. `\n` starts a new line box, `text_measure` reports the widest line and
+`text_height` the block, and `font_glyph_count`, `font_page_count` and
+`font_missing` report what the atlas holds. A codepoint the face does not cover
+draws the face's own `.notdef` box rather than a hole. This is not shaping:
+there is no bidi, Arabic joining, Indic reordering, or ligature and mark
+positioning, so Arabic and the Brahmic scripts render as isolated forms.
+
 **Shaders are pipelines, not programs.** A Vulkan pipeline bakes both stages and
 the whole fixed-function state into one immutable object, so there is no
 per-pass or per-material shader to set. A pipeline is chosen by what a draw is:
