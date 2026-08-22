@@ -120,6 +120,7 @@ fwd boom.graphics.texture.texture_from_bytes_as;
 fwd boom.graphics.texture.texture_from_bytes;
 fwd boom.graphics.texture.texture_load_as;
 fwd boom.graphics.texture.texture_load;
+fwd boom.graphics.texture.texture_upload_region;
 fwd boom.graphics.texture.texture_view;
 fwd boom.graphics.texture.texture_delete;
 
@@ -349,9 +350,9 @@ fwd boom.graphics.assets.assets_texture_get;
 fwd boom.graphics.assets.assets_release;
 fwd boom.graphics.assets.assets_live_count;
 
-fwd boom.graphics.text.FIRST_CP;
-fwd boom.graphics.text.LAST_CP;
-fwd boom.graphics.text.GLYPH_COUNT;
+fwd boom.graphics.text.ATLAS_PAGE;
+fwd boom.graphics.text.ATLAS_PAGE_MAX;
+fwd boom.graphics.text.MAX_PAGES;
 fwd boom.graphics.text.FontRaster;
 fwd boom.graphics.text.FONT_RASTER_SMOOTH;
 fwd boom.graphics.text.FONT_RASTER_PIXEL;
@@ -369,7 +370,13 @@ fwd boom.graphics.text.font_load;
 fwd boom.graphics.text.font_load_oversampled;
 fwd boom.graphics.text.font_load_with_options;
 fwd boom.graphics.text.font_delete;
+fwd boom.graphics.text.font_preload;
+fwd boom.graphics.text.font_glyph_count;
+fwd boom.graphics.text.font_page_count;
+fwd boom.graphics.text.font_missing;
 fwd boom.graphics.text.text_measure;
+fwd boom.graphics.text.text_height;
+fwd boom.graphics.text.text_lines;
 fwd boom.graphics.text.text_draw;
 
 fwd boom.graphics.spirv.LIT_FRAG_SPV;

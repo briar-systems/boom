@@ -303,6 +303,18 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
         @dst_access = vk.ACCESS_SHADER_READ_BIT;
         ret true;
     }
+    if (old == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new == vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        # Writing into an image that is already live and sampled. The glyph
+        # atlas grows this way: a page keeps its contents and one cell is
+        # overwritten, so unlike a fresh upload the old layout is not UNDEFINED
+        # and the existing texels must survive the barrier. Any sampling of the
+        # page must finish before the copy writes it.
+        @src_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        @dst_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
+        @src_access = vk.ACCESS_SHADER_READ_BIT;
+        @dst_access = vk.ACCESS_TRANSFER_WRITE_BIT;
+        ret true;
+    }
     ret false;
 }
 
@@ -623,6 +635,95 @@ pub fun image_upload(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8,
     ret ok[bool, Error](true);
 }
 
+# Overwrite a rectangle of an image that is already live.
+#
+# WHY THIS IS NOT image_upload WITH AN OFFSET. image_upload creates the image,
+# so it transitions from UNDEFINED, which tells the driver the previous contents
+# may be discarded. A partial write has to preserve everything it is not
+# covering, so it starts from SHADER_READ_ONLY_OPTIMAL and returns there. Reusing
+# the UNDEFINED path for a sub-rectangle is valid Vulkan that legally throws away
+# the rest of the image, and a tiling driver does exactly that.
+#
+# The staging buffer holds only the rectangle, tightly packed, so the cost is the
+# region rather than the image. That is what makes a per-glyph atlas write
+# affordable: the glyph atlas is megabytes and a cell is kilobytes.
+#
+# The queue wait inside end_one_shot stalls, which is why the caller should
+# admit glyphs before a frame rather than in the middle of one where it can.
+# Correctness does not depend on that: this pool is not the frame's, and the
+# frame's own commands are not submitted until frame end, so a cell written
+# while a frame is still recording is resident before any draw executes.
+# ---
+# i:      the live image to write into, in SHADER_READ_ONLY_OPTIMAL
+# v:      the device
+# pool:   a command pool for the one-shot buffer
+# pixels: width * height * 4 RGBA8 bytes, tightly packed
+# x:      left edge of the destination rectangle in texels
+# y:      top edge of the destination rectangle in texels
+# width:  rectangle width in texels
+# height: rectangle height in texels
+# ret:    true on success, or the step that failed
+pub fun image_upload_region(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8,
+                            x: u32, y: u32, width: u32, height: u32) Result[bool, Error] {
+    if (!i.ready) {
+        ret err[bool, Error](error("cannot write a region of an image that was not created"));
+    }
+    if (width == 0 || height == 0) {
+        ret err[bool, Error](error("cannot write a zero-sized image region"));
+    }
+    # Checked in usize so a rectangle whose right edge overflows u32 is caught
+    # rather than wrapping into a rectangle that looks like it fits.
+    if (x::usize + width::usize > i.width::usize
+        || y::usize + height::usize > i.height::usize) {
+        ret err[bool, Error](error("image region falls outside the image"));
+    }
+
+    val size: usize = image_bytes(width, height);
+    var staging: Buffer;
+    val sr: Result[bool, Error] = buffer_init(?staging, v, size::u64,
+        vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](sr)) { ret sr; }
+    if (!buffer_write(?staging, v, pixels, size::u64)) {
+        buffer_dnit(?staging, v);
+        ret err[bool, Error](error("could not stage the image region pixels"));
+    }
+
+    var cmd: vk.CommandBuffer;
+    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
+    if (is_err[bool, Error](br)) {
+        buffer_dnit(?staging, v);
+        ret br;
+    }
+
+    transition(cmd, i.handle, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+               vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    var region: vk.BufferImageCopy;
+    region.bufferOffset      = 0;
+    region.bufferRowLength   = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel       = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount     = 1;
+    region.imageOffset.x     = x::i32;
+    region.imageOffset.y     = y::i32;
+    region.imageOffset.z     = 0;
+    region.imageExtent.width  = width;
+    region.imageExtent.height = height;
+    region.imageExtent.depth  = 1;
+    vk.vkCmdCopyBufferToImage(cmd, staging.handle, i.handle,
+                              vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, ?region);
+
+    transition(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    val er: Result[bool, Error] = end_one_shot(v, pool, cmd);
+    buffer_dnit(?staging, v);
+    ret er;
+}
+
 # Destroy the view, the image, and its memory.
 pub fun image_dnit(i: *Image, v: *Vk) {
     if (i.view != nil)   { vk.vkDestroyImageView(v.device, i.view, nil); i.view = nil; }
@@ -738,17 +839,40 @@ test "image: the read transition orders the copy before the fragment stage" {
     ret 0;
 }
 
+test "image: a live image can be written into and left readable" {
+    # The glyph atlas writes one cell of a page that is already being sampled.
+    # Unlike a fresh upload the old layout is not UNDEFINED, so the barrier has
+    # to order the write after any sampling still in flight rather than let the
+    # driver treat the existing texels as discardable.
+    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
+    if (!transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    if (ss != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 2; }
+    if (ds != vk.PIPELINE_STAGE_TRANSFER_BIT)        { ret 3; }
+    if (sa != vk.ACCESS_SHADER_READ_BIT)             { ret 4; }
+    if (da != vk.ACCESS_TRANSFER_WRITE_BIT)          { ret 5; }
+
+    # And back the other way, which is the pair that leaves the page in the
+    # layout its descriptor claims. Both directions have to exist or a region
+    # write strands the image in a transfer layout.
+    if (!transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          ?ss, ?ds, ?sa, ?da)) { ret 6; }
+    ret 0;
+}
+
 test "image: an unhandled transition is refused rather than zeroed" {
     var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
     # Emitting a barrier with zeroed masks synchronizes nothing while looking
-    # like it did, so the reverse direction must fail rather than be recorded.
-    if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         ?ss, ?ds, ?sa, ?da)) { ret 1; }
-    # An arbitrary pair nothing in boom performs. The point is that the table
-    # is a closed set, not that it happens to be missing this one.
+    # like it did, so a pair the table does not carry must fail rather than be
+    # recorded. These are arbitrary pairs nothing in boom performs; the point is
+    # that the table is a closed set, not that it happens to be missing them.
     if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                          vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                         ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    if (transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          ?ss, ?ds, ?sa, ?da)) { ret 2; }
     ret 0;
 }
