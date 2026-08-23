@@ -69,6 +69,65 @@ val KHR_PORTABILITY_SUBSET_EXTENSION_NAME: *u8 = "VK_KHR_portability_subset";
 # request drops to 1.0 and instance creation proceeds; shader module creation is
 # then the thing that fails, with a message naming the version, rather than the
 # instance failing with one that does not.
+# name one failed Vulkan call after the result it actually returned
+#
+# a bring-up failure that says only "failed" costs a report-and-reply round
+# trip to learn whether the machine lacks a driver or the request was wrong.
+# the common results are named; anything else keeps the bare call name.
+# ---
+# call: the Vulkan entry point that failed
+# code: the VkResult it returned
+# ret:  a static message naming both
+fun result_name(call: str, code: i32) str {
+    if (code == vk.ERROR_INCOMPATIBLE_DRIVER) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver on this machine)";
+        }
+        ret "vkCreateDevice: VK_ERROR_INCOMPATIBLE_DRIVER";
+    }
+    if (code == vk.ERROR_EXTENSION_NOT_PRESENT) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_EXTENSION_NOT_PRESENT";
+        }
+        ret "vkCreateDevice: VK_ERROR_EXTENSION_NOT_PRESENT";
+    }
+    if (code == vk.ERROR_LAYER_NOT_PRESENT) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_LAYER_NOT_PRESENT";
+        }
+        ret "vkCreateDevice: VK_ERROR_LAYER_NOT_PRESENT";
+    }
+    if (code == vk.ERROR_INITIALIZATION_FAILED) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_INITIALIZATION_FAILED";
+        }
+        ret "vkCreateDevice: VK_ERROR_INITIALIZATION_FAILED";
+    }
+    if (code == vk.ERROR_OUT_OF_HOST_MEMORY
+        || code == vk.ERROR_OUT_OF_DEVICE_MEMORY) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: out of memory";
+        }
+        ret "vkCreateDevice: out of memory";
+    }
+    if (code == vk.ERROR_FEATURE_NOT_PRESENT) {
+        ret "vkCreateDevice: VK_ERROR_FEATURE_NOT_PRESENT";
+    }
+    if (same(call, "vkCreateInstance")) {
+        ret "vkCreateInstance failed with an unlisted VkResult";
+    }
+    ret "vkCreateDevice failed with an unlisted VkResult";
+}
+
+fun same(a: str, b: str) bool {
+    var i: usize = 0;
+    for (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret a[i] == b[i];
+}
+
 fun requested_api_version() u32 {
     if (vk.vkEnumerateInstanceVersion == nil) { ret API_VERSION_1_0; }
     var supported: u32 = 0;
@@ -196,8 +255,9 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
         ici.flags = ici.flags | INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
 
-    if (vk.vkCreateInstance(?ici, nil, ?v.instance) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateInstance failed"));
+    val made: i32 = vk.vkCreateInstance(?ici, nil, ?v.instance);
+    if (made != vk.SUCCESS) {
+        ret err[bool, Error](error(result_name("vkCreateInstance", made)));
     }
     if (vk.load_instance(gc.glfwGetInstanceProcAddress:~vk.GetInstanceProcAddr, v.instance::ptr) <= 0) {
         ret err[bool, Error](error("could not resolve instance Vulkan commands"));
@@ -457,8 +517,9 @@ fun create_device(v: *Vk) Result[bool, Error] {
     dci.ppEnabledExtensionNames = ?enabled[0];
     dci.pEnabledFeatures        = nil;
 
-    if (vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateDevice failed"));
+    val built: i32 = vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device);
+    if (built != vk.SUCCESS) {
+        ret err[bool, Error](error(result_name("vkCreateDevice", built)));
     }
     # THE DEVICE LOADER'S BOOTSTRAP COMES FROM THE INSTANCE, NOT FROM ITSELF.
     # mach-vk's `vkGetDeviceProcAddr` global is *set by* load_device, so passing
