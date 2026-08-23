@@ -11,10 +11,12 @@
 # rather than reaching for module globals.
 
 use boom.window.Window;
-use boom.window.window_open;
+use boom.window.window_open_mode;
 use boom.window.window_close;
 use boom.window.window_is_valid;
 use boom.window.window_set_event_sink;
+use boom.window.WindowMode;
+use boom.window.window_mode_is_valid;
 use boom.clock.Clock;
 use boom.clock.clock_new;
 use boom.timestep.Timestep;
@@ -23,8 +25,6 @@ use boom.event.EventQueue;
 use boom.event.queue_new;
 use window: boom.window;
 use inp: boom.input;
-use phy: boom.physics;
-use boom.math.vec.vec3;
 use std.chrono.duration.Duration;
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -40,6 +40,7 @@ use std.types.string.str;
 # max_frame: largest frame time folded into the accumulator at once
 # frame_dt:  when non-zero, the delta every frame is told it took, instead of
 #            the wall clock. See below.
+# mode:      initial window presentation mode
 #
 # WHY A GAME WOULD PIN ITS FRAME DELTA. The loop feeds the wall-clock delta into
 # the fixed-step accumulator, so the number of ticks a run executes depends on
@@ -61,6 +62,19 @@ pub rec Config {
     fixed_dt:  Duration;
     max_frame: Duration;
     frame_dt:  Duration;
+    mode:      WindowMode;
+}
+
+# whether a configuration can drive the frame loop
+#
+# the fixed step must be positive, the frame clamp must admit at least one
+# complete step, and a pinned frame delta cannot run time backward.
+# ---
+# cfg: configuration to validate
+# ret: true when context_init can use the timing values safely
+pub fun config_is_valid(cfg: Config) bool {
+    ret cfg.fixed_dt > 0 && cfg.max_frame >= cfg.fixed_dt && cfg.frame_dt >= 0
+        && window_mode_is_valid(cfg.mode);
 }
 
 # the live state of a running engine
@@ -70,10 +84,10 @@ pub rec Config {
 # step:    fixed-timestep accumulator
 # events:  input event queue, fed by the window
 # input:   polled key and mouse state, sampled at each fixed tick
-# physics: rigid body simulation, stepped once per fixed tick
 # sink:    where the window delivers input; points into this Context
 # alpha:   render interpolation factor in [0, 1), set each frame
 # running: cleared to stop the loop
+# status:  process status returned by the run loop
 # user:    opaque game-state pointer, nil until set; hooks reach it
 #          through the Context they receive
 pub rec Context {
@@ -82,10 +96,10 @@ pub rec Context {
     step:    Timestep;
     events:  EventQueue;
     input:   inp.Input;
-    physics: phy.Physics;
     sink:    window.Sink;
     alpha:   f64;
     running: bool;
+    status:  i64;
     user:    ptr;
     # Zero means the clock is the wall clock. Non-zero pins every frame's delta
     # to this, which is what makes a run reproducible. See Config.frame_dt.
@@ -96,18 +110,23 @@ pub rec Context {
 #
 # opens the window, attaches the input queue as its event
 # sink, starts the clock, and arms the fixed-timestep accumulator.
-# returns false if the window could not be opened, in which case the
-# subsystems are already torn down and context_shutdown must not be
-# called.
+# returns false if the timing configuration is invalid or the window could
+# not be opened, in which case context_shutdown must not be called.
 # ---
 # ctx: context to initialize
 # cfg: window and timestep parameters
-# ret: true on success, false if the window could not be opened
+# ret: true on success, false if validation or window creation failed
 pub fun context_init(ctx: *Context, cfg: Config) bool {
+    ctx.alpha    = 0.0;
+    ctx.running  = false;
+    ctx.status   = 1;
+    ctx.user     = nil;
+    ctx.frame_dt = cfg.frame_dt;
+    if (!config_is_valid(cfg)) { ret false; }
+
     ctx.events = queue_new();
     ctx.input   = inp.input_new();
-    ctx.physics = phy.physics_new(vec3(0.0, -9.81, 0.0));
-    ctx.window = window_open(cfg.width, cfg.height, cfg.title);
+    ctx.window = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
     if (!window_is_valid(?ctx.window)) {
         ret false;
     }
@@ -119,18 +138,36 @@ pub fun context_init(ctx: *Context, cfg: Config) bool {
     window_set_event_sink(?ctx.window, ?ctx.sink);
     ctx.clock   = clock_new();
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
-    ctx.alpha   = 0.0;
     ctx.running = true;
-    ctx.user    = nil;
-    ctx.frame_dt = cfg.frame_dt;
+    ctx.status  = 0;
     ret true;
 }
 
-# request the run loop to exit after the current frame
+# request the run loop to exit after the current callback
 # ---
 # ctx: context to stop
 pub fun context_stop(ctx: *Context) {
     ctx.running = false;
+}
+
+# stop the run loop with a failing process status
+#
+# zero is promoted to one so this helper cannot report success by mistake.
+# ---
+# ctx:    context to stop
+# status: non-zero process status to return
+pub fun context_fail(ctx: *Context, status: i64) {
+    ctx.status = status;
+    if (ctx.status == 0) { ctx.status = 1; }
+    ctx.running = false;
+}
+
+# read the process status the run loop will return
+# ---
+# ctx: context to query
+# ret: zero for success, otherwise the status passed to context_fail
+pub fun context_status(ctx: *Context) i64 {
+    ret ctx.status;
 }
 
 # attach an opaque game-state pointer to the context
@@ -181,5 +218,46 @@ test "context: user pointer clears to nil" {
     context_set_user(?ctx, (?state)::ptr);
     context_set_user(?ctx, nil);
     if (context_user(?ctx) != nil) { ret 1; }
+    ret 0;
+}
+
+test "context: failure stops the loop and records a status" {
+    var ctx: Context;
+    ctx.running = true;
+    context_fail(?ctx, 7);
+    if (ctx.running) { ret 1; }
+    if (context_status(?ctx) != 7) { ret 2; }
+    ret 0;
+}
+
+test "context: failure cannot report success" {
+    var ctx: Context;
+    ctx.running = true;
+    context_fail(?ctx, 0);
+    if (context_status(?ctx) != 1) { ret 1; }
+    ret 0;
+}
+
+test "context: timing configuration rejects invalid loops" {
+    val base: Config = Config{
+        width:     1,
+        height:    1,
+        title:     "test",
+        fixed_dt:  10,
+        max_frame: 20,
+        frame_dt:  0,
+        mode:      window.WINDOW_MODE_WINDOWED,
+    };
+    if (!config_is_valid(base)) { ret 1; }
+
+    var cfg: Config = base;
+    cfg.fixed_dt = 0;
+    if (config_is_valid(cfg)) { ret 2; }
+    cfg.fixed_dt = 10;
+    cfg.max_frame = 9;
+    if (config_is_valid(cfg)) { ret 3; }
+    cfg.max_frame = 20;
+    cfg.frame_dt = 0 - 1;
+    if (config_is_valid(cfg)) { ret 4; }
     ret 0;
 }

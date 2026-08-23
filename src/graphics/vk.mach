@@ -45,6 +45,16 @@ pub val NO_FAMILY: u32 = 0xFFFFFFFF;
 val API_VERSION_1_0: u32 = 0x00400000;
 val API_VERSION_1_3: u32 = 0x00403000;
 
+# The portability extensions, and the instance flag that opts into the first.
+#
+# Defined here because mach-vk emits a curated set of extension names rather
+# than every one the registry lists, and neither of these is among them. Spelled
+# as mach-vk spells KHR_SWAPCHAIN_EXTENSION_NAME: the registry's name without
+# the VK_ prefix the generator drops.
+val INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x00000001;
+val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: *u8 = "VK_KHR_portability_enumeration";
+val KHR_PORTABILITY_SUBSET_EXTENSION_NAME: *u8 = "VK_KHR_portability_subset";
+
 # The version the instance requests.
 #
 # 1.3, NOT 1.0. Mach emits SPIR-V 1.6, and the SPIR-V version a driver will
@@ -59,6 +69,65 @@ val API_VERSION_1_3: u32 = 0x00403000;
 # request drops to 1.0 and instance creation proceeds; shader module creation is
 # then the thing that fails, with a message naming the version, rather than the
 # instance failing with one that does not.
+# name one failed Vulkan call after the result it actually returned
+#
+# a bring-up failure that says only "failed" costs a report-and-reply round
+# trip to learn whether the machine lacks a driver or the request was wrong.
+# the common results are named; anything else keeps the bare call name.
+# ---
+# call: the Vulkan entry point that failed
+# code: the VkResult it returned
+# ret:  a static message naming both
+fun result_name(call: str, code: i32) str {
+    if (code == vk.ERROR_INCOMPATIBLE_DRIVER) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver on this machine)";
+        }
+        ret "vkCreateDevice: VK_ERROR_INCOMPATIBLE_DRIVER";
+    }
+    if (code == vk.ERROR_EXTENSION_NOT_PRESENT) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_EXTENSION_NOT_PRESENT";
+        }
+        ret "vkCreateDevice: VK_ERROR_EXTENSION_NOT_PRESENT";
+    }
+    if (code == vk.ERROR_LAYER_NOT_PRESENT) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_LAYER_NOT_PRESENT";
+        }
+        ret "vkCreateDevice: VK_ERROR_LAYER_NOT_PRESENT";
+    }
+    if (code == vk.ERROR_INITIALIZATION_FAILED) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: VK_ERROR_INITIALIZATION_FAILED";
+        }
+        ret "vkCreateDevice: VK_ERROR_INITIALIZATION_FAILED";
+    }
+    if (code == vk.ERROR_OUT_OF_HOST_MEMORY
+        || code == vk.ERROR_OUT_OF_DEVICE_MEMORY) {
+        if (same(call, "vkCreateInstance")) {
+            ret "vkCreateInstance: out of memory";
+        }
+        ret "vkCreateDevice: out of memory";
+    }
+    if (code == vk.ERROR_FEATURE_NOT_PRESENT) {
+        ret "vkCreateDevice: VK_ERROR_FEATURE_NOT_PRESENT";
+    }
+    if (same(call, "vkCreateInstance")) {
+        ret "vkCreateInstance failed with an unlisted VkResult";
+    }
+    ret "vkCreateDevice failed with an unlisted VkResult";
+}
+
+fun same(a: str, b: str) bool {
+    var i: usize = 0;
+    for (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) { ret false; }
+        i = i + 1;
+    }
+    ret a[i] == b[i];
+}
+
 fun requested_api_version() u32 {
     if (vk.vkEnumerateInstanceVersion == nil) { ret API_VERSION_1_0; }
     var supported: u32 = 0;
@@ -119,6 +188,44 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
         ret err[bool, Error](error("GLFW reported no required instance extensions"));
     }
 
+    # GLFW's list plus whatever the platform adds, in a fixed array rather than
+    # an allocated one. GLFW asks for two on every platform boom targets, the
+    # generic surface and one platform surface, and boom adds at most one on
+    # top, so fifteen is several times what any of them needs and the sixteenth
+    # slot is held for that one.
+    #
+    # FIXED BECAUSE THE ALLOCATING VERSION FAILS QUIETLY. A growable list has an
+    # allocation that can fail, and the only place to notice is the push, which
+    # is one call deep in the thing that should have been a list of names. Miss
+    # it and the instance is created with no extensions at all, which succeeds,
+    # and the first call to fail is the surface: a report three steps downstream
+    # of the cause and pointing at the wrong subsystem. A bound that can be
+    # refused here says what actually went wrong.
+    if (ext_count > 15) {
+        ret err[bool, Error](error("GLFW requires more instance extensions than boom can enable"));
+    }
+    var enabled: [16]*u8;
+    var enabled_count: u32 = 0;
+    for (enabled_count < ext_count) {
+        enabled[enabled_count] = exts[enabled_count];
+        enabled_count = enabled_count + 1;
+    }
+
+    $if ($mach.build.os == $mach.os.darwin) {
+        # VULKAN ON MACOS IS A TRANSLATION LAYER, NOT A DRIVER. Apple ships
+        # Metal and no Vulkan implementation, so what runs there is MoltenVK: a
+        # Vulkan front end that lowers to Metal underneath. Metal cannot express
+        # all of Vulkan, so MoltenVK identifies itself as a portability
+        # implementation rather than a complete one, and the loader keeps those
+        # away from an application that has not said it can cope with one. It
+        # does not hide them at enumeration, it refuses the instance, which is
+        # why a macOS build without this fails at vkCreateInstance rather than
+        # at device selection, with a message that names nothing to do with
+        # portability.
+        enabled[enabled_count] = KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+        enabled_count = enabled_count + 1;
+    }
+
     var app: vk.ApplicationInfo;
     app.sType              = vk.STRUCTURE_TYPE_APPLICATION_INFO;
     app.pNext              = nil;
@@ -135,11 +242,22 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     ici.pApplicationInfo        = ?app;
     ici.enabledLayerCount       = 0;
     ici.ppEnabledLayerNames     = nil;
-    ici.enabledExtensionCount   = ext_count;
-    ici.ppEnabledExtensionNames = exts;
+    ici.enabledExtensionCount   = enabled_count;
+    ici.ppEnabledExtensionNames = ?enabled[0];
+    $if ($mach.build.os == $mach.os.darwin) {
+        # THE FLAG AND THE EXTENSION ABOVE ARE ONE THING WRITTEN IN TWO PLACES.
+        # The extension is what makes this bit legal to pass, since a flag
+        # belonging to an extension the instance did not enable is invalid
+        # usage, and the bit is what actually opts the enumeration in. The
+        # extension alone changes nothing and the bit alone is rejected, so
+        # neither is meaningful without the other and adding one without the
+        # other is always a mistake.
+        ici.flags = ici.flags | INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
 
-    if (vk.vkCreateInstance(?ici, nil, ?v.instance) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateInstance failed"));
+    val made: i32 = vk.vkCreateInstance(?ici, nil, ?v.instance);
+    if (made != vk.SUCCESS) {
+        ret err[bool, Error](error(result_name("vkCreateInstance", made)));
     }
     if (vk.load_instance(gc.glfwGetInstanceProcAddress:~vk.GetInstanceProcAddr, v.instance::ptr) <= 0) {
         ret err[bool, Error](error("could not resolve instance Vulkan commands"));
@@ -335,7 +453,38 @@ fun create_device(v: *Vk) Result[bool, Error] {
         qcount = 2;
     }
 
-    var swapchain_ext: *u8 = vk.KHR_SWAPCHAIN_EXTENSION_NAME::*u8;
+    # The device extension list, fixed for the same reason the instance's is.
+    # Every entry is decided here rather than reported by anything, so the bound
+    # is not a guess: swapchain always, portability_subset on macOS, and eight
+    # so that the next one to be needed is a line rather than a resize. What
+    # does not go here is an extension boom could do without, for the reason the
+    # features paragraph below gives about optional things.
+    var enabled: [8]*u8;
+    var enabled_count: u32 = 0;
+    enabled[enabled_count] = vk.KHR_SWAPCHAIN_EXTENSION_NAME;
+    enabled_count = enabled_count + 1;
+
+    $if ($mach.build.os == $mach.os.darwin) {
+        # PORTABILITY_SUBSET IS NOT OPTIONAL WHERE IT IS OFFERED. A device
+        # advertising it is saying it does not implement all of Vulkan, and the
+        # spec requires an application creating that device to enable it, since
+        # it is the only way to ask which parts are missing. A device created
+        # without it is invalid usage and vkCreateDevice may refuse outright.
+        # MoltenVK advertises it on everything it exposes, so on macOS it is
+        # never the optional case.
+        #
+        # GATING ON THE OS IS NOT THE PREDICATE THE SPEC NAMES, and that is a
+        # known edge rather than an oversight. The rule is about what the device
+        # advertises, not what the host runs, so a macOS box driving lavapipe or
+        # SwiftShader is handed an extension its device never offered and gets a
+        # bare "vkCreateDevice failed" with nothing to point at. boom does not
+        # enumerate device extensions anywhere yet, and adding that machinery
+        # for one call site would be the wrong order to build it in. When there
+        # is a second caller this becomes a query against
+        # vkEnumerateDeviceExtensionProperties and the $if goes away.
+        enabled[enabled_count] = KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+        enabled_count = enabled_count + 1;
+    }
 
     # NO OPTIONAL FEATURES, AND THAT IS A CLAIM ABOUT THE SHADERS. A device is
     # created with every optional feature off, and using one that was not
@@ -364,12 +513,13 @@ fun create_device(v: *Vk) Result[bool, Error] {
     dci.pQueueCreateInfos       = ?qci[0];
     dci.enabledLayerCount       = 0;
     dci.ppEnabledLayerNames     = nil;
-    dci.enabledExtensionCount   = 1;
-    dci.ppEnabledExtensionNames = ?swapchain_ext;
+    dci.enabledExtensionCount   = enabled_count;
+    dci.ppEnabledExtensionNames = ?enabled[0];
     dci.pEnabledFeatures        = nil;
 
-    if (vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateDevice failed"));
+    val built: i32 = vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device);
+    if (built != vk.SUCCESS) {
+        ret err[bool, Error](error(result_name("vkCreateDevice", built)));
     }
     # THE DEVICE LOADER'S BOOTSTRAP COMES FROM THE INSTANCE, NOT FROM ITSELF.
     # mach-vk's `vkGetDeviceProcAddr` global is *set by* load_device, so passing

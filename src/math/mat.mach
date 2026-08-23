@@ -1,23 +1,19 @@
-# scalar-interim 4x4 matrix type for the shared math layer
-#
-# Mat4 stores its 16 elements column-major, the layout std140 expects,
-# so a Mat4 uploads to a uniform without transposing. element (row, col)
-# lives at index col * 4 + row. engine-internal, to be replaced by
-# mach-math; see boom.math.scalar.
+# 4x4 matrix operations for the shared math layer
 
 use boom.math.scalar.tanf;
 use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
 use boom.math.vec.vec3_sub;
 use boom.math.vec.vec3_dot;
 use boom.math.vec.vec3_cross;
 use boom.math.vec.vec3_normalize;
 use boom.math.quat.Quat;
 
-# a 4x4 matrix in column-major order
+# a 4x4 matrix stored as four SIMD columns in std140 order
 # ---
-# m: the 16 elements, element (row, col) at index col * 4 + row
+# m: the columns, indexed as m[column][row]
 pub rec Mat4 {
-    m: [16]f32;
+    m: [4]f32x4;
 }
 
 # the identity matrix
@@ -25,10 +21,10 @@ pub rec Mat4 {
 # ret: a matrix with ones on the diagonal
 pub fun mat4_identity() Mat4 {
     var r: Mat4;
-    r.m[0]  = 1.0;
-    r.m[5]  = 1.0;
-    r.m[10] = 1.0;
-    r.m[15] = 1.0;
+    r.m[0][0] = 1.0;
+    r.m[1][1] = 1.0;
+    r.m[2][2] = 1.0;
+    r.m[3][3] = 1.0;
     ret r;
 }
 
@@ -41,17 +37,10 @@ pub fun mat4_mul(a: *Mat4, b: *Mat4) Mat4 {
     var r: Mat4;
     var col: i64 = 0;
     for (col < 4) {
-        var row: i64 = 0;
-        for (row < 4) {
-            var sum: f32 = 0.0;
-            var k: i64 = 0;
-            for (k < 4) {
-                sum = sum + a.m[k * 4 + row] * b.m[col * 4 + k];
-                k = k + 1;
-            }
-            r.m[col * 4 + row] = sum;
-            row = row + 1;
-        }
+        r.m[col] = a.m[0] * splat4(b.m[col][0])
+                 + a.m[1] * splat4(b.m[col][1])
+                 + a.m[2] * splat4(b.m[col][2])
+                 + a.m[3] * splat4(b.m[col][3]);
         col = col + 1;
     }
     ret r;
@@ -63,9 +52,9 @@ pub fun mat4_mul(a: *Mat4, b: *Mat4) Mat4 {
 # ret: a matrix translating by v
 pub fun mat4_translation(v: Vec3) Mat4 {
     var r: Mat4 = mat4_identity();
-    r.m[12] = v.x;
-    r.m[13] = v.y;
-    r.m[14] = v.z;
+    r.m[3][0] = v[0];
+    r.m[3][1] = v[1];
+    r.m[3][2] = v[2];
     ret r;
 }
 
@@ -75,10 +64,10 @@ pub fun mat4_translation(v: Vec3) Mat4 {
 # ret: a matrix scaling by v
 pub fun mat4_scale(v: Vec3) Mat4 {
     var r: Mat4;
-    r.m[0]  = v.x;
-    r.m[5]  = v.y;
-    r.m[10] = v.z;
-    r.m[15] = 1.0;
+    r.m[0][0] = v[0];
+    r.m[1][1] = v[1];
+    r.m[2][2] = v[2];
+    r.m[3][3] = 1.0;
     ret r;
 }
 
@@ -87,27 +76,27 @@ pub fun mat4_scale(v: Vec3) Mat4 {
 # q:   unit quaternion
 # ret: the equivalent rotation matrix
 pub fun mat4_from_quat(q: Quat) Mat4 {
-    val xx: f32 = q.x * q.x;
-    val yy: f32 = q.y * q.y;
-    val zz: f32 = q.z * q.z;
-    val xy: f32 = q.x * q.y;
-    val xz: f32 = q.x * q.z;
-    val yz: f32 = q.y * q.z;
-    val wx: f32 = q.w * q.x;
-    val wy: f32 = q.w * q.y;
-    val wz: f32 = q.w * q.z;
+    val xx: f32 = q[0] * q[0];
+    val yy: f32 = q[1] * q[1];
+    val zz: f32 = q[2] * q[2];
+    val xy: f32 = q[0] * q[1];
+    val xz: f32 = q[0] * q[2];
+    val yz: f32 = q[1] * q[2];
+    val wx: f32 = q[3] * q[0];
+    val wy: f32 = q[3] * q[1];
+    val wz: f32 = q[3] * q[2];
 
     var r: Mat4;
-    r.m[0]  = 1.0 - 2.0 * (yy + zz);
-    r.m[1]  = 2.0 * (xy + wz);
-    r.m[2]  = 2.0 * (xz - wy);
-    r.m[4]  = 2.0 * (xy - wz);
-    r.m[5]  = 1.0 - 2.0 * (xx + zz);
-    r.m[6]  = 2.0 * (yz + wx);
-    r.m[8]  = 2.0 * (xz + wy);
-    r.m[9]  = 2.0 * (yz - wx);
-    r.m[10] = 1.0 - 2.0 * (xx + yy);
-    r.m[15] = 1.0;
+    r.m[0][0] = 1.0 - 2.0 * (yy + zz);
+    r.m[0][1] = 2.0 * (xy + wz);
+    r.m[0][2] = 2.0 * (xz - wy);
+    r.m[1][0] = 2.0 * (xy - wz);
+    r.m[1][1] = 1.0 - 2.0 * (xx + zz);
+    r.m[1][2] = 2.0 * (yz + wx);
+    r.m[2][0] = 2.0 * (xz + wy);
+    r.m[2][1] = 2.0 * (yz - wx);
+    r.m[2][2] = 1.0 - 2.0 * (xx + yy);
+    r.m[3][3] = 1.0;
     ret r;
 }
 
@@ -134,11 +123,11 @@ pub fun mat4_from_quat(q: Quat) Mat4 {
 pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
     val f: f32 = 1.0 / tanf(fovy * 0.5);
     var r: Mat4;
-    r.m[0]  = f / aspect;
-    r.m[5]  = 0.0 - f;
-    r.m[10] = far / (near - far);
-    r.m[11] = 0.0 - 1.0;
-    r.m[14] = (far * near) / (near - far);
+    r.m[0][0] = f / aspect;
+    r.m[1][1] = 0.0 - f;
+    r.m[2][2] = far / (near - far);
+    r.m[2][3] = 0.0 - 1.0;
+    r.m[3][2] = (far * near) / (near - far);
     ret r;
 }
 
@@ -158,16 +147,16 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
 # ret:    the projection matrix
 pub fun mat4_orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
     var r: Mat4;
-    r.m[0]  = 2.0 / (right - left);
+    r.m[0][0] = 2.0 / (right - left);
     # Negated against the OpenGL form, because Vulkan's Y increases downward.
-    r.m[5]  = 0.0 - 2.0 / (top - bottom);
+    r.m[1][1] = 0.0 - 2.0 / (top - bottom);
     # Depth maps to [0, 1], not [-1, 1]. Under the OpenGL form everything from
     # the near plane to the midpoint lands at a negative Z and is clipped.
-    r.m[10] = 0.0 - 1.0 / (far - near);
-    r.m[12] = 0.0 - (right + left) / (right - left);
-    r.m[13] = (top + bottom) / (top - bottom);
-    r.m[14] = 0.0 - near / (far - near);
-    r.m[15] = 1.0;
+    r.m[2][2] = 0.0 - 1.0 / (far - near);
+    r.m[3][0] = 0.0 - (right + left) / (right - left);
+    r.m[3][1] = (top + bottom) / (top - bottom);
+    r.m[3][2] = 0.0 - near / (far - near);
+    r.m[3][3] = 1.0;
     ret r;
 }
 
@@ -183,19 +172,19 @@ pub fun mat4_look_at(eye: Vec3, center: Vec3, up: Vec3) Mat4 {
     val u: Vec3 = vec3_cross(s, f);
 
     var r: Mat4;
-    r.m[0]  = s.x;
-    r.m[1]  = u.x;
-    r.m[2]  = 0.0 - f.x;
-    r.m[4]  = s.y;
-    r.m[5]  = u.y;
-    r.m[6]  = 0.0 - f.y;
-    r.m[8]  = s.z;
-    r.m[9]  = u.z;
-    r.m[10] = 0.0 - f.z;
-    r.m[12] = 0.0 - vec3_dot(s, eye);
-    r.m[13] = 0.0 - vec3_dot(u, eye);
-    r.m[14] = vec3_dot(f, eye);
-    r.m[15] = 1.0;
+    r.m[0][0] = s[0];
+    r.m[0][1] = u[0];
+    r.m[0][2] = 0.0 - f[0];
+    r.m[1][0] = s[1];
+    r.m[1][1] = u[1];
+    r.m[1][2] = 0.0 - f[1];
+    r.m[2][0] = s[2];
+    r.m[2][1] = u[2];
+    r.m[2][2] = 0.0 - f[2];
+    r.m[3][0] = 0.0 - vec3_dot(s, eye);
+    r.m[3][1] = 0.0 - vec3_dot(u, eye);
+    r.m[3][2] = vec3_dot(f, eye);
+    r.m[3][3] = 1.0;
     ret r;
 }
 
@@ -204,7 +193,7 @@ pub fun mat4_look_at(eye: Vec3, center: Vec3, up: Vec3) Mat4 {
 # m:   matrix to expose
 # ret: pointer to the first of the 16 column-major elements
 pub fun mat4_ptr(m: *Mat4) *f32 {
-    ret ?m.m[0];
+    ret ?m.m[0][0];
 }
 
 # transform a point, applying the translation column
@@ -226,11 +215,11 @@ pub fun mat4_ptr(m: *Mat4) *f32 {
 # p:   the point
 # ret: m * (p, 1)
 pub fun mat4_transform_point(m: *Mat4, p: Vec3) Vec3 {
-    var r: Vec3;
-    r.x = m.m[0] * p.x + m.m[4] * p.y + m.m[8]  * p.z + m.m[12];
-    r.y = m.m[1] * p.x + m.m[5] * p.y + m.m[9]  * p.z + m.m[13];
-    r.z = m.m[2] * p.x + m.m[6] * p.y + m.m[10] * p.z + m.m[14];
-    ret r;
+    val r: f32x4 = m.m[0] * splat4(p[0])
+                   + m.m[1] * splat4(p[1])
+                   + m.m[2] * splat4(p[2])
+                   + m.m[3];
+    ret vec3(r[0], r[1], r[2]);
 }
 
 # transform a point by a projection, dividing through by w
@@ -250,12 +239,12 @@ pub fun mat4_transform_point(m: *Mat4, p: Vec3) Vec3 {
 # p:   the point
 # ret: m * (p, 1), divided by w
 pub fun mat4_project_point(m: *Mat4, p: Vec3) Vec3 {
-    val x: f32 = m.m[0] * p.x + m.m[4] * p.y + m.m[8]  * p.z + m.m[12];
-    val y: f32 = m.m[1] * p.x + m.m[5] * p.y + m.m[9]  * p.z + m.m[13];
-    val z: f32 = m.m[2] * p.x + m.m[6] * p.y + m.m[10] * p.z + m.m[14];
-    val w: f32 = m.m[3] * p.x + m.m[7] * p.y + m.m[11] * p.z + m.m[15];
-    if (w == 0.0) { ret Vec3{x: x, y: y, z: z}; }
-    ret Vec3{x: x / w, y: y / w, z: z / w};
+    val r: f32x4 = m.m[0] * splat4(p[0])
+                   + m.m[1] * splat4(p[1])
+                   + m.m[2] * splat4(p[2])
+                   + m.m[3];
+    if (r[3] == 0.0) { ret vec3(r[0], r[1], r[2]); }
+    ret vec3(r[0] / r[3], r[1] / r[3], r[2] / r[3]);
 }
 
 # transform a direction, ignoring the translation column
@@ -269,32 +258,43 @@ pub fun mat4_project_point(m: *Mat4, p: Vec3) Vec3 {
 # v:   the direction
 # ret: the upper-left 3x3 of m applied to v
 pub fun mat4_transform_dir(m: *Mat4, v: Vec3) Vec3 {
-    var r: Vec3;
-    r.x = m.m[0] * v.x + m.m[4] * v.y + m.m[8]  * v.z;
-    r.y = m.m[1] * v.x + m.m[5] * v.y + m.m[9]  * v.z;
-    r.z = m.m[2] * v.x + m.m[6] * v.y + m.m[10] * v.z;
-    ret r;
+    val r: f32x4 = m.m[0] * splat4(v[0])
+                   + m.m[1] * splat4(v[1])
+                   + m.m[2] * splat4(v[2]);
+    ret vec3(r[0], r[1], r[2]);
+}
+
+fun splat4(v: f32) f32x4 {
+    ret f32x4{v, v, v, v};
+}
+
+test "mat: columns preserve the std140 matrix layout" {
+    if ($size_of(Mat4) != 64 || $align_of(Mat4) != 16) { ret 1; }
+    var m: Mat4 = mat4_identity();
+    val p: *f32 = mat4_ptr(?m);
+    if (p[0] != 1.0 || p[5] != 1.0 || p[10] != 1.0 || p[15] != 1.0) { ret 2; }
+    ret 0;
 }
 
 test "mat: identity is the multiplicative unit" {
     var id: Mat4 = mat4_identity();
-    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
+    var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
     var r: Mat4 = mat4_mul(?id, ?t);
-    if (r.m[12] != 1.0 || r.m[13] != 2.0 || r.m[14] != 3.0) { ret 1; }
+    if (r.m[3][0] != 1.0 || r.m[3][1] != 2.0 || r.m[3][2] != 3.0) { ret 1; }
     ret 0;
 }
 
 test "mat: multiply composes translations" {
-    var a: Mat4 = mat4_translation(Vec3{x: 1.0, y: 0.0, z: 0.0});
-    var b: Mat4 = mat4_translation(Vec3{x: 0.0, y: 2.0, z: 0.0});
+    var a: Mat4 = mat4_translation(vec3(1.0, 0.0, 0.0));
+    var b: Mat4 = mat4_translation(vec3(0.0, 2.0, 0.0));
     var r: Mat4 = mat4_mul(?a, ?b);
-    if (r.m[12] != 1.0 || r.m[13] != 2.0 || r.m[14] != 0.0) { ret 1; }
+    if (r.m[3][0] != 1.0 || r.m[3][1] != 2.0 || r.m[3][2] != 0.0) { ret 1; }
     ret 0;
 }
 
 test "mat: scale lands on the diagonal" {
-    var s: Mat4 = mat4_scale(Vec3{x: 2.0, y: 3.0, z: 4.0});
-    if (s.m[0] != 2.0 || s.m[5] != 3.0 || s.m[10] != 4.0 || s.m[15] != 1.0) { ret 1; }
+    var s: Mat4 = mat4_scale(vec3(2.0, 3.0, 4.0));
+    if (s.m[0][0] != 2.0 || s.m[1][1] != 3.0 || s.m[2][2] != 4.0 || s.m[3][3] != 1.0) { ret 1; }
     ret 0;
 }
 
@@ -306,20 +306,20 @@ test "mat: perspective maps the clip planes to the Vulkan depth range" {
     val near: f32 = 0.1;
     val far:  f32 = 100.0;
     var p: Mat4 = mat4_perspective(1.5707963, 1.0, near, far);
-    if (p.m[11] != 0.0 - 1.0) { ret 1; }
-    if (p.m[15] != 0.0)       { ret 2; }
+    if (p.m[2][3] != 0.0 - 1.0) { ret 1; }
+    if (p.m[3][3] != 0.0)       { ret 2; }
 
     # A point on the near plane is at eye z = -near, and w is -z_eye.
-    val zn: f32 = (p.m[10] * (0.0 - near) + p.m[14]) / near;
+    val zn: f32 = (p.m[2][2] * (0.0 - near) + p.m[3][2]) / near;
     if (zn > 0.0001 || zn < 0.0 - 0.0001) { ret 3; }
 
     # A point on the far plane maps to 1.
-    val zf: f32 = (p.m[10] * (0.0 - far) + p.m[14]) / far;
+    val zf: f32 = (p.m[2][2] * (0.0 - far) + p.m[3][2]) / far;
     if (zf - 1.0 > 0.0001 || zf - 1.0 < 0.0 - 0.0001) { ret 4; }
 
     # Y is negated, because Vulkan's Y increases downward. Positive here would
     # render every scene vertically mirrored.
-    if (p.m[5] >= 0.0) { ret 5; }
+    if (p.m[1][1] >= 0.0) { ret 5; }
     ret 0;
 }
 
@@ -329,50 +329,50 @@ test "mat: orthographic maps a pixel box to the Vulkan clip cube" {
     val w: f32 = 800.0;
     val h: f32 = 600.0;
     var p: Mat4 = mat4_orthographic(0.0, w, h, 0.0, 0.0 - 1.0, 1.0);
-    if (p.m[15] != 1.0) { ret 1; }
+    if (p.m[3][3] != 1.0) { ret 1; }
 
-    val x0: f32 = p.m[0] * 0.0 + p.m[12];
-    val x1: f32 = p.m[0] * w   + p.m[12];
+    val x0: f32 = p.m[0][0] * 0.0 + p.m[3][0];
+    val x1: f32 = p.m[0][0] * w   + p.m[3][0];
     if (x0 + 1.0 > 0.0001 || x0 + 1.0 < 0.0 - 0.0001) { ret 2; }
     if (x1 - 1.0 > 0.0001 || x1 - 1.0 < 0.0 - 0.0001) { ret 3; }
 
     # y = 0 is the TOP of the window, which is clip -1 in Vulkan. The OpenGL
     # form puts it at +1, so every sprite ends up mirrored about the midline
     # and a full-window blit still looks plausible.
-    val y0: f32 = p.m[5] * 0.0 + p.m[13];
-    val y1: f32 = p.m[5] * h   + p.m[13];
+    val y0: f32 = p.m[1][1] * 0.0 + p.m[3][1];
+    val y1: f32 = p.m[1][1] * h   + p.m[3][1];
     if (y0 + 1.0 > 0.0001 || y0 + 1.0 < 0.0 - 0.0001) { ret 4; }
     if (y1 - 1.0 > 0.0001 || y1 - 1.0 < 0.0 - 0.0001) { ret 5; }
 
     # Depth: eye z = -near maps to 0 and eye z = -far maps to 1.
-    val z0: f32 = p.m[10] * 1.0 + p.m[14];
-    val z1: f32 = p.m[10] * (0.0 - 1.0) + p.m[14];
+    val z0: f32 = p.m[2][2] * 1.0 + p.m[3][2];
+    val z1: f32 = p.m[2][2] * (0.0 - 1.0) + p.m[3][2];
     if (z0 > 0.0001 || z0 < 0.0 - 0.0001)             { ret 6; }
     if (z1 - 1.0 > 0.0001 || z1 - 1.0 < 0.0 - 0.0001) { ret 7; }
     ret 0;
 }
 
 test "mat: look_at from the z axis faces the origin" {
-    var v: Mat4 = mat4_look_at(Vec3{x: 0.0, y: 0.0, z: 5.0}, Vec3{x: 0.0, y: 0.0, z: 0.0}, Vec3{x: 0.0, y: 1.0, z: 0.0});
-    if (v.m[15] != 1.0) { ret 1; }
-    val d: f32 = v.m[14] - (0.0 - 5.0);
+    var v: Mat4 = mat4_look_at(vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
+    if (v.m[3][3] != 1.0) { ret 1; }
+    val d: f32 = v.m[3][2] - (0.0 - 5.0);
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
     ret 0;
 }
 
 test "mat: a point picks up the translation column" {
-    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
-    val p: Vec3 = mat4_transform_point(?t, Vec3{x: 10.0, y: 20.0, z: 30.0});
-    if (p.x != 11.0 || p.y != 22.0 || p.z != 33.0) { ret 1; }
+    var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
+    val p: Vec3 = mat4_transform_point(?t, vec3(10.0, 20.0, 30.0));
+    if (p[0] != 11.0 || p[1] != 22.0 || p[2] != 33.0) { ret 1; }
     ret 0;
 }
 
 test "mat: a direction ignores the translation column" {
-    var t: Mat4 = mat4_translation(Vec3{x: 1.0, y: 2.0, z: 3.0});
-    val d: Vec3 = mat4_transform_dir(?t, Vec3{x: 10.0, y: 20.0, z: 30.0});
+    var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
+    val d: Vec3 = mat4_transform_dir(?t, vec3(10.0, 20.0, 30.0));
     # a normal that picks up a translation points somewhere else entirely
     # once the object moves, which is the bug this separation prevents.
-    if (d.x != 10.0 || d.y != 20.0 || d.z != 30.0) { ret 1; }
+    if (d[0] != 10.0 || d[1] != 20.0 || d[2] != 30.0) { ret 1; }
     ret 0;
 }
 
@@ -380,16 +380,16 @@ test "mat: transform agrees with composing the matrices" {
     # the check that catches a transposed convention. building T*S and
     # transforming once must equal scaling then translating, and it does
     # not if the elements are read row-major.
-    var s: Mat4 = mat4_scale(Vec3{x: 2.0, y: 3.0, z: 4.0});
-    var t: Mat4 = mat4_translation(Vec3{x: 5.0, y: 6.0, z: 7.0});
+    var s: Mat4 = mat4_scale(vec3(2.0, 3.0, 4.0));
+    var t: Mat4 = mat4_translation(vec3(5.0, 6.0, 7.0));
     var ts: Mat4 = mat4_mul(?t, ?s);
 
-    val v: Vec3 = Vec3{x: 1.0, y: 1.0, z: 1.0};
+    val v: Vec3 = vec3(1.0, 1.0, 1.0);
     val once: Vec3 = mat4_transform_point(?ts, v);
     val twice: Vec3 = mat4_transform_point(?t, mat4_transform_point(?s, v));
 
-    if (once.x != twice.x || once.y != twice.y || once.z != twice.z) { ret 1; }
-    if (once.x != 7.0 || once.y != 9.0 || once.z != 11.0) { ret 2; }
+    if (once[0] != twice[0] || once[1] != twice[1] || once[2] != twice[2]) { ret 1; }
+    if (once[0] != 7.0 || once[1] != 9.0 || once[2] != 11.0) { ret 2; }
     ret 0;
 }
 
@@ -398,10 +398,10 @@ test "mat: a rotation moves a point off its axis" {
     # translation tests above by doing nothing, so this asserts an
     # actual rotation: 90 degrees about z sends +x to +y.
     val h: f32 = 0.70710678;
-    var r: Mat4 = mat4_from_quat(Quat{x: 0.0, y: 0.0, z: h, w: h});
-    val p: Vec3 = mat4_transform_point(?r, Vec3{x: 1.0, y: 0.0, z: 0.0});
-    if (p.x > 0.001 || p.x < -0.001) { ret 1; }
-    if (p.y < 0.999 || p.y > 1.001)  { ret 2; }
+    var r: Mat4 = mat4_from_quat(f32x4{0.0, 0.0, h, h});
+    val p: Vec3 = mat4_transform_point(?r, vec3(1.0, 0.0, 0.0));
+    if (p[0] > 0.001 || p[0] < -0.001) { ret 1; }
+    if (p[1] < 0.999 || p[1] > 1.001)  { ret 2; }
     ret 0;
 }
 
@@ -411,18 +411,18 @@ test "mat: projecting a point divides through by w" {
     # at the same place, which is the trap this function exists to remove.
     var p: Mat4 = mat4_perspective(1.0, 1.0, 0.1, 100.0);
 
-    val near: Vec3 = mat4_project_point(?p, Vec3{x: 1.0, y: 0.0, z: 0.0 - 5.0});
-    val far:  Vec3 = mat4_project_point(?p, Vec3{x: 1.0, y: 0.0, z: 0.0 - 10.0});
+    val near: Vec3 = mat4_project_point(?p, vec3(1.0, 0.0, 0.0 - 5.0));
+    val far:  Vec3 = mat4_project_point(?p, vec3(1.0, 0.0, 0.0 - 10.0));
 
     # Twice the distance, half the screen offset.
-    var d: f32 = near.x - far.x * 2.0;
+    var d: f32 = near[0] - far[0] * 2.0;
     if (d < 0.0) { d = 0.0 - d; }
     if (d > 0.0001) { ret 1; }
 
     # And the undivided form does not foreshorten at all, which is what makes
     # the two genuinely different rather than a rename.
-    val nu: Vec3 = mat4_transform_point(?p, Vec3{x: 1.0, y: 0.0, z: 0.0 - 5.0});
-    val fu: Vec3 = mat4_transform_point(?p, Vec3{x: 1.0, y: 0.0, z: 0.0 - 10.0});
-    if (nu.x != fu.x) { ret 2; }
+    val nu: Vec3 = mat4_transform_point(?p, vec3(1.0, 0.0, 0.0 - 5.0));
+    val fu: Vec3 = mat4_transform_point(?p, vec3(1.0, 0.0, 0.0 - 10.0));
+    if (nu[0] != fu[0]) { ret 2; }
     ret 0;
 }

@@ -151,7 +151,7 @@ pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
     # bottom above top, which is what keeps y increasing downward.
     var proj: Mat4 = mat4_orthographic(0.0 - hw, hw, hh, 0.0 - hh, 0.0 - 1.0, 1.0);
 
-    var view: Mat4 = mat4_translation(vec3(0.0 - c.center.x, 0.0 - c.center.y, 0.0));
+    var view: Mat4 = mat4_translation(vec3(0.0 - c.center[0], 0.0 - c.center[1], 0.0));
     if (c.rotation != 0.0) {
         # Negated because rotating the camera clockwise turns the world
         # counter-clockwise beneath it.
@@ -185,14 +185,14 @@ pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
 pub fun camera2d_screen_to_world(c: *Camera2D, screen: Vec2, width: f32, height: f32) Vec2 {
     val z: f32 = camera2d_scale(c, width, height);
     # Undo the projection: back to view space, where the camera centre is 0.
-    val vx: f32 = (screen.x - width  * 0.5) / z;
-    val vy: f32 = (screen.y - height * 0.5) / z;
+    val vx: f32 = (screen[0] - width  * 0.5) / z;
+    val vy: f32 = (screen[1] - height * 0.5) / z;
     # Undo the roll. The forward transform rolls by -rotation, so this rolls by
     # +rotation.
     val s: f32 = sinf(c.rotation);
     val k: f32 = cosf(c.rotation);
-    ret vec2(c.center.x + vx * k - vy * s,
-             c.center.y + vx * s + vy * k);
+    ret vec2(c.center[0] + vx * k - vy * s,
+             c.center[1] + vx * s + vy * k);
 }
 
 # Where a world point lands on the target, in pixels.
@@ -201,8 +201,8 @@ pub fun camera2d_screen_to_world(c: *Camera2D, screen: Vec2, width: f32, height:
 # world object or deciding whether something is on screen at all.
 pub fun camera2d_world_to_screen(c: *Camera2D, world: Vec2, width: f32, height: f32) Vec2 {
     val z: f32 = camera2d_scale(c, width, height);
-    val dx: f32 = world.x - c.center.x;
-    val dy: f32 = world.y - c.center.y;
+    val dx: f32 = world[0] - c.center[0];
+    val dy: f32 = world[1] - c.center[1];
     # Roll by -rotation, matching the forward transform.
     val s: f32 = sinf(0.0 - c.rotation);
     val k: f32 = cosf(0.0 - c.rotation);
@@ -229,14 +229,14 @@ pub fun camera2d_visible(c: *Camera2D, width: f32, height: f32) Rect {
     val d: Vec2 = camera2d_screen_to_world(c, vec2(0.0, height), width, height);
     val e: Vec2 = camera2d_screen_to_world(c, vec2(width, height), width, height);
 
-    var x0: f32 = a.x;
-    var x1: f32 = a.x;
-    var y0: f32 = a.y;
-    var y1: f32 = a.y;
-    x0 = minf(minf(x0, b.x), minf(d.x, e.x));
-    x1 = maxf(maxf(x1, b.x), maxf(d.x, e.x));
-    y0 = minf(minf(y0, b.y), minf(d.y, e.y));
-    y1 = maxf(maxf(y1, b.y), maxf(d.y, e.y));
+    var x0: f32 = a[0];
+    var x1: f32 = a[0];
+    var y0: f32 = a[1];
+    var y1: f32 = a[1];
+    x0 = minf(minf(x0, b[0]), minf(d[0], e[0]));
+    x1 = maxf(maxf(x1, b[0]), maxf(d[0], e[0]));
+    y0 = minf(minf(y0, b[1]), minf(d[1], e[1]));
+    y1 = maxf(maxf(y1, b[1]), maxf(d[1], e[1]));
     ret rect(x0, y0, x1 - x0, y1 - y0);
 }
 
@@ -252,8 +252,8 @@ test "camera2d: the centre of the view lands at the middle of the screen" {
     var c: Camera2D = camera2d(vec2(100.0, 50.0), 1.0);
     var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
     val p: Vec3 = apply(?m, 100.0, 50.0);
-    if (!near(p.x, 0.0)) { ret 1; }
-    if (!near(p.y, 0.0)) { ret 2; }
+    if (!near(p[0], 0.0)) { ret 1; }
+    if (!near(p[1], 0.0)) { ret 2; }
     ret 0;
 }
 
@@ -266,12 +266,12 @@ test "camera2d: at zoom one the view is exactly the target rectangle" {
     # Top left of the target maps to the top left of clip space, which with
     # y down is (-1, -1).
     val tl: Vec3 = apply(?m, 0.0, 0.0);
-    if (!near(tl.x, 0.0 - 1.0)) { ret 1; }
-    if (!near(tl.y, 0.0 - 1.0)) { ret 2; }
+    if (!near(tl[0], 0.0 - 1.0)) { ret 1; }
+    if (!near(tl[1], 0.0 - 1.0)) { ret 2; }
 
     val br: Vec3 = apply(?m, 320.0, 180.0);
-    if (!near(br.x, 1.0)) { ret 3; }
-    if (!near(br.y, 1.0)) { ret 4; }
+    if (!near(br[0], 1.0)) { ret 3; }
+    if (!near(br[1], 1.0)) { ret 4; }
     ret 0;
 }
 
@@ -283,7 +283,7 @@ test "camera2d: y increases downward" {
     var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
     val top:    Vec3 = apply(?m, 160.0, 0.0);
     val bottom: Vec3 = apply(?m, 160.0, 180.0);
-    if (!(top.y < bottom.y)) { ret 1; }
+    if (!(top[1] < bottom[1])) { ret 1; }
     ret 0;
 }
 
@@ -296,13 +296,13 @@ test "camera2d: zoom scales sizes, not only positions" {
 
     val a: Vec3 = apply(?m, 160.0, 90.0);
     val b: Vec3 = apply(?m, 176.0, 90.0);
-    val at_2x: f32 = b.x - a.x;
+    val at_2x: f32 = b[0] - a[0];
 
     var c1: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
     var m1: Mat4 = camera2d_matrix(?c1, 320.0, 180.0);
     val a1: Vec3 = apply(?m1, 160.0, 90.0);
     val b1: Vec3 = apply(?m1, 176.0, 90.0);
-    val at_1x: f32 = b1.x - a1.x;
+    val at_1x: f32 = b1[0] - a1[0];
 
     # Twice the zoom, twice the extent on screen for the same world span.
     if (!near(at_2x, at_1x * 2.0)) { ret 1; }
@@ -318,7 +318,7 @@ test "camera2d: panning moves the world the other way" {
     var mb: Mat4 = camera2d_matrix(?b, 320.0, 180.0);
     val pa: Vec3 = apply(?ma, 100.0, 90.0);
     val pb: Vec3 = apply(?mb, 100.0, 90.0);
-    if (!(pb.x < pa.x)) { ret 1; }
+    if (!(pb[0] < pa[0])) { ret 1; }
     ret 0;
 }
 
@@ -337,13 +337,13 @@ test "camera2d: a rotation turns the world about the camera centre" {
     var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
 
     val centre: Vec3 = apply(?m, 160.0, 90.0);
-    if (!near(centre.x, 0.0)) { ret 1; }
-    if (!near(centre.y, 0.0)) { ret 2; }
+    if (!near(centre[0], 0.0)) { ret 1; }
+    if (!near(centre[1], 0.0)) { ret 2; }
 
     # In clip space 40 world units up is 40 / (180 / 2) of the half-height.
     val right: Vec3 = apply(?m, 200.0, 90.0);
-    if (!near(right.x, 0.0))                     { ret 3; }
-    if (!near(right.y, 0.0 - (40.0 / 90.0)))     { ret 4; }
+    if (!near(right[0], 0.0))                     { ret 3; }
+    if (!near(right[1], 0.0 - (40.0 / 90.0)))     { ret 4; }
     ret 0;
 }
 
@@ -379,8 +379,8 @@ test "camera2d: screen to world and back is a round trip" {
     val p: Vec2 = vec2(64.0, 48.0);
     val w: Vec2 = camera2d_screen_to_world(?c, p, 320.0, 180.0);
     val b: Vec2 = camera2d_world_to_screen(?c, w, 320.0, 180.0);
-    if (!near(b.x, p.x)) { ret 1; }
-    if (!near(b.y, p.y)) { ret 2; }
+    if (!near(b[0], p[0])) { ret 1; }
+    if (!near(b[1], p[1])) { ret 2; }
     ret 0;
 }
 
@@ -388,8 +388,8 @@ test "camera2d: the middle of the target is the camera centre" {
     var c: Camera2D = camera2d(vec2(500.0, 300.0), 3.0);
     c.rotation = 1.1;
     val w: Vec2 = camera2d_screen_to_world(?c, vec2(160.0, 90.0), 320.0, 180.0);
-    if (!near(w.x, 500.0)) { ret 1; }
-    if (!near(w.y, 300.0)) { ret 2; }
+    if (!near(w[0], 500.0)) { ret 1; }
+    if (!near(w[1], 300.0)) { ret 2; }
     ret 0;
 }
 
@@ -402,10 +402,10 @@ test "camera2d: screen to world agrees with the matrix" {
     val w: Vec2 = camera2d_screen_to_world(?c, vec2(40.0, 150.0), 320.0, 180.0);
 
     var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
-    val clip: Vec3 = apply(?m, w.x, w.y);
+    val clip: Vec3 = apply(?m, w[0], w[1]);
     # Clip back to target pixels, y down in both.
-    val sx: f32 = (clip.x + 1.0) * 0.5 * 320.0;
-    val sy: f32 = (clip.y + 1.0) * 0.5 * 180.0;
+    val sx: f32 = (clip[0] + 1.0) * 0.5 * 320.0;
+    val sy: f32 = (clip[1] + 1.0) * 0.5 * 180.0;
     if (!near(sx, 40.0))  { ret 1; }
     if (!near(sy, 150.0)) { ret 2; }
     ret 0;
@@ -498,15 +498,15 @@ test "camera2d: picking follows the height lock" {
     # The bottom edge of a 1920x1080 viewport is half the view height below the
     # centre: 90 world units, y down.
     val w: Vec2 = camera2d_screen_to_world(?c, vec2(960.0, 1080.0), 1920.0, 1080.0);
-    if (!near_eps(w.y, 90.0, 0.01)) { ret 1; }
-    if (!near_eps(w.x, 0.0, 0.01))  { ret 2; }
+    if (!near_eps(w[1], 90.0, 0.01)) { ret 1; }
+    if (!near_eps(w[0], 0.0, 0.01))  { ret 2; }
 
     # Round trip through the matrix, at a different aspect.
     var m: Mat4 = camera2d_matrix(?c, 600.0, 1000.0);
     val p: Vec2 = camera2d_screen_to_world(?c, vec2(100.0, 250.0), 600.0, 1000.0);
-    val clip: Vec3 = apply(?m, p.x, p.y);
-    if (!near_eps((clip.x + 1.0) * 0.5 * 600.0, 100.0, 0.05))  { ret 3; }
-    if (!near_eps((clip.y + 1.0) * 0.5 * 1000.0, 250.0, 0.05)) { ret 4; }
+    val clip: Vec3 = apply(?m, p[0], p[1]);
+    if (!near_eps((clip[0] + 1.0) * 0.5 * 600.0, 100.0, 0.05))  { ret 3; }
+    if (!near_eps((clip[1] + 1.0) * 0.5 * 1000.0, 250.0, 0.05)) { ret 4; }
     ret 0;
 }
 

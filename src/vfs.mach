@@ -49,6 +49,7 @@ use allo: std.allocator;
 use page: std.allocator.page;
 use text: std.text.string;
 use env:  std.process.env;
+use path: std.types.path;
 
 # The separator between a scheme and its path
 val MARK: str = "://";
@@ -62,7 +63,8 @@ pub var res_root: str = "res";
 # Where `user://` resolves
 #
 # Empty means "derive from the platform at first use". set it to override that
-# entirely, which is what a portable build or a test wants.
+# entirely, which is what a portable build or a test wants. applications should
+# normally derive and assign a namespaced root with vfs_user_data_root.
 pub var user_root: str = "";
 
 # How many extra schemes a game may register beyond res and user
@@ -72,6 +74,11 @@ rec Extra {
     name: str;
     root: str;
     used: bool;
+}
+
+rec Root {
+    value: str;
+    owned: bool;
 }
 
 var extras: [8]Extra;
@@ -117,6 +124,107 @@ pub fun vfs_has_scheme(vpath: str) bool {
     ret scheme_end(vpath) != 0;
 }
 
+# Derive an owned, platform-native application data root
+#
+# An explicit user_root is already considered the complete application root and
+# is cloned unchanged. otherwise this appends organization and application to
+# the platform data directory. both names must use the portable identifier
+# alphabet `[A-Za-z0-9._-]`. the caller owns the returned path; assign it to
+# user_root only while that allocation remains live.
+# ---
+# a:            allocator for the returned path
+# organization: stable publisher identifier, e.g. `briar-systems`
+# application:  stable application identifier, e.g. `ludus`
+# ret:          owned application data path, or an error
+pub fun vfs_user_data_root(a: *allo.Allocator,
+                           organization: str,
+                           application: str) Result[str, str] {
+    if (a == nil) { ret err[str, str]("allocator is nil"); }
+    if (!valid_root_component(organization)
+        || !valid_root_component(application)) {
+        ret err[str, str]("invalid user data namespace");
+    }
+    if (user_root != nil && str_len(user_root) > 0) {
+        ret text.str_dup(a, user_root);
+    }
+
+    val base_result: Result[Root, str] = user_root_resolved(a);
+    if (is_err[Root, str](base_result)) {
+        ret err[str, str](unwrap_err[Root, str](base_result));
+    }
+    val base: Root = unwrap_ok[Root, str](base_result);
+    val organization_result: Result[str, str] = path.join(
+        a, base.value, organization);
+    release_root(a, base);
+    if (is_err[str, str](organization_result)) {
+        ret err[str, str](unwrap_err[str, str](organization_result));
+    }
+    val organization_root: str = unwrap_ok[str, str](organization_result);
+    val application_result: Result[str, str] = path.join(
+        a, organization_root, application);
+    allo.deallocate[u8](a, organization_root, str_len(organization_root) + 1);
+    ret application_result;
+}
+
+fun valid_root_component(value: str) bool {
+    if (value == nil || str_len(value) == 0
+        || str_equals(value, ".") || str_equals(value, "..")) { ret false; }
+    if (value[str_len(value) - 1] == '.' || reserved_windows_name(value)) {
+        ret false;
+    }
+    var i: usize = 0;
+    for (i < str_len(value)) {
+        val c: u8 = value[i]::u8;
+        val alpha: bool = (c >= 'a'::u8 && c <= 'z'::u8)
+            || (c >= 'A'::u8 && c <= 'Z'::u8);
+        val digit: bool = c >= '0'::u8 && c <= '9'::u8;
+        if (!alpha && !digit && c != '-'::u8 && c != '_'::u8 && c != '.'::u8) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun reserved_windows_name(value: str) bool {
+    var len: usize = 0;
+    for (value[len] != 0 && value[len] != '.') { len = len + 1; }
+    if (name_equals(value, len, "con") || name_equals(value, len, "prn")
+        || name_equals(value, len, "aux") || name_equals(value, len, "nul")) {
+        ret true;
+    }
+    if (len == 4 && value[3] >= '1' && value[3] <= '9') {
+        if (name_equals_prefix(value, "com") || name_equals_prefix(value, "lpt")) {
+            ret true;
+        }
+    }
+    ret false;
+}
+
+fun name_equals(value: str, len: usize, expected: str) bool {
+    if (len != str_len(expected)) { ret false; }
+    var i: usize = 0;
+    for (i < len) {
+        if (ascii_lower(value[i]) != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun name_equals_prefix(value: str, expected: str) bool {
+    var i: usize = 0;
+    for (i < 3) {
+        if (ascii_lower(value[i]) != expected[i]) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+fun ascii_lower(c: u8) u8 {
+    if (c >= 'A'::u8 && c <= 'Z'::u8) { ret c + 32; }
+    ret c;
+}
+
 # Index just past the `://` of a scheme, or 0 when there is none
 #
 # A path whose `://` appears after a `/` is not a scheme -- that is a directory
@@ -127,7 +235,7 @@ fun scheme_end(vpath: str) usize {
     val n: usize = str_len(vpath);
     var i: usize = 0;
     for (i + 3 <= n) {
-        if (vpath[i] == '/') { ret 0; }
+        if (path.is_separator(vpath[i]::u8)) { ret 0; }
         if (vpath[i] == ':' && vpath[i + 1] == '/' && vpath[i + 2] == '/') { ret i + 3; }
         i = i + 1;
     }
@@ -135,8 +243,10 @@ fun scheme_end(vpath: str) usize {
 }
 
 # The root a scheme resolves against, or nil when the scheme is unknown
-fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[str, str] {
-    if (str_starts_with(vpath, "res://"))  { ret ok[str, str](res_root); }
+fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[Root, str] {
+    if (str_starts_with(vpath, "res://")) {
+        ret ok[Root, str](Root{value: res_root, owned: false});
+    }
     if (str_starts_with(vpath, "user://")) { ret user_root_resolved(a); }
 
     var i: usize = 0;
@@ -148,11 +258,13 @@ fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[str, str] {
                 if (vpath[k] != extras[i].name[k]) { m = false; }
                 k = k + 1;
             }
-            if (m) { ret ok[str, str](extras[i].root); }
+            if (m) {
+                ret ok[Root, str](Root{value: extras[i].root, owned: false});
+            }
         }
         i = i + 1;
     }
-    ret err[str, str]("unknown path scheme");
+    ret err[Root, str]("unknown path scheme");
 }
 
 # Resolve a virtual path to a filesystem path
@@ -169,35 +281,54 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
     val end: usize = scheme_end(vpath);
     if (end == 0) { ret text.str_dup(a, vpath); }
 
-    val rr: Result[str, str] = root_for(a, vpath, end);
-    if (is_err[str, str](rr)) { ret rr; }
-    val root: str = unwrap_ok[str, str](rr);
+    val rr: Result[Root, str] = root_for(a, vpath, end);
+    if (is_err[Root, str](rr)) { ret err[str, str](unwrap_err[Root, str](rr)); }
+    val root: Root = unwrap_ok[Root, str](rr);
 
     val n:    usize = str_len(vpath);
     val rest: usize = n - end;
-    val rlen: usize = str_len(root);
+    val rlen: usize = str_len(root.value);
 
     # A root of "" means the rest is already the whole path, which is what an
     # absolute user_root override collapses to
-    if (rlen == 0) { ret text.str_dup_range(a, vpath, end, rest); }
+    if (rlen == 0) {
+        val result: Result[str, str] = text.str_dup_range(a, vpath, end, rest);
+        release_root(a, root);
+        ret result;
+    }
 
     # Join with exactly one separator regardless of whether the root carries a
     # trailing one, since both spellings are natural for a dev to write
     var sep: usize = 1;
-    if (root[rlen - 1] == '/') { sep = 0; }
+    if (path.is_separator(root.value[rlen - 1]::u8)) { sep = 0; }
 
     val br: Result[*u8, str] = allo.allocate[u8](a, rlen + sep + rest + 1);
-    if (is_err[*u8, str](br)) { ret err[str, str](unwrap_err[*u8, str](br)); }
+    if (is_err[*u8, str](br)) {
+        release_root(a, root);
+        ret err[str, str](unwrap_err[*u8, str](br));
+    }
     val buf: *u8 = unwrap_ok[*u8, str](br);
 
     var o: usize = 0;
     var i: usize = 0;
-    for (i < rlen) { buf[o] = root[i]::u8; o = o + 1; i = i + 1; }
-    if (sep == 1) { buf[o] = '/'::u8; o = o + 1; }
+    for (i < rlen) { buf[o] = root.value[i]::u8; o = o + 1; i = i + 1; }
+    if (sep == 1) { buf[o] = path.separator(); o = o + 1; }
     i = 0;
-    for (i < rest) { buf[o] = vpath[end + i]::u8; o = o + 1; i = i + 1; }
+    for (i < rest) {
+        var c: u8 = vpath[end + i]::u8;
+        if (c == '/'::u8) { c = path.separator(); }
+        buf[o] = c;
+        o = o + 1;
+        i = i + 1;
+    }
     buf[o] = 0;
+    release_root(a, root);
     ret ok[str, str](buf:~str);
+}
+
+fun release_root(a: *allo.Allocator, root: Root) {
+    if (!root.owned || root.value == nil) { ret; }
+    allo.deallocate[u8](a, root.value, str_len(root.value) + 1);
 }
 
 # The resolved `user://` root, deriving the platform default when unset
@@ -206,32 +337,64 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
 # on linux, is itself configurable. the result is not cached: a game that
 # cares sets user_root explicitly, and a game that does not resolves it a
 # handful of times over its life.
-fun user_root_resolved(a: *allo.Allocator) Result[str, str] {
-    if (user_root != nil && str_len(user_root) > 0) { ret ok[str, str](user_root); }
+fun user_root_resolved(a: *allo.Allocator) Result[Root, str] {
+    if (user_root != nil && str_len(user_root) > 0) {
+        ret ok[Root, str](Root{value: user_root, owned: false});
+    }
 
     $if ($mach.build.os == $mach.os.windows) {
         # Roaming application data, the documented home for per-user state
         val r: Result[str, str] = env.value(a, "APPDATA");
-        if (!is_err[str, str](r)) { ret r; }
+        if (!is_err[str, str](r)) {
+            val value: str = unwrap_ok[str, str](r);
+            if (path.is_abs(value)) {
+                ret ok[Root, str](Root{value: value, owned: true});
+            }
+            allo.deallocate[u8](a, value, str_len(value) + 1);
+        }
     }
     $or ($mach.build.os == $mach.os.darwin) {
         val h: Result[str, str] = env.value(a, "HOME");
         if (!is_err[str, str](h)) {
-            ret text.str_dup(a, unwrap_ok[str, str](h));
+            val home: str = unwrap_ok[str, str](h);
+            if (path.is_abs(home)) {
+                ret append_owned_root(a, home, "Library/Application Support");
+            }
+            allo.deallocate[u8](a, home, str_len(home) + 1);
         }
     }
     $or {
-        # XDG first, since a user may have moved it; HOME is the fallback the
-        # spec itself names
+        # XDG first, since a user may have moved it; the specification defines
+        # $HOME/.local/share as the default when the variable is absent
         val x: Result[str, str] = env.value(a, "XDG_DATA_HOME");
-        if (!is_err[str, str](x)) { ret x; }
+        if (!is_err[str, str](x)) {
+            val data: str = unwrap_ok[str, str](x);
+            if (path.is_abs(data)) {
+                ret ok[Root, str](Root{value: data, owned: true});
+            }
+            allo.deallocate[u8](a, data, str_len(data) + 1);
+        }
         val h: Result[str, str] = env.value(a, "HOME");
-        if (!is_err[str, str](h)) { ret h; }
+        if (!is_err[str, str](h)) {
+            val home: str = unwrap_ok[str, str](h);
+            if (path.is_abs(home)) {
+                ret append_owned_root(a, home, ".local/share");
+            }
+            allo.deallocate[u8](a, home, str_len(home) + 1);
+        }
     }
 
-    # No environment to derive from: fall back to the working directory rather
-    # than failing, so a headless or sandboxed run still has somewhere to write
-    ret text.str_dup(a, ".");
+    ret err[Root, str]("user data directory is unavailable");
+}
+
+fun append_owned_root(a: *allo.Allocator, base: str, suffix: str) Result[Root, str] {
+    val joined: Result[str, str] = path.join(a, base, suffix);
+    allo.deallocate[u8](a, base, str_len(base) + 1);
+    if (is_err[str, str](joined)) {
+        ret err[Root, str](unwrap_err[str, str](joined));
+    }
+    ret ok[Root, str](Root{
+        value: unwrap_ok[str, str](joined), owned: true});
 }
 
 # --------------------------------------------------------------------- tests
@@ -336,26 +499,66 @@ test "vfs: user:// honours an explicit override" {
 
     user_root = "/tmp/game-state";
     val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
+    user_root = saved;
     if (is_err[str, str](r)) { ret 1; }
     if (!str_equals(unwrap_ok[str, str](r), "/tmp/game-state/save1.dat")) { ret 1; }
-
-    user_root = saved;
     ret 0;
 }
 
-test "vfs: user:// derives a root when unset rather than failing" {
+test "vfs: an explicit user root is already application scoped" {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = user_root;
+
+    user_root = "/tmp/portable-ludus";
+    val r: Result[str, str] = vfs_user_data_root(
+        ?a, "briar-systems", "ludus");
+    user_root = saved;
+    if (is_err[str, str](r)) { ret 1; }
+    val root: str = unwrap_ok[str, str](r);
+    if (!str_equals(root, "/tmp/portable-ludus")) { ret 2; }
+    allo.deallocate[u8](?a, root, str_len(root) + 1);
+    ret 0;
+}
+
+test "vfs: user data namespaces are single path components" {
+    var a: allo.Allocator;
+    page.make(?a);
+    if (!is_err[str, str](vfs_user_data_root(?a, "..", "ludus"))) { ret 1; }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar/systems", "ludus"))) {
+        ret 2;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar\\systems", "ludus"))) {
+        ret 3;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar:systems", "ludus"))) {
+        ret 4;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems.", "ludus"))) {
+        ret 5;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", "CON.log"))) {
+        ret 6;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", "lPt9"))) {
+        ret 7;
+    }
+    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", ""))) { ret 8; }
+    ret 0;
+}
+
+test "vfs: user:// derives a root or reports missing platform state" {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = user_root;
     user_root = "";
 
-    # Whatever the platform yields, it must produce a usable path -- a game
-    # writing a save must never be told there is nowhere to write
     val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
-    if (is_err[str, str](r)) { ret 1; }
-    if (str_len(unwrap_ok[str, str](r)) == 0) { ret 1; }
-
     user_root = saved;
+    # Sandboxed processes may expose no HOME or platform data directory. that
+    # is an explicit error instead of writing into the working directory.
+    if (is_err[str, str](r)) { ret 0; }
+    if (str_len(unwrap_ok[str, str](r)) == 0) { ret 1; }
     ret 0;
 }
 

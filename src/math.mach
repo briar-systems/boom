@@ -1,12 +1,8 @@
-# boom's shared scalar-interim math
+# boom's shared math
 
-# a small, self-contained math layer (scalars, vectors, a 4x4 matrix,
-# quaternions, and a rigid transform) that every subsystem shares:
-# graphics builds model, view, and projection matrices from it, and
-# physics and audio draw on the same vocabulary. it stands in for the
-# shared mach-math, which is deferred until the compiler has SIMD vector
-# types; when that lands this module is replaced wholesale and the public
-# math handles keep their shape. consumers import it as `use boom.math;`.
+# a small, self-contained math layer that every subsystem shares. vectors,
+# quaternions, and matrix columns use native SIMD values; graphics, physics,
+# and audio therefore exchange the same representations without adapters.
 
 use boom.math.scalar;
 use boom.math.vec;

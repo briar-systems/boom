@@ -8,11 +8,11 @@ boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.
 
 Early development. The engine core is in place: a context-owned lifecycle
 (`init` → `run` → `shutdown`), a fixed-timestep loop with render interpolation,
-a GLFW window with no client API, and timing, input-event, and logging
-utilities. `boom.graphics` is a Vulkan renderer built around a `Renderer` and
-render passes: opaque texture, mesh, material, and render-target handles over
-mach-vk, with 2D and 3D driven through the same pass machinery and an
-extensible vertex format underpinning meshes. Shaders are written in Mach,
+a GLFW window with no client API, and timing and input-event utilities.
+Applications use `std.log` directly. `boom.graphics` is a Vulkan renderer built
+around a `Renderer` and render passes: opaque texture, mesh, material, and
+render-target handles over mach-vk, with 2D and 3D driven through the same pass
+machinery and an extensible vertex format underpinning meshes. Shaders are written in Mach,
 compiled to SPIR-V at build time and embedded, so a shipped binary carries
 them. A skeletal animation runtime loads and plays animated glTF models with
 mach-gltf fully hidden (see [Animation](#animation)).
@@ -23,7 +23,8 @@ A game implements the `boom.app.App` hooks and hands them to the run loop. The
 `boom.context.Context` owns the window, the frame clock, the fixed-timestep
 accumulator, and the input queue; `boom.engine.run` drives the hooks around a
 poll → update → render frame, running updates at a fixed rate independent of
-the frame rate and exposing the leftover interpolation factor as `ctx.alpha`.
+the frame rate, exposing the leftover interpolation factor as `ctx.alpha`, and
+returning the context's final process status.
 
 ```mach
 use std.runtime;
@@ -42,6 +43,7 @@ fun main(argc: i64, argv: **u8) i64 {
         title:     "example",
         fixed_dt:  SECOND / 60,      # 60 Hz update
         max_frame: SECOND / 4,       # spiral-of-death clamp
+        frame_dt:  0,                # wall clock; pin for deterministic probes
     };
     if (!boom.context.context_init(?ctx, cfg)) {
         ret 1;
@@ -53,10 +55,10 @@ fun main(argc: i64, argv: **u8) i64 {
         f_draw:     draw,
         f_dnit: nil::fun(*boom.context.Context),
     };
-    boom.engine.run(?ctx, ?app);
+    val status: i64 = boom.engine.run(?ctx, ?app);
 
     boom.context.context_shutdown(?ctx);
-    ret 0;
+    ret status;
 }
 ```
 
@@ -66,6 +68,17 @@ loop skips it.
 Window-manager close requests stop the loop. Escape is otherwise an ordinary
 `KEY_ESCAPE` input owned by the application, so it can open a pause menu, act as
 Back, or call `context_stop` when the application chooses to quit.
+`context_fail` stops immediately and records a non-zero status for `run` to
+return. Physics worlds are application-owned and advanced explicitly from a
+fixed tick, so pausing one simulation never requires changing the core loop.
+
+## Physics
+
+`boom.physics.Physics` wraps mach-phys without placing a world in the engine
+context. Create the worlds the application needs, call `physics_step` from a
+fixed tick with `timestep_dt_seconds(?ctx.step)`, and inspect the resulting
+contacts with `physics_contact_count` and `physics_contact`. Contacts retain
+boom body ids and math types; they are not mixed into the window input queue.
 
 ## Graphics
 
@@ -100,7 +113,7 @@ a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
 keeps them, keyed by that choice, the mesh's vertex layout, and the target's
 attachment formats, because Vulkan bakes both vertex input and render-pass
 compatibility into the pipeline. The shaders themselves live in
-`shaders/` as Mach source, are compiled to SPIR-V by the `build-shaders` step,
+`src/shaders/` as Mach source, are compiled by artifacts in the root project,
 and are embedded from `res/spv/`.
 
 **Every draw takes a uniform slot.** A Vulkan draw reads a buffer range that
@@ -108,6 +121,36 @@ must already hold its values when the command buffer executes, so each draw
 writes its own slot of a per-frame ring. A frame therefore has a bounded number
 of draws, and `renderer_dropped` reports any it refused rather than letting them
 silently not appear.
+
+**A game's own shading has two budgets, and the difference between them
+matters.** boom ships one lit program as a default and does not intend to grow a
+lighting system, so a game that wants its own supplies a `Shader` and feeds it
+through these two:
+
+- `pass_set_user` sets the block that arrives at **binding 4**. It is a draw's
+  own parameters, copied into that draw's uniform slot as the draw is submitted,
+  so two draws in one frame can be given different blocks. It is `USER_BYTES`,
+  which is 256 bytes: sixteen `vec4`s. A block larger than that is refused, and
+  `renderer_refused` counts the refusal rather than leaving the following draws
+  quietly reading whatever their slot last held.
+
+- `renderer_storage_write` fills the buffer that arrives at **binding 8**. It is
+  one buffer the whole frame shares, filled once after `renderer_begin_frame`,
+  read by every draw in the frame, and laid out under std430 rather than std140.
+  This is where anything larger than sixteen `vec4`s goes: a light list is two
+  `vec4` per light, so six fit in the block after a header and forty do not fit
+  at all. It grows to whatever a game writes and keeps what it grew to, so the
+  first frames pay for the growth and no later frame does. Reserve at least what
+  the shader declares with `renderer_storage_reserve`: the descriptor's range is
+  the buffer's capacity, so a block larger than the capacity is invalid usage
+  that a driver may honour anyway. `renderer_storage_refused` counts writes the
+  buffer could not grow for, and `renderer_storage_capacity`,
+  `renderer_storage_used` and `renderer_storage_buffers` report what it costs.
+
+`examples/shader` uses both in the same frame: thirty-two point lights in the
+storage buffer, the ambient term and the light count in the block, and a probe
+that renders one entry of the list back out into a float target and compares it
+against the bytes it wrote.
 
 ### Renderer and passes
 
@@ -140,10 +183,40 @@ attachment (`BLEND_OPAQUE`), compose with source alpha (`BLEND_SOURCE_ALPHA`),
 or sum overlapping contributions (`BLEND_ADDITIVE`). Additive mode sums alpha
 as well as RGB, and the selected mode applies to every attachment in the pass.
 
+**Reading a target back is a stall, and that is the point.** `render_target_read`
+copies the first colour attachment into host memory as packed RGBA8 and
+`render_target_read_raw_at` copies any attachment in its native format, which is
+the operation behind a screenshot, a rendering test, or a probe that checks a
+pass drew what it claimed. Both drain the device before copying, so the image is
+whole rather than one a pass was still writing, and that drain is a full
+pipeline stall: a debugging and tooling facility, not something a shipping frame
+does. A read reports the last frame that was *submitted*. Passes record into the
+frame's command buffer and `renderer_end_frame` is what submits it, so a read
+taken between `renderer_begin_frame` and `renderer_end_frame` hands back the
+previous frame complete rather than the one being recorded; end the frame first
+when the current one's draws are the point. `renderer_wait_idle` performs the
+same drain on its own, for tooling that reads several targets in a row or times
+work that would otherwise still be in flight.
+
 `renderer_begin_frame` reports through an out parameter whether a frame was
 actually opened. A `false` there is a swapchain that went out of date and was
 rebuilt, which every window resize causes; the correct response is to skip the
 frame, not to treat it as an error.
+
+**The present mode is the game's, and it can change while the game runs.**
+`renderer_init` presents with `PRESENT_VSYNC`. `renderer_init_with_present`
+asks instead for `PRESENT_MAILBOX` (uncapped, no tearing, frames overtaken
+before they are shown are discarded) or `PRESENT_IMMEDIATE` (uncapped, tears,
+and the mode to profile under, since vsync reports every frame as the display
+interval regardless of what it cost). `renderer_set_present_mode` is what a
+settings screen calls: it rebuilds the swapchain, and every texture, mesh,
+font and pipeline the game has loaded survives. Vsync is the only mode a Vulkan
+implementation is required to support, so the other two are requests.
+`renderer_present_mode_supported` answers ahead of the attempt,
+`renderer_present_mode` reports the mode actually in use after a fallback, and
+`renderer_present_mode_requested` reports the one asked for, which is the one to
+save: writing back the mode in use would replace a player's `PRESENT_MAILBOX`
+with the vsync one machine fell back to.
 
 Operations that can fail return `Result[T, Error]`, where `Error`
 (`boom.graphics.error`) carries its message inline in a fixed buffer, so a
@@ -229,7 +302,7 @@ gfx.pass_draw_skinned(?scene_pass, ?model.mesh, ?player.pose, ?transform);
 
 Passing a `Pose` is what selects the skinned pipeline. The renderer uploads the
 pose's joint matrices into a per-frame storage buffer that
-`shaders/src/skinned_vert.mach` reads, and that shader places each vertex by its
+`src/shaders/skinned_vert.mach` reads, and that shader places each vertex by its
 four weighted joints before applying the model, view, and projection. A mesh
 whose vertex layout carries no joints or weights is drawn unskinned rather than
 through a program whose vertex inputs it cannot satisfy.
@@ -239,17 +312,18 @@ for translation and scale, slerp for rotation), composes the local joint
 transforms up the hierarchy into joint-world matrices, and multiplies by the
 inverse bind matrices to form the skinning palette
 (`boom.graphics.skeleton`, `boom.graphics.animation`); `boom.graphics.model`
-is the loader. The interim scalar math (`boom.math`: `Vec3`, `Mat4`, `Quat`,
-`Transform`, ...) stands in for the shared `mach-math`, which is deferred until
-the compiler has SIMD vector types, so that swap stays a localized change.
+is the loader. The shared math layer (`boom.math`: `Vec3`, `Mat4`, `Quat`,
+`Transform`, ...) uses native SIMD vectors throughout, including four
+column-major `f32x4` values for a matrix.
 
 `examples/animation` is a runnable consumer: it loads a two-bone bar
 (`assets/bar.glb`) and plays its bend clip, turning the model so the bend reads
 in 3D, all through boom handles.
 
 First pass, documented rather than gold-plated: one active clip at a time (no
-blend tree), a bounded joint count for the palette (`MAX_JOINTS`, 128) and a bounded number
-of skinned draws per frame (`MAX_PALETTES`, 32),
+blend tree), a bounded joint count for the palette (`MAX_JOINTS`, 128) and a
+bounded number of skinned draws per frame (`MAX_PALETTES`, 512: the ring starts
+at 32 and grows a block at a time up to that, retaining what it grew),
 and linear or step interpolation. The loader uses the first skin, requires
 joint nodes in TRS form, and rejects cubic-spline samplers. Blending, IK,
 retargeting, a larger or configurable palette, matrix-form joints, and
@@ -308,3 +382,20 @@ mach test .
 
 Building a game that links against boom's window layer needs GLFW available to
 the linker; the library build and the test suite do not.
+
+## macOS
+
+Apple ships Metal and no Vulkan driver, so a macOS build runs against
+[MoltenVK](https://github.com/KhronosGroup/MoltenVK), which translates Vulkan to
+Metal underneath. boom enables the portability extensions that arrangement
+requires, so nothing about the build differs.
+
+Older Intel machines need one environment variable set before the binary runs.
+MoltenVK builds its descriptor sets out of Metal argument buffers by default,
+and the Metal driver for the Intel HD 5000 generation mishandles them, so a
+binary that builds and links cleanly crashes inside the driver instead of
+drawing. Turning that path off avoids it:
+
+```sh
+export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0
+```

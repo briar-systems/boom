@@ -11,6 +11,13 @@
 # Format and present mode are chosen from what the surface reports, never
 # assumed. A driver is free to offer neither B8G8R8A8_SRGB nor MAILBOX, and a
 # renderer that assumes either fails on hardware that is behaving correctly.
+#
+# The present mode is a request, in exactly the way the extent is: the caller
+# says what it wants, the surface decides, and `Swapchain.present` is the
+# answer. A caller that needs to know whether it got what it asked for reads
+# that back rather than assuming, because the fallback is silent otherwise and
+# a game measuring its own frame times under an unnoticed vsync is measuring
+# the display's refresh rate and reading it as its own performance.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -29,25 +36,148 @@ use boom.graphics.vk.format_is_srgb;
 # Most images a swapchain may hold.
 pub val MAX_IMAGES: usize = 8;
 
+# Room for every present mode Vulkan defines, so a query cannot truncate a real
+# answer.
+#
+# `enumerated` counts VK_INCOMPLETE as success, which is right for the format
+# list because only a preferred entry is ever wanted out of it. It is not right
+# for a membership test: a list truncated before MAILBOX reads as a driver that
+# does not offer MAILBOX, and the fallback would engage on hardware that
+# supports it perfectly. Four modes are core and two more come from
+# VK_KHR_shared_presentable_image, so a list this long cannot lose one.
+val MAX_PRESENT_MODES: u32 = 8;
+
+# How finished frames reach the display.
+#
+# Backend-neutral deliberately: a game names one of these and never a
+# VK_PRESENT_MODE_* constant, for the same reason it never names a VkFormat.
+# Three members rather than a mirror of Vulkan's list, because three is the
+# number of distinct decisions behind a vsync setting: wait for the display,
+# do not wait but do not tear, or do not wait at all.
+pub def PresentMode: u8;
+
+# Wait for the display and show every frame in order. No tearing, and the frame
+# rate is capped at the refresh rate.
+#
+# THE ONLY MODE VULKAN REQUIRES AN IMPLEMENTATION TO SUPPORT, which is why it
+# is both the default and the fallback. It is also why a frame time measured
+# under it says nothing about the game: presentation blocks until the display
+# is ready, so a frame that cost two milliseconds and one that cost fifteen
+# both read as the display interval, and the headroom between them is invisible.
+pub val PRESENT_VSYNC: PresentMode = 0;
+
+# Render as fast as the GPU allows, show the most recent finished frame at the
+# display's next refresh, and discard the ones it overtook.
+#
+# No tearing and lower latency than vsync. What it costs is the discarded
+# frames: the GPU does work that is never seen, which on a laptop is heat and
+# battery spent on nothing. Optional, and absent often enough to matter: several
+# Wayland compositors offer FIFO and nothing else.
+pub val PRESENT_MAILBOX: PresentMode = 1;
+
+# Present as soon as a frame is finished, without waiting for the display.
+#
+# Tears, visibly, whenever a frame lands mid-scan. What it buys is the lowest
+# latency available and an honest frame time, which is why it is the mode to
+# profile under: the rate is the one the game can actually produce rather than
+# the one the display is willing to accept. Optional.
+pub val PRESENT_IMMEDIATE: PresentMode = 2;
+
+# Whether a value names a present mode.
+#
+# A mode restored from a settings file or a command line is an integer nobody
+# has checked yet. The game-facing setter refuses one that names nothing rather
+# than letting it fall through to vsync, since a menu would then be showing a
+# mode the renderer is not in.
+pub fun present_mode_valid(mode: PresentMode) bool {
+    ret mode == PRESENT_VSYNC || mode == PRESENT_MAILBOX || mode == PRESENT_IMMEDIATE;
+}
+
+# The Vulkan constant behind a mode.
+#
+# Written out rather than cast. The two enumerations both start at zero and
+# disagree about which mode that is: PRESENT_VSYNC is 0 here and
+# VK_PRESENT_MODE_IMMEDIATE_KHR is 0 there, so a cast would turn the safe
+# default into the one that tears.
+fun present_mode_vk(mode: PresentMode) i32 {
+    if (mode == PRESENT_MAILBOX)   { ret vk.PRESENT_MODE_MAILBOX_KHR; }
+    if (mode == PRESENT_IMMEDIATE) { ret vk.PRESENT_MODE_IMMEDIATE_KHR; }
+    ret vk.PRESENT_MODE_FIFO_KHR;
+}
+
+# Whether the surface can present this way.
+#
+# Vsync is answered without asking, because the specification requires every
+# implementation to support it. That also makes the answer available before
+# there is a device to query, which is what lets a menu assembled during
+# start-up list the modes it can offer instead of accepting a choice and
+# quietly ignoring it.
+pub fun present_mode_supported(v: *Vk, mode: PresentMode) bool {
+    if (!present_mode_valid(mode)) { ret false; }
+    if (mode == PRESENT_VSYNC)     { ret true; }
+    if (v == nil || !v.ready)      { ret false; }
+
+    var count: u32 = 0;
+    if (!enumerated(vk.vkGetPhysicalDeviceSurfacePresentModesKHR(v.physical, v.surface, ?count, nil))) {
+        ret false;
+    }
+    if (count == 0) { ret false; }
+
+    var modes: [8]i32;
+    var cap: u32 = MAX_PRESENT_MODES;
+    if (count < cap) { cap = count; }
+    if (!enumerated(vk.vkGetPhysicalDeviceSurfacePresentModesKHR(v.physical, v.surface, ?cap, ?modes[0]))) {
+        ret false;
+    }
+
+    val want: i32 = present_mode_vk(mode);
+    var i: u32 = 0;
+    for (i < cap) {
+        if (modes[i] == want) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+# The mode to create the swapchain with, given the one that was asked for.
+#
+# ANYTHING THE SURFACE DOES NOT OFFER BECOMES VSYNC, and deliberately not the
+# other optional mode. MAILBOX and IMMEDIATE differ in whether the image tears,
+# so substituting one for the other changes what the player sees on hardware
+# they never asked about. Dropping to the mode every implementation has is the
+# only substitution that is a degradation of the same choice rather than a
+# different choice made on the player's behalf.
+#
+# A game that would rather have IMMEDIATE than vsync when MAILBOX is missing
+# asks `present_mode_supported` and decides for itself. That policy belongs to
+# the game; what belongs here is the query that makes it expressible.
+fun pick_present_mode(v: *Vk, want: PresentMode) PresentMode {
+    if (present_mode_supported(v, want)) { ret want; }
+    ret PRESENT_VSYNC;
+}
+
 # The swapchain and the images it owns.
 # ---
-# handle: The swapchain object.
-# images: Images owned by the swapchain, not by this record.
-# views:  One view per image, created and destroyed here.
-# count:  Number of valid images and views.
-# format: The chosen surface format.
-# width:  Current extent width.
-# height: Current extent height.
-# ready:  Whether creation completed.
+# handle:  The swapchain object.
+# images:  Images owned by the swapchain, not by this record.
+# views:   One view per image, created and destroyed here.
+# count:   Number of valid images and views.
+# format:  The chosen surface format.
+# present: The present mode in use, which is the requested one unless the
+#          surface does not offer it.
+# width:   Current extent width.
+# height:  Current extent height.
+# ready:   Whether creation completed.
 pub rec Swapchain {
-    handle: vk.SwapchainKHR;
-    images: [8]vk.Image;
-    views:  [8]vk.ImageView;
-    count:  u32;
-    format: i32;
-    width:  u32;
-    height: u32;
-    ready:  bool;
+    handle:  vk.SwapchainKHR;
+    images:  [8]vk.Image;
+    views:   [8]vk.ImageView;
+    count:   u32;
+    format:  i32;
+    present: PresentMode;
+    width:   u32;
+    height:  u32;
+    ready:   bool;
 }
 
 # Clamp a requested extent into what the surface allows.
@@ -67,10 +197,24 @@ fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
     if (@h > caps.maxImageExtent.height) { @h = caps.maxImageExtent.height; }
 }
 
-# Create a swapchain and its image views for the given extent.
-pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bool, Error] {
+# Create a swapchain and its image views for the given extent and present mode.
+#
+# Both are requests. What the surface allows is what gets created, and `s.width`,
+# `s.height` and `s.present` are the answers.
+#
+# An unrecognized mode is not refused here; it falls back like an unsupported
+# one, and `s.present` names what was taken. The check that turns a nonsense
+# value into an error lives at the game-facing edge, in
+# `boom.graphics.renderer`, so this stays total and the rebuild path keeps one
+# fewer way to fail.
+pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
+                       present: PresentMode) Result[bool, Error] {
     s.ready = false;
     s.count = 0;
+    s.handle = nil;
+    # Set before any early return, so a failed creation still reports a mode
+    # that names something.
+    s.present = PRESENT_VSYNC;
 
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
 
@@ -114,9 +258,13 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
     ci.imageUsage       = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.preTransform     = caps.currentTransform;
     ci.compositeAlpha   = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
-    # FIFO is the only present mode required to be supported, so it needs no
-    # query. Preferring MAILBOX is a latency refinement, not a correctness one.
-    ci.presentMode      = vk.PRESENT_MODE_FIFO_KHR;
+    # FIFO is the only present mode required to be supported, so every other one
+    # is a query and a fallback rather than a request. Creating a swapchain with
+    # a mode the surface did not report is invalid usage that some drivers
+    # honour anyway, which is the shape of bug that only appears on someone
+    # else's machine.
+    s.present           = pick_present_mode(v, present);
+    ci.presentMode      = present_mode_vk(s.present);
     ci.clipped          = vk.TRUE;
     ci.oldSwapchain     = nil;
 
@@ -143,14 +291,15 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
 
     var got: u32 = 0;
     if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil))) {
+        swapchain_dnit(s, v);
         ret err[bool, Error](error("could not count swapchain images"));
     }
     if (got::usize > MAX_IMAGES) { got = MAX_IMAGES::u32; }
     if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]))) {
+        swapchain_dnit(s, v);
         ret err[bool, Error](error("could not fetch swapchain images"));
     }
 
-    s.count  = got;
     s.format = v.color_format;
     s.width  = w;
     s.height = h;
@@ -175,8 +324,10 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
         vci.subresourceRange.layerCount     = 1;
 
         if (vk.vkCreateImageView(v.device, ?vci, nil, ?s.views[i]) != vk.SUCCESS) {
+            swapchain_dnit(s, v);
             ret err[bool, Error](error("could not create a swapchain image view"));
         }
+        s.count = s.count + 1;
         i = i + 1;
     }
 
@@ -189,26 +340,31 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bo
 # The images are owned by the swapchain and must not be destroyed here; the
 # views are ours and must be destroyed first.
 pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
-    if (!s.ready) { ret; }
     var i: u32 = 0;
     for (i < s.count) {
         vk.vkDestroyImageView(v.device, s.views[i], nil);
+        s.views[i] = nil;
         i = i + 1;
     }
-    vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
+    if (s.handle != nil) {
+        vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
+        s.handle = nil;
+    }
     s.count = 0;
     s.ready = false;
 }
 
-# Rebuild for a new extent.
+# Rebuild for a new extent or present mode.
 #
-# A swapchain is bound to a surface size, so a resize invalidates it. The
-# device must be idle first: rebuilding while a frame is in flight destroys
-# images the GPU is still reading.
-pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32) Result[bool, Error] {
+# A swapchain is bound to a surface size and to a present mode, so a resize or a
+# change of mode invalidates it; there is no setter for the second for the same
+# reason there is none for the first. The device must be idle first: rebuilding
+# while a frame is in flight destroys images the GPU is still reading.
+pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32,
+                          present: PresentMode) Result[bool, Error] {
     vk.vkDeviceWaitIdle(v.device);
     swapchain_dnit(s, v);
-    ret swapchain_init(s, v, width, height);
+    ret swapchain_init(s, v, width, height, present);
 }
 
 # --------------------------------------------------------------------- tests
@@ -271,5 +427,56 @@ test "swapchain: teardown on an uninitialized handle is a no-op" {
     v.ready = false;
     swapchain_dnit(?s, ?v);
     if (s.ready) { ret 1; }
+    ret 0;
+}
+
+test "swapchain: each present mode maps to the Vulkan constant it names" {
+    # Both enumerations start at zero and disagree about which mode that is, so
+    # a mapping written as a cast turns vsync into the mode that tears. Nothing
+    # catches that: the swapchain is created, it presents, and the only symptom
+    # is an image the player did not ask to have torn.
+    if (present_mode_vk(PRESENT_VSYNC)     != vk.PRESENT_MODE_FIFO_KHR)      { ret 1; }
+    if (present_mode_vk(PRESENT_MAILBOX)   != vk.PRESENT_MODE_MAILBOX_KHR)   { ret 2; }
+    if (present_mode_vk(PRESENT_IMMEDIATE) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 3; }
+    ret 0;
+}
+
+test "swapchain: a value that names no present mode is not one" {
+    if (!present_mode_valid(PRESENT_VSYNC))     { ret 1; }
+    if (!present_mode_valid(PRESENT_MAILBOX))   { ret 2; }
+    if (!present_mode_valid(PRESENT_IMMEDIATE)) { ret 3; }
+    # A settings file written by a later version of boom, or one holding a value
+    # that was never a mode at all.
+    if (present_mode_valid(3))   { ret 4; }
+    if (present_mode_valid(255)) { ret 5; }
+    ret 0;
+}
+
+test "swapchain: vsync needs no device to be known supported" {
+    # Required of every implementation, so the answer is available before
+    # bring-up, which is what lets a menu assembled during start-up list what it
+    # can offer. The optional two cannot be answered without a surface and must
+    # not be claimed on the strength of being asked about.
+    var v: Vk;
+    v.ready = false;
+    if (!present_mode_supported(?v, PRESENT_VSYNC))    { ret 1; }
+    if (present_mode_supported(?v, PRESENT_MAILBOX))   { ret 2; }
+    if (present_mode_supported(?v, PRESENT_IMMEDIATE)) { ret 3; }
+    if (present_mode_supported(?v, 200))               { ret 4; }
+    ret 0;
+}
+
+test "swapchain: a mode the surface will not do falls back to vsync" {
+    # Not to the other optional mode. MAILBOX and IMMEDIATE differ in whether
+    # the image tears, so substituting one for the other would change what the
+    # player sees on hardware they never asked about.
+    var v: Vk;
+    v.ready = false;
+    if (pick_present_mode(?v, PRESENT_MAILBOX)   != PRESENT_VSYNC) { ret 1; }
+    if (pick_present_mode(?v, PRESENT_IMMEDIATE) != PRESENT_VSYNC) { ret 2; }
+    if (pick_present_mode(?v, PRESENT_VSYNC)     != PRESENT_VSYNC) { ret 3; }
+    # A nonsense value reaches the same place rather than being passed through
+    # to vkCreateSwapchainKHR as an undefined enumerator.
+    if (pick_present_mode(?v, 200)               != PRESENT_VSYNC) { ret 4; }
     ret 0;
 }

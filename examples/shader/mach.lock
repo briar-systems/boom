@@ -27,8 +27,8 @@ commit = "ebf2bb0722d47a412c820bdeb419ceec65921882"
 
 [dep.mach-font]
 url = "https://github.com/briar-systems/mach-font"
-ref = "branch/main"
-commit = "f0df249a554271953a16d830b7f1725665deb4ed"
+ref = "branch/dev"
+commit = "da30f3dc54436c36afee5997d817c6965d403a6f"
 
 [dep.mach-phys]
 url = "https://github.com/briar-systems/mach-phys"
@@ -39,3 +39,8 @@ commit = "33011b6198cdf5b5a381bdb2a6923afdc93ea2ae"
 url = "https://github.com/briar-systems/mach-vk"
 ref = "branch/main"
 commit = "a52428a59ad960adf4f468315008db2e097546ec"
+
+[dep.mach-shader]
+url = "https://github.com/briar-systems/mach-shader"
+ref = "branch/main"
+commit = "e4ad3d3ffa8c5e19c270381f76623087f2d3ac18"

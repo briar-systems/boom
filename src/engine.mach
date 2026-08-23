@@ -14,7 +14,6 @@
 use boom.context.Context;
 use boom.app.App;
 use inp: boom.input;
-use phy: boom.physics;
 use boom.window.window_should_close;
 use boom.window.window_poll;
 use boom.gamepad.gamepad_poll;
@@ -24,11 +23,20 @@ use boom.clock.clock_advance;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
 use boom.timestep.timestep_alpha;
-use boom.timestep.timestep_dt_seconds;
 
 fun invoke(hook: fun(*Context), ctx: *Context) {
     if (hook != nil) {
         hook(ctx);
+    }
+}
+
+fun tick_pending(ctx: *Context, app: *App) {
+    for (ctx.running && timestep_step(?ctx.step)) {
+        # fold input exactly once per tick, immediately before the tick sees
+        # it. a frame running three ticks shows a press to the first only, and
+        # a frame running none leaves it pending for whichever tick is next.
+        inp.input_begin_tick(?ctx.input);
+        invoke(app.f_tick, ctx);
     }
 }
 
@@ -38,7 +46,7 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
 # window is closed: each frame polls input, advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
 # ctx.alpha, and renders via f_draw. calls f_dnit once on exit. absent
-# hooks are skipped.
+# hooks are skipped. the context status is returned after teardown.
 #
 # the loop does not present: a Renderer brackets its own frame with an
 # acquire and a present. what the loop owns is the timing, the input fold,
@@ -46,7 +54,8 @@ fun invoke(hook: fun(*Context), ctx: *Context) {
 # ---
 # ctx: initialized engine context to run
 # app: lifecycle hooks to drive
-pub fun run(ctx: *Context, app: *App) {
+# ret: the context's final process status
+pub fun run(ctx: *Context, app: *App) i64 {
     invoke(app.f_init, ctx);
 
     for (ctx.running && !window_should_close(?ctx.window)) {
@@ -67,26 +76,52 @@ pub fun run(ctx: *Context, app: *App) {
         or { clock_tick(?ctx.clock); }
 
         timestep_add(?ctx.step, ctx.clock.delta);
-        for (timestep_step(?ctx.step)) {
-            # fold input exactly once per tick, immediately before the tick
-            # sees it. this is what makes an edge belong to one tick: a frame
-            # running three ticks shows the press to the first only, and a
-            # frame running none leaves it pending for whichever tick is next.
-            inp.input_begin_tick(?ctx.input);
-            # Physics runs before the tick so a game reacts to this step's
-            # collisions in the same tick they happened.
-            phy.physics_step(?ctx.physics, ?ctx.events, timestep_dt_seconds(?ctx.step));
-            invoke(app.f_tick, ctx);
-        }
+        tick_pending(ctx, app);
 
-        ctx.alpha = timestep_alpha(?ctx.step);
-        # The renderer brackets its own frame with an acquire and a present,
-        # so the loop no longer swaps the window after drawing. Under GL the
-        # swap was the loop's because several renderers could composite into
-        # one frame; a Vulkan frame is one command buffer between one acquire
-        # and one present, and that bracket belongs to the renderer.
-        invoke(app.f_draw, ctx);
+        if (ctx.running) {
+            ctx.alpha = timestep_alpha(?ctx.step);
+            # The renderer brackets its own frame with an acquire and a present,
+            # so the loop no longer swaps the window after drawing. Under GL the
+            # swap was the loop's because several renderers could composite into
+            # one frame; a Vulkan frame is one command buffer between one acquire
+            # and one present, and that bracket belongs to the renderer.
+            invoke(app.f_draw, ctx);
+        }
     }
 
     invoke(app.f_dnit, ctx);
+    ret ctx.status;
+}
+
+use std.types.bool.true;
+use boom.context.context_stop;
+use boom.context.context_set_user;
+use boom.context.context_user;
+use boom.timestep.timestep_new;
+
+fun stop_on_tick(ctx: *Context) {
+    val ticks: *i64 = context_user(ctx)::*i64;
+    @ticks = @ticks + 1;
+    context_stop(ctx);
+}
+
+test "engine: stopping a tick leaves catch-up work pending" {
+    var ticks: i64 = 0;
+    var ctx: Context;
+    ctx.running = true;
+    ctx.input = inp.input_new();
+    ctx.step = timestep_new(10, 100);
+    timestep_add(?ctx.step, 35);
+    context_set_user(?ctx, (?ticks)::ptr);
+
+    var app: App;
+    app.f_init = nil::fun(*Context);
+    app.f_tick = stop_on_tick;
+    app.f_draw = nil::fun(*Context);
+    app.f_dnit = nil::fun(*Context);
+
+    tick_pending(?ctx, ?app);
+    if (ticks != 1) { ret 1; }
+    if (ctx.step.accumulator != 25) { ret 2; }
+    ret 0;
 }

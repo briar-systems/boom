@@ -168,7 +168,7 @@ fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
     val v: snd.VoiceId = snd.audio_play(s, ?clip, 0.5, false);
     if (snd.audio_voice_count(s) == 0) {
         p.printlnf("FAIL {}: no voice was claimed", label);
-        snd.sound_free(?clip);
+        snd.sound_free(s, ?clip);
         ret false;
     }
 
@@ -178,10 +178,10 @@ fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
         p.println("      Either the device never pulled, or the mixer cannot read this");
         p.println("      clip's format and is emitting silence without advancing. Both");
         p.println("      leak the voice permanently: after 32 the mixer refuses to play.");
-        snd.sound_free(?clip);
+        snd.sound_free(s, ?clip);
         ret false;
     }
-    snd.sound_free(?clip);
+    snd.sound_free(s, ?clip);
     p.printlnf("ok   {}", label);
     ret true;
 }
@@ -288,9 +288,9 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     p.println("ok   a looping voice runs past the clip and is reclaimed on request");
 
-    snd.sound_free(?c1);
-    snd.sound_free(?c2);
-    snd.sound_free(?c3);
+    snd.sound_free(?s, ?c1);
+    snd.sound_free(?s, ?c2);
+    snd.sound_free(?s, ?c3);
     snd.audio_dnit(?s);
     p.println("ok   teardown");
     p.println("PASS: a device opened, clips decoded and mixed, and every voice came back");

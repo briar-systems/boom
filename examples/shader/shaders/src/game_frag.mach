@@ -1,33 +1,57 @@
-# The game's fragment stage: a rim light, from parameters the game sets.
+# The game's fragment stage: a light list, from a buffer the game fills.
 #
-# THIS IS THE POINT OF THE EXAMPLE. Everything it shades with comes from
-# binding 4, the block the game fills and `gfx.pass_set_user` delivers. Nothing
-# here is hardcoded the way boom's own lit stage hardcodes its one directional
-# light, which is precisely why an engine should not own lighting: this is a
-# decision about how the game looks.
+# THIS IS THE POINT OF THE EXAMPLE. Everything it shades with comes from the
+# game: the ambient direction and colour from binding 4, the block
+# `gfx.pass_set_user` delivers, and the lights themselves from binding 8, the
+# frame's storage buffer `gfx.renderer_storage_write` fills. Nothing here is
+# hardcoded the way boom's own lit stage hardcodes its one directional light,
+# which is precisely why an engine should not own lighting: this is a decision
+# about how the game looks.
 #
-# The rim term is deliberately not subtle. If binding 4 were not reaching the
-# shader, the direction and colour would be whatever the slot happened to hold
-# and the cube would be flat, black, or strobing between frames rather than
+# WHY THE LIST IS NOT IN BINDING 4. A light is two f32x4 here, and binding 4 is
+# gfx.USER_BYTES: 256 bytes, so sixteen f32x4, so six lights once the header is
+# in. This example draws thirty-two. A game that stopped at six would either be
+# drawing the wrong scene or drawing it in five passes.
+#
+# The lighting is deliberately not subtle. If binding 8 were not reaching the
+# shader, the positions and colours would be whatever the buffer happened to
+# hold and the cube would be flat, black, or strobing between frames rather than
 # quietly a little different. A demonstration of a descriptor that is delivered
 # should not be satisfied by a descriptor that is not.
 
 use sh:  shader.math;
 use tex: shader.texture;
 
-# What the game sets, matching the `Light` record in src/main.mach.
+# What the game sets per pass, matching the `Params` record in src/main.mach.
 #
-# std140 rounds a three-component vector up to four, so both are f32x4 and the
-# CPU side declares Vec4 for the same reason. Getting that wrong reads the
-# colour out of the direction's padding, which is the classic uniform-layout
-# bug: it draws, and it draws wrong.
-rec Light {
+# std140 rounds a three-component vector up to four, so every member is f32x4
+# and the CPU side declares Vec4 for the same reason. Getting that wrong reads
+# one member out of another's padding, which is the classic uniform-layout bug:
+# it draws, and it draws wrong.
+rec Params {
     direction: f32x4;
     colour:    f32x4;
+    # x: how many lights the buffer holds. y: an index to read straight out of
+    # the buffer instead of shading, or a negative number to shade. See
+    # PROBE MODE below.
+    control:   f32x4;
+}
+
+# The light list, in the frame's storage buffer.
+#
+# Two f32x4 per light: position with its radius in w, then colour. 128 entries
+# is sixty-four lights, which is 2 KiB and eight times what binding 4 holds.
+#
+# std430 rather than std140, which is what a storage buffer gets and what makes
+# this a plain array of f32x4 with a natural 16-byte stride. The CPU writes it
+# as a straight copy of its own Vec4 array.
+rec Lights {
+    items: [128]f32x4;
 }
 
 #[sampler(0, 1)] var albedo: tex.Sampler2D;
-#[uniform(0, 4)] var light:  Light;
+#[uniform(0, 4)] var params: Params;
+#[storage(0, 8)] var lights: Lights;
 
 #[input(0)] var in_normal: f32x3;
 #[input(1)] var in_uv:     f32x2;
@@ -37,32 +61,61 @@ rec Light {
 
 #[stage("fragment")]
 fun frag_main() {
+    # PROBE MODE. With a non-negative index in control.y this writes one entry
+    # of the buffer out as a colour and shades nothing. That is what lets the
+    # example check the delivery rather than look at it: the host renders one
+    # frame in probe mode into a float target, reads the pixel back, and
+    # compares it against the bytes it wrote. An entry past the sixteenth is
+    # deliberately chosen, because that is the one a uniform block could not
+    # have carried.
+    val probe: f32 = params.control[1];
+    if (probe >= 0.0) {
+        out_colour = lights.items[probe::u32];
+        ret;
+    }
+
+    # Renormalized here because interpolation across a triangle does not
+    # preserve length, so a normal that left the vertex stage as a unit vector
+    # does not arrive as one.
     val n: f32x3 = sh.normalize_3(in_normal);
-    val l: f32x3 = sh.normalize_3(f32x3{light.direction[0],
-                                        light.direction[1],
-                                        light.direction[2]});
 
-    # A plain lambert term, so the lit side reads as lit.
-    val d: f32 = sh.max(sh.dot_3(n, l), 0.0);
+    # A dim directional term from binding 4, so the unlit faces are not black
+    # and the point lights read as light landing on top of something.
+    val amb: f32x3 = sh.normalize_3(f32x3{params.direction[0],
+                                          params.direction[1],
+                                          params.direction[2]});
+    val d: f32 = sh.max(sh.dot_3(n, amb), 0.0);
+    val k: f32 = 0.10 + 0.25 * d;
 
-    # The rim: bright where the surface turns away from the camera. The camera
-    # sits on +z looking at the origin, so the view direction is close enough to
-    # +z for a demonstration, and taking it from the world position keeps the
-    # term varying across the faces rather than being flat per face.
-    val v: f32x3 = sh.normalize_3(f32x3{0.0 - in_world[0],
-                                        0.0 - in_world[1],
-                                        5.5 - in_world[2]});
-    val facing: f32 = sh.max(sh.dot_3(n, v), 0.0);
-    val rim: f32 = (1.0 - facing) * (1.0 - facing);
+    var acc: f32x3 = f32x3{params.colour[0] * k,
+                           params.colour[1] * k,
+                           params.colour[2] * k};
+
+    # The list. Every light is a position, a radius and a colour, and this is
+    # the loop a uniform block could not have fed: the trip count comes from the
+    # game, and the entries it reads are past where the block ends.
+    val count: u32 = params.control[0]::u32;
+    var i: u32 = 0;
+    for (i < count) {
+        val place: f32x4 = lights.items[i * 2];
+        val tint:  f32x4 = lights.items[i * 2 + 1];
+
+        val to: f32x3 = f32x3{place[0] - in_world[0],
+                              place[1] - in_world[1],
+                              place[2] - in_world[2]};
+        val dist: f32 = sh.length_3(to);
+
+        # Linear falloff to the radius, squared so the edge is soft. A light
+        # whose radius is zero contributes nothing rather than dividing by it.
+        var fall: f32 = 0.0;
+        if (place[3] > 0.0) { fall = sh.max(1.0 - dist / place[3], 0.0); }
+        val lam: f32 = sh.max(sh.dot_3(n, sh.normalize_3(to)), 0.0);
+        val g: f32 = fall * fall * lam;
+
+        acc = acc + f32x3{tint[0] * g, tint[1] * g, tint[2] * g};
+        i = i + 1;
+    }
 
     val texel: f32x4 = tex.sample_2d(albedo, in_uv);
-    val k: f32 = 0.15 + 0.55 * d;
-
-    # The rim is added in the game's own colour rather than multiplied, so it
-    # reads as light landing on the edge instead of as a tint over the whole
-    # surface.
-    out_colour = f32x4{texel[0] * k + light.colour[0] * rim,
-                       texel[1] * k + light.colour[1] * rim,
-                       texel[2] * k + light.colour[2] * rim,
-                       texel[3]};
+    out_colour = f32x4{texel[0] * acc[0], texel[1] * acc[1], texel[2] * acc[2], texel[3]};
 }

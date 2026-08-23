@@ -24,9 +24,10 @@ use std.types.bool.false;
 use std.types.size.usize;
 use boom.math.mat.Mat4;
 use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
 use boom.graphics.sprite.Rect;
 
-# The mesh vertex stage's uniform block, matching shaders/src/mesh_vert.mach.
+# The mesh vertex stage's uniform block, matching src/shaders/mesh_vert.mach.
 # ---
 # mvp:   Model-view-projection, applied to the position.
 # model: Model matrix; its upper-left 3x3 is applied to the normal.
@@ -35,7 +36,7 @@ pub rec MeshUniforms {
     model: Mat4;
 }
 
-# The skinned vertex stage's uniform block, matching shaders/src/skinned_vert.mach.
+# The skinned vertex stage's uniform block, matching src/shaders/skinned_vert.mach.
 #
 # WHY THIS IS NOT MeshUniforms WITH A RENAMED FIELD. The unskinned stage gets one
 # premultiplied MVP because nothing sits between the model matrix and the vertex.
@@ -89,10 +90,10 @@ pub rec ScreenUniforms {
 # width:  Atlas width in pixels.
 # height: Atlas height in pixels.
 pub fun src_uv(r: Rect, width: u32, height: u32) Vec4 {
-    if (width == 0 || height == 0) { ret Vec4{x: 0.0, y: 0.0, z: 0.0, w: 0.0}; }
+    if (width == 0 || height == 0) { ret vec4(0.0, 0.0, 0.0, 0.0); }
     val fw: f32 = width::f32;
     val fh: f32 = height::f32;
-    ret Vec4{x: r.x / fw, y: r.y / fh, z: r.w / fw, w: r.h / fh};
+    ret vec4(r.x / fw, r.y / fh, r.w / fw, r.h / fh);
 }
 
 # --------------------------------------------------------------------- tests
@@ -150,8 +151,8 @@ test "uniform: the tint block is one vec4" {
 
 test "uniform: a full-atlas rect maps to the whole UV range" {
     val uv: Vec4 = src_uv(Rect{x: 0.0, y: 0.0, w: 256.0, h: 256.0}, 256, 256);
-    if (uv.x != 0.0 || uv.y != 0.0) { ret 1; }
-    if (uv.z != 1.0 || uv.w != 1.0) { ret 2; }
+    if (uv[0] != 0.0 || uv[1] != 0.0) { ret 1; }
+    if (uv[2] != 1.0 || uv[3] != 1.0) { ret 2; }
     ret 0;
 }
 
@@ -159,15 +160,15 @@ test "uniform: a sub-rect divides by the atlas, not by itself" {
     # A 32x32 glyph at (64, 96) in a 256x128 atlas. Dividing width and height by
     # the same number is the mistake, and it is invisible on a square atlas.
     val uv: Vec4 = src_uv(Rect{x: 64.0, y: 96.0, w: 32.0, h: 32.0}, 256, 128);
-    if (uv.x != 0.25)  { ret 1; }
-    if (uv.y != 0.75)  { ret 2; }
-    if (uv.z != 0.125) { ret 3; }
-    if (uv.w != 0.25)  { ret 4; }
+    if (uv[0] != 0.25)  { ret 1; }
+    if (uv[1] != 0.75)  { ret 2; }
+    if (uv[2] != 0.125) { ret 3; }
+    if (uv[3] != 0.25)  { ret 4; }
     ret 0;
 }
 
 test "uniform: a zero-sized atlas yields zeroes rather than dividing" {
     val uv: Vec4 = src_uv(Rect{x: 1.0, y: 1.0, w: 1.0, h: 1.0}, 0, 64);
-    if (uv.x != 0.0 || uv.z != 0.0) { ret 1; }
+    if (uv[0] != 0.0 || uv[2] != 0.0) { ret 1; }
     ret 0;
 }

@@ -172,7 +172,7 @@ pub fun vertex_format_standard() VertexFormat {
 #
 # the standard format followed by JOINTS_0 (uvec4 of u16, location 5, bound as
 # a true integer attribute) and WEIGHTS_0 (vec4, location 6): a 56-byte vertex
-# matching shaders/src/skinned_vert.mach.
+# matching src/shaders/skinned_vert.mach.
 #
 # the locations skip 3 and 4 because SEMANTIC_COLOR_0 and SEMANTIC_TANGENT own
 # them by convention. leaving the gap costs nothing and means adding either one

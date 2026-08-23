@@ -1,6 +1,6 @@
 [project]
 id = "boom"
-version = "0.16.0"
+version = "0.17.0"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -19,6 +19,12 @@ isa = "x86_64"
 os  = "darwin"
 abi = "sysv64"
 
+[target.spirv]
+isa = "spirv"
+os  = "freestanding"
+abi = "spirv"
+of  = "spv"
+
 [profile.debug]
 opt = 0
 debug = true
@@ -33,14 +39,10 @@ simd = "scalarize"
 kind = "static"
 entry = "lib/boom.mach"
 out = "lib/boom"
-targets = ["*"]
+targets = ["linux-x86_64", "windows", "darwin"]
 link = []
 need = ["build-shaders"]
 
-# Shaders are a separate project targeting spirv, built by this step and
-# embedded into the library. They cannot be an artifact of this project because
-# a project builds for one target and boom builds for the host.
-#
 # THE MODULES ARE NAMED, NOT GLOBBED. A `*.spv` copy takes whatever is in the
 # build directory, which includes the output of a shader that has since been
 # deleted: the sprite pair survived its own removal that way and would have been
@@ -53,8 +55,8 @@ need = ["build-shaders"]
 # because #[embed] takes a literal path and {project.out} varies by target
 # and profile; SPIR-V is target-independent, so one copy serves every build.
 [step.build-shaders]
-cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in lit_frag mesh_vert skinned_vert ui_vert ui_frag; do cp shaders/out/obj/shaders/$m.spv res/spv/$m.spv; done"
-in  = ["shaders/src/*.mach", "shaders/mach.toml"]
+cmd = "mach build . --target spirv --profile release && mkdir -p res/spv && for m in lit_frag mesh_vert skinned_vert ui_vert ui_frag; do cp out/spirv/release/obj/boom/shaders/$m.spv res/spv/$m.spv; done"
+in  = ["src/shaders/*.mach", "mach.toml"]
 out = ["res/spv/lit_frag.spv", "res/spv/mesh_vert.spv", "res/spv/skinned_vert.spv", "res/spv/ui_vert.spv", "res/spv/ui_frag.spv"]
 need = []
 
@@ -76,7 +78,7 @@ ref = "branch/main"
 
 [dep.mach-font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "branch/main"
+ref = "branch/dev"
 
 [dep.mach-phys]
 git = "https://github.com/briar-systems/mach-phys"
@@ -89,3 +91,47 @@ ref = "branch/main"
 [dep.mach-gltf]
 git = "https://github.com/briar-systems/mach-gltf"
 ref = "branch/main"
+
+[dep.mach-shader]
+git = "https://github.com/briar-systems/mach-shader"
+ref = "branch/main"
+
+[artifact.lit_frag]
+kind = "bin"
+entry = "shaders/lit_frag.mach"
+out = "spv/lit_frag.spv"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.mesh_vert]
+kind = "bin"
+entry = "shaders/mesh_vert.mach"
+out = "spv/mesh_vert.spv"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.skinned_vert]
+kind = "bin"
+entry = "shaders/skinned_vert.mach"
+out = "spv/skinned_vert.spv"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.ui_vert]
+kind = "bin"
+entry = "shaders/ui_vert.mach"
+out = "spv/ui_vert.spv"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.ui_frag]
+kind = "bin"
+entry = "shaders/ui_frag.mach"
+out = "spv/ui_frag.spv"
+targets = ["spirv"]
+link = []
+need = []

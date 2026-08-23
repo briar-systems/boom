@@ -1,4 +1,4 @@
-# scalar-interim floating-point helpers for the render path
+# shared floating-point helpers
 #
 # the shared mach-math is deferred until the compiler grows SIMD vector
 # types, so boom.graphics carries its own small scalar math. these are

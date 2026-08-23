@@ -5,6 +5,120 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- graphics: a per-frame storage buffer, for data a shader needs more of than a
+  uniform block holds. A draw's game-supplied block is one aligned region, so
+  `USER_BYTES` is 256 bytes and sixteen vec4s, and a list does not fit that
+  shape: a traced light is two vec4, which leaves six lights after a header
+  where a scene has forty. `renderer_storage_write` fills one buffer per frame
+  in flight and every draw in the frame reads it at binding 8, under std430,
+  which is the point: copying a payload larger than a slot into each draw's slot
+  would defeat the exercise. `renderer_storage_write_at` packs several arrays
+  into it. The buffer grows to whatever a game writes and keeps what it grew to,
+  retaining the buffer it replaced because draws already recorded name it, so
+  growth is paid in the first frames and never again. Reserve at least what the
+  shader declares with `renderer_storage_reserve`: the descriptor's range is the
+  capacity, and a block larger than the range is invalid usage a driver may
+  honour anyway. It grows no further than `STORAGE_MAX_BYTES`, which is the
+  smallest `maxStorageBufferRange` any Vulkan implementation may report rather
+  than a budget: the descriptor names the whole buffer, so a capacity past that
+  is one a conforming device is entitled to reject.
+  `renderer_storage_capacity`, `renderer_storage_used`,
+  `renderer_storage_buffers` and `renderer_storage_refused` report what it costs
+  and whether anything was lost. The distinction from `pass_set_user` is that a
+  block is copied per draw and this is the frame's, so per-draw parameters stay
+  in the block and the array the draws index into goes here.
+
+- graphics: `renderer_refused` counts uniform blocks `pass_set_user` turned away
+  for being larger than `USER_BYTES`. A caller that ignored the answer used to
+  get no sign at all, and the draws that followed read whatever their slot's
+  user region last held.
+
+- graphics: a game chooses how finished frames reach the display.
+  `PRESENT_VSYNC` waits for the display, `PRESENT_MAILBOX` renders uncapped
+  without tearing, and `PRESENT_IMMEDIATE` renders uncapped and tears, which is
+  the mode to profile under: under vsync every frame reads as the display
+  interval no matter what it cost. `renderer_init_with_present` selects one at
+  start-up and `renderer_set_present_mode` changes it with the game running,
+  rebuilding the swapchain rather than requiring the renderer to be torn down
+  and every resource reloaded. Vsync is the only mode Vulkan requires an
+  implementation to support, so anything else is a request:
+  `renderer_present_mode_supported` asks in advance,
+  `renderer_present_mode` reports the mode actually in use, and
+  `renderer_present_mode_requested` reports the one asked for, which is the one
+  a settings screen saves. `renderer_init` is unchanged and presents with vsync.
+
+- graphics: `renderer_wait_idle` blocks until the GPU has finished everything
+  the renderer has submitted. A full pipeline stall, for tooling that
+  coordinates several readbacks without paying the drain in each one, or that
+  measures GPU work which would otherwise still be in flight.
+
+- graphics: the renderer comes up on macOS. Apple ships no Vulkan driver, so a
+  macOS build runs against MoltenVK, and the loader refuses to hand an instance
+  a translation layer unless the application says it can cope with one: the
+  instance now enables `VK_KHR_portability_enumeration` and sets the matching
+  enumeration flag, and the device enables `VK_KHR_portability_subset`, which
+  the spec requires of any device advertising it. All of it is compiled in on
+  Darwin only and no other platform changes. Older Intel machines also need
+  `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0` in the environment, which the
+  README explains.
+
+### Fixed
+- graphics: a draw refused because its uniforms could not be uploaded is counted
+  in `renderer_dropped` instead of returning in silence. Refusing to record a
+  draw whose parameters could not be written is correct; saying nothing about it
+  is not. A full-screen stage that does not run leaves everything downstream
+  reading whatever its target already held, nothing is logged, and no validation
+  layer fires, so from outside it is indistinguishable from the shading being
+  wrong. It cost a day in a consumer before the block size was the suspect. The
+  slot writes on both the mesh and the batched paths, the palette upload, and
+  two descriptor calls whose answers were discarded outright all count now; the
+  discarded ones could leave a set bound with descriptors nothing had written.
+
+- graphics: a descriptor block, palette ring or vertex arena block whose
+  creation failed part way is destroyed rather than abandoned. The counter a
+  teardown iterates is only advanced once a block is whole, so a block that
+  failed after its pool or its buffer existed left a handle nothing would ever
+  destroy. Only reachable when the device runs out of memory, which is the
+  moment least able to afford leaking what it just failed to fill.
+
+- graphics: `render_target_read` and `render_target_read_raw_at` wait for the
+  device before copying, so a target read while the game is running returns a
+  complete image instead of one the GPU was part way through writing.
+  Previously the copy was submitted alongside the frames still in flight and
+  ordered against nothing, and consecutive reads of an unchanging target could
+  differ. A read reports the last frame that was submitted, so one taken between
+  `renderer_begin_frame` and `renderer_end_frame` does not include the open
+  frame's draws.
+
+- graphics: a batched 2D run pushed without a texture of its own takes its atlas
+  from the material bound with `pass_set_material` again, instead of the
+  renderer's white texel. 0.12.0 gave a run's own texture binding 1
+  unconditionally, and a run pushed with `nil` has no such texture: what it got
+  bound was the white texel it had already been defaulted to, so every sampler
+  read 1.0. Not a blank picture, a saturated one, which is why it survived a
+  look at the screen. `examples/lighting` wrote a white G-buffer and ten of its
+  pixel checks came back reading 255 or 0. A run that does carry a texture still
+  owns binding 1, so a material naming a different sheet still cannot redirect
+  uvs that were normalised against the run's own.
+
+- graphics: a pass rendering to the window clears to the colour it was given.
+  `PassDesc.clear` and `clear_color` were read on the offscreen path only: a
+  window pass took the colour, dropped it, and left standing the black the
+  frame had cleared to on load, with nothing at the call site to say the
+  request had gone nowhere. A game asking for a background colour had been
+  getting black for as long as it had asked, and it took a bug report from
+  outside the project to notice. The frame's render pass has been recording
+  since `renderer_begin_frame`, so the load-time clear is spent before any pass
+  opens and the window clear is a `vkCmdClearAttachments` recorded into the
+  open pass instead. That is not free the way a clear on load is, and it erases
+  what earlier passes in the same frame drew, which is what asking a pass to
+  clear means: `pass_overlay` and `pass_world` still declare no clear, so an
+  overlay does not wipe the scene under it. Depth is cleared with the colour,
+  as it already is for an offscreen target.
+
 ## [0.16.0] - 2026-08-10
 
 ### Added

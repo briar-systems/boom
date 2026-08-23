@@ -39,6 +39,7 @@ use std.types.size.usize;
 use boom.graphics.texture.Texture;
 use boom.graphics.sprite.Rect;
 use boom.math.vec.Vec4;
+use boom.math.vec.vec4;
 
 # How many vertices one sprite expands to: two triangles, not indexed.
 #
@@ -156,10 +157,10 @@ fun corner(out: *f32, i: usize, x: f32, y: f32, u: f32, v: f32, tint: Vec4) {
     out[o + 1] = y;
     out[o + 2] = u;
     out[o + 3] = v;
-    out[o + 4] = tint.x;
-    out[o + 5] = tint.y;
-    out[o + 6] = tint.z;
-    out[o + 7] = tint.w;
+    out[o + 4] = tint[0];
+    out[o + 5] = tint[1];
+    out[o + 6] = tint[2];
+    out[o + 7] = tint[3];
 }
 
 # --------------------------------------------------------------------- tests
@@ -175,7 +176,7 @@ test "batch: a sprite expands to two triangles covering the destination rect" {
 
     sprite_expand(Rect{x: 10.0, y: 20.0, w: 30.0, h: 40.0},
                   Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
-                  Vec4{x: 1.0, y: 1.0, z: 1.0, w: 1.0}, ?out[0]);
+                  vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
 
     # Derived from the rectangle, not read off the output: the corners are
     # (10,20) and (40,60), and every vertex must be one of the four.
@@ -203,7 +204,7 @@ test "batch: the uvs follow the source rect and match their corners" {
     var out: [48]f32;
     sprite_expand(Rect{x: 0.0, y: 0.0, w: 8.0, h: 8.0},
                   Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.25},
-                  Vec4{x: 1.0, y: 1.0, z: 1.0, w: 1.0}, ?out[0]);
+                  vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
 
     # A vertex on the left edge samples the source's left edge, and so on for
     # each side. This is what catches a transposed or offset uv, which renders
@@ -231,7 +232,7 @@ test "batch: the tint reaches every vertex" {
     var out: [48]f32;
     sprite_expand(Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
                   Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
-                  Vec4{x: 0.25, y: 0.5, z: 0.75, w: 0.5}, ?out[0]);
+                  vec4(0.25, 0.5, 0.75, 0.5), ?out[0]);
     var v: usize = 0;
     for (v < SPRITE_VERTICES) {
         val o: usize = v * VERTEX_FLOATS;

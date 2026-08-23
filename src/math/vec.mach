@@ -1,43 +1,15 @@
-# scalar-interim vector types for the render path
-#
-# Vec2/Vec3/Vec4 with the handful of operations the renderer and camera
-# need. engine-internal, to be replaced by mach-math once the compiler
-# has SIMD vector types; see boom.math.scalar.
+# shared vector types and operations
 
 use boom.math.scalar.sqrtf;
 
-# a 2-component vector, used for texture coordinates
-# ---
-# x: first component
-# y: second component
-pub rec Vec2 {
-    x: f32;
-    y: f32;
-}
+# a 2D vector
+pub def Vec2: f32x2;
 
-# a 3-component vector, used for positions, directions, and colors
-# ---
-# x: first component
-# y: second component
-# z: third component
-pub rec Vec3 {
-    x: f32;
-    y: f32;
-    z: f32;
-}
+# a 3D vector with its unused fourth lane kept at zero
+pub def Vec3: f32x4;
 
-# a 4-component vector, used for homogeneous points and RGBA colors
-# ---
-# x: first component
-# y: second component
-# z: third component
-# w: fourth component
-pub rec Vec4 {
-    x: f32;
-    y: f32;
-    z: f32;
-    w: f32;
-}
+# a 4D vector
+pub def Vec4: f32x4;
 
 # build a Vec2
 # ---
@@ -45,7 +17,7 @@ pub rec Vec4 {
 # y:   second component
 # ret: the vector (x, y)
 pub fun vec2(x: f32, y: f32) Vec2 {
-    ret Vec2{x: x, y: y};
+    ret f32x2{x, y};
 }
 
 # build a Vec3
@@ -55,7 +27,7 @@ pub fun vec2(x: f32, y: f32) Vec2 {
 # z:   third component
 # ret: the vector (x, y, z)
 pub fun vec3(x: f32, y: f32, z: f32) Vec3 {
-    ret Vec3{x: x, y: y, z: z};
+    ret f32x4{x, y, z, 0.0};
 }
 
 # build a Vec4
@@ -66,7 +38,7 @@ pub fun vec3(x: f32, y: f32, z: f32) Vec3 {
 # w:   fourth component
 # ret: the vector (x, y, z, w)
 pub fun vec4(x: f32, y: f32, z: f32, w: f32) Vec4 {
-    ret Vec4{x: x, y: y, z: z, w: w};
+    ret f32x4{x, y, z, w};
 }
 
 # add two vectors component-wise
@@ -75,7 +47,7 @@ pub fun vec4(x: f32, y: f32, z: f32, w: f32) Vec4 {
 # b:   right vector
 # ret: a + b
 pub fun vec3_add(a: Vec3, b: Vec3) Vec3 {
-    ret Vec3{x: a.x + b.x, y: a.y + b.y, z: a.z + b.z};
+    ret a + b;
 }
 
 # subtract two vectors component-wise
@@ -84,7 +56,7 @@ pub fun vec3_add(a: Vec3, b: Vec3) Vec3 {
 # b:   right vector
 # ret: a - b
 pub fun vec3_sub(a: Vec3, b: Vec3) Vec3 {
-    ret Vec3{x: a.x - b.x, y: a.y - b.y, z: a.z - b.z};
+    ret a - b;
 }
 
 # scale a vector by a scalar
@@ -93,7 +65,7 @@ pub fun vec3_sub(a: Vec3, b: Vec3) Vec3 {
 # s:   scalar
 # ret: a * s
 pub fun vec3_scale(a: Vec3, s: f32) Vec3 {
-    ret Vec3{x: a.x * s, y: a.y * s, z: a.z * s};
+    ret a * f32x4{s, s, s, 0.0};
 }
 
 # dot product of two vectors
@@ -102,7 +74,8 @@ pub fun vec3_scale(a: Vec3, s: f32) Vec3 {
 # b:   right vector
 # ret: a . b
 pub fun vec3_dot(a: Vec3, b: Vec3) f32 {
-    ret a.x * b.x + a.y * b.y + a.z * b.z;
+    val p: f32x4 = a * b;
+    ret p[0] + p[1] + p[2];
 }
 
 # cross product of two vectors
@@ -111,10 +84,11 @@ pub fun vec3_dot(a: Vec3, b: Vec3) f32 {
 # b:   right vector
 # ret: a x b
 pub fun vec3_cross(a: Vec3, b: Vec3) Vec3 {
-    ret Vec3{
-        x: a.y * b.z - a.z * b.y,
-        y: a.z * b.x - a.x * b.z,
-        z: a.x * b.y - a.y * b.x,
+    ret f32x4{
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+        0.0,
     };
 }
 
@@ -136,7 +110,7 @@ pub fun vec3_length(a: Vec3) f32 {
 pub fun vec3_normalize(a: Vec3) Vec3 {
     val len: f32 = vec3_length(a);
     if (len == 0.0) {
-        ret Vec3{x: 0.0, y: 0.0, z: 0.0};
+        ret vec3(0.0, 0.0, 0.0);
     }
     ret vec3_scale(a, 1.0 / len);
 }
@@ -146,7 +120,7 @@ test "vec: dot and cross of the basis vectors" {
     val y: Vec3 = vec3(0.0, 1.0, 0.0);
     if (vec3_dot(x, y) != 0.0) { ret 1; }
     val z: Vec3 = vec3_cross(x, y);
-    if (z.x != 0.0 || z.y != 0.0 || z.z != 1.0) { ret 2; }
+    if (z[0] != 0.0 || z[1] != 0.0 || z[2] != 1.0 || z[3] != 0.0) { ret 2; }
     ret 0;
 }
 
@@ -161,7 +135,7 @@ test "vec: length and normalize" {
 
 test "vec: normalize of the zero vector stays zero" {
     val n: Vec3 = vec3_normalize(vec3(0.0, 0.0, 0.0));
-    if (n.x != 0.0 || n.y != 0.0 || n.z != 0.0) { ret 1; }
+    if (n[0] != 0.0 || n[1] != 0.0 || n[2] != 0.0 || n[3] != 0.0) { ret 1; }
     ret 0;
 }
 
@@ -169,6 +143,13 @@ test "vec: add scale and subtract" {
     val a: Vec3 = vec3(1.0, 2.0, 3.0);
     val b: Vec3 = vec3_scale(a, 2.0);
     val c: Vec3 = vec3_sub(b, a);
-    if (c.x != 1.0 || c.y != 2.0 || c.z != 3.0) { ret 1; }
+    if (c[0] != 1.0 || c[1] != 2.0 || c[2] != 3.0 || c[3] != 0.0) { ret 1; }
+    ret 0;
+}
+
+test "vec: native layouts match their lane widths" {
+    if ($size_of(Vec2) != 8 || $align_of(Vec2) != 4)   { ret 1; }
+    if ($size_of(Vec3) != 16 || $align_of(Vec3) != 16) { ret 2; }
+    if ($size_of(Vec4) != 16 || $align_of(Vec4) != 16) { ret 3; }
     ret 0;
 }

@@ -31,7 +31,7 @@
 # lighting system, since how a surface responds to light is the game's
 # decision. See examples/shader. The shaders are Mach, compiled to SPIR-V by
 # the build-shaders step and embedded by boom.graphics.spirv; they live in
-# shaders/.
+# src/shaders/.
 #
 # AN IMMEDIATE-MODE DRAW LIST GOES THROUGH pass_draw_triangles. A sprite is one
 # rectangle placed by a model matrix, which is the wrong shape for a UI, a
@@ -45,6 +45,15 @@
 # draw writes its own slot of a per-frame ring. A frame therefore has a
 # bounded number of draws, and renderer_dropped reports any it refused
 # rather than letting them silently not appear.
+#
+# A GAME'S OWN SHADING HAS TWO BUDGETS. pass_set_user sets the block that
+# arrives at binding 4: a draw's own parameters, copied into that draw's
+# slot as it is submitted, at most USER_BYTES, which is sixteen vec4s.
+# renderer_storage_write fills the buffer that arrives at binding 8: one
+# buffer the whole frame shares, filled once after renderer_begin_frame and
+# read by every draw, under std430 and as large as the game writes. A list
+# goes in the second, because two vec4 per light leaves six lights in the
+# first. See boom.graphics.storage.
 #
 # A mesh is described by a VertexFormat (boom.graphics.vertex): a declared
 # list of attributes rather than a fixed vertex struct, and a pipeline
@@ -214,6 +223,7 @@ fwd boom.graphics.sprite.rect_overlaps;
 
 fwd boom.graphics.renderer.Renderer;
 fwd boom.graphics.renderer.renderer_init;
+fwd boom.graphics.renderer.renderer_init_with_present;
 fwd boom.graphics.renderer.renderer_resize;
 fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
@@ -230,9 +240,27 @@ fwd boom.graphics.fit.fit_unproject;
 fwd boom.graphics.renderer.renderer_width;
 fwd boom.graphics.renderer.renderer_height;
 fwd boom.graphics.renderer.renderer_is_srgb;
+# How finished frames reach the display. Vsync is the only mode a Vulkan
+# implementation is required to support, so the other two are requests: ask
+# renderer_present_mode_supported before, or renderer_present_mode after. See
+# boom.graphics.swapchain.
+fwd boom.graphics.swapchain.PresentMode;
+fwd boom.graphics.swapchain.PRESENT_VSYNC;
+fwd boom.graphics.swapchain.PRESENT_MAILBOX;
+fwd boom.graphics.swapchain.PRESENT_IMMEDIATE;
+fwd boom.graphics.swapchain.present_mode_valid;
+fwd boom.graphics.swapchain.present_mode_supported;
+fwd boom.graphics.renderer.renderer_set_present_mode;
+fwd boom.graphics.renderer.renderer_present_mode;
+fwd boom.graphics.renderer.renderer_present_mode_requested;
+fwd boom.graphics.renderer.renderer_present_mode_supported;
 fwd boom.graphics.renderer.renderer_dropped;
+fwd boom.graphics.renderer.renderer_refused;
 fwd boom.graphics.renderer.renderer_draws;
 fwd boom.graphics.renderer.renderer_culled;
+# A full stall of the graphics pipeline, for tooling that coordinates several
+# readbacks or measures what the GPU did. See render_target_read.
+fwd boom.graphics.renderer.renderer_wait_idle;
 fwd boom.graphics.renderer.renderer_stream_dropped;
 fwd boom.graphics.renderer.renderer_stream_blocks;
 fwd boom.graphics.renderer.renderer_stream_reserved;
@@ -289,6 +317,27 @@ fwd boom.graphics.renderer.pass_draw_shaded;
 fwd boom.graphics.renderer.pass_draw_shaded_skinned;
 fwd boom.graphics.descriptor.USER_BYTES;
 
+# Bulk per-frame data for a game's own shading, larger than a uniform block
+# holds. One buffer the whole frame shares, arriving at FRAME_STORAGE_BINDING
+# under std430, which is where a light list, a decal list or any other array the
+# draws index into belongs. USER_BYTES is the budget for a draw's own
+# parameters; this is the budget for everything that is not per draw. See
+# boom.graphics.storage.
+fwd boom.graphics.storage.FRAME_STORAGE_BINDING;
+fwd boom.graphics.storage.STORAGE_BYTES;
+fwd boom.graphics.storage.STORAGE_MAX_BYTES;
+fwd boom.graphics.storage.MAX_STORAGE_BUFFERS;
+fwd boom.graphics.storage.FrameStorage;
+fwd boom.graphics.storage.NO_STORAGE_SIZE;
+fwd boom.graphics.storage.storage_size_for;
+fwd boom.graphics.renderer.renderer_storage_write;
+fwd boom.graphics.renderer.renderer_storage_write_at;
+fwd boom.graphics.renderer.renderer_storage_reserve;
+fwd boom.graphics.renderer.renderer_storage_capacity;
+fwd boom.graphics.renderer.renderer_storage_used;
+fwd boom.graphics.renderer.renderer_storage_buffers;
+fwd boom.graphics.renderer.renderer_storage_refused;
+
 fwd boom.graphics.assets.CAPACITY;
 fwd boom.graphics.assets.Handle;
 fwd boom.graphics.assets.Assets;
@@ -303,11 +352,22 @@ fwd boom.graphics.assets.assets_live_count;
 fwd boom.graphics.text.FIRST_CP;
 fwd boom.graphics.text.LAST_CP;
 fwd boom.graphics.text.GLYPH_COUNT;
+fwd boom.graphics.text.FontRaster;
+fwd boom.graphics.text.FONT_RASTER_SMOOTH;
+fwd boom.graphics.text.FONT_RASTER_PIXEL;
+fwd boom.graphics.text.FontSizeMode;
+fwd boom.graphics.text.FONT_SIZE_LINE_HEIGHT;
+fwd boom.graphics.text.FONT_SIZE_EM;
+fwd boom.graphics.text.FontOptions;
+fwd boom.graphics.text.font_options;
+fwd boom.graphics.text.font_pixel_options;
 fwd boom.graphics.text.Font;
 fwd boom.graphics.text.font_from_bytes;
 fwd boom.graphics.text.font_from_bytes_oversampled;
+fwd boom.graphics.text.font_from_bytes_with_options;
 fwd boom.graphics.text.font_load;
 fwd boom.graphics.text.font_load_oversampled;
+fwd boom.graphics.text.font_load_with_options;
 fwd boom.graphics.text.font_delete;
 fwd boom.graphics.text.text_measure;
 fwd boom.graphics.text.text_draw;
@@ -366,6 +426,7 @@ fwd boom.graphics.pipeline.Binding;
 fwd boom.graphics.pipeline.BINDING_NONE;
 fwd boom.graphics.pipeline.BINDING_UNIFORM;
 fwd boom.graphics.pipeline.BINDING_SAMPLER;
+fwd boom.graphics.pipeline.BINDING_STORAGE;
 fwd boom.graphics.pipeline.MAX_BINDINGS;
 fwd boom.graphics.pipeline.SetLayout;
 fwd boom.graphics.pipeline.set_layout;
