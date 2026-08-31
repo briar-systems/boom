@@ -773,6 +773,13 @@ pub fun mesh_delete(d: *Device, m: *Mesh) {
     m.index_count = 0;
 }
 
+# release mesh buffers after a renderer frame fence proved they are unused
+pub fun mesh_release_retired(d: *Device, m: *Mesh) {
+    buffer_dnit(?m.vertices, d.vk);
+    buffer_dnit(?m.indices, d.vk);
+    m.index_count = 0;
+}
+
 # write a little-endian u32 into a byte buffer at off
 fun put_u32(b: *u8, off: usize, v: u32) {
     b[off]     = (v & 0xFF)::u8;

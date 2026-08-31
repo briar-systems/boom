@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-31
+
+### Added
+- graphics: `renderer_retire_mesh` transfers a mesh to the renderer for
+  destruction after the owning frame fence is signalled. Streaming worlds can
+  evict persistent chunk meshes without a device-wide idle wait on every
+  eviction. `renderer_retired_meshes` reports the queued resource count.
+
 ## [0.18.0] - 2026-08-31
 
 ### Added

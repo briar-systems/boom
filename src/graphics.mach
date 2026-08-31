@@ -267,6 +267,8 @@ fwd boom.graphics.renderer.renderer_culled;
 # A full stall of the graphics pipeline, for tooling that coordinates several
 # readbacks or measures what the GPU did. See render_target_read.
 fwd boom.graphics.renderer.renderer_wait_idle;
+fwd boom.graphics.renderer.renderer_retire_mesh;
+fwd boom.graphics.renderer.renderer_retired_meshes;
 fwd boom.graphics.renderer.renderer_stream_dropped;
 fwd boom.graphics.renderer.renderer_stream_blocks;
 fwd boom.graphics.renderer.renderer_stream_reserved;
