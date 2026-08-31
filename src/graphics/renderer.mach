@@ -140,6 +140,7 @@ use boom.graphics.tilemap.tilemap_done;
 use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.vertex.vertex_format_ui;
+use boom.graphics.vertex.vertex_format_standard;
 use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
@@ -212,6 +213,7 @@ use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_orthographic;
 use boom.math.transform.Transform;
+use boom.math.transform.transform_identity;
 use boom.math.transform.transform_matrix;
 
 # the render device: the frame lifecycle, pipelines, and shared resources
@@ -1597,6 +1599,53 @@ fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: *Material) {
     }
 }
 
+# write the descriptors shared by every shaded 3D surface
+fun write_surface_slot(p: *Pass, slot: usize, mat: *Material, tex: *Texture,
+                       tint: Vec4) bool {
+    val r: *Renderer = p.renderer;
+    var basec: TintUniforms;
+    basec.colour = tint;
+    if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, COLOUR_OFFSET,
+                                   (?basec):~*u8, $size_of(TintUniforms))) {
+        ret false;
+    }
+    if (p.user != nil) {
+        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
+                                       p.user, p.user_len)) {
+            ret false;
+        }
+    }
+
+    var src: *Texture = tex;
+    if (src == nil) { src = ?r.white; }
+    var views:    [4]vk.ImageView;
+    var samplers: [4]vk.Sampler;
+    fill_views_mat(r, ?views[0], mat, src);
+    fill_samplers_mat(r, ?samplers[0], mat);
+    ret descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+        $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
+        COLOUR_OFFSET::u64, $size_of(TintUniforms)::u64,
+        storage_buffer(?r.store, r.frame_index),
+        storage_capacity(?r.store, r.frame_index)::u64);
+}
+
+# bind the pipeline cached for this pass and vertex layout
+fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
+                          sh: *Shader, slot: usize) bool {
+    val r: *Renderer = p.renderer;
+    var pipe: *Pipeline = nil;
+    if (sh != nil) {
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility, format);
+    }
+    or {
+        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
+                         program, format);
+    }
+    if (pipe == nil) { ret false; }
+    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    ret descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+}
+
 # Draw the 2D runs that follow with a game's own shader.
 #
 # Passing nil restores the built-in program. Flushes first, so the run already
@@ -1680,6 +1729,83 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
 # sh:  the game's shader
 pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
     pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, sh);
+}
+
+# submit dynamic non-indexed 3D triangles through a game shader
+pub fun pass_draw_shaded_triangles(p: *Pass, vertices: ptr, vertex_count: i32,
+                                   format: *VertexFormat, local_bounds: *Aabb,
+                                   mat: *Material, t: *Transform, sh: *Shader) {
+    val r: *Renderer = p.renderer;
+    if (vertex_count <= 0) { ret; }
+    if (!dynamic_triangles_valid(vertices, vertex_count, format, local_bounds,
+                                 mat, t, sh)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    batch_flush(p);
+    var model: Mat4 = transform_matrix(t);
+    if (!dynamic_bounds_visible(p, local_bounds, ?model)) {
+        r.culled = r.culled + 1;
+        ret;
+    }
+
+    val stride: usize = format.stride::usize;
+    var first: u32 = 0;
+    var block: usize = 0;
+    if (!stream_push(?r.stream, ?r.vk, r.frame_index, vertices:~*u8,
+                     vertex_count::usize * stride, stride, ?first, ?block)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    val slot: usize = take_slot(p);
+    if (slot == NO_SLOT) { ret; }
+
+    var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
+    var mvp: Mat4 = mat4_mul(?vp, ?model);
+    var uniforms: MeshUniforms;
+    uniforms.mvp = mvp;
+    uniforms.model = model;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot,
+        (?uniforms):~*u8, $size_of(MeshUniforms))) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    if (!write_surface_slot(p, slot, mat, material_texture(mat),
+                            mat.base_color)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    if (!bind_surface_pipeline(p, format, PROGRAM_MESH, sh, slot)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    var buffer: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
+    if (buffer == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var offset: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buffer, ?offset);
+    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, first, 0);
+    r.draws = r.draws + 1;
+}
+
+fun dynamic_triangles_valid(vertices: ptr, vertex_count: i32,
+                            format: *VertexFormat, local_bounds: *Aabb,
+                            mat: *Material, t: *Transform, sh: *Shader) bool {
+    ret vertices != nil && vertex_count > 0 && (vertex_count % 3) == 0
+        && format != nil && format.stride != 0 && local_bounds != nil
+        && mat != nil && t != nil && sh != nil;
+}
+
+fun dynamic_bounds_visible(p: *Pass, local_bounds: *Aabb,
+                           model: *Mat4) bool {
+    if (!p.cull) { ret true; }
+    var world_bounds: Aabb = aabb_transform(local_bounds, model);
+    ret frustum_contains_aabb(?p.frustum, ?world_bounds);
 }
 
 # Submit a skinned mesh drawn with the game's own shader.
@@ -1779,48 +1905,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         }
     }
 
-    # The base colour goes in the slot's second aligned sub-slot, which is what
-    # the fragment stage's binding 2 reads. The sprite path does the same, so
-    # one descriptor write path serves both. It is not packed immediately after
-    # the matrices, because a uniform descriptor's buffer offset has to satisfy
-    # minUniformBufferOffsetAlignment.
-    val base_off: usize = COLOUR_OFFSET;
-    var basec: TintUniforms;
-    basec.colour = tint;
-    if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
-                                   (?basec):~*u8, $size_of(TintUniforms))) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-
-    # The game's own block, if this pass has one. Copied per draw rather than
-    # held by reference, so a game may change the struct between draws and each
-    # draw keeps what it was submitted with.
-    if (p.user != nil) {
-        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
-                                       p.user, p.user_len)) {
-            r.dropped = r.dropped + 1;
-            ret;
-        }
-    }
-
-    # Every fragment stage samples, so an untextured draw gets the renderer's
-    # white texel and comes out as its base colour.
-    var src: *Texture = tex;
-    if (src == nil) { src = ?r.white; }
-
-    # Every texture the material carries, not only the first. A shader that
-    # samples one reads binding 1 exactly as before; one that samples four reads
-    # 1, 5, 6 and 7.
-    var views:    [4]vk.ImageView;
-    var samplers: [4]vk.Sampler;
-    fill_views_mat(r, ?views[0], mat, src);
-    fill_samplers_mat(r, ?samplers[0], mat);
-    if (!descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                               $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
-                               base_off::u64, $size_of(TintUniforms)::u64,
-                               storage_buffer(?r.store, r.frame_index),
-                               storage_capacity(?r.store, r.frame_index)::u64)) {
+    if (!write_surface_slot(p, slot, mat, tex, tint)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -1850,25 +1935,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         }
     }
 
-    var pipe: *Pipeline = nil;
-    if (sh != nil) {
-        # Built against this pass rather than the window's, because a pipeline
-        # is only valid in a render pass compatible with the one it was made
-        # for, and a game shader drawn into an offscreen target would otherwise
-        # be using the window's.
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility, ?m.format);
-    }
-    or {
-        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         program, ?m.format);
-    }
-    if (pipe == nil) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
+    if (!bind_surface_pipeline(p, ?m.format, program, sh, slot)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -2275,6 +2342,78 @@ test "renderer: a full uniform ring drops draws and counts them" {
     # draw's transform, so exhaustion has to be visible instead.
     if (take_slot(?p) != NO_SLOT) { ret 1; }
     if (r.dropped != 1)           { ret 2; }
+    ret 0;
+}
+
+test "renderer: invalid dynamic 3D triangles are counted as dropped draws" {
+    var r: Renderer;
+    var p: Pass;
+    p.renderer = ?r;
+
+    var vertices: [24]f32;
+    var format: VertexFormat = vertex_format_standard();
+    var bounds: Aabb = Aabb{
+        min: vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0),
+        max: vec3(1.0, 1.0, 1.0),
+    };
+    var mat: Material;
+    var t: Transform = transform_identity();
+    var sh: Shader;
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 0, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 0) { ret 1; }
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 4, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 1) { ret 2; }
+
+    pass_draw_shaded_triangles(?p, nil, 3, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 2) { ret 3; }
+
+    var empty_format: VertexFormat;
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 3, ?empty_format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 3) { ret 4; }
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 3, ?format,
+                               ?bounds, ?mat, ?t, nil);
+    if (r.dropped != 4) { ret 5; }
+    ret 0;
+}
+
+test "renderer: dynamic 3D bounds are transformed before culling" {
+    var c: Camera;
+    c.position = vec3(0.0, 0.0, 5.0);
+    c.target   = vec3(0.0, 0.0, 0.0);
+    c.up       = vec3(0.0, 1.0, 0.0);
+    c.fov      = 1.0;
+    c.aspect   = 1.0;
+    c.near     = 0.1;
+    c.far      = 100.0;
+
+    var view: Mat4 = camera_view(?c);
+    var projection: Mat4 = camera_projection(?c);
+    var vp: Mat4 = mat4_mul(?projection, ?view);
+    var p: Pass;
+    p.cull = 1;
+    p.frustum = frustum_from_matrix(?vp);
+
+    var bounds: Aabb = Aabb{
+        min: vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0),
+        max: vec3(1.0, 1.0, 1.0),
+    };
+    var t: Transform = transform_identity();
+    var model: Mat4 = transform_matrix(?t);
+    if (!dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 1; }
+
+    t.position = vec3(1000.0, 0.0, 0.0);
+    model = transform_matrix(?t);
+    if (dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 2; }
+
+    p.cull = 0;
+    if (!dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 3; }
     ret 0;
 }
 
