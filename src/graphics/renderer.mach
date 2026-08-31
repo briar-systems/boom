@@ -188,6 +188,8 @@ use boom.graphics.material.TEXTURE_LINEAR;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
+use boom.graphics.camera.camera_depth_convention;
+use boom.graphics.camera.camera_perspective_reversed_infinite;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.camera2d.camera2d_visible;
@@ -215,6 +217,9 @@ use boom.math.mat.mat4_orthographic;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_identity;
 use boom.math.transform.transform_matrix;
+use boom.graphics.depth.DepthConvention;
+use boom.graphics.depth.DEPTH_FORWARD;
+use boom.graphics.depth.DEPTH_REVERSED;
 
 # the render device: the frame lifecycle, pipelines, and shared resources
 # ---
@@ -390,7 +395,8 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     # is the pipeline every frame uses.
     val window_compatibility: PassCompatibility = pass_compatibility_one(r.vk.color_format);
     val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, r.frame.pass,
-                                      ?window_compatibility, PROGRAM_UI, ?r.ui_format);
+                                      ?window_compatibility, PROGRAM_UI,
+                                      ?r.ui_format, DEPTH_FORWARD);
     if (two_d == nil) {
         renderer_rollback(r);
         ret err[bool, Error](error("could not build the 2D pipeline"));
@@ -895,6 +901,7 @@ test "renderer: the requested present mode outlives the surface refusing it" {
 # camera:      the 3D viewpoint, read when perspective is 1
 # clear:       1 to clear when the pass begins
 # clear_color: the color cleared to when clear is 1
+# depth:       the projection and depth-buffer convention
 pub rec PassDesc {
     target:      *RenderTarget;
     perspective: u8;
@@ -905,6 +912,7 @@ pub rec PassDesc {
     camera2d:    *Camera2D;
     clear:       u8;
     clear_color: Vec4;
+    depth:       DepthConvention;
 
     # Whether the pass skips draws whose bounds are outside its view. Non-zero
     # by default, because a draw that cannot be seen is not worth submitting and
@@ -930,6 +938,7 @@ pub fun pass_scene(camera: *Camera) PassDesc {
         camera2d:    nil,
         clear:       1,
         clear_color: vec4(0.08, 0.09, 0.12, 1.0),
+        depth:       camera_depth_convention(camera),
         cull:        1,
     };
 }
@@ -945,6 +954,7 @@ pub fun pass_overlay() PassDesc {
         camera2d:    nil,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        depth:       DEPTH_FORWARD,
         cull:        1,
     };
 }
@@ -969,6 +979,7 @@ pub fun pass_world(camera: *Camera2D) PassDesc {
         camera2d:    camera,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        depth:       DEPTH_FORWARD,
         cull:        1,
     };
 }
@@ -994,6 +1005,7 @@ pub rec Pass {
     height:     i32;
     view:       Mat4;
     projection: Mat4;
+    depth:      DepthConvention;
 
     # The open run of 2D geometry. On the pass rather than the renderer because
     # its vertices were placed for this pass's projection and must be drawn into
@@ -1052,7 +1064,7 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
     # Four colours and a depth, which is as many attachments as any pass boom
     # builds has.
     var atts: [5]vk.ClearAttachment;
-    val n: usize = clear_attachments(p.targets, color, ?atts[0]);
+    val n: usize = clear_attachments(p.targets, color, p.depth, ?atts[0]);
 
     var rect: vk.ClearRect;
     rect.rect.offset.x      = 0;
@@ -1085,7 +1097,8 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
 # positional: each entry names its own aspect and, for a colour, its own
 # attachment index. The order still follows pass_create's, colours then depth,
 # because every other attachment array in boom reads that way.
-fun clear_attachments(targets: usize, color: Vec4, out: *vk.ClearAttachment) usize {
+fun clear_attachments(targets: usize, color: Vec4, depth: DepthConvention,
+                      out: *vk.ClearAttachment) usize {
     var i: usize = 0;
     for (i < targets) {
         out[i].aspectMask                  = vk.IMAGE_ASPECT_COLOR_BIT;
@@ -1108,10 +1121,15 @@ fun clear_attachments(targets: usize, color: Vec4, out: *vk.ClearAttachment) usi
     out[targets].aspectMask                      = vk.IMAGE_ASPECT_DEPTH_BIT;
     # Read only for a colour clear, and the struct offers nowhere else to put it.
     out[targets].colorAttachment                 = 0;
-    out[targets].clearValue.depthStencil.depth   = 1.0;
+    out[targets].clearValue.depthStencil.depth   = depth_clear_value(depth);
     out[targets].clearValue.depthStencil.stencil = 0;
 
     ret targets + 1;
+}
+
+fun depth_clear_value(depth: DepthConvention) f32 {
+    if (depth == DEPTH_REVERSED) { ret 0.0; }
+    ret 1.0;
 }
 
 # begin a pass
@@ -1152,6 +1170,10 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.shader2d = nil;
     p.mat2d    = nil;
     p.cull     = d.cull != 0;
+    p.depth    = d.depth;
+    if (d.perspective != 0) {
+        p.depth = camera_depth_convention(d.camera);
+    }
     p.user     = nil;
     p.user_len = 0;
 
@@ -1227,9 +1249,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
             clears[cvi].color.float32[3] = d.clear_color[3];
             cvi = cvi + 1;
         }
-        # Depth clears to 1.0, the far plane. Clearing to 0 would make every
-        # fragment fail the less-than test and the target come out empty.
-        clears[p.targets].depthStencil.depth   = 1.0;
+        # depth clears to the far value of the pass convention
+        clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
         clears[p.targets].depthStencil.stencil = 0;
 
         var rbi: vk.RenderPassBeginInfo;
@@ -1413,11 +1434,12 @@ pub fun batch_flush(p: *Pass) {
 
     var pipe: *Pipeline = nil;
     if (p.shader2d != nil) {
-        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility, ?r.ui_format);
+        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility,
+                               ?r.ui_format, p.depth);
     }
     or {
         pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         PROGRAM_UI, ?r.ui_format);
+                         PROGRAM_UI, ?r.ui_format, p.depth);
     }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
@@ -1635,11 +1657,12 @@ fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
     val r: *Renderer = p.renderer;
     var pipe: *Pipeline = nil;
     if (sh != nil) {
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility, format);
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility,
+                               format, p.depth);
     }
     or {
         pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         program, format);
+                         program, format, p.depth);
     }
     if (pipe == nil) { ret false; }
     pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
@@ -2290,6 +2313,26 @@ test "renderer: a scene pass takes its matrices from the camera" {
     ret 0;
 }
 
+test "renderer: a reversed camera carries its depth convention into the pass" {
+    var r: Renderer;
+    r.width  = 640;
+    r.height = 480;
+    var c: Camera = camera_perspective_reversed_infinite(
+        vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0),
+        1.0, 1.333, 0.1);
+    var d: PassDesc = pass_scene(?c);
+    if (d.depth != DEPTH_REVERSED) { ret 1; }
+
+    d.clear = 0;
+    var p: Pass = pass_begin(?r, ?d);
+    if (p.depth != DEPTH_REVERSED) { ret 2; }
+
+    val zn: f32 = (p.projection.m[2][2] * (0.0 - c.near)
+                    + p.projection.m[3][2]) / c.near;
+    if (zn - 1.0 > 0.0001 || zn - 1.0 < 0.0 - 0.0001) { ret 3; }
+    ret 0;
+}
+
 test "renderer: pass descriptions differ in what they clear and project" {
     val s: PassDesc = pass_scene(nil);
     val o: PassDesc = pass_overlay();
@@ -2304,7 +2347,8 @@ test "renderer: pass descriptions differ in what they clear and project" {
 test "renderer: a mid-pass clear names every attachment and no aspect it lacks" {
     var atts: [5]vk.ClearAttachment;
 
-    val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0), ?atts[0]);
+    val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0),
+                                       DEPTH_FORWARD, ?atts[0]);
     if (one != 2)                                        { ret 1; }
     if (atts[0].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 2; }
     if (atts[0].colorAttachment != 0)                    { ret 3; }
@@ -2317,11 +2361,21 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
 
     # A pass with four sheets clears four. Clearing only the first would leave
     # the rest holding the previous frame, which is a picture, just the wrong one.
-    val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0), ?atts[0]);
+    val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0),
+                                        DEPTH_FORWARD, ?atts[0]);
     if (four != 5)                                       { ret 7; }
     if (atts[3].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 8; }
     if (atts[3].colorAttachment != 3)                    { ret 9; }
     if (atts[4].aspectMask != vk.IMAGE_ASPECT_DEPTH_BIT) { ret 10; }
+    ret 0;
+}
+
+test "renderer: reversed depth clears to zero" {
+    var atts: [2]vk.ClearAttachment;
+    if (clear_attachments(1, vec4(0.0, 0.0, 0.0, 1.0),
+                          DEPTH_REVERSED, ?atts[0]) != 2) { ret 1; }
+    if (atts[1].clearValue.depthStencil.depth != 0.0) { ret 2; }
+    if (depth_clear_value(DEPTH_FORWARD) != 1.0)      { ret 3; }
     ret 0;
 }
 

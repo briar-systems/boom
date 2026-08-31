@@ -1,0 +1,26 @@
+# the direction represented by increasing depth-buffer values
+
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.bool.false;
+
+pub def DepthConvention: u8;
+
+# near maps to zero and far maps to one
+pub val DEPTH_FORWARD: DepthConvention = 0;
+
+# near maps to one and distance approaches zero
+pub val DEPTH_REVERSED: DepthConvention = 1;
+
+pub fun depth_convention_valid(depth: DepthConvention) bool {
+    ret depth == DEPTH_FORWARD || depth == DEPTH_REVERSED;
+}
+
+test "depth: the zero value preserves forward depth" {
+    var depth: DepthConvention;
+    if (depth != DEPTH_FORWARD) { ret 1; }
+    if (!depth_convention_valid(depth)) { ret 2; }
+    if (!depth_convention_valid(DEPTH_REVERSED)) { ret 3; }
+    if (depth_convention_valid(2)) { ret 4; }
+    ret 0;
+}

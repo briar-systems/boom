@@ -78,6 +78,9 @@
 fwd boom.graphics.error.Error;
 fwd boom.graphics.error.error;
 fwd boom.graphics.error.error_msg;
+fwd boom.graphics.depth.DepthConvention;
+fwd boom.graphics.depth.DEPTH_FORWARD;
+fwd boom.graphics.depth.DEPTH_REVERSED;
 
 fwd boom.graphics.device.Device;
 fwd boom.graphics.device.device_init;
@@ -176,12 +179,15 @@ fwd boom.graphics.material.material_texture_named;
 
 fwd boom.graphics.camera.Camera;
 fwd boom.graphics.camera.camera_perspective;
+fwd boom.graphics.camera.camera_perspective_reversed_infinite;
 fwd boom.graphics.camera.camera_view;
 fwd boom.graphics.camera.camera_projection;
+fwd boom.graphics.camera.camera_depth_convention;
 fwd boom.graphics.camera.camera_orthographic;
 fwd boom.graphics.camera.camera_ortho_height;
 fwd boom.graphics.camera.camera_ray;
 fwd boom.graphics.camera.PROJECTION_PERSPECTIVE;
+fwd boom.graphics.camera.PROJECTION_PERSPECTIVE_REVERSED;
 fwd boom.graphics.camera.PROJECTION_ORTHOGRAPHIC;
 fwd boom.graphics.camera2d.Camera2D;
 fwd boom.graphics.camera2d.camera2d;
@@ -421,6 +427,7 @@ fwd boom.graphics.pipeline.attribute_format;
 fwd boom.graphics.pipeline.vertex_attributes;
 fwd boom.graphics.pipeline.shader_module;
 fwd boom.graphics.pipeline.pipeline_init;
+fwd boom.graphics.pipeline.pipeline_init_depth;
 fwd boom.graphics.pipeline.pipeline_bind;
 fwd boom.graphics.pipeline.pipeline_dnit;
 fwd boom.graphics.pipeline.Binding;

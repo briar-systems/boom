@@ -41,6 +41,7 @@ use boom.math.aabb.aabb_empty;
 use boom.math.aabb.aabb_add;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_project_point;
+use boom.math.mat.mat4_perspective_reversed_infinite;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_perspective;
 use boom.graphics.camera.camera_orthographic;
@@ -72,10 +73,9 @@ pub fun frustum_from_matrix(m: *Mat4) Frustum {
     # y >= -w and y <= w
     f.planes[2] = normalize_plane(add4(r3, r1));
     f.planes[3] = normalize_plane(sub4(r3, r1));
-    # z >= 0 and z <= w. The near plane is row 2 alone rather than r3 + r2,
-    # which is what makes this Vulkan's depth range instead of OpenGL's; using
-    # the OpenGL form here culls everything between the near plane and the
-    # midpoint of the depth range.
+    # z >= 0 and z <= w are the two depth boundaries
+    # forward depth puts near in r2 and far in r3-r2
+    # reversed depth swaps them, and an infinite far plane has a zero normal
     f.planes[4] = normalize_plane(r2);
     f.planes[5] = normalize_plane(sub4(r3, r2));
     ret f;
@@ -124,14 +124,16 @@ pub fun frustum_contains_point(f: *Frustum, p: Vec3) bool {
     ret true;
 }
 
-# Scale a plane so its normal is unit length.
+# scale a finite plane so its normal is unit length
 #
 # Not needed to answer inside-or-outside, since that is only a sign, but it
 # makes the value of the expression an actual distance. The box test relies on
 # that: it compares the centre's distance against the box's reach, and those are
-# only comparable when the normal is normalized.
+# only comparable when the normal is normalized. a degenerate infinite far
+# plane has no boundary and is preserved as an always-accepting inequality.
 fun normalize_plane(p: Vec4) Vec4 {
     val n: f32 = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    # an infinite projection has no finite far plane
     if (n == 0.0) { ret p; }
     ret vec4(p[0] / n, p[1] / n, p[2] / n, p[3] / n);
 }
@@ -191,6 +193,21 @@ test "frustum: a box beyond the far plane is rejected" {
     var f: Frustum = test_frustum();
     var b: Aabb = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
+    ret 0;
+}
+
+test "frustum: reversed infinite perspective clips near and has no far limit" {
+    var p: Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
+    var f: Frustum = frustum_from_matrix(?p);
+
+    if (f.planes[4][0] != 0.0 || f.planes[4][1] != 0.0
+        || f.planes[4][2] != 0.0 || f.planes[4][3] <= 0.0) { ret 1; }
+
+    var before_near: Aabb = box_at(0.0, 0.0, 0.0 - 0.05, 0.01);
+    if (frustum_contains_aabb(?f, ?before_near)) { ret 2; }
+
+    var distant: Aabb = box_at(0.0, 0.0, 0.0 - 130000.0, 10.0);
+    if (!frustum_contains_aabb(?f, ?distant)) { ret 3; }
     ret 0;
 }
 

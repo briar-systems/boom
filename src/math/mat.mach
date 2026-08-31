@@ -131,6 +131,19 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
     ret r;
 }
 
+# a right-handed infinite reversed-z perspective projection
+pub fun mat4_perspective_reversed_infinite(fovy: f32, aspect: f32,
+                                           near: f32) Mat4 {
+    val f: f32 = 1.0 / tanf(fovy * 0.5);
+    var r: Mat4;
+    r.m[0][0] = f / aspect;
+    r.m[1][1] = 0.0 - f;
+    r.m[2][2] = 0.0;
+    r.m[2][3] = 0.0 - 1.0;
+    r.m[3][2] = near;
+    ret r;
+}
+
 # a right-handed orthographic projection onto the Vulkan clip volume
 #
 # maps an axis-aligned box to clip space with depth in [0, 1] and Y increasing
@@ -319,6 +332,22 @@ test "mat: perspective maps the clip planes to the Vulkan depth range" {
 
     # Y is negated, because Vulkan's Y increases downward. Positive here would
     # render every scene vertically mirrored.
+    if (p.m[1][1] >= 0.0) { ret 5; }
+    ret 0;
+}
+
+test "mat: infinite reversed perspective maps near to one and distance to zero" {
+    val near: f32 = 0.1;
+    var p: Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, near);
+    if (p.m[2][3] != 0.0 - 1.0) { ret 1; }
+    if (p.m[3][3] != 0.0)       { ret 2; }
+
+    val zn: f32 = (p.m[2][2] * (0.0 - near) + p.m[3][2]) / near;
+    if (zn - 1.0 > 0.0001 || zn - 1.0 < 0.0 - 0.0001) { ret 3; }
+
+    val distant: f32 = 1000000.0;
+    val zd: f32 = (p.m[2][2] * (0.0 - distant) + p.m[3][2]) / distant;
+    if (zd > 0.000001 || zd <= 0.0) { ret 4; }
     if (p.m[1][1] >= 0.0) { ret 5; }
     ret 0;
 }
