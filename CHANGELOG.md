@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-31
+
+### Added
+- window: `window_set_cursor_captured` captures or releases the pointer for
+  relative first-person input, enables raw mouse motion where the platform
+  supports it, and rebases cursor state so changing modes does not create a
+  synthetic movement event. `window_cursor_captured` reports the active mode.
+
+- graphics: `pass_draw_shaded_triangles` streams caller-owned, non-indexed 3D
+  triangle vertices through a game shader without creating a persistent mesh.
+  Dynamic draws use the regular material, transform, descriptor, culling, and
+  draw-accounting paths, with a caller-supplied vertex format and local bounds.
+
+- graphics: reversed infinite perspective cameras and depth-aware render passes.
+  `camera_perspective_reversed_infinite` removes the far clipping plane while
+  carrying a reversed depth convention through frustum extraction, pass clears,
+  built-in and custom shader pipelines, and depth comparison. Existing cameras
+  and passes retain forward depth by default.
+
+## [0.17.0] - 2026-08-23
+
 ### Added
 - graphics: a per-frame storage buffer, for data a shader needs more of than a
   uniform block holds. A draw's game-supplied block is one aligned region, so
