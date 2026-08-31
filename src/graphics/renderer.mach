@@ -177,6 +177,7 @@ use boom.graphics.texture.texture_view;
 use boom.graphics.texture.texture_delete;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
+use boom.graphics.mesh.mesh_release_retired;
 use boom.graphics.vertex.vertex_format_is_skinned;
 use boom.graphics.skeleton.Pose;
 use boom.graphics.skeleton.MAX_JOINTS;
@@ -221,6 +222,13 @@ use boom.graphics.depth.DepthConvention;
 use boom.graphics.depth.DEPTH_FORWARD;
 use boom.graphics.depth.DEPTH_REVERSED;
 
+pub val MAX_RETIRED_MESHES: usize = 1024;
+
+rec RetiredMeshes {
+    meshes: [1024]Mesh;
+    count: usize;
+}
+
 # the render device: the frame lifecycle, pipelines, and shared resources
 # ---
 # vk:      the instance, device, and queues
@@ -263,6 +271,7 @@ pub rec Renderer {
     white:       Texture;
     stream:      VertexStream;
     store:       FrameStorage;
+    retired:     [2]RetiredMeshes;
     ui_format:   VertexFormat;
     width:       i32;
     height:      i32;
@@ -331,6 +340,11 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     r.height      = height;
     r.drawing     = false;
     r.frame_index = 0;
+    var retire_frame: usize = 0;
+    for (retire_frame < 2) {
+        r.retired[retire_frame].count = 0;
+        retire_frame = retire_frame + 1;
+    }
     r.dropped     = 0;
     r.refused     = 0;
     r.culled      = 0;
@@ -676,6 +690,7 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     }
 
     r.frame_index = r.frame.current;
+    release_retired_meshes(r, r.frame_index);
     # The frame's fence has been waited on, so every slot this frame owns is
     # free again. Without this the ring runs out after MAX_SLOTS total draws
     # rather than MAX_SLOTS per frame.
@@ -738,6 +753,41 @@ pub fun renderer_end_frame(r: *Renderer) Result[bool, Error] {
 # r: the renderer to drain
 pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
+}
+
+# retire a mesh when this frame's fence next proves its last use complete
+pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) bool {
+    if (r == nil || m == nil || !r.ready_dev) { ret false; }
+    val frame: usize = r.frame_index;
+    val count: usize = r.retired[frame].count;
+    if (count >= MAX_RETIRED_MESHES) { ret false; }
+    r.retired[frame].meshes[count] = @m;
+    r.retired[frame].count = count + 1;
+    m.vertices.handle = nil;
+    m.vertices.memory = nil;
+    m.vertices.size = 0;
+    m.vertices.mapped = nil;
+    m.indices.handle = nil;
+    m.indices.memory = nil;
+    m.indices.size = 0;
+    m.indices.mapped = nil;
+    m.index_count = 0;
+    ret true;
+}
+
+pub fun renderer_retired_meshes(r: *Renderer) usize {
+    if (r == nil) { ret 0; }
+    ret r.retired[0].count + r.retired[1].count;
+}
+
+fun release_retired_meshes(r: *Renderer, frame: usize) {
+    if (r == nil || !r.ready_dev || frame >= 2) { ret; }
+    var i: usize = 0;
+    for (i < r.retired[frame].count) {
+        mesh_release_retired(?r.dev, ?r.retired[frame].meshes[i]);
+        i = i + 1;
+    }
+    r.retired[frame].count = 0;
 }
 
 # how many draws were refused this frame
@@ -809,6 +859,11 @@ fun renderer_rollback(r: *Renderer) {
 
     # A live device may still be reading any of the later stages.
     if (r.ready_dev) { vk.vkDeviceWaitIdle(r.vk.device); }
+
+    if (r.ready_dev) {
+        release_retired_meshes(r, 0);
+        release_retired_meshes(r, 1);
+    }
 
     if (r.ready_store)  { storage_dnit(?r.store, ?r.vk); r.ready_store = false; }
     if (r.ready_stream) { stream_dnit(?r.stream, ?r.vk); r.ready_stream = false; }
