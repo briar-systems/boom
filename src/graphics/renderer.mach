@@ -140,6 +140,7 @@ use boom.graphics.tilemap.tilemap_done;
 use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.vertex.vertex_format_ui;
+use boom.graphics.vertex.vertex_format_standard;
 use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
@@ -187,6 +188,8 @@ use boom.graphics.material.TEXTURE_LINEAR;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
+use boom.graphics.camera.camera_depth_convention;
+use boom.graphics.camera.camera_perspective_reversed_infinite;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.camera2d.camera2d_visible;
@@ -212,7 +215,11 @@ use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_orthographic;
 use boom.math.transform.Transform;
+use boom.math.transform.transform_identity;
 use boom.math.transform.transform_matrix;
+use boom.graphics.depth.DepthConvention;
+use boom.graphics.depth.DEPTH_FORWARD;
+use boom.graphics.depth.DEPTH_REVERSED;
 
 # the render device: the frame lifecycle, pipelines, and shared resources
 # ---
@@ -388,7 +395,8 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     # is the pipeline every frame uses.
     val window_compatibility: PassCompatibility = pass_compatibility_one(r.vk.color_format);
     val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, r.frame.pass,
-                                      ?window_compatibility, PROGRAM_UI, ?r.ui_format);
+                                      ?window_compatibility, PROGRAM_UI,
+                                      ?r.ui_format, DEPTH_FORWARD);
     if (two_d == nil) {
         renderer_rollback(r);
         ret err[bool, Error](error("could not build the 2D pipeline"));
@@ -893,6 +901,7 @@ test "renderer: the requested present mode outlives the surface refusing it" {
 # camera:      the 3D viewpoint, read when perspective is 1
 # clear:       1 to clear when the pass begins
 # clear_color: the color cleared to when clear is 1
+# depth:       the projection and depth-buffer convention
 pub rec PassDesc {
     target:      *RenderTarget;
     perspective: u8;
@@ -903,6 +912,7 @@ pub rec PassDesc {
     camera2d:    *Camera2D;
     clear:       u8;
     clear_color: Vec4;
+    depth:       DepthConvention;
 
     # Whether the pass skips draws whose bounds are outside its view. Non-zero
     # by default, because a draw that cannot be seen is not worth submitting and
@@ -928,6 +938,7 @@ pub fun pass_scene(camera: *Camera) PassDesc {
         camera2d:    nil,
         clear:       1,
         clear_color: vec4(0.08, 0.09, 0.12, 1.0),
+        depth:       camera_depth_convention(camera),
         cull:        1,
     };
 }
@@ -943,6 +954,7 @@ pub fun pass_overlay() PassDesc {
         camera2d:    nil,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        depth:       DEPTH_FORWARD,
         cull:        1,
     };
 }
@@ -967,6 +979,7 @@ pub fun pass_world(camera: *Camera2D) PassDesc {
         camera2d:    camera,
         clear:       0,
         clear_color: vec4(0.0, 0.0, 0.0, 0.0),
+        depth:       DEPTH_FORWARD,
         cull:        1,
     };
 }
@@ -992,6 +1005,7 @@ pub rec Pass {
     height:     i32;
     view:       Mat4;
     projection: Mat4;
+    depth:      DepthConvention;
 
     # The open run of 2D geometry. On the pass rather than the renderer because
     # its vertices were placed for this pass's projection and must be drawn into
@@ -1050,7 +1064,7 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
     # Four colours and a depth, which is as many attachments as any pass boom
     # builds has.
     var atts: [5]vk.ClearAttachment;
-    val n: usize = clear_attachments(p.targets, color, ?atts[0]);
+    val n: usize = clear_attachments(p.targets, color, p.depth, ?atts[0]);
 
     var rect: vk.ClearRect;
     rect.rect.offset.x      = 0;
@@ -1083,7 +1097,8 @@ fun clear_mid_pass(p: *Pass, color: Vec4) {
 # positional: each entry names its own aspect and, for a colour, its own
 # attachment index. The order still follows pass_create's, colours then depth,
 # because every other attachment array in boom reads that way.
-fun clear_attachments(targets: usize, color: Vec4, out: *vk.ClearAttachment) usize {
+fun clear_attachments(targets: usize, color: Vec4, depth: DepthConvention,
+                      out: *vk.ClearAttachment) usize {
     var i: usize = 0;
     for (i < targets) {
         out[i].aspectMask                  = vk.IMAGE_ASPECT_COLOR_BIT;
@@ -1106,10 +1121,15 @@ fun clear_attachments(targets: usize, color: Vec4, out: *vk.ClearAttachment) usi
     out[targets].aspectMask                      = vk.IMAGE_ASPECT_DEPTH_BIT;
     # Read only for a colour clear, and the struct offers nowhere else to put it.
     out[targets].colorAttachment                 = 0;
-    out[targets].clearValue.depthStencil.depth   = 1.0;
+    out[targets].clearValue.depthStencil.depth   = depth_clear_value(depth);
     out[targets].clearValue.depthStencil.stencil = 0;
 
     ret targets + 1;
+}
+
+fun depth_clear_value(depth: DepthConvention) f32 {
+    if (depth == DEPTH_REVERSED) { ret 0.0; }
+    ret 1.0;
 }
 
 # begin a pass
@@ -1150,6 +1170,10 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.shader2d = nil;
     p.mat2d    = nil;
     p.cull     = d.cull != 0;
+    p.depth    = d.depth;
+    if (d.perspective != 0) {
+        p.depth = camera_depth_convention(d.camera);
+    }
     p.user     = nil;
     p.user_len = 0;
 
@@ -1225,9 +1249,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
             clears[cvi].color.float32[3] = d.clear_color[3];
             cvi = cvi + 1;
         }
-        # Depth clears to 1.0, the far plane. Clearing to 0 would make every
-        # fragment fail the less-than test and the target come out empty.
-        clears[p.targets].depthStencil.depth   = 1.0;
+        # depth clears to the far value of the pass convention
+        clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
         clears[p.targets].depthStencil.stencil = 0;
 
         var rbi: vk.RenderPassBeginInfo;
@@ -1411,11 +1434,12 @@ pub fun batch_flush(p: *Pass) {
 
     var pipe: *Pipeline = nil;
     if (p.shader2d != nil) {
-        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility, ?r.ui_format);
+        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility,
+                               ?r.ui_format, p.depth);
     }
     or {
         pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         PROGRAM_UI, ?r.ui_format);
+                         PROGRAM_UI, ?r.ui_format, p.depth);
     }
     if (pipe == nil) {
         r.dropped = r.dropped + 1;
@@ -1597,6 +1621,54 @@ fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: *Material) {
     }
 }
 
+# write the descriptors shared by every shaded 3D surface
+fun write_surface_slot(p: *Pass, slot: usize, mat: *Material, tex: *Texture,
+                       tint: Vec4) bool {
+    val r: *Renderer = p.renderer;
+    var basec: TintUniforms;
+    basec.colour = tint;
+    if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, COLOUR_OFFSET,
+                                   (?basec):~*u8, $size_of(TintUniforms))) {
+        ret false;
+    }
+    if (p.user != nil) {
+        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
+                                       p.user, p.user_len)) {
+            ret false;
+        }
+    }
+
+    var src: *Texture = tex;
+    if (src == nil) { src = ?r.white; }
+    var views:    [4]vk.ImageView;
+    var samplers: [4]vk.Sampler;
+    fill_views_mat(r, ?views[0], mat, src);
+    fill_samplers_mat(r, ?samplers[0], mat);
+    ret descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
+        $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
+        COLOUR_OFFSET::u64, $size_of(TintUniforms)::u64,
+        storage_buffer(?r.store, r.frame_index),
+        storage_capacity(?r.store, r.frame_index)::u64);
+}
+
+# bind the pipeline cached for this pass and vertex layout
+fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
+                          sh: *Shader, slot: usize) bool {
+    val r: *Renderer = p.renderer;
+    var pipe: *Pipeline = nil;
+    if (sh != nil) {
+        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility,
+                               format, p.depth);
+    }
+    or {
+        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
+                         program, format, p.depth);
+    }
+    if (pipe == nil) { ret false; }
+    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    ret descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+}
+
 # Draw the 2D runs that follow with a game's own shader.
 #
 # Passing nil restores the built-in program. Flushes first, so the run already
@@ -1680,6 +1752,83 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
 # sh:  the game's shader
 pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
     pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, sh);
+}
+
+# submit dynamic non-indexed 3D triangles through a game shader
+pub fun pass_draw_shaded_triangles(p: *Pass, vertices: ptr, vertex_count: i32,
+                                   format: *VertexFormat, local_bounds: *Aabb,
+                                   mat: *Material, t: *Transform, sh: *Shader) {
+    val r: *Renderer = p.renderer;
+    if (vertex_count <= 0) { ret; }
+    if (!dynamic_triangles_valid(vertices, vertex_count, format, local_bounds,
+                                 mat, t, sh)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    batch_flush(p);
+    var model: Mat4 = transform_matrix(t);
+    if (!dynamic_bounds_visible(p, local_bounds, ?model)) {
+        r.culled = r.culled + 1;
+        ret;
+    }
+
+    val stride: usize = format.stride::usize;
+    var first: u32 = 0;
+    var block: usize = 0;
+    if (!stream_push(?r.stream, ?r.vk, r.frame_index, vertices:~*u8,
+                     vertex_count::usize * stride, stride, ?first, ?block)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    val slot: usize = take_slot(p);
+    if (slot == NO_SLOT) { ret; }
+
+    var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
+    var mvp: Mat4 = mat4_mul(?vp, ?model);
+    var uniforms: MeshUniforms;
+    uniforms.mvp = mvp;
+    uniforms.model = model;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot,
+        (?uniforms):~*u8, $size_of(MeshUniforms))) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    if (!write_surface_slot(p, slot, mat, material_texture(mat),
+                            mat.base_color)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    if (!bind_surface_pipeline(p, format, PROGRAM_MESH, sh, slot)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    var buffer: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
+    if (buffer == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var offset: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buffer, ?offset);
+    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, first, 0);
+    r.draws = r.draws + 1;
+}
+
+fun dynamic_triangles_valid(vertices: ptr, vertex_count: i32,
+                            format: *VertexFormat, local_bounds: *Aabb,
+                            mat: *Material, t: *Transform, sh: *Shader) bool {
+    ret vertices != nil && vertex_count > 0 && (vertex_count % 3) == 0
+        && format != nil && format.stride != 0 && local_bounds != nil
+        && mat != nil && t != nil && sh != nil;
+}
+
+fun dynamic_bounds_visible(p: *Pass, local_bounds: *Aabb,
+                           model: *Mat4) bool {
+    if (!p.cull) { ret true; }
+    var world_bounds: Aabb = aabb_transform(local_bounds, model);
+    ret frustum_contains_aabb(?p.frustum, ?world_bounds);
 }
 
 # Submit a skinned mesh drawn with the game's own shader.
@@ -1779,48 +1928,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         }
     }
 
-    # The base colour goes in the slot's second aligned sub-slot, which is what
-    # the fragment stage's binding 2 reads. The sprite path does the same, so
-    # one descriptor write path serves both. It is not packed immediately after
-    # the matrices, because a uniform descriptor's buffer offset has to satisfy
-    # minUniformBufferOffsetAlignment.
-    val base_off: usize = COLOUR_OFFSET;
-    var basec: TintUniforms;
-    basec.colour = tint;
-    if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, base_off,
-                                   (?basec):~*u8, $size_of(TintUniforms))) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-
-    # The game's own block, if this pass has one. Copied per draw rather than
-    # held by reference, so a game may change the struct between draws and each
-    # draw keeps what it was submitted with.
-    if (p.user != nil) {
-        if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
-                                       p.user, p.user_len)) {
-            r.dropped = r.dropped + 1;
-            ret;
-        }
-    }
-
-    # Every fragment stage samples, so an untextured draw gets the renderer's
-    # white texel and comes out as its base colour.
-    var src: *Texture = tex;
-    if (src == nil) { src = ?r.white; }
-
-    # Every texture the material carries, not only the first. A shader that
-    # samples one reads binding 1 exactly as before; one that samples four reads
-    # 1, 5, 6 and 7.
-    var views:    [4]vk.ImageView;
-    var samplers: [4]vk.Sampler;
-    fill_views_mat(r, ?views[0], mat, src);
-    fill_samplers_mat(r, ?samplers[0], mat);
-    if (!descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
-                               $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
-                               base_off::u64, $size_of(TintUniforms)::u64,
-                               storage_buffer(?r.store, r.frame_index),
-                               storage_capacity(?r.store, r.frame_index)::u64)) {
+    if (!write_surface_slot(p, slot, mat, tex, tint)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -1850,25 +1958,7 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
         }
     }
 
-    var pipe: *Pipeline = nil;
-    if (sh != nil) {
-        # Built against this pass rather than the window's, because a pipeline
-        # is only valid in a render pass compatible with the one it was made
-        # for, and a game shader drawn into an offscreen target would otherwise
-        # be using the window's.
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility, ?m.format);
-    }
-    or {
-        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         program, ?m.format);
-    }
-    if (pipe == nil) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
+    if (!bind_surface_pipeline(p, ?m.format, program, sh, slot)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -2223,6 +2313,26 @@ test "renderer: a scene pass takes its matrices from the camera" {
     ret 0;
 }
 
+test "renderer: a reversed camera carries its depth convention into the pass" {
+    var r: Renderer;
+    r.width  = 640;
+    r.height = 480;
+    var c: Camera = camera_perspective_reversed_infinite(
+        vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0),
+        1.0, 1.333, 0.1);
+    var d: PassDesc = pass_scene(?c);
+    if (d.depth != DEPTH_REVERSED) { ret 1; }
+
+    d.clear = 0;
+    var p: Pass = pass_begin(?r, ?d);
+    if (p.depth != DEPTH_REVERSED) { ret 2; }
+
+    val zn: f32 = (p.projection.m[2][2] * (0.0 - c.near)
+                    + p.projection.m[3][2]) / c.near;
+    if (zn - 1.0 > 0.0001 || zn - 1.0 < 0.0 - 0.0001) { ret 3; }
+    ret 0;
+}
+
 test "renderer: pass descriptions differ in what they clear and project" {
     val s: PassDesc = pass_scene(nil);
     val o: PassDesc = pass_overlay();
@@ -2237,7 +2347,8 @@ test "renderer: pass descriptions differ in what they clear and project" {
 test "renderer: a mid-pass clear names every attachment and no aspect it lacks" {
     var atts: [5]vk.ClearAttachment;
 
-    val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0), ?atts[0]);
+    val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0),
+                                       DEPTH_FORWARD, ?atts[0]);
     if (one != 2)                                        { ret 1; }
     if (atts[0].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 2; }
     if (atts[0].colorAttachment != 0)                    { ret 3; }
@@ -2250,11 +2361,21 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
 
     # A pass with four sheets clears four. Clearing only the first would leave
     # the rest holding the previous frame, which is a picture, just the wrong one.
-    val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0), ?atts[0]);
+    val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0),
+                                        DEPTH_FORWARD, ?atts[0]);
     if (four != 5)                                       { ret 7; }
     if (atts[3].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 8; }
     if (atts[3].colorAttachment != 3)                    { ret 9; }
     if (atts[4].aspectMask != vk.IMAGE_ASPECT_DEPTH_BIT) { ret 10; }
+    ret 0;
+}
+
+test "renderer: reversed depth clears to zero" {
+    var atts: [2]vk.ClearAttachment;
+    if (clear_attachments(1, vec4(0.0, 0.0, 0.0, 1.0),
+                          DEPTH_REVERSED, ?atts[0]) != 2) { ret 1; }
+    if (atts[1].clearValue.depthStencil.depth != 0.0) { ret 2; }
+    if (depth_clear_value(DEPTH_FORWARD) != 1.0)      { ret 3; }
     ret 0;
 }
 
@@ -2275,6 +2396,78 @@ test "renderer: a full uniform ring drops draws and counts them" {
     # draw's transform, so exhaustion has to be visible instead.
     if (take_slot(?p) != NO_SLOT) { ret 1; }
     if (r.dropped != 1)           { ret 2; }
+    ret 0;
+}
+
+test "renderer: invalid dynamic 3D triangles are counted as dropped draws" {
+    var r: Renderer;
+    var p: Pass;
+    p.renderer = ?r;
+
+    var vertices: [24]f32;
+    var format: VertexFormat = vertex_format_standard();
+    var bounds: Aabb = Aabb{
+        min: vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0),
+        max: vec3(1.0, 1.0, 1.0),
+    };
+    var mat: Material;
+    var t: Transform = transform_identity();
+    var sh: Shader;
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 0, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 0) { ret 1; }
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 4, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 1) { ret 2; }
+
+    pass_draw_shaded_triangles(?p, nil, 3, ?format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 2) { ret 3; }
+
+    var empty_format: VertexFormat;
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 3, ?empty_format,
+                               ?bounds, ?mat, ?t, ?sh);
+    if (r.dropped != 3) { ret 4; }
+
+    pass_draw_shaded_triangles(?p, (?vertices[0])::ptr, 3, ?format,
+                               ?bounds, ?mat, ?t, nil);
+    if (r.dropped != 4) { ret 5; }
+    ret 0;
+}
+
+test "renderer: dynamic 3D bounds are transformed before culling" {
+    var c: Camera;
+    c.position = vec3(0.0, 0.0, 5.0);
+    c.target   = vec3(0.0, 0.0, 0.0);
+    c.up       = vec3(0.0, 1.0, 0.0);
+    c.fov      = 1.0;
+    c.aspect   = 1.0;
+    c.near     = 0.1;
+    c.far      = 100.0;
+
+    var view: Mat4 = camera_view(?c);
+    var projection: Mat4 = camera_projection(?c);
+    var vp: Mat4 = mat4_mul(?projection, ?view);
+    var p: Pass;
+    p.cull = 1;
+    p.frustum = frustum_from_matrix(?vp);
+
+    var bounds: Aabb = Aabb{
+        min: vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0),
+        max: vec3(1.0, 1.0, 1.0),
+    };
+    var t: Transform = transform_identity();
+    var model: Mat4 = transform_matrix(?t);
+    if (!dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 1; }
+
+    t.position = vec3(1000.0, 0.0, 0.0);
+    model = transform_matrix(?t);
+    if (dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 2; }
+
+    p.cull = 0;
+    if (!dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 3; }
     ret 0;
 }
 

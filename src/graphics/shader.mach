@@ -15,8 +15,9 @@
 # as a validation error rather than as a picture.
 #
 # So a Shader is the pair of SPIR-V modules and nothing else, and the pipelines
-# are built underneath it, on demand, keyed by render-pass compatibility and the
-# vertex layout each draw actually needs. A game creates one, draws with it, and
+# are built underneath it, on demand, keyed by render-pass compatibility, depth
+# convention, and the vertex layout each draw actually needs. A game creates
+# one, draws with it, and
 # deletes it.
 # It never names a pipeline, a render pass, or a descriptor set.
 #
@@ -55,26 +56,29 @@ use boom.graphics.vertex.vertex_format_skinned;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.PipelineDesc;
 use boom.graphics.pipeline.pipeline_desc_3d;
-use boom.graphics.pipeline.pipeline_init;
+use boom.graphics.pipeline.pipeline_init_depth;
 use boom.graphics.pipeline.pipeline_dnit;
 use boom.graphics.pipeline.SetLayout;
 use boom.graphics.pipeline.set_layout_full;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_eq;
 use boom.graphics.pass.pass_compatibility_one;
+use boom.graphics.depth.DepthConvention;
+use boom.graphics.depth.DEPTH_FORWARD;
+use boom.graphics.depth.DEPTH_REVERSED;
 
 # How many pipelines one shader may build.
 #
 # One per combination of render pass and vertex layout the shader is drawn
-# with. A game typically has one or two of each, so four is generous; a shader
-# that exhausts it is being used across more targets than a frame has, which is
-# a mistake worth reporting rather than growing through.
-pub val MAX_SHADER_PIPELINES: usize = 4;
+# with. the depth convention is another cache axis, so both conventions fit
+# without taking capacity away from the usual layouts and targets.
+pub val MAX_SHADER_PIPELINES: usize = 8;
 
-# One built pipeline and the two things it was built for.
+# one built pipeline and the state it was built for
 rec ShaderPipeline {
     compatibility: PassCompatibility;
     format:   VertexFormat;
+    depth:    DepthConvention;
     pipeline: Pipeline;
     live:     bool;
 }
@@ -95,7 +99,7 @@ pub rec Shader {
     frag:  *u8;
     flen:  usize;
     desc:  PipelineDesc;
-    built: [4]ShaderPipeline;
+    built: [8]ShaderPipeline;
     count: usize;
     ready: bool;
 }
@@ -154,12 +158,14 @@ pub fun shader_set_state(s: *Shader, d: PipelineDesc) {
 # and the caller reports that as a dropped draw rather than drawing with a
 # pipeline meant for different geometry.
 pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
-                        compatibility: *PassCompatibility, f: *VertexFormat) *Pipeline {
+                        compatibility: *PassCompatibility, f: *VertexFormat,
+                        depth: DepthConvention) *Pipeline {
     if (!s.ready || pass == nil) { ret nil; }
 
     var i: usize = 0;
     for (i < s.count) {
         if (s.built[i].live
+            && s.built[i].depth == depth
             && pass_compatibility_eq(?s.built[i].compatibility, compatibility)
             && vertex_format_eq(?s.built[i].format, f)) {
             ret ?s.built[i].pipeline;
@@ -171,13 +177,16 @@ pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
 
     val n: usize = s.count;
     var lay: SetLayout = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init(?s.built[n].pipeline, v, pass,
-                                               compatibility.color_count, f, ?s.desc,
-                                               s.vert, s.vlen, s.frag, s.flen, ?lay);
+    val r: Result[bool, Error] = pipeline_init_depth(?s.built[n].pipeline, v, pass,
+                                                     compatibility.color_count,
+                                                     f, ?s.desc, depth,
+                                                     s.vert, s.vlen,
+                                                     s.frag, s.flen, ?lay);
     if (is_err[bool, Error](r)) { ret nil; }
 
     s.built[n].compatibility = @compatibility;
     s.built[n].format = @f;
+    s.built[n].depth  = depth;
     s.built[n].live   = true;
     s.count = n + 1;
     ret ?s.built[n].pipeline;
@@ -284,24 +293,32 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
 
     s.built[0].compatibility = compatibility;
     s.built[0].format = std_fmt;
+    s.built[0].depth  = DEPTH_FORWARD;
     s.built[0].live   = true;
     s.count = 1;
 
     # The pair it was built for.
-    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt) != ?s.built[0].pipeline) { ret 2; }
+    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
+                        DEPTH_FORWARD) != ?s.built[0].pipeline) { ret 2; }
 
     # A distinct but compatible pass reuses it.
-    if (shader_pipeline(?s, ?v, b, ?compatibility, ?std_fmt) != ?s.built[0].pipeline) { ret 3; }
+    if (shader_pipeline(?s, ?v, b, ?compatibility, ?std_fmt,
+                        DEPTH_FORWARD) != ?s.built[0].pipeline) { ret 3; }
 
     # A different attachment format is not compatible. Building instead fails
     # here for want of a device, which is the nil.
-    if (shader_pipeline(?s, ?v, b, ?other, ?std_fmt) != nil) { ret 4; }
+    if (shader_pipeline(?s, ?v, b, ?other, ?std_fmt,
+                        DEPTH_FORWARD) != nil) { ret 4; }
 
     # Same pass, a different layout: likewise.
-    if (shader_pipeline(?s, ?v, a, ?compatibility, ?skin_fmt) != nil) { ret 5; }
+    if (shader_pipeline(?s, ?v, a, ?compatibility, ?skin_fmt,
+                        DEPTH_FORWARD) != nil) { ret 5; }
+
+    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
+                        DEPTH_REVERSED) != nil) { ret 6; }
 
     # And a failed build leaves nothing behind to be handed out later.
-    if (shader_pipelines(?s) != 1) { ret 6; }
+    if (shader_pipelines(?s) != 1) { ret 7; }
     ret 0;
 }
 
@@ -315,14 +332,15 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
 
     var fmt: VertexFormat = vertex_format_standard();
-    var handles: [4]u32;
-    var compatibilities: [4]PassCompatibility;
+    var handles: [8]u32;
+    var compatibilities: [8]PassCompatibility;
     var i: usize = 0;
     for (i < MAX_SHADER_PIPELINES) {
         handles[i] = i::u32;
         compatibilities[i] = pass_compatibility_one((i + 1)::i32);
         s.built[i].compatibility = compatibilities[i];
         s.built[i].format = fmt;
+        s.built[i].depth  = DEPTH_FORWARD;
         s.built[i].live   = true;
         i = i + 1;
     }
@@ -331,7 +349,8 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     var extra: u32 = 99;
     var extra_compatibility: PassCompatibility = pass_compatibility_one(99);
     if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass,
-                        ?extra_compatibility, ?fmt) != nil) { ret 2; }
+                        ?extra_compatibility, ?fmt,
+                        DEPTH_FORWARD) != nil) { ret 2; }
     # Nothing was evicted to make room.
     if (shader_pipelines(?s) != MAX_SHADER_PIPELINES) { ret 3; }
     if (!s.built[0].live)                             { ret 4; }
@@ -349,6 +368,6 @@ test "shader: an unready shader builds nothing" {
     s.ready = false;
     s.count = 0;
     if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass,
-                        ?compatibility, ?f) != nil) { ret 1; }
+                        ?compatibility, ?f, DEPTH_FORWARD) != nil) { ret 1; }
     ret 0;
 }

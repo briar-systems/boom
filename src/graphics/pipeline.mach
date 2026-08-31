@@ -41,6 +41,10 @@ use boom.graphics.vertex.COMP_U32;
 use boom.graphics.vertex.COMP_I8;
 use boom.graphics.vertex.COMP_I16;
 use boom.graphics.storage.FRAME_STORAGE_BINDING;
+use boom.graphics.depth.DepthConvention;
+use boom.graphics.depth.DEPTH_FORWARD;
+use boom.graphics.depth.DEPTH_REVERSED;
+use boom.graphics.depth.depth_convention_valid;
 
 # The format returned when an attribute cannot be expressed in Vulkan.
 pub val FORMAT_UNSUPPORTED: i32 = 0;
@@ -457,12 +461,26 @@ fun blend_attachment(mode: BlendMode) vk.PipelineColorBlendAttachmentState {
 # it travels alongside it.
 pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
                       f: *VertexFormat, d: *PipelineDesc,
-                      vert: *u8, vlen: usize, frag: *u8, flen: usize, layout: *SetLayout) Result[bool, Error] {
+                      vert: *u8, vlen: usize, frag: *u8, flen: usize,
+                      layout: *SetLayout) Result[bool, Error] {
+    ret pipeline_init_depth(p, v, pass, targets, f, d, DEPTH_FORWARD,
+                               vert, vlen, frag, flen, layout);
+}
+
+# build a pipeline for an explicit pass depth convention
+pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
+                            targets: usize, f: *VertexFormat,
+                            d: *PipelineDesc, depth: DepthConvention,
+                            vert: *u8, vlen: usize, frag: *u8, flen: usize,
+                            layout: *SetLayout) Result[bool, Error] {
     p.ready      = false;
     p.handle     = nil;
     p.layout     = nil;
     p.set_layout = nil;
 
+    if (!depth_convention_valid(depth)) {
+        ret err[bool, Error](error("invalid pipeline depth convention"));
+    }
     if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
     if (d.blend < BLEND_OPAQUE || d.blend > BLEND_ADDITIVE) {
         ret err[bool, Error](error("invalid pipeline blend mode"));
@@ -608,7 +626,7 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
         ds.depthTestEnable  = vk.TRUE;
         ds.depthWriteEnable = vk.TRUE;
     }
-    ds.depthCompareOp        = vk.COMPARE_OP_LESS;
+    ds.depthCompareOp        = depth_compare_op(depth);
     ds.depthBoundsTestEnable = vk.FALSE;
     ds.stencilTestEnable     = vk.FALSE;
     ds.minDepthBounds        = 0.0;
@@ -685,6 +703,11 @@ pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
 
     p.ready = true;
     ret ok[bool, Error](true);
+}
+
+fun depth_compare_op(depth: DepthConvention) i32 {
+    if (depth == DEPTH_REVERSED) { ret vk.COMPARE_OP_GREATER; }
+    ret vk.COMPARE_OP_LESS;
 }
 
 # Bind the pipeline and set the viewport and scissor for the current extent.
@@ -830,6 +853,12 @@ test "pipeline: 2D and 3D descriptions differ where it matters" {
     # sharing one description would make overlays disappear behind geometry.
     if (a.blend != BLEND_OPAQUE || !a.cull || !a.depth) { ret 1; }
     if (b.blend != BLEND_SOURCE_ALPHA || b.cull || b.depth) { ret 2; }
+    ret 0;
+}
+
+test "pipeline: depth convention selects the matching comparison" {
+    if (depth_compare_op(DEPTH_FORWARD) != vk.COMPARE_OP_LESS)     { ret 1; }
+    if (depth_compare_op(DEPTH_REVERSED) != vk.COMPARE_OP_GREATER) { ret 2; }
     ret 0;
 }
 

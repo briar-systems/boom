@@ -41,6 +41,7 @@ fwd mat.mat4_translation;
 fwd mat.mat4_scale;
 fwd mat.mat4_from_quat;
 fwd mat.mat4_perspective;
+fwd mat.mat4_perspective_reversed_infinite;
 fwd mat.mat4_orthographic;
 fwd mat.mat4_look_at;
 fwd mat.mat4_ptr;

@@ -472,6 +472,27 @@ pub fun window_set_min_size(w: *Window, width: i32, height: i32) {
     glfw.set_window_size_limits(w.handle, width, height, glfw.DONT_CARE, glfw.DONT_CARE);
 }
 
+# capture or release the pointer for relative first-person look
+pub fun window_set_cursor_captured(w: *Window, captured: bool) bool {
+    if (!window_is_valid(w)) { ret false; }
+    var mode: i32 = glfw.CURSOR_NORMAL;
+    if (captured) { mode = glfw.CURSOR_DISABLED; }
+    glfw.set_input_mode(w.handle, glfw.CURSOR, mode);
+    if (glfw.raw_mouse_motion_supported()) {
+        var raw: i32 = glfw.FALSE;
+        if (captured) { raw = glfw.TRUE; }
+        glfw.set_input_mode(w.handle, glfw.RAW_MOUSE_MOTION, raw);
+    }
+    window_refresh_size(w);
+    ret glfw.get_input_mode(w.handle, glfw.CURSOR) == mode;
+}
+
+# whether the pointer is currently captured for relative motion
+pub fun window_cursor_captured(w: *Window) bool {
+    if (!window_is_valid(w)) { ret false; }
+    ret glfw.get_input_mode(w.handle, glfw.CURSOR) == glfw.CURSOR_DISABLED;
+}
+
 # route this window's input into a queue
 #
 # where the platform callbacks deliver input
@@ -768,5 +789,12 @@ test "window: content-scale changes do not become cursor motion" {
     var e: Event;
     if (!queue_pop(?q, ?e)) { ret 5; }
     if (e.kind != MOUSE_MOVE || e.a != 202 || e.b != 104) { ret 6; }
+    ret 0;
+}
+
+test "window: cursor capture rejects an invalid window" {
+    var w: Window;
+    if (window_set_cursor_captured(?w, true)) { ret 1; }
+    if (window_cursor_captured(?w)) { ret 2; }
     ret 0;
 }
