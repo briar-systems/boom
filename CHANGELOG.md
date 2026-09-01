@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-01
+
+### Added
+- graphics: `renderer_mesh_with_bounds` uploads runtime geometry with an
+  `Aabb` the caller supplies, skipping the per-vertex `mesh_bounds_of` walk for
+  a game that already knows the extent of the geometry it generated. The box is
+  taken as given and is not validated against the vertices.
+- graphics: `renderer_mesh_begin` reserves host-visible staging and hands back
+  writable vertex and index pointers, and `renderer_mesh_end` submits the
+  transfer with caller-supplied bounds. Geometry generated in place is written
+  once instead of being assembled in a game's own array and copied again.
+  `renderer_mesh_cancel` releases a reservation that will not be finished, and
+  `renderer_mesh_reserved` reports how many are open. Each reservation owns its
+  own staging, so several may be open at once, and an open one is charged
+  against the pending upload budget until it is ended or cancelled.
+
+### Changed
+- graphics: `renderer_mesh` is now the begin, copy, end path with walked
+  bounds, so runtime uploads have one implementation rather than two. Its
+  signature, its errors, and the geometry it produces are unchanged.
+
 ## [0.22.0] - 2026-09-01
 
 ### Added

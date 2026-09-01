@@ -62,6 +62,8 @@ use std.types.result.err;
 use std.types.result.is_err;
 use std.types.result.unwrap_ok;
 use std.types.result.unwrap_err;
+use std.types.string.str;
+use mem: std.memory;
 use vk;
 use glfw.glfw;
 use boom.graphics.error.Error;
@@ -184,6 +186,7 @@ use boom.graphics.mesh.mesh_release_retired;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_write;
+use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.vertex.vertex_format_is_skinned;
 use boom.graphics.vertex.vertex_format_eq;
@@ -290,6 +293,7 @@ pub rec Renderer {
     retired:     [2]RetiredMeshes;
     uploads:     [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
     upload_count: usize;
+    upload_reserved: usize;
     ui_format:   VertexFormat;
     width:       i32;
     height:      i32;
@@ -364,6 +368,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
         retire_frame = retire_frame + 1;
     }
     r.upload_count = 0;
+    r.upload_reserved = 0;
     r.dropped     = 0;
     r.refused     = 0;
     r.culled      = 0;
@@ -526,62 +531,221 @@ fun collect_mesh_uploads(r: *Renderer) {
     }
 }
 
-# upload runtime geometry without draining the graphics queue
-pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
-                      format: *VertexFormat, indices: *u32,
-                      index_count: i32) Result[Mesh, Error] {
+# The staging a runtime mesh upload is written through, held between a
+# renderer_mesh_begin and its renderer_mesh_end.
+#
+# The caller writes vertex_bytes through `vertices` and index_bytes through
+# `indices`. Both point at host-coherent memory the transfer reads directly, so
+# geometry a game generates is written once rather than assembled in its own
+# array and copied again on the way to staging.
+#
+# When ok is false nothing but reason is meaningful.
+# ---
+# vertices:       writable vertex staging, vertex_bytes long
+# indices:        writable index staging, index_bytes long
+# vertex_count:   vertices the staging was sized for
+# index_count:    indices the staging was sized for
+# format:         the layout the vertices are written in
+# vertex_bytes:   the writable vertex extent, vertex_count * format.stride
+# index_bytes:    the writable index extent, four bytes per index
+# ok:             whether the staging was reserved
+# reason:         why a reservation was refused
+# vertex_staging: the vertex staging buffer, owned until end or cancel
+# index_staging:  the index staging buffer, owned until end or cancel
+pub rec MeshUpload {
+    vertices:       ptr;
+    indices:        *u32;
+    vertex_count:   i32;
+    index_count:    i32;
+    format:         VertexFormat;
+    vertex_bytes:   u64;
+    index_bytes:    u64;
+    ok:             bool;
+    reason:         Error;
+    vertex_staging: Buffer;
+    index_staging:  Buffer;
+}
+
+# whether another mesh upload fits, counting open reservations as outstanding
+#
+# A reservation holds staging and a queue slot from begin until end or cancel,
+# so it is charged against the same budget as a submitted transfer. Counting
+# only submitted transfers would admit a begin whose end has nowhere to go.
+fun mesh_upload_fits(pending: usize, reserved: usize) bool {
+    ret pending + reserved < MAX_PENDING_MESH_UPLOADS;
+}
+
+# the shape and staging extents an upload of this geometry needs
+fun mesh_upload_sizes(u: *MeshUpload, format: *VertexFormat,
+                      vertex_count: i32, index_count: i32) {
+    u.vertex_count = vertex_count;
+    u.index_count  = index_count;
+    u.format       = @format;
+    u.vertex_bytes = vertex_count::u64 * format.stride::u64;
+    u.index_bytes  = index_count::u64 * 4;
+}
+
+# copy a caller's arrays into the staging an upload exposes
+fun mesh_upload_fill(u: *MeshUpload, vertices: *u8, indices: *u8) {
+    mem.copy[u8](u.vertices:~*u8, vertices, u.vertex_bytes::usize);
+    mem.copy[u8](u.indices:~*u8, indices, u.index_bytes::usize);
+}
+
+# the Mesh an upload describes, before its device-local buffers exist
+fun mesh_upload_record(u: *MeshUpload, bounds: Aabb) Mesh {
+    var m: Mesh;
+    m.vertices.handle = nil;
+    m.indices.handle  = nil;
+    m.format          = u.format;
+    m.index_count     = u.index_count;
+    m.bounds          = bounds;
+    ret m;
+}
+
+fun mesh_upload_empty() MeshUpload {
+    var u: MeshUpload;
+    u.vertices     = nil;
+    u.indices      = nil;
+    u.vertex_count = 0;
+    u.index_count  = 0;
+    u.vertex_bytes = 0;
+    u.index_bytes  = 0;
+    u.ok           = false;
+    u.vertex_staging.handle = nil;
+    u.index_staging.handle  = nil;
+    ret u;
+}
+
+fun mesh_upload_refused(message: str) MeshUpload {
+    var u: MeshUpload = mesh_upload_empty();
+    u.reason = error(message);
+    ret u;
+}
+
+# release everything a failed end holds, staging and half-built mesh alike
+fun mesh_end_fail(r: *Renderer, pending: *PendingMeshUpload, m: *Mesh,
+                  reason: Error) Result[Mesh, Error] {
+    release_mesh_upload(r, pending);
+    buffer_dnit(?m.vertices, ?r.vk);
+    buffer_dnit(?m.indices, ?r.vk);
+    ret err[Mesh, Error](reason);
+}
+
+# Reserve host-visible staging for a runtime mesh and hand back its pointers.
+#
+# The caller writes its vertices and indices straight into the memory the
+# transfer reads, then finishes with renderer_mesh_end. That removes the copy
+# renderer_mesh makes out of a game's own array, which for multi-megabyte
+# generated geometry is the larger half of the upload cost.
+#
+# Every reservation owns its own staging, so several may be open at once and a
+# begin without an end does not disturb the next one. An open reservation is
+# charged against the pending upload budget until end or cancel retires it, and
+# one that is simply abandoned holds its staging until renderer teardown.
+# ---
+# r:            the renderer
+# format:       the layout the vertices will be written in
+# vertex_count: vertices to make room for
+# index_count:  indices to make room for
+# ret:          the staging to write through, or ok false and the reason
+pub fun renderer_mesh_begin(r: *Renderer, format: *VertexFormat,
+                            vertex_count: i32,
+                            index_count: i32) MeshUpload {
     if (r == nil || !r.ready_dev) {
-        ret err[Mesh, Error](error("the renderer is not initialized"));
+        ret mesh_upload_refused("the renderer is not initialized");
     }
     if (vertex_count <= 0 || index_count <= 0) {
-        ret err[Mesh, Error](error("a mesh needs at least one vertex and one index"));
+        ret mesh_upload_refused("a mesh needs at least one vertex and one index");
     }
     if (format == nil || format.stride == 0) {
-        ret err[Mesh, Error](error("the vertex format has a zero stride"));
+        ret mesh_upload_refused("the vertex format has a zero stride");
     }
     collect_mesh_uploads(r);
-    if (r.upload_count >= MAX_PENDING_MESH_UPLOADS) {
-        ret err[Mesh, Error](error("the runtime mesh upload queue is full"));
+    if (!mesh_upload_fits(r.upload_count, r.upload_reserved)) {
+        ret mesh_upload_refused("the runtime mesh upload queue is full");
     }
 
-    val vsize: u64 = vertex_count::u64 * format.stride::u64;
-    val isize: u64 = index_count::u64 * 4;
-    var mesh_out: Mesh;
-    mesh_out.vertices.handle = nil;
-    mesh_out.indices.handle = nil;
-    mesh_out.format = @format;
-    mesh_out.index_count = index_count;
-    mesh_out.bounds = mesh_bounds_of(vertices:~*u8, vertex_count, format);
+    var u: MeshUpload = mesh_upload_empty();
+    mesh_upload_sizes(?u, format, vertex_count, index_count);
 
-    var upload: PendingMeshUpload;
-    upload.vertex_staging.handle = nil;
-    upload.index_staging.handle = nil;
-    upload.command = nil;
-    upload.fence = nil;
-
-    val vsr: Result[bool, Error] = buffer_init(?upload.vertex_staging,
-        ?r.vk, vsize, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+    val vsr: Result[bool, Error] = buffer_init(?u.vertex_staging, ?r.vk,
+        u.vertex_bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
             | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (is_err[bool, Error](vsr)) {
-        ret err[Mesh, Error](unwrap_err[bool, Error](vsr));
+        u.reason = unwrap_err[bool, Error](vsr);
+        ret u;
     }
-    val isr: Result[bool, Error] = buffer_init(?upload.index_staging,
-        ?r.vk, isize, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+    val isr: Result[bool, Error] = buffer_init(?u.index_staging, ?r.vk,
+        u.index_bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
             | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (is_err[bool, Error](isr)) {
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        ret err[Mesh, Error](unwrap_err[bool, Error](isr));
+        buffer_dnit(?u.vertex_staging, ?r.vk);
+        u.reason = unwrap_err[bool, Error](isr);
+        ret u;
     }
-    if (!buffer_write(?upload.vertex_staging, ?r.vk,
-        vertices:~*u8, vsize)
-        || !buffer_write(?upload.index_staging, ?r.vk,
-            indices:~*u8, isize)) {
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not write runtime mesh staging buffers"));
+
+    # Mapped for the life of the reservation rather than per write: the caller
+    # holds these pointers, and the memory is host-coherent, so there is nothing
+    # to flush between the last write and the transfer.
+    u.vertices = buffer_map(?u.vertex_staging, ?r.vk);
+    u.indices  = buffer_map(?u.index_staging, ?r.vk):~*u32;
+    if (u.vertices == nil || u.indices == nil) {
+        buffer_dnit(?u.vertex_staging, ?r.vk);
+        buffer_dnit(?u.index_staging, ?r.vk);
+        u.vertices = nil;
+        u.indices  = nil;
+        u.reason   = error("could not map runtime mesh staging buffers");
+        ret u;
     }
+
+    r.upload_reserved = r.upload_reserved + 1;
+    u.ok = true;
+    ret u;
+}
+
+# Submit a reserved upload and hand back the mesh it becomes.
+#
+# `bounds` is taken as given. The caller guarantees the box contains every
+# vertex it wrote and boom does not walk the vertices to check, which is the
+# whole point for a caller that generated the geometry and already knows its
+# extent.
+#
+# The reservation is consumed either way, so a failed end needs no cancel and
+# ending twice reports the second call rather than submitting again.
+# ---
+# r:      the renderer the staging was reserved from
+# upload: the reservation, consumed by this call
+# bounds: the geometry's extent in the mesh's own space
+# ret:    the drawable Mesh handle, or the first upload error
+pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
+                          bounds: Aabb) Result[Mesh, Error] {
+    if (upload == nil) {
+        ret err[Mesh, Error](error("there is no mesh upload to finish"));
+    }
+    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
+    if (r == nil || !r.ready_dev) {
+        ret err[Mesh, Error](error("the renderer is not initialized"));
+    }
+
+    val vsize: u64 = upload.vertex_bytes;
+    val isize: u64 = upload.index_bytes;
+    var mesh_out: Mesh = mesh_upload_record(upload, bounds);
+
+    # The staging moves from the caller's reservation to the renderer's pending
+    # queue here, so the reservation is retired exactly once whatever follows.
+    var pending: PendingMeshUpload;
+    pending.vertex_staging = upload.vertex_staging;
+    pending.index_staging  = upload.index_staging;
+    pending.command = nil;
+    pending.fence   = nil;
+    upload.vertices = nil;
+    upload.indices  = nil;
+    upload.vertex_staging.handle = nil;
+    upload.index_staging.handle  = nil;
+    upload.ok = false;
+    r.upload_reserved = r.upload_reserved - 1;
 
     val vdr: Result[bool, Error] = buffer_init(?mesh_out.vertices, ?r.vk,
         vsize,
@@ -589,9 +753,8 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
             | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
         vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (is_err[bool, Error](vdr)) {
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](unwrap_err[bool, Error](vdr));
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            unwrap_err[bool, Error](vdr));
     }
     val idr: Result[bool, Error] = buffer_init(?mesh_out.indices, ?r.vk,
         isize,
@@ -599,10 +762,8 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
             | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
         vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (is_err[bool, Error](idr)) {
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](unwrap_err[bool, Error](idr));
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            unwrap_err[bool, Error](idr));
     }
 
     var ai: vk.CommandBufferAllocateInfo;
@@ -611,13 +772,12 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
     ai.commandPool = r.dev.pool;
     ai.level = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
-    if (vk.vkAllocateCommandBuffers(r.vk.device, ?ai, ?upload.command)
+    if (vk.vkAllocateCommandBuffers(r.vk.device, ?ai, ?pending.command)
         != vk.SUCCESS) {
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?mesh_out.indices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not allocate a runtime mesh upload command"));
+        # Nothing was allocated, so there is no command buffer to free.
+        pending.command = nil;
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            error("could not allocate a runtime mesh upload command"));
     }
 
     var bi: vk.CommandBufferBeginInfo;
@@ -625,27 +785,22 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
     bi.pNext = nil;
     bi.flags = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bi.pInheritanceInfo = nil;
-    if (vk.vkBeginCommandBuffer(upload.command, ?bi) != vk.SUCCESS) {
-        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
-            ?upload.command);
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?mesh_out.indices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not begin a runtime mesh upload"));
+    if (vk.vkBeginCommandBuffer(pending.command, ?bi) != vk.SUCCESS) {
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            error("could not begin a runtime mesh upload"));
     }
 
     var vertex_copy: vk.BufferCopy;
     vertex_copy.srcOffset = 0;
     vertex_copy.dstOffset = 0;
     vertex_copy.size = vsize;
-    vk.vkCmdCopyBuffer(upload.command, upload.vertex_staging.handle,
+    vk.vkCmdCopyBuffer(pending.command, pending.vertex_staging.handle,
         mesh_out.vertices.handle, 1, ?vertex_copy);
     var index_copy: vk.BufferCopy;
     index_copy.srcOffset = 0;
     index_copy.dstOffset = 0;
     index_copy.size = isize;
-    vk.vkCmdCopyBuffer(upload.command, upload.index_staging.handle,
+    vk.vkCmdCopyBuffer(pending.command, pending.index_staging.handle,
         mesh_out.indices.handle, 1, ?index_copy);
 
     var barriers: [2]vk.BufferMemoryBarrier;
@@ -667,33 +822,24 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
     barriers[1].buffer = mesh_out.indices.handle;
     barriers[1].offset = 0;
     barriers[1].size = isize;
-    vk.vkCmdPipelineBarrier(upload.command,
+    vk.vkCmdPipelineBarrier(pending.command,
         vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_VERTEX_INPUT_BIT,
         0, 0, nil, 2, ?barriers[0], 0, nil);
 
-    if (vk.vkEndCommandBuffer(upload.command) != vk.SUCCESS) {
-        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
-            ?upload.command);
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?mesh_out.indices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not finish a runtime mesh upload"));
+    if (vk.vkEndCommandBuffer(pending.command) != vk.SUCCESS) {
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            error("could not finish a runtime mesh upload"));
     }
 
     var fci: vk.FenceCreateInfo;
     fci.sType = vk.STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.pNext = nil;
     fci.flags = 0;
-    if (vk.vkCreateFence(r.vk.device, ?fci, nil, ?upload.fence)
+    if (vk.vkCreateFence(r.vk.device, ?fci, nil, ?pending.fence)
         != vk.SUCCESS) {
-        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
-            ?upload.command);
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?mesh_out.indices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not fence a runtime mesh upload"));
+        pending.fence = nil;
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            error("could not fence a runtime mesh upload"));
     }
 
     var si: vk.SubmitInfo;
@@ -703,24 +849,83 @@ pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
     si.pWaitSemaphores = nil;
     si.pWaitDstStageMask = nil;
     si.commandBufferCount = 1;
-    si.pCommandBuffers = ?upload.command;
+    si.pCommandBuffers = ?pending.command;
     si.signalSemaphoreCount = 0;
     si.pSignalSemaphores = nil;
-    if (vk.vkQueueSubmit(r.vk.graphics_queue, 1, ?si, upload.fence)
+    if (vk.vkQueueSubmit(r.vk.graphics_queue, 1, ?si, pending.fence)
         != vk.SUCCESS) {
-        vk.vkDestroyFence(r.vk.device, upload.fence, nil);
-        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
-            ?upload.command);
-        buffer_dnit(?mesh_out.vertices, ?r.vk);
-        buffer_dnit(?mesh_out.indices, ?r.vk);
-        buffer_dnit(?upload.vertex_staging, ?r.vk);
-        buffer_dnit(?upload.index_staging, ?r.vk);
-        ret err[Mesh, Error](error("could not submit a runtime mesh upload"));
+        ret mesh_end_fail(r, ?pending, ?mesh_out,
+            error("could not submit a runtime mesh upload"));
     }
 
-    r.uploads[r.upload_count] = upload;
+    r.uploads[r.upload_count] = pending;
     r.upload_count = r.upload_count + 1;
     ret ok[Mesh, Error](mesh_out);
+}
+
+# Release a reservation without uploading it.
+#
+# The way out of a begin the caller decides not to finish. end consumes the
+# reservation itself, so this is only for the abandoned case.
+# ---
+# r:      the renderer the staging was reserved from
+# upload: the reservation, consumed by this call
+pub fun renderer_mesh_cancel(r: *Renderer, upload: *MeshUpload) {
+    if (r == nil || upload == nil || !upload.ok) { ret; }
+    buffer_dnit(?upload.vertex_staging, ?r.vk);
+    buffer_dnit(?upload.index_staging, ?r.vk);
+    upload.vertices = nil;
+    upload.indices  = nil;
+    upload.ok       = false;
+    r.upload_reserved = r.upload_reserved - 1;
+}
+
+# reservations opened by renderer_mesh_begin and not yet ended or cancelled
+pub fun renderer_mesh_reserved(r: *Renderer) usize {
+    if (r == nil) { ret 0; }
+    ret r.upload_reserved;
+}
+
+# Upload runtime geometry with bounds the caller already knows.
+#
+# Identical to renderer_mesh except that the box is taken as given rather than
+# walked out of the vertices. That walk is a call per vertex, which a game
+# generating multi-megabyte meshes pays twice: once here and once wherever it
+# computed the same extent while building them.
+# ---
+# r:            the renderer
+# vertices:     raw interleaved vertex bytes
+# vertex_count: number of vertices
+# format:       the vertex layout
+# indices:      triangle index list, three per triangle
+# index_count:  number of indices
+# bounds:       the geometry's extent in the mesh's own space
+# ret:          the drawable Mesh handle, or the first upload error
+pub fun renderer_mesh_with_bounds(r: *Renderer, vertices: ptr,
+                                  vertex_count: i32, format: *VertexFormat,
+                                  indices: *u32, index_count: i32,
+                                  bounds: Aabb) Result[Mesh, Error] {
+    var upload: MeshUpload = renderer_mesh_begin(r, format, vertex_count,
+        index_count);
+    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
+    mesh_upload_fill(?upload, vertices:~*u8, indices:~*u8);
+    ret renderer_mesh_end(r, ?upload, bounds);
+}
+
+# upload runtime geometry without draining the graphics queue
+#
+# Walks the vertices for the mesh's bounds. A caller that already knows the
+# extent skips that with renderer_mesh_with_bounds, and one that can generate
+# its geometry in place skips this copy too with renderer_mesh_begin.
+pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
+                      format: *VertexFormat, indices: *u32,
+                      index_count: i32) Result[Mesh, Error] {
+    var upload: MeshUpload = renderer_mesh_begin(r, format, vertex_count,
+        index_count);
+    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
+    mesh_upload_fill(?upload, vertices:~*u8, indices:~*u8);
+    ret renderer_mesh_end(r, ?upload,
+        mesh_bounds_of(vertices:~*u8, vertex_count, format));
 }
 
 # The framebuffer width the renderer is currently drawing into, in pixels.
@@ -1112,6 +1317,9 @@ fun renderer_rollback(r: *Renderer) {
             r.upload_count = r.upload_count - 1;
             release_mesh_upload(r, ?r.uploads[r.upload_count]);
         }
+        # Staging still held by an open reservation dies with the device; the
+        # budget it charged has to die with it.
+        r.upload_reserved = 0;
         release_retired_meshes(r, 0);
         release_retired_meshes(r, 1);
     }
@@ -3031,5 +3239,131 @@ test "renderer: draining a renderer that never came up is a no-op" {
     var r: Renderer;
     r.vk.ready = false;
     renderer_wait_idle(?r);
+    ret 0;
+}
+
+test "renderer: an open mesh reservation is charged against the pending budget" {
+    if (!mesh_upload_fits(0, 0)) { ret 1; }
+    if (!mesh_upload_fits(MAX_PENDING_MESH_UPLOADS - 1, 0)) { ret 2; }
+    # A reservation holds staging and a slot from begin until end, so counting
+    # only submitted transfers would admit a begin whose end has nowhere to go.
+    if (mesh_upload_fits(MAX_PENDING_MESH_UPLOADS - 1, 1)) { ret 3; }
+    if (mesh_upload_fits(MAX_PENDING_MESH_UPLOADS, 0)) { ret 4; }
+    ret 0;
+}
+
+test "renderer: mesh upload staging is sized from the format's stride" {
+    var f: VertexFormat = vertex_format_standard();
+    var u: MeshUpload;
+    mesh_upload_sizes(?u, ?f, 4, 6);
+    if (u.vertex_count != 4 || u.index_count != 6) { ret 1; }
+    # The extent the caller may write. Sizing it from anything but the declared
+    # stride hands out a pointer that runs off the end of the allocation.
+    if (u.vertex_bytes != 4::u64 * f.stride::u64) { ret 2; }
+    if (u.index_bytes != 24) { ret 3; }
+    if (u.format.stride != f.stride) { ret 4; }
+    ret 0;
+}
+
+test "renderer: a mesh upload copies whole arrays through its own pointers" {
+    var f: VertexFormat = vertex_format_standard();
+    var u: MeshUpload;
+    mesh_upload_sizes(?u, ?f, 2, 3);
+
+    var src: [256]u8;
+    var i: usize = 0;
+    for (i < u.vertex_bytes::usize) { src[i] = (i + 1)::u8; i = i + 1; }
+    var idx: [3]u32;
+    idx[0] = 7;
+    idx[1] = 8;
+    idx[2] = 9;
+
+    # Staging needs a device, so the write path is exercised against plain
+    # memory: this is the copy renderer_mesh makes on the caller's behalf.
+    var vdst: [256]u8;
+    var idst: [3]u32;
+    u.vertices = (?vdst[0]):~ptr;
+    u.indices  = ?idst[0];
+    mesh_upload_fill(?u, ?src[0], (?idx[0]):~*u8);
+
+    i = 0;
+    for (i < u.vertex_bytes::usize) {
+        if (vdst[i] != src[i]) { ret 1; }
+        i = i + 1;
+    }
+    if (idst[0] != 7 || idst[1] != 8 || idst[2] != 9) { ret 2; }
+    ret 0;
+}
+
+test "renderer: caller-supplied mesh bounds reach the mesh exactly as given" {
+    var f: VertexFormat = vertex_format_standard();
+    var u: MeshUpload;
+    mesh_upload_sizes(?u, ?f, 3, 3);
+
+    val b: Aabb = Aabb{min: vec3(0.0 - 2.0, 0.0 - 1.0, 0.0 - 4.0),
+                       max: vec3(5.0, 6.0, 7.0)};
+
+    # Taken as given rather than recomputed: a caller that already knows its
+    # extent must not pay the per-vertex walk a second time.
+    val m: Mesh = mesh_upload_record(?u, b);
+    if (m.bounds.min[0] != 0.0 - 2.0) { ret 1; }
+    if (m.bounds.min[1] != 0.0 - 1.0) { ret 2; }
+    if (m.bounds.min[2] != 0.0 - 4.0) { ret 3; }
+    if (m.bounds.max[0] != 5.0)       { ret 4; }
+    if (m.bounds.max[1] != 6.0)       { ret 5; }
+    if (m.bounds.max[2] != 7.0)       { ret 6; }
+    if (m.index_count != 3)           { ret 7; }
+    if (m.format.stride != f.stride)  { ret 8; }
+    ret 0;
+}
+
+test "renderer: the walked bounds a mesh gets are the ones the vertices hold" {
+    var f: VertexFormat = vertex_format_standard();
+    # Two standard vertices: position, normal, texcoord, eight floats each.
+    var v: [16]f32;
+    var i: usize = 0;
+    for (i < 16) { v[i] = 0.0; i = i + 1; }
+    v[0] = 1.0;
+    v[1] = 2.0;
+    v[2] = 3.0;
+    v[8]  = 0.0 - 4.0;
+    v[9]  = 0.0 - 5.0;
+    v[10] = 0.0 - 6.0;
+
+    var u: MeshUpload;
+    mesh_upload_sizes(?u, ?f, 2, 3);
+
+    # renderer_mesh is renderer_mesh_with_bounds fed this walk, so the two paths
+    # agree on a mesh whose caller did not supply a box.
+    val walked: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
+    val m: Mesh = mesh_upload_record(?u, walked);
+    if (m.bounds.min[0] != 0.0 - 4.0) { ret 1; }
+    if (m.bounds.min[1] != 0.0 - 5.0) { ret 2; }
+    if (m.bounds.min[2] != 0.0 - 6.0) { ret 3; }
+    if (m.bounds.max[0] != 1.0)       { ret 4; }
+    if (m.bounds.max[1] != 2.0)       { ret 5; }
+    if (m.bounds.max[2] != 3.0)       { ret 6; }
+    ret 0;
+}
+
+test "renderer: a mesh upload begun before the device is refused, not a fault" {
+    var r: Renderer;
+    r.ready_dev = false;
+    r.upload_count = 0;
+    r.upload_reserved = 0;
+    var f: VertexFormat = vertex_format_standard();
+
+    var u: MeshUpload = renderer_mesh_begin(?r, ?f, 3, 3);
+    if (u.ok) { ret 1; }
+    # A refused reservation hands back no pointers to write through and charges
+    # nothing, so a caller that ignores ok writes to nil rather than to memory
+    # the renderer thinks it owns.
+    if (u.vertices != nil || u.indices != nil) { ret 2; }
+    if (renderer_mesh_reserved(?r) != 0) { ret 3; }
+
+    val m: Result[Mesh, Error] = renderer_mesh_end(?r, ?u, aabb_empty());
+    if (!is_err[Mesh, Error](m)) { ret 4; }
+    renderer_mesh_cancel(?r, ?u);
+    if (renderer_mesh_reserved(?r) != 0 || r.upload_count != 0) { ret 5; }
     ret 0;
 }
