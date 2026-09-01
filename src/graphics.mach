@@ -238,6 +238,16 @@ fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_device;
 fwd boom.graphics.renderer.renderer_mesh;
+# Two ways past the cost renderer_mesh pays on the caller's behalf. The
+# with-bounds form skips the per-vertex walk for a caller that already knows the
+# extent; the begin/end pair skips the copy as well, by handing the caller the
+# staging to generate its geometry into. See boom.graphics.renderer.
+fwd boom.graphics.renderer.MeshUpload;
+fwd boom.graphics.renderer.renderer_mesh_with_bounds;
+fwd boom.graphics.renderer.renderer_mesh_begin;
+fwd boom.graphics.renderer.renderer_mesh_end;
+fwd boom.graphics.renderer.renderer_mesh_cancel;
+fwd boom.graphics.renderer.renderer_mesh_reserved;
 fwd boom.graphics.fit.FitMode;
 fwd boom.graphics.fit.FIT_STRETCH;
 fwd boom.graphics.fit.FIT_CONTAIN;
