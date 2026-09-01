@@ -75,35 +75,86 @@ pub val BLEND_ADDITIVE: BlendMode = 2;
 
 # What a pipeline needs beyond its shaders and vertex format.
 # ---
-# blend:   How fragment output combines with the colour attachment.
-# cull:    Back-face culling. Off for 2D, where quads may be wound either way.
-# depth:   Depth test and write. Off for overlays drawn in submission order.
-# topology: Primitive topology, normally a triangle list.
+# blend:                How fragment output combines with the colour attachment.
+# cull:                 Back-face culling. Off for 2D, where quads may be wound either way.
+# depth:                Depth test and write. Off for overlays drawn in submission order.
+# depth_bias:           Whether rasterized depth is offset before depth testing and fragment shading.
+# depth_bias_constant:  Constant depth offset in implementation-dependent depth units.
+# depth_bias_clamp:     Maximum absolute depth offset. Zero leaves the offset unclamped.
+# depth_bias_slope:     Offset scaled by the primitive's maximum depth slope.
+# topology:             Primitive topology, normally a triangle list.
 pub rec PipelineDesc {
-    blend:    BlendMode;
-    cull:     bool;
-    depth:    bool;
-    topology: i32;
+    blend:               BlendMode;
+    cull:                bool;
+    depth:               bool;
+    depth_bias:          bool;
+    depth_bias_constant: f32;
+    depth_bias_clamp:    f32;
+    depth_bias_slope:    f32;
+    topology:            i32;
 }
 
 # The default description: opaque, culled, depth-tested triangles.
 pub fun pipeline_desc_3d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend    = BLEND_OPAQUE;
-    d.cull     = true;
-    d.depth    = true;
-    d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    d.blend               = BLEND_OPAQUE;
+    d.cull                = true;
+    d.depth               = true;
+    d.depth_bias          = false;
+    d.depth_bias_constant = 0.0;
+    d.depth_bias_clamp    = 0.0;
+    d.depth_bias_slope    = 0.0;
+    d.topology            = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     ret d;
 }
 
 # The 2D description: blended, unculled, no depth.
 pub fun pipeline_desc_2d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend    = BLEND_SOURCE_ALPHA;
-    d.cull     = false;
-    d.depth    = false;
-    d.topology = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    d.blend               = BLEND_SOURCE_ALPHA;
+    d.cull                = false;
+    d.depth               = false;
+    d.depth_bias          = false;
+    d.depth_bias_constant = 0.0;
+    d.depth_bias_clamp    = 0.0;
+    d.depth_bias_slope    = 0.0;
+    d.topology            = vk.PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     ret d;
+}
+
+fun rasterization_state(d: *PipelineDesc) vk.PipelineRasterizationStateCreateInfo {
+    var rs: vk.PipelineRasterizationStateCreateInfo;
+    rs.sType                   = vk.STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs.pNext                   = nil;
+    rs.flags                   = 0;
+    rs.depthClampEnable        = vk.FALSE;
+    rs.rasterizerDiscardEnable = vk.FALSE;
+    rs.polygonMode             = vk.POLYGON_MODE_FILL;
+    rs.cullMode                = 0;
+    if (d.cull) { rs.cullMode = vk.CULL_MODE_BACK_BIT; }
+    # COUNTER-CLOCKWISE, matching glTF's winding, and the Y flip does not change
+    # that. It is tempting to reason that boom.math negates Y to reach Vulkan's
+    # clip space, that a negation mirrors every triangle, and that CLOCKWISE
+    # therefore follows. The middle step is where it goes wrong: Vulkan's
+    # framebuffer already has Y increasing downward, so the negation converts a
+    # Y-up view space into that convention rather than mirroring anything the
+    # rasterizer sees. The winding on screen is what it was in model space.
+    #
+    # This was CLOCKWISE, and the argument above was written down next to it, and
+    # it culled part of every closed mesh. Nothing reported that: a cube missing
+    # some of its faces still draws, still presents, and still has the right
+    # silhouette from the outside, because the faces behind the missing ones are
+    # drawn instead. examples/vulkan reads the render back and compares the
+    # covered pixel count against the area of the projected hull, which is the
+    # check that caught it.
+    rs.frontFace               = vk.FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.depthBiasEnable         = vk.FALSE;
+    if (d.depth_bias) { rs.depthBiasEnable = vk.TRUE; }
+    rs.depthBiasConstantFactor = d.depth_bias_constant;
+    rs.depthBiasClamp          = d.depth_bias_clamp;
+    rs.depthBiasSlopeFactor    = d.depth_bias_slope;
+    rs.lineWidth               = 1.0;
+    ret rs;
 }
 
 # The Vulkan format for one vertex attribute.
@@ -574,37 +625,7 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     vp.scissorCount  = 1;
     vp.pScissors     = nil;
 
-    var rs: vk.PipelineRasterizationStateCreateInfo;
-    rs.sType                   = vk.STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rs.pNext                   = nil;
-    rs.flags                   = 0;
-    rs.depthClampEnable        = vk.FALSE;
-    rs.rasterizerDiscardEnable = vk.FALSE;
-    rs.polygonMode             = vk.POLYGON_MODE_FILL;
-    rs.cullMode                = 0;
-    if (d.cull) { rs.cullMode = vk.CULL_MODE_BACK_BIT; }
-    # COUNTER-CLOCKWISE, matching glTF's winding, and the Y flip does not change
-    # that. It is tempting to reason that boom.math negates Y to reach Vulkan's
-    # clip space, that a negation mirrors every triangle, and that CLOCKWISE
-    # therefore follows. The middle step is where it goes wrong: Vulkan's
-    # framebuffer already has Y increasing downward, so the negation converts a
-    # Y-up view space into that convention rather than mirroring anything the
-    # rasterizer sees. The winding on screen is what it was in model space.
-    #
-    # This was CLOCKWISE, and the argument above was written down next to it, and
-    # it culled part of every closed mesh. Nothing reported that: a cube missing
-    # some of its faces still draws, still presents, and still has the right
-    # silhouette from the outside, because the faces behind the missing ones are
-    # drawn instead. examples/vulkan reads the render back and compares the
-    # covered pixel count against the area of the projected hull, which is the
-    # check that caught it.
-    rs.frontFace               = vk.FRONT_FACE_COUNTER_CLOCKWISE;
-    rs.depthBiasEnable         = vk.FALSE;
-    rs.depthBiasConstantFactor = 0.0;
-    rs.depthBiasClamp          = 0.0;
-    rs.depthBiasSlopeFactor    = 0.0;
-    rs.lineWidth               = 1.0;
-
+    var rs: vk.PipelineRasterizationStateCreateInfo = rasterization_state(d);
     var ms: vk.PipelineMultisampleStateCreateInfo;
     ms.sType                 = vk.STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.pNext                 = nil;
@@ -853,6 +874,25 @@ test "pipeline: 2D and 3D descriptions differ where it matters" {
     # sharing one description would make overlays disappear behind geometry.
     if (a.blend != BLEND_OPAQUE || !a.cull || !a.depth) { ret 1; }
     if (b.blend != BLEND_SOURCE_ALPHA || b.cull || b.depth) { ret 2; }
+    if (a.depth_bias || a.depth_bias_constant != 0.0
+        || a.depth_bias_clamp != 0.0 || a.depth_bias_slope != 0.0) { ret 3; }
+    if (b.depth_bias || b.depth_bias_constant != 0.0
+        || b.depth_bias_clamp != 0.0 || b.depth_bias_slope != 0.0) { ret 4; }
+    ret 0;
+}
+
+test "pipeline: raster depth bias maps exactly to Vulkan state" {
+    var d: PipelineDesc = pipeline_desc_3d();
+    d.depth_bias          = true;
+    d.depth_bias_constant = 1.25;
+    d.depth_bias_clamp    = 0.75;
+    d.depth_bias_slope    = 1.5;
+
+    val rs: vk.PipelineRasterizationStateCreateInfo = rasterization_state(?d);
+    if (rs.depthBiasEnable != vk.TRUE) { ret 1; }
+    if (rs.depthBiasConstantFactor != 1.25) { ret 2; }
+    if (rs.depthBiasClamp != 0.75) { ret 3; }
+    if (rs.depthBiasSlopeFactor != 1.5) { ret 4; }
     ret 0;
 }
 
