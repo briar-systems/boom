@@ -40,11 +40,13 @@
 # Those go in one draw, through a per-frame vertex arena, in the layout
 # vertex_format_ui describes. blit emits exactly that layout.
 #
-# EVERY DRAW TAKES A UNIFORM SLOT. A Vulkan draw reads a buffer range that
-# must already hold its values when the command buffer executes, so each
-# draw writes its own slot of a per-frame ring. A frame therefore has a
-# bounded number of draws, and renderer_dropped reports any it refused
-# rather than letting them silently not appear.
+# EVERY SURFACE STATE TAKES A UNIFORM SLOT. A Vulkan draw reads a buffer range
+# that must already hold its values when the command buffer executes, so an
+# ordinary draw writes its own slot of a per-frame ring. Static meshes sharing
+# one immutable transform, material, shader, and vertex layout can use
+# pass_draw_shaded_batch to share one slot and pipeline bind while retaining
+# independent bounds and buffers. renderer_dropped reports any refusal rather
+# than letting geometry silently not appear.
 #
 # A GAME'S OWN SHADING HAS TWO BUDGETS. pass_set_user sets the block that
 # arrives at binding 4: a draw's own parameters, copied into that draw's
@@ -322,6 +324,7 @@ fwd boom.graphics.renderer.pass_set_user;
 fwd boom.graphics.renderer.pass_set_shader;
 fwd boom.graphics.renderer.pass_set_material;
 fwd boom.graphics.renderer.pass_draw_shaded;
+fwd boom.graphics.renderer.pass_draw_shaded_batch;
 fwd boom.graphics.renderer.pass_draw_shaded_triangles;
 fwd boom.graphics.renderer.pass_draw_shaded_skinned;
 fwd boom.graphics.descriptor.USER_BYTES;
