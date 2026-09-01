@@ -38,10 +38,11 @@
 # arrives at binding 8 as one buffer the whole frame shares. See
 # boom.graphics.storage for why those are two things rather than one.
 #
-# A 3D draw takes a uniform slot. GL set named uniforms on the bound program
-# between draws; a Vulkan draw reads a buffer range that must already hold
-# its values when the command buffer executes, so each mesh draw writes its
-# own slot.
+# A 3D surface state takes a uniform slot. GL set named uniforms on the bound
+# program between draws; a Vulkan draw reads a buffer range that must already
+# hold its values when the command buffer executes. pass_draw_shaded writes one
+# slot for one mesh. pass_draw_shaded_batch deliberately shares that immutable
+# state across many static meshes.
 #
 # 2D draws do not, and that is deliberate. A sprite carrying a per-draw
 # uniform put a hard ceiling on how many could be drawn in a frame, and the
@@ -141,6 +142,7 @@ use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.vertex.vertex_format_ui;
 use boom.graphics.vertex.vertex_format_standard;
+use boom.graphics.vertex.vertex_format_skinned;
 use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
@@ -179,6 +181,7 @@ use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
 use boom.graphics.mesh.mesh_release_retired;
 use boom.graphics.vertex.vertex_format_is_skinned;
+use boom.graphics.vertex.vertex_format_eq;
 use boom.graphics.skeleton.Pose;
 use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.pose_matrices;
@@ -1807,6 +1810,144 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
 # sh:  the game's shader
 pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
     pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, sh);
+}
+
+# submit static meshes that share one shaded surface state
+#
+# this is the static-world counterpart to pass_draw_shaded. one transform,
+# material, shader, descriptor slot, and pipeline bind serve every mesh in the
+# array. each mesh still owns its buffers and bounds, so boom can cull and draw
+# the visible members independently without making the game merge unrelated
+# resource lifetimes.
+#
+# every mesh must use the same unskinned vertex layout. a mixed-layout batch is
+# refused as a whole because its one bound pipeline cannot describe two vertex
+# streams. use another batch for another layout or surface state.
+#
+# the mesh pointer array is borrowed for this call. meshes and their backing
+# buffers remain owned by the caller.
+# ---
+# p:          the open pass
+# meshes:     pointers to meshes sharing the batch state
+# mesh_count: number of pointers
+# mat:        the shared material
+# t:          the shared model transform
+# sh:         the shared game shader
+pub fun pass_draw_shaded_batch(p: *Pass, meshes: **Mesh, mesh_count: usize,
+                               mat: *Material, t: *Transform, sh: *Shader) {
+    if (mesh_count == 0) { ret; }
+    val r: *Renderer = p.renderer;
+    if (!shaded_batch_valid(meshes, mesh_count, mat, t, sh)) {
+        r.dropped = r.dropped + mesh_count;
+        ret;
+    }
+
+    # preserve submission order with any open 2D run before binding the shared
+    # surface state.
+    batch_flush(p);
+
+    var model: Mat4 = transform_matrix(t);
+    var visible: usize = 0;
+    var i: usize = 0;
+    for (i < mesh_count) {
+        val m: *Mesh = meshes[i];
+        if (!p.cull) { visible = visible + 1; }
+        or {
+            var world_bounds: Aabb = aabb_transform(?m.bounds, ?model);
+            if (frustum_contains_aabb(?p.frustum, ?world_bounds)) {
+                visible = visible + 1;
+            }
+            or { r.culled = r.culled + 1; }
+        }
+        i = i + 1;
+    }
+    if (visible == 0) { ret; }
+
+    val slot: usize = take_slot(p);
+    if (slot == NO_SLOT) {
+        # take_slot counted one refused slot. the remaining visible meshes are
+        # absent for the same refusal and belong in the draw count too.
+        if (visible > 1) { r.dropped = r.dropped + visible - 1; }
+        ret;
+    }
+
+    var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
+    var mvp: Mat4 = mat4_mul(?vp, ?model);
+    var uniforms: MeshUniforms;
+    uniforms.mvp = mvp;
+    uniforms.model = model;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot,
+                                (?uniforms):~*u8, $size_of(MeshUniforms))) {
+        r.dropped = r.dropped + visible;
+        ret;
+    }
+    if (!write_surface_slot(p, slot, mat, material_texture(mat), mat.base_color)) {
+        r.dropped = r.dropped + visible;
+        ret;
+    }
+    if (!bind_surface_pipeline(p, ?meshes[0].format, PROGRAM_MESH, sh, slot)) {
+        r.dropped = r.dropped + visible;
+        ret;
+    }
+
+    i = 0;
+    for (i < mesh_count) {
+        val m: *Mesh = meshes[i];
+        var draw: bool = true;
+        if (p.cull) {
+            var world_bounds: Aabb = aabb_transform(?m.bounds, ?model);
+            draw = frustum_contains_aabb(?p.frustum, ?world_bounds);
+        }
+        if (draw) {
+            mesh_draw(m, p.cmd);
+            r.draws = r.draws + 1;
+        }
+        i = i + 1;
+    }
+}
+
+fun shaded_batch_valid(meshes: **Mesh, mesh_count: usize, mat: *Material,
+                       t: *Transform, sh: *Shader) bool {
+    if (meshes == nil || mesh_count == 0 || mat == nil || t == nil || sh == nil) {
+        ret false;
+    }
+    val first: *Mesh = meshes[0];
+    if (first == nil || first.format.stride == 0
+        || vertex_format_is_skinned(?first.format)) {
+        ret false;
+    }
+    var i: usize = 1;
+    for (i < mesh_count) {
+        val m: *Mesh = meshes[i];
+        if (m == nil || !vertex_format_eq(?first.format, ?m.format)) {
+            ret false;
+        }
+        i = i + 1;
+    }
+    ret true;
+}
+
+test "renderer: a shaded mesh batch has one vertex layout" {
+    var a: Mesh;
+    var b: Mesh;
+    a.format = vertex_format_standard();
+    b.format = vertex_format_standard();
+    var meshes: [2]*Mesh;
+    meshes[0] = ?a;
+    meshes[1] = ?b;
+    var mat: Material;
+    var transform: Transform = transform_identity();
+    var shader: Shader;
+
+    if (!shaded_batch_valid(?meshes[0], 2, ?mat, ?transform, ?shader)) { ret 1; }
+    b.format = vertex_format_ui();
+    if (shaded_batch_valid(?meshes[0], 2, ?mat, ?transform, ?shader)) { ret 2; }
+    b.format = vertex_format_skinned();
+    a.format = vertex_format_skinned();
+    if (shaded_batch_valid(?meshes[0], 2, ?mat, ?transform, ?shader)) { ret 3; }
+    meshes[1] = nil;
+    if (shaded_batch_valid(?meshes[0], 2, ?mat, ?transform, ?shader)) { ret 4; }
+    ret 0;
 }
 
 # submit dynamic non-indexed 3D triangles through a game shader
