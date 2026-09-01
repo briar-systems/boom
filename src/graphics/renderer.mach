@@ -179,7 +179,12 @@ use boom.graphics.texture.texture_view;
 use boom.graphics.texture.texture_delete;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_draw;
+use boom.graphics.mesh.mesh_bounds_of;
 use boom.graphics.mesh.mesh_release_retired;
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_write;
+use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.vertex.vertex_format_is_skinned;
 use boom.graphics.vertex.vertex_format_eq;
 use boom.graphics.skeleton.Pose;
@@ -226,10 +231,18 @@ use boom.graphics.depth.DEPTH_FORWARD;
 use boom.graphics.depth.DEPTH_REVERSED;
 
 pub val MAX_RETIRED_MESHES: usize = 1024;
+pub val MAX_PENDING_MESH_UPLOADS: usize = 1024;
 
 rec RetiredMeshes {
     meshes: [1024]Mesh;
     count: usize;
+}
+
+rec PendingMeshUpload {
+    vertex_staging: Buffer;
+    index_staging: Buffer;
+    command: vk.CommandBuffer;
+    fence: vk.Fence;
 }
 
 # the render device: the frame lifecycle, pipelines, and shared resources
@@ -275,6 +288,8 @@ pub rec Renderer {
     stream:      VertexStream;
     store:       FrameStorage;
     retired:     [2]RetiredMeshes;
+    uploads:     [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
+    upload_count: usize;
     ui_format:   VertexFormat;
     width:       i32;
     height:      i32;
@@ -348,6 +363,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
         r.retired[retire_frame].count = 0;
         retire_frame = retire_frame + 1;
     }
+    r.upload_count = 0;
     r.dropped     = 0;
     r.refused     = 0;
     r.culled      = 0;
@@ -478,6 +494,233 @@ pub fun renderer_is_srgb(r: *Renderer) bool {
 # ret: the upload context, valid while the renderer lives
 pub fun renderer_device(r: *Renderer) *Device {
     ret ?r.dev;
+}
+
+fun release_mesh_upload(r: *Renderer, upload: *PendingMeshUpload) {
+    if (upload.fence != nil) {
+        vk.vkDestroyFence(r.vk.device, upload.fence, nil);
+        upload.fence = nil;
+    }
+    if (upload.command != nil) {
+        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
+            ?upload.command);
+        upload.command = nil;
+    }
+    buffer_dnit(?upload.vertex_staging, ?r.vk);
+    buffer_dnit(?upload.index_staging, ?r.vk);
+}
+
+fun collect_mesh_uploads(r: *Renderer) {
+    if (r == nil || !r.ready_dev) { ret; }
+    var i: usize = 0;
+    for (i < r.upload_count) {
+        if (vk.vkGetFenceStatus(r.vk.device, r.uploads[i].fence)
+            == vk.SUCCESS) {
+            release_mesh_upload(r, ?r.uploads[i]);
+            r.upload_count = r.upload_count - 1;
+            if (i < r.upload_count) {
+                r.uploads[i] = r.uploads[r.upload_count];
+            }
+        }
+        or { i = i + 1; }
+    }
+}
+
+# upload runtime geometry without draining the graphics queue
+pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
+                      format: *VertexFormat, indices: *u32,
+                      index_count: i32) Result[Mesh, Error] {
+    if (r == nil || !r.ready_dev) {
+        ret err[Mesh, Error](error("the renderer is not initialized"));
+    }
+    if (vertex_count <= 0 || index_count <= 0) {
+        ret err[Mesh, Error](error("a mesh needs at least one vertex and one index"));
+    }
+    if (format == nil || format.stride == 0) {
+        ret err[Mesh, Error](error("the vertex format has a zero stride"));
+    }
+    collect_mesh_uploads(r);
+    if (r.upload_count >= MAX_PENDING_MESH_UPLOADS) {
+        ret err[Mesh, Error](error("the runtime mesh upload queue is full"));
+    }
+
+    val vsize: u64 = vertex_count::u64 * format.stride::u64;
+    val isize: u64 = index_count::u64 * 4;
+    var mesh_out: Mesh;
+    mesh_out.vertices.handle = nil;
+    mesh_out.indices.handle = nil;
+    mesh_out.format = @format;
+    mesh_out.index_count = index_count;
+    mesh_out.bounds = mesh_bounds_of(vertices:~*u8, vertex_count, format);
+
+    var upload: PendingMeshUpload;
+    upload.vertex_staging.handle = nil;
+    upload.index_staging.handle = nil;
+    upload.command = nil;
+    upload.fence = nil;
+
+    val vsr: Result[bool, Error] = buffer_init(?upload.vertex_staging,
+        ?r.vk, vsize, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](vsr)) {
+        ret err[Mesh, Error](unwrap_err[bool, Error](vsr));
+    }
+    val isr: Result[bool, Error] = buffer_init(?upload.index_staging,
+        ?r.vk, isize, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
+            | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (is_err[bool, Error](isr)) {
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        ret err[Mesh, Error](unwrap_err[bool, Error](isr));
+    }
+    if (!buffer_write(?upload.vertex_staging, ?r.vk,
+        vertices:~*u8, vsize)
+        || !buffer_write(?upload.index_staging, ?r.vk,
+            indices:~*u8, isize)) {
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not write runtime mesh staging buffers"));
+    }
+
+    val vdr: Result[bool, Error] = buffer_init(?mesh_out.vertices, ?r.vk,
+        vsize,
+        vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
+            | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (is_err[bool, Error](vdr)) {
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](unwrap_err[bool, Error](vdr));
+    }
+    val idr: Result[bool, Error] = buffer_init(?mesh_out.indices, ?r.vk,
+        isize,
+        vk.BUFFER_USAGE_INDEX_BUFFER_BIT
+            | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (is_err[bool, Error](idr)) {
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](unwrap_err[bool, Error](idr));
+    }
+
+    var ai: vk.CommandBufferAllocateInfo;
+    ai.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.pNext = nil;
+    ai.commandPool = r.dev.pool;
+    ai.level = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    if (vk.vkAllocateCommandBuffers(r.vk.device, ?ai, ?upload.command)
+        != vk.SUCCESS) {
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?mesh_out.indices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not allocate a runtime mesh upload command"));
+    }
+
+    var bi: vk.CommandBufferBeginInfo;
+    bi.sType = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.pNext = nil;
+    bi.flags = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    bi.pInheritanceInfo = nil;
+    if (vk.vkBeginCommandBuffer(upload.command, ?bi) != vk.SUCCESS) {
+        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
+            ?upload.command);
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?mesh_out.indices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not begin a runtime mesh upload"));
+    }
+
+    var vertex_copy: vk.BufferCopy;
+    vertex_copy.srcOffset = 0;
+    vertex_copy.dstOffset = 0;
+    vertex_copy.size = vsize;
+    vk.vkCmdCopyBuffer(upload.command, upload.vertex_staging.handle,
+        mesh_out.vertices.handle, 1, ?vertex_copy);
+    var index_copy: vk.BufferCopy;
+    index_copy.srcOffset = 0;
+    index_copy.dstOffset = 0;
+    index_copy.size = isize;
+    vk.vkCmdCopyBuffer(upload.command, upload.index_staging.handle,
+        mesh_out.indices.handle, 1, ?index_copy);
+
+    var barriers: [2]vk.BufferMemoryBarrier;
+    barriers[0].sType = vk.STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barriers[0].pNext = nil;
+    barriers[0].srcAccessMask = vk.ACCESS_TRANSFER_WRITE_BIT;
+    barriers[0].dstAccessMask = vk.ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    barriers[0].srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    barriers[0].dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    barriers[0].buffer = mesh_out.vertices.handle;
+    barriers[0].offset = 0;
+    barriers[0].size = vsize;
+    barriers[1].sType = vk.STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barriers[1].pNext = nil;
+    barriers[1].srcAccessMask = vk.ACCESS_TRANSFER_WRITE_BIT;
+    barriers[1].dstAccessMask = vk.ACCESS_INDEX_READ_BIT;
+    barriers[1].srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    barriers[1].dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
+    barriers[1].buffer = mesh_out.indices.handle;
+    barriers[1].offset = 0;
+    barriers[1].size = isize;
+    vk.vkCmdPipelineBarrier(upload.command,
+        vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0, 0, nil, 2, ?barriers[0], 0, nil);
+
+    if (vk.vkEndCommandBuffer(upload.command) != vk.SUCCESS) {
+        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
+            ?upload.command);
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?mesh_out.indices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not finish a runtime mesh upload"));
+    }
+
+    var fci: vk.FenceCreateInfo;
+    fci.sType = vk.STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fci.pNext = nil;
+    fci.flags = 0;
+    if (vk.vkCreateFence(r.vk.device, ?fci, nil, ?upload.fence)
+        != vk.SUCCESS) {
+        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
+            ?upload.command);
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?mesh_out.indices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not fence a runtime mesh upload"));
+    }
+
+    var si: vk.SubmitInfo;
+    si.sType = vk.STRUCTURE_TYPE_SUBMIT_INFO;
+    si.pNext = nil;
+    si.waitSemaphoreCount = 0;
+    si.pWaitSemaphores = nil;
+    si.pWaitDstStageMask = nil;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = ?upload.command;
+    si.signalSemaphoreCount = 0;
+    si.pSignalSemaphores = nil;
+    if (vk.vkQueueSubmit(r.vk.graphics_queue, 1, ?si, upload.fence)
+        != vk.SUCCESS) {
+        vk.vkDestroyFence(r.vk.device, upload.fence, nil);
+        vk.vkFreeCommandBuffers(r.vk.device, r.dev.pool, 1,
+            ?upload.command);
+        buffer_dnit(?mesh_out.vertices, ?r.vk);
+        buffer_dnit(?mesh_out.indices, ?r.vk);
+        buffer_dnit(?upload.vertex_staging, ?r.vk);
+        buffer_dnit(?upload.index_staging, ?r.vk);
+        ret err[Mesh, Error](error("could not submit a runtime mesh upload"));
+    }
+
+    r.uploads[r.upload_count] = upload;
+    r.upload_count = r.upload_count + 1;
+    ret ok[Mesh, Error](mesh_out);
 }
 
 # The framebuffer width the renderer is currently drawing into, in pixels.
@@ -653,6 +896,7 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     r.refused = 0;
     r.culled  = 0;
     r.draws   = 0;
+    collect_mesh_uploads(r);
 
     # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
     # rebuild only when the presentation engine reported it out of date, which
@@ -864,6 +1108,10 @@ fun renderer_rollback(r: *Renderer) {
     if (r.ready_dev) { vk.vkDeviceWaitIdle(r.vk.device); }
 
     if (r.ready_dev) {
+        for (r.upload_count > 0) {
+            r.upload_count = r.upload_count - 1;
+            release_mesh_upload(r, ?r.uploads[r.upload_count]);
+        }
         release_retired_meshes(r, 0);
         release_retired_meshes(r, 1);
     }

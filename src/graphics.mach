@@ -237,6 +237,7 @@ fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_device;
+fwd boom.graphics.renderer.renderer_mesh;
 fwd boom.graphics.fit.FitMode;
 fwd boom.graphics.fit.FIT_STRETCH;
 fwd boom.graphics.fit.FIT_CONTAIN;
