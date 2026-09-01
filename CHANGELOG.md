@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-01
+
+### Added
+- graphics: `PipelineDesc` exposes constant, clamp, and slope-scaled raster
+  depth bias so shadow caster passes can offset stored depth in fixed-function
+  pipeline state.
+
 ## [0.21.0] - 2026-09-01
 
 ### Added
