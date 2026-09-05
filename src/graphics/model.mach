@@ -40,6 +40,7 @@ use boom.graphics.animation.INTERP_LINEAR;
 use boom.graphics.animation.INTERP_STEP;
 use boom.graphics.error.Error;
 use boom.graphics.error.error;
+use boom.graphics.error.error_msg;
 use vfs: boom.vfs;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
@@ -77,12 +78,14 @@ use text:  std.text.string;
 # ---
 # mesh:       the uploaded skinned geometry, drawn with pass_draw_skinned
 # skeleton:   the joint hierarchy and bind data, count 0 for an unskinned model
+# joint_names: optional names in skin index order, owned by arena
 # clips:      the named animation clips, owned by arena, or nil when there are none
 # clip_count: number of clips
 # arena:      backing storage for the clips and their keyframe arrays
 pub rec Model {
     mesh:       Mesh;
     skeleton:   Skeleton;
+    joint_names: [128]str;
     clips:      *Animation;
     clip_count: usize;
     arena:      arena.Arena;
@@ -234,6 +237,34 @@ fun dup_name(v: str, pa: *allo.Allocator, out: *str) Result[bool, Error] {
     val r: Result[str, str] = text.str_dup(pa, v);
     if (is_err[str, str](r)) { ret err[bool, Error](error(unwrap_err[str, str](r))); }
     @out = unwrap_ok[str, str](r);
+    ret ok[bool, Error](true);
+}
+
+fun build_joint_names(loaded: *gp.Loaded, skin: *gd.Skin,
+                       pa: *allo.Allocator, names: *str) Result[bool, Error] {
+    if (skin.joints.size > MAX_JOINTS) {
+        ret err[bool, Error](error("skin has more joints than MAX_JOINTS"));
+    }
+    var j: usize = 0;
+    for (j < skin.joints.size) {
+        val jr: Result[*i64, str] = slice.get[i64](skin.joints, j);
+        if (is_err[*i64, str](jr)) {
+            ret err[bool, Error](error("skin joint index out of range"));
+        }
+        val node_i: i64 = @unwrap_ok[*i64, str](jr);
+        val nr: Result[*gd.Node, str] =
+            slice.get[gd.Node](loaded.document.nodes, node_i::usize);
+        if (is_err[*gd.Node, str](nr)) {
+            ret err[bool, Error](error("skin joint references a missing node"));
+        }
+        val node: *gd.Node = unwrap_ok[*gd.Node, str](nr);
+        names[j] = nil;
+        if (node.name != nil && node.name[0] != 0) {
+            val copied: Result[bool, Error] = dup_name(node.name, pa, ?names[j]);
+            if (is_err[bool, Error](copied)) { ret copied; }
+        }
+        j = j + 1;
+    }
     ret ok[bool, Error](true);
 }
 
@@ -422,6 +453,14 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) Result[Model, Error] {
         val sr: Result[*gd.Skin, str] = slice.get[gd.Skin](loaded.document.skins, 0);
         if (!is_err[*gd.Skin, str](sr)) {
             val skin: *gd.Skin = unwrap_ok[*gd.Skin, str](sr);
+            val names: Result[bool, Error] =
+                build_joint_names(?loaded, skin, ?paa, ?model.joint_names[0]);
+            if (is_err[bool, Error](names)) {
+                arena.dnit(?model.arena);
+                mesh_delete(d, ?model.mesh);
+                arena.dnit(?tar);
+                ret err[Model, Error](unwrap_err[bool, Error](names));
+            }
             val anr: Result[bool, Error] = build_animations(?loaded, skin, ?paa, ?model.clips, ?model.clip_count);
             if (is_err[bool, Error](anr)) {
                 arena.dnit(?model.arena);
@@ -493,6 +532,29 @@ pub fun model_rest_player(model: *Model) AnimationPlayer {
     ret animation_player(?model.skeleton, nil);
 }
 
+# resolve a unique named joint without relying on exporter-assigned skin order
+pub fun model_joint(model: *Model, name: str) Result[usize, Error] {
+    if (model == nil) { ret err[usize, Error](error("model is nil")); }
+    if (name == nil || name[0] == 0) {
+        ret err[usize, Error](error("joint name must not be empty"));
+    }
+    var found: usize = MAX_JOINTS;
+    var j: usize = 0;
+    for (j < model.skeleton.count) {
+        if (model.joint_names[j] != nil && str_equals(model.joint_names[j], name)) {
+            if (found != MAX_JOINTS) {
+                ret err[usize, Error](error("joint name is ambiguous"));
+            }
+            found = j;
+        }
+        j = j + 1;
+    }
+    if (found == MAX_JOINTS) {
+        ret err[usize, Error](error("no joint with that name"));
+    }
+    ret ok[usize, Error](found);
+}
+
 # release a model's GPU buffers and clip storage
 # ---
 # m: model to delete; the handle must not be used afterward
@@ -501,6 +563,12 @@ pub fun model_delete(d: *Device, m: *Model) {
     arena.dnit(?m.arena);
     m.clips      = nil;
     m.clip_count = 0;
+    var j: usize = 0;
+    for (j < MAX_JOINTS) {
+        m.joint_names[j] = nil;
+        j = j + 1;
+    }
+    m.skeleton.count = 0;
 }
 
 # write a little-endian u32 into a byte buffer at off
@@ -633,5 +701,117 @@ test "model: skeleton and animation extract from a skinned, animated glb" {
     if (pl.pose.matrices[0].m[0][0] > 0.01 || pl.pose.matrices[0].m[0][0] < 0.0 - 0.01) { arena.dnit(?ar); ret 15; }
 
     arena.dnit(?ar);
+    ret 0;
+}
+
+fun fixture_named_model() Result[Model, Error] {
+    var glb: [2048]u8;
+    val n: usize = fixture_animated_glb(?glb[0]);
+    var pa: allo.Allocator;
+    page.make(?pa);
+    var parse_arena: arena.Arena;
+    if (is_some[str](arena.init(?parse_arena, ?pa, 65536))) {
+        ret err[Model, Error](error("fixture parse allocation failed"));
+    }
+    fin { arena.dnit(?parse_arena); }
+    var parse_a: allo.Allocator;
+    arena.make(?parse_a, ?parse_arena);
+    val parsed: Result[gp.Loaded, str] = gp.load_glb(?glb[0], n, ?parse_a);
+    if (is_err[gp.Loaded, str](parsed)) {
+        ret err[Model, Error](error(unwrap_err[gp.Loaded, str](parsed)));
+    }
+    var loaded: gp.Loaded = unwrap_ok[gp.Loaded, str](parsed);
+    val waist: Result[str, str] = text.str_dup(?parse_a, "waist");
+    val socket: Result[str, str] = text.str_dup(?parse_a, "muzzle");
+    if (is_err[str, str](waist) || is_err[str, str](socket)) {
+        ret err[Model, Error](error("fixture name allocation failed"));
+    }
+    loaded.document.nodes.data[1].name = unwrap_ok[str, str](waist);
+    loaded.document.nodes.data[2].name = unwrap_ok[str, str](socket);
+    val skin: *gd.Skin = ?loaded.document.skins.data[0];
+    skin.joints.data[0] = 2;
+    skin.joints.data[1] = 1;
+    var model: Model;
+    if (is_some[str](arena.init(?model.arena, ?pa, 4096))) {
+        ret err[Model, Error](error("fixture persistent allocation failed"));
+    }
+    var kept: bool = false;
+    fin { if (!kept) { arena.dnit(?model.arena); } }
+    var persistent: allo.Allocator;
+    arena.make(?persistent, ?model.arena);
+    val built: Result[bool, Error] = build_skeleton(?loaded, ?parse_a, ?model.skeleton);
+    if (is_err[bool, Error](built)) { ret err[Model, Error](unwrap_err[bool, Error](built)); }
+    val copied: Result[bool, Error] =
+        build_joint_names(?loaded, skin, ?persistent, ?model.joint_names[0]);
+    if (is_err[bool, Error](copied)) { ret err[Model, Error](unwrap_err[bool, Error](copied)); }
+    if (model.joint_names[0] == loaded.document.nodes.data[2].name
+        || model.joint_names[1] == loaded.document.nodes.data[1].name) {
+        ret err[Model, Error](error("fixture names still borrow parser storage"));
+    }
+    loaded.document.nodes.data[1].name[0] = 'x';
+    loaded.document.nodes.data[2].name[0] = 'x';
+    kept = true;
+    ret ok[Model, Error](model);
+}
+
+test "model: named joints follow skin ordering and own names beyond parsing and moves" {
+    val built: Result[Model, Error] = fixture_named_model();
+    if (is_err[Model, Error](built)) { ret 1; }
+    var model: Model = unwrap_ok[Model, Error](built);
+    fin { arena.dnit(?model.arena); }
+    val waist: Result[usize, Error] = model_joint(?model, "waist");
+    val muzzle: Result[usize, Error] = model_joint(?model, "muzzle");
+    if (is_err[usize, Error](waist) || is_err[usize, Error](muzzle)) { ret 2; }
+    if (unwrap_ok[usize, Error](waist) != 1 || unwrap_ok[usize, Error](muzzle) != 0) { ret 3; }
+    if (model.skeleton.parents[0] != 1 || model.skeleton.order[0] != 1) { ret 4; }
+    ret 0;
+}
+
+test "model: named joint lookup distinguishes missing and ambiguous names" {
+    var model: Model;
+    model.skeleton.count = 3;
+    model.joint_names[0] = "waist";
+    model.joint_names[2] = "waist";
+    val missing: Result[usize, Error] = model_joint(?model, "muzzle");
+    val ambiguous: Result[usize, Error] = model_joint(?model, "waist");
+    if (!is_err[usize, Error](missing) || !is_err[usize, Error](ambiguous)) { ret 1; }
+    var missing_error: Error = unwrap_err[usize, Error](missing);
+    var ambiguous_error: Error = unwrap_err[usize, Error](ambiguous);
+    if (!str_equals(error_msg(?missing_error), "no joint with that name")) { ret 2; }
+    if (!str_equals(error_msg(?ambiguous_error), "joint name is ambiguous")) { ret 3; }
+    if (!is_err[usize, Error](model_joint(?model, nil))) { ret 4; }
+    if (!is_err[usize, Error](model_joint(?model, ""))) { ret 5; }
+    if (!is_err[usize, Error](model_joint(nil, "waist"))) { ret 6; }
+    ret 0;
+}
+
+test "model: optional unnamed joints remain legal and cannot match an empty query" {
+    var nodes: [2]gd.Node;
+    nodes[1].name = "";
+    var joints: [2]i64 = [2]i64{1, 0};
+    var loaded: gp.Loaded;
+    loaded.document.nodes = slice.make[gd.Node](?nodes[0], 2);
+    var skin: gd.Skin;
+    skin.joints = slice.make[i64](?joints[0], 2);
+    var model: Model;
+    model.skeleton.count = 2;
+    model.joint_names[0] = "previous";
+    val names: Result[bool, Error] =
+        build_joint_names(?loaded, ?skin, nil, ?model.joint_names[0]);
+    if (is_err[bool, Error](names)) { ret 1; }
+    if (model.joint_names[0] != nil || model.joint_names[1] != nil) { ret 2; }
+    if (!is_err[usize, Error](model_joint(?model, ""))) { ret 3; }
+    ret 0;
+}
+
+test "model: joint names reject invalid skin node references before allocation" {
+    var joints: [1]i64 = [1]i64{99};
+    var skin: gd.Skin;
+    skin.joints = slice.make[i64](?joints[0], 1);
+    var loaded: gp.Loaded;
+    var names: [128]str;
+    if (!is_err[bool, Error](build_joint_names(?loaded, ?skin, nil, ?names[0]))) { ret 1; }
+    skin.joints.size = 129;
+    if (!is_err[bool, Error](build_joint_names(?loaded, ?skin, nil, ?names[0]))) { ret 2; }
     ret 0;
 }

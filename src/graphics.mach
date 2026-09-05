@@ -135,6 +135,7 @@ fwd boom.graphics.skeleton.MAX_JOINTS;
 fwd boom.graphics.skeleton.Skeleton;
 fwd boom.graphics.skeleton.Pose;
 fwd boom.graphics.skeleton.skeleton_pose;
+fwd boom.graphics.skeleton.skeleton_globals;
 fwd boom.graphics.skeleton.skeleton_rest_pose;
 fwd boom.graphics.skeleton.pose_matrices;
 
@@ -159,6 +160,7 @@ fwd boom.graphics.model.model_from_glb;
 fwd boom.graphics.model.model_load;
 fwd boom.graphics.model.model_player;
 fwd boom.graphics.model.model_rest_player;
+fwd boom.graphics.model.model_joint;
 fwd boom.graphics.model.model_delete;
 
 fwd boom.graphics.material.MAX_TEXTURES;
