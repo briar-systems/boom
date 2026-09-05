@@ -65,6 +65,23 @@ pub rec Pose {
     matrices: [128]Mat4;
 }
 
+# compose model-space joint transforms into caller storage of at least sk.count matrices
+pub fun skeleton_globals(sk: *Skeleton, locals: *Transform, out: *Mat4) {
+    var i: usize = 0;
+    for (i < sk.count) {
+        val j: usize = sk.order[i];
+        var local: Mat4 = transform_matrix(?locals[j]);
+        val p: i64 = sk.parents[j];
+        if (p < 0) {
+            out[j] = local;
+        }
+        or {
+            out[j] = mat4_mul(?out[p::usize], ?local);
+        }
+        i = i + 1;
+    }
+}
+
 # compose per-joint local transforms into a skinning palette
 #
 # sweeps joints in the skeleton's evaluation order so each joint's parent
@@ -80,19 +97,7 @@ pub rec Pose {
 # out:    receives the computed skinning palette
 pub fun skeleton_pose(sk: *Skeleton, locals: *Transform, out: *Pose) {
     var globals: [128]Mat4;
-    var i: usize = 0;
-    for (i < sk.count) {
-        val j: usize = sk.order[i];
-        var local: Mat4 = transform_matrix(?locals[j]);
-        val p: i64 = sk.parents[j];
-        if (p < 0) {
-            globals[j] = local;
-        }
-        or {
-            globals[j] = mat4_mul(?globals[p::usize], ?local);
-        }
-        i = i + 1;
-    }
+    skeleton_globals(sk, locals, ?globals[0]);
     var k: usize = 0;
     for (k < sk.count) {
         out.matrices[k] = mat4_mul(?globals[k], ?sk.inverse_bind[k]);
@@ -223,5 +228,32 @@ test "skeleton: the inverse bind matrix folds into the skinning matrix" {
     skeleton_rest_pose(?sk, ?pose);
     # rest globals are identity, so joint 1's skinning matrix is its inverse bind
     if (pose.matrices[1].m[3][0] != 0.0 - 3.0) { ret 1; }
+    ret 0;
+}
+
+test "skeleton: socket globals retain parent rotation and translation before inverse bind" {
+    var sk: Skeleton;
+    fixture_chain(?sk);
+    sk.parents[0] = 1;
+    sk.parents[1] = 0 - 1;
+    sk.order[0] = 1;
+    sk.order[1] = 0;
+    sk.rest[1].position = vec3(2.0, 3.0, 0.0);
+    sk.rest[1].rotation = f32x4{0.0, 0.0, 0.70710678, 0.70710678};
+    sk.rest[0].position = vec3(1.0, 0.0, 0.0);
+    sk.inverse_bind[0] = mat4_translation(vec3(0.0 - 1.0, 0.0, 0.0));
+    var globals: [3]Mat4;
+    globals[2] = mat4_translation(vec3(99.0, 0.0, 0.0));
+    skeleton_globals(?sk, ?sk.rest[0], ?globals[0]);
+    if (globals[0].m[3][0] < 1.999 || globals[0].m[3][0] > 2.001) { ret 1; }
+    if (globals[0].m[3][1] < 3.999 || globals[0].m[3][1] > 4.001) { ret 2; }
+    if (globals[0].m[0][1] < 0.999 || globals[0].m[1][0] > 0.0 - 0.999) { ret 3; }
+    if (globals[2].m[3][0] != 99.0) { ret 4; }
+    var pose: Pose;
+    skeleton_pose(?sk, ?sk.rest[0], ?pose);
+    if (pose.matrices[0].m[3][0] < 1.999 || pose.matrices[0].m[3][0] > 2.001) { ret 5; }
+    if (pose.matrices[0].m[3][1] < 2.999 || pose.matrices[0].m[3][1] > 3.001) { ret 6; }
+    if (pose.matrices[0].m[0][1] != globals[0].m[0][1]) { ret 7; }
+    if (pose.count != 2 || pose.matrices[2].m[0][0] != 1.0) { ret 8; }
     ret 0;
 }
