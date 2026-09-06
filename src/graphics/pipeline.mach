@@ -736,6 +736,11 @@ fun depth_compare_op(depth: DepthConvention) i32 {
 # The viewport and scissor are dynamic, so a pipeline bound without them draws
 # nothing. Setting them here keeps the two facts together.
 pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u32) {
+    pipeline_bind_region(p,cmd,0,0,width,height);
+}
+
+pub fun pipeline_bind_region(p: *Pipeline, cmd: vk.CommandBuffer, x: i32, y: i32,
+                             width: u32, height: u32) {
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.handle);
 
     # A POSITIVE HEIGHT, NOT A FLIPPED VIEWPORT. There are two ways to reach
@@ -745,8 +750,8 @@ pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u
     # anything symmetrical about the horizontal midline, so it survives the
     # obvious check and shows up on the first asymmetric scene.
     var vpt: vk.Viewport;
-    vpt.x        = 0.0;
-    vpt.y        = 0.0;
+    vpt.x        = x::f32;
+    vpt.y        = y::f32;
     vpt.width    = width::f32;
     vpt.height   = height::f32;
     # Matching the [0, 1] clip depth the projections produce. A [-1, 1] range
@@ -756,8 +761,8 @@ pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u
     vk.vkCmdSetViewport(cmd, 0, 1, ?vpt);
 
     var sc: vk.Rect2D;
-    sc.offset.x      = 0;
-    sc.offset.y      = 0;
+    sc.offset.x      = x;
+    sc.offset.y      = y;
     sc.extent.width  = width;
     sc.extent.height = height;
     vk.vkCmdSetScissor(cmd, 0, 1, ?sc);

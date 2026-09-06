@@ -96,7 +96,7 @@ use boom.graphics.frame.frame_suspend_pass;
 use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_dnit;
 use boom.graphics.pipeline.Pipeline;
-use boom.graphics.pipeline.pipeline_bind;
+use boom.graphics.pipeline.pipeline_bind_region;
 use boom.graphics.cache.PipelineCache;
 use boom.graphics.cache.Program;
 use boom.graphics.cache.PROGRAM_MESH;
@@ -1517,6 +1517,10 @@ pub rec Pass {
     target:     *RenderTarget;
     width:      i32;
     height:     i32;
+    region_x:   i32;
+    region_y:   i32;
+    region_width: i32;
+    region_height: i32;
     view:       Mat4;
     projection: Mat4;
     depth:      DepthConvention;
@@ -1718,6 +1722,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         }
     }
 
+    p.region_width = p.width;
+    p.region_height = p.height;
     if (d.perspective != 0) {
         p.view       = camera_view(d.camera);
         p.projection = camera_projection(d.camera);
@@ -1787,6 +1793,21 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
     }
     ret p;
+}
+
+# restrict subsequent draws to a pixel viewport and matching scissor, preserving projection
+pub fun pass_set_region(p: *Pass, x: i32, y: i32, width: i32, height: i32) bool {
+    if (x < 0 || y < 0 || width <= 0 || height <= 0
+        || width > p.width || height > p.height || x > p.width-width || y > p.height-height) {
+        p.renderer.refused = p.renderer.refused+1;
+        ret false;
+    }
+    batch_flush(p);
+    p.region_x = x;
+    p.region_y = y;
+    p.region_width = width;
+    p.region_height = height;
+    ret true;
 }
 
 # finish a pass
@@ -1959,7 +1980,8 @@ pub fun batch_flush(p: *Pass) {
         r.dropped = r.dropped + 1;
         ret;
     }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    pipeline_bind_region(pipe, p.cmd, p.region_x, p.region_y,
+                         p.region_width::u32, p.region_height::u32);
     if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
         r.dropped = r.dropped + 1;
         ret;
@@ -2179,7 +2201,8 @@ fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
                          program, format, p.depth);
     }
     if (pipe == nil) { ret false; }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
+    pipeline_bind_region(pipe, p.cmd, p.region_x, p.region_y,
+                         p.region_width::u32, p.region_height::u32);
     ret descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
 }
 
@@ -3365,5 +3388,25 @@ test "renderer: a mesh upload begun before the device is refused, not a fault" {
     if (!is_err[Mesh, Error](m)) { ret 4; }
     renderer_mesh_cancel(?r, ?u);
     if (renderer_mesh_reserved(?r) != 0 || r.upload_count != 0) { ret 5; }
+    ret 0;
+}
+
+test "renderer: pass regions bound viewport and scissor without changing projection" {
+    var renderer: Renderer;
+    var pass: Pass;
+    pass.renderer = ?renderer;
+    pass.targets = 1;
+    pass.width = 2048;
+    pass.height = 2048;
+    pass.projection = mat4_identity();
+    if (!pass_set_region(?pass,1536,1024,512,512)) { ret 1; }
+    if (pass.region_x != 1536 || pass.region_y != 1024
+        || pass.region_width != 512 || pass.region_height != 512) { ret 2; }
+    if (pass.width != 2048 || pass.height != 2048 || pass.projection.m[0][0] != 1.0) { ret 3; }
+    if (pass_set_region(?pass,-1,0,512,512) || pass_set_region(?pass,0,0,0,512)) { ret 4; }
+    if (pass_set_region(?pass,1537,0,512,512) || pass_set_region(?pass,0,0,2049,512)) { ret 5; }
+    if (pass_set_region(?pass,2147483647,0,512,512)) { ret 6; }
+    if (renderer.refused != 5 || pass.region_x != 1536 || pass.region_y != 1024) { ret 7; }
+    if (!pass_set_region(?pass,0,0,2048,2048) || renderer.refused != 5) { ret 8; }
     ret 0;
 }
