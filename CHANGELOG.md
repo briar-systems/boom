@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- graphics: `pass_set_region` restricts the draws that follow to a pixel
+  viewport and matching scissor inside the pass without changing its projection,
+  so one target can hold several independently drawn cells such as a shadow
+  atlas. Out-of-bounds regions are refused and counted in `renderer_refused`.
+  `pipeline_bind_region` is the pipeline-level form.
+- graphics: `model_joint` resolves a uniquely named joint to its skin index, and
+  `skeleton_globals` exposes posed joint transforms, so a game can attach props
+  to sockets without depending on exporter joint order.
+
+### Fixed
+- graphics: render passes store depth and declare attachment read and write
+  access in their subpass dependencies, so a loading continuation after an
+  offscreen excursion sees the depth drawn before it and an attachment reused
+  across passes is synchronized.
+
 ## [0.23.0] - 2026-09-01
 
 ### Added
