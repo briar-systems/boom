@@ -25,7 +25,7 @@
 #
 # It is not part of CI, which has no sound device. Run it on a machine with one:
 #
-#   mach dep pull && mach build . && ./out/*/debug/bin/audio
+#   mach dep pull . && mach build . && ./out/*/debug/bin/audio
 #
 # A machine with no device reports that and exits non-zero, which is the correct
 # outcome and not a pass.

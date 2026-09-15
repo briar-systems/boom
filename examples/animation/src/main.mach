@@ -21,16 +21,21 @@ use boom.context.context_init;
 use boom.context.context_set_user;
 use boom.context.context_user;
 use boom.context.context_shutdown;
+use boom.context.context_fail;
+use boom.context.ContextError;
+use boom.context.context_error_message;
 use boom.engine.run;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.window.WindowMode;
 use boom.app.App;
 use gfx: boom.graphics;
 use gm:  boom.math;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.error.err;
+use allo: std.allocator;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.string.str;
@@ -65,30 +70,33 @@ fun on_init(ctx: *Context) {
     val w: i32 = ctx.window.width;
     val h: i32 = ctx.window.height;
 
-    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
-    if (is_err[bool, gfx.Error](ri)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
-        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+    val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel ri.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(ri.err));
+        context_fail(ctx, 1);
         ret;
     }
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
-    val loaded: Result[gfx.Model, gfx.Error] = gfx.model_load(d, "assets/bar.glb");
-    if (is_err[gfx.Model, gfx.Error](loaded)) {
-        var e: gfx.Error = unwrap_err[gfx.Model, gfx.Error](loaded);
-        print.eprintlnf("model load error: {}", gfx.error_msg(?e));
+    val loaded: res[gfx.Model, gfx.Error] = gfx.model_load(d, "assets/bar.glb");
+    if (sel loaded.err) {
+        print.eprintlnf("model load error: {}", gfx.error_message(loaded.err));
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
         ret;
     }
-    g.model = unwrap_ok[gfx.Model, gfx.Error](loaded);
+    g.model = loaded.ok;
 
-    val pl: Result[gfx.AnimationPlayer, gfx.Error] = gfx.model_player(?g.model, "bend");
-    if (is_err[gfx.AnimationPlayer, gfx.Error](pl)) {
-        var e: gfx.Error = unwrap_err[gfx.AnimationPlayer, gfx.Error](pl);
-        print.eprintlnf("model player error: {}", gfx.error_msg(?e));
+    val pl: res[gfx.AnimationPlayer, gfx.Error] = gfx.model_player(?g.model, "bend");
+    if (sel pl.err) {
+        print.eprintlnf("model player error: {}", gfx.error_message(pl.err));
+        gfx.model_delete(d, ?g.model);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
         ret;
     }
-    g.player = unwrap_ok[gfx.AnimationPlayer, gfx.Error](pl);
+    g.player = pl.ok;
 
     # No texture, so the renderer's white texel is bound and the model comes out
     # as this colour under the directional light.
@@ -140,14 +148,13 @@ fun on_draw(ctx: *Context) {
     # A frame that did not open is a swapchain that went out of date and was
     # rebuilt, which happens on every resize. Skipping the frame is the correct
     # response; drawing into it is not possible.
-    var opened: bool = false;
-    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
-    if (is_err[bool, gfx.Error](br)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
-        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
         ret;
     }
-    if (!opened) {
+    if (!br.ok) {
         ret;
     }
 
@@ -156,10 +163,10 @@ fun on_draw(ctx: *Context) {
     gfx.pass_draw_skinned_material(?pass, ?g.model.mesh, ?g.material, ?g.player.pose, ?g.transform);
     gfx.pass_end(?pass);
 
-    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
-    if (is_err[bool, gfx.Error](er)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
-        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
     }
 }
 
@@ -168,7 +175,11 @@ fun on_dnit(ctx: *Context) {
     if (g.ready == 0) {
         ret;
     }
-    gfx.model_delete(gfx.renderer_device(?g.renderer), ?g.model);
+    val released: err[allo.Error] = gfx.model_delete(gfx.renderer_device(?g.renderer), ?g.model);
+    if (sel released.err) {
+        print.eprintln("the model's clips could not be released");
+        context_fail(ctx, 1);
+    }
     gfx.renderer_dnit(?g.renderer);
 }
 
@@ -189,14 +200,21 @@ fun main(argc: i64, argv: **u8) i64 {
         title:     "boom skeletal animation: a two-bone bend",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
     };
 
-    if (!context_init(?ctx, cfg)) {
-        print.eprintln("failed to open window");
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
         ret 1;
     }
     context_set_user(?ctx, (?game)::ptr);
-    run(?ctx, ?app);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
     context_shutdown(?ctx);
-    ret 0;
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    ret ran.ok;
 }
