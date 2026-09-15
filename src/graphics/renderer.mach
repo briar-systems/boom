@@ -2631,21 +2631,23 @@ pub fun pass_draw_skinned_material(p: *Pass, m: *Mesh, mat: *Material, pose: *Po
 # submit a 2D sprite draw covering a whole texture
 # ---
 # p:       the open pass
-# texture: the texture to draw
+# texture: the texture to draw, or none for the white texel or the pass material's atlas
 # dest:    the destination rectangle in pixels
 # tint:    the color multiplied into the texture
-pub fun pass_draw_sprite(p: *Pass, texture: *Texture, dest: Rect, tint: Vec4) {
+pub fun pass_draw_sprite(p: *Pass, texture: opt[*Texture], dest: Rect, tint: Vec4) {
     pass_draw_sprite_uv(p, texture, dest, rect(0.0, 0.0, 1.0, 1.0), tint);
 }
 
 # submit a 2D sprite draw of a sub-rectangle of a texture
 # ---
 # p:       the open pass
-# texture: the texture to sample
+# texture: the texture to sample, or none for the white texel or the pass
+#          material's atlas, which is how a solid rectangle and a sprite named
+#          only by pass_set_material are drawn
 # dest:    the destination rectangle in pixels
 # src:     the source rectangle in texture space, 0 to 1
 # tint:    the color multiplied into the sample
-pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, tint: Vec4) {
+pub fun pass_draw_sprite_uv(p: *Pass, texture: opt[*Texture], dest: Rect, src: Rect, tint: Vec4) {
     # Expanded to two triangles and appended to the open run rather than drawn.
     # A run of sprites sharing a texture becomes one draw and one uniform slot,
     # which is what lets a screenful of them cost what a handful used to. See
@@ -2661,7 +2663,7 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, 
 
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
-    batch_append(p, opt[*Texture].some{texture}, (?v[0]):~*u8, SPRITE_VERTICES);
+    batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);
 }
 
 # submit a whole tile field as one run of quads
@@ -2704,7 +2706,7 @@ pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: 
     var cur: TileCursor = tile_cursor(?span);
     for (!tilemap_done(?cur, ?span)) {
         val n: usize = tilemap_expand(layer, sheet, ?span, ?cur, tint, ?v[0], TILEMAP_CHUNK);
-        if (n > 0) { batch_append(p, opt[*Texture].some{sheet.texture}, (?v[0]):~*u8, n * SPRITE_VERTICES); }
+        if (n > 0) { batch_append(p, sheet.texture, (?v[0]):~*u8, n * SPRITE_VERTICES); }
     }
 }
 

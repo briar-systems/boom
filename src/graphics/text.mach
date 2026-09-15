@@ -585,7 +585,7 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
             # saves a draw call per space without changing the layout
             if (f.glyphs[sl.some].w > 0.0) {
                 val dest: Rect = glyph_dest(f, ?f.glyphs[sl.some], pen, y);
-                pass_draw_sprite_uv(p, ?f.atlas, dest, cell_uv(f, sl.some), tint);
+                pass_draw_sprite_uv(p, opt[*Texture].some{?f.atlas}, dest, cell_uv(f, sl.some), tint);
             }
             pen = pen + f.glyphs[sl.some].advance;
         }

@@ -74,12 +74,12 @@ pub val TILEMAP_CHUNK: usize = 32;
 # floor, a wall and a decoration layer over the same terrain set has three grids
 # and one of these.
 # ---
-# texture: the sheet every frame is cut from, or nil for the white texel
+# texture: the sheet every frame is cut from, or none for the white texel
 # frames:  frame_count source rectangles in texture space, 0 to 1, indexed by
 #          the tile value itself. Entry zero is never read: see TILE_EMPTY.
 # count:   how many entries frames has, including the unread zeroth
 pub rec TileSheet {
-    texture: *Texture;
+    texture: opt[*Texture];
     frames:  *Rect;
     count:   usize;
 }
@@ -121,10 +121,10 @@ pub rec TileSpan {
 
 # Build a TileSheet.
 # ---
-# texture: the sheet, or nil for the white texel
+# texture: the sheet, or none for the white texel
 # frames:  count source rectangles, indexed by tile value
 # count:   how many entries frames has
-pub fun tile_sheet(texture: *Texture, frames: *Rect, count: usize) TileSheet {
+pub fun tile_sheet(texture: opt[*Texture], frames: *Rect, count: usize) TileSheet {
     ret TileSheet{texture: texture, frames: frames, count: count};
 }
 
@@ -412,7 +412,7 @@ test "tilemap: an expansion walks the span once, skipping holes" {
     var frames: [3]Rect = [3]Rect{rect(0.0, 0.0, 0.0, 0.0),
                                   rect(0.0, 0.0, 0.5, 1.0),
                                   rect(0.5, 0.0, 0.5, 1.0)};
-    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 3);
+    var sheet: TileSheet = tile_sheet(opt[*Texture].none{}, ?frames[0], 3);
 
     # Columns 0 to 2, all three rows: 1, _, 2 / _, 2, 9 / 1, 1, _. Two holes and
     # one index past the sheet, so nine cells become five tiles.
@@ -443,7 +443,7 @@ test "tilemap: a chunked expansion loses no tile at the boundary" {
     for (i < 25) { tiles[i] = 1; i = i + 1; }
     var l: TileLayer = tile_layer(?tiles[0], 5, 5, 10.0, vec2(0.0, 0.0));
     var frames: [2]Rect = [2]Rect{rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 1.0, 1.0)};
-    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 2);
+    var sheet: TileSheet = tile_sheet(opt[*Texture].none{}, ?frames[0], 2);
     val tint: Vec4 = vec4(1.0, 1.0, 1.0, 1.0);
 
     var s: TileSpan = tilemap_span(?l, rect(0.0, 0.0, 50.0, 50.0));
@@ -593,7 +593,7 @@ test "tilemap: an index past the frame array draws nothing" {
     var frames: [3]Rect = [3]Rect{rect(0.0, 0.0, 0.0, 0.0),
                                   rect(0.0, 0.0, 0.5, 0.5),
                                   rect(0.5, 0.0, 0.5, 0.5)};
-    var sheet: TileSheet = tile_sheet(nil, ?frames[0], 3);
+    var sheet: TileSheet = tile_sheet(opt[*Texture].none{}, ?frames[0], 3);
 
     val past: opt[Rect] = tilemap_frame(?sheet, 3);
     if (!sel past.none) { ret 1; }
