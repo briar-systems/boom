@@ -17,6 +17,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `skeleton_globals` exposes posed joint transforms, so a game can attach props
   to sockets without depending on exporter joint order.
 
+### Changed
+- build: **Breaking.** Builds with Mach 5.0 and std 2.1. Dependencies are
+  declared under their project ids (`std`, `glfw`, `audio`, `image`, `font`,
+  `phys`, `vk`, `gltf`, `shader`) and pinned by the committed `dep/` gitlinks
+  in place of `mach.lock`. Profiles state every field, and the linux target,
+  debug profile and `boom` library artifact are the defaults, so a consumer's
+  `use boom;` binds `boom.lib.boom`. A consumer declares `[dep.boom]` alone.
+- build: the built-in shaders are `shader-*` artifacts on a `spirv` target in
+  the `vulkan1.0` environment, and the committed `res/spv` modules are SPIR-V
+  1.0, which every Vulkan instance version accepts.
+- api: **Breaking.** Every failure is a closed error tag and every absence is
+  `opt`, following std 2's representation rules. `Result[T, E]` is `res[T, E]`,
+  `Result[bool, E]` whose payload was always true is `err[E]`, and each error
+  tag has a static `*_error_message` renderer.
+- vfs: `vfs_resolve` and `vfs_user_data_root` return `res[str, VfsError]`,
+  `vfs_register` returns `err[RegisterError]` (`builtin`, `full`), and the new
+  `vfs_read_bytes` returns `res[Vector[u8], ReadError]` (`path`, `read`) for
+  every loader.
+- window: `WindowMode` is a tag (`windowed`, `borderless`, `fullscreen`) and
+  `window_mode_is_valid` is gone. `window_open` and `window_open_mode` return
+  `res[Window, WindowError]` (`init`, `no_monitor`, `create`, `closed`),
+  `window_set_mode` returns `err[WindowError]`, `Window.handle` and
+  `Window.monitor` are `opt`, and `window_handle` returns the optional handle.
+- event: `Event` is a tag with one typed case per kind (`close`, `key`,
+  `mouse_button`, `mouse_move`, `scroll`, `resize`, `collision`) in place of a
+  kind field and four integer slots. `queue_pop` returns `opt[Event]` and
+  `queue_push` returns `err[QueueError]`.
+- context and engine: `context_init` returns `err[ContextError]` (`config`,
+  `window`, `clock`), `Config.mode` is the `WindowMode` tag, `run` returns
+  `res[i64, EngineError]`, `clock_new` returns `res[Clock, io_error.Error]` and
+  `clock_tick` returns `err[io_error.Error]`.
+- input and gamepad: `PAD_NONE` is gone and `pad_first_pressed` returns
+  `opt[usize]`, `PadStick` is a tag, `gamepad_add_mappings` returns
+  `err[glfw.Error]` and `gamepad_name` returns `opt[str]`.
+- physics: `NO_BODY` is gone and body ids are slot indices. `physics_add`
+  returns `res[BodyId, PhysicsError]` (`full`, `no_body`), the velocity and
+  restitution setters return `err[PhysicsError]`, `physics_velocity` returns
+  `opt[Vec3]` and `physics_contact(p, index)` returns `opt[Contact]`.
+- audio: `audio_init` returns `err[AudioError]`, the sound loaders return
+  `res[Sound, AudioError]`, and `audio_dnit` and `sound_free` return
+  `err[allocator.Error]`. `AudioError` wraps mach-audio's `BufferError`,
+  `DeviceError` and `DecodeError`, a `vfs.ReadError` as `load`, and boom's
+  `empty_clip` and `zero_frames`. `voice_none` is gone and `audio_play` and
+  `audio_play_ex` return `opt[VoiceId]`.
+- graphics: the inline-message `Error` record, `error` and `error_msg` are
+  replaced by the `Error` tag, whose cases name the refusing layer (`alloc`,
+  `vulkan`, `loader`, `device`, `uninitialized`, `full`, `load`, `buffer`,
+  `image`, `shader`, `pipeline`, `target`, `renderer`, `mesh`, `model`,
+  `texture`, `text`) with `error_message` and `vk_result_message`.
+- graphics: `renderer_init(r, window: *Window)` and
+  `renderer_init_with_present(r, window, present)` take the boom window and
+  read its size, and return `err[Error]`. `renderer_begin_frame(r)` returns
+  `res[bool, Error]` in place of its out parameter, and `renderer_end_frame`,
+  `renderer_resize`, `renderer_set_present_mode`, `renderer_retire_mesh` and
+  the `renderer_storage_*` writes and reserve return `err[Error]`.
+- graphics: `PassDesc` is `{target: opt[*RenderTarget], view: PassView, clear:
+  opt[Vec4], depth, cull: bool}`, with `PassView` a tag (`pixels`,
+  `world: *Camera2D`, `scene: *Camera`) in place of `perspective`, `camera`,
+  `camera2d` and `clear_color`. `pass_set_region` and `pass_set_user` return
+  `err[Error]`, `pass_clear_user` clears the block, and `pass_set_shader`,
+  `pass_set_material`, `pass_draw_sprite`, `pass_draw_sprite_uv`,
+  `pass_draw_triangles` and `tile_sheet` take their shader, material or texture
+  as `opt`.
+- graphics: `renderer_mesh_begin` returns `res[MeshUpload, Error]` and
+  `MeshUpload.ok` and `reason` are replaced by `live`.
+- graphics: `PresentMode`, `BlendMode`, `DepthConvention`, `RenderFormat`,
+  `ColorSpace`, `ImageUsage`, `TextureFilter`, `Projection`, `FitMode`,
+  `FontRaster` (the pixel case carries its threshold, replacing
+  `FontOptions.threshold`), `FontSizeMode`, `ChannelPath` and `Interp` are tags
+  in place of integer constants, and `present_mode_valid` and
+  `depth_convention_valid` are gone with the values they rejected.
+- graphics: textures, meshes, models, fonts and render targets return
+  `res[T, Error]`. `model_player` fails with `model.no_clip`, `model_joint` with
+  `joint_name_empty`, `joint_ambiguous` or `no_joint`, and `model_delete`
+  returns `err[allocator.Error]`. `mesh_data_max_joint` returns `opt[usize]`,
+  `Skeleton.parents` holds `opt[usize]`, `Model.joint_names` holds `opt[str]`,
+  and `AnimationPlayer.clip` is `opt[*Animation]`.
+- graphics: `handle_none` and `handle_is_none` are gone, `assets_texture_get`
+  returns `opt[*Texture]` and `assets_release` returns
+  `res[bool, allocator.Error]`. `material_add_texture` returns
+  `err[MaterialError]` and `material_texture` returns `opt[*Texture]`.
+  `tilemap_at` returns `opt[u16]`, `tilemap_frame(sheet, tile)` returns
+  `opt[Rect]` and `fit_unproject` returns `opt[Vec2]`.
+- graphics: the lower layers follow the same rules: `NO_FAMILY`,
+  `NO_MEMORY_TYPE`, `NO_SLOT`, `NO_STORAGE_SIZE` and `FORMAT_UNSUPPORTED` are
+  gone, `pick_memory_type`, `attribute_format`, `vertex_attributes`,
+  `descriptors_take`, `storage_size_for`, `image_raw_bytes` and
+  `render_target_raw_bytes_at` return `opt`, `buffer_map` returns
+  `res[ptr, Error]`, `transition_masks(old, new)` returns
+  `opt[TransitionMasks]`, `stream_push` returns `opt[StreamSpan]`, and the
+  `spirvread` lookups return `opt`.
+
 ### Fixed
 - graphics: render passes store depth and declare attachment read and write
   access in their subpass dependencies, so a loading continuation after an
