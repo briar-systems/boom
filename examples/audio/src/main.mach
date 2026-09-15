@@ -35,20 +35,14 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
-use std.types.option.Option;
-use std.types.option.is_some;
-use std.chrono.time.Time;
-use std.chrono.time.monotonic;
-use std.chrono.time.time_sub;
-use std.chrono.duration.Duration;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use std.chrono.duration.MILLISECOND;
 use allo: std.allocator;
 use page: std.allocator.page;
 use fs:   std.filesystem;
+use os:   std.system.os;
 use p:    std.print;
 use snd:  boom.audio;
 use vfs:  boom.vfs;
@@ -64,16 +58,11 @@ val CHANS: u16 = 2;
 # thread is pulling rather than the clip being consumed in one go.
 val CLIP_MS: usize = 400;
 
-# Spin until ms have passed.
+# Sleep until ms have passed.
 #
-# std has no sleep. A busy wait is wasteful and completely adequate here: the
-# audio thread is a separate OS thread and does not need this one to yield.
+# The audio thread is a separate OS thread and keeps pulling while this one sleeps.
 fun wait_ms(ms: i64) {
-    val start: Time = monotonic();
-    var elapsed: Duration = 0;
-    for (elapsed < ms * MILLISECOND) {
-        elapsed = time_sub(monotonic(), start);
-    }
+    os.sleep(ms * MILLISECOND);
 }
 
 # Write a little-endian u16 at off.
@@ -141,15 +130,40 @@ fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
 # Write a generated clip to disk under the given path.
 fun emit(path: str, bytes: *u8, rate: u32, chans: u16, freq: f32) bool {
     val len: usize = build_wav(bytes, rate, chans, freq, CLIP_MS);
-    val e: Option[str] = fs.write_bytes(path, bytes, len, 0o644);
-    ret !is_some[str](e);
+    val e: err[fs.FsError] = fs.write_bytes(path, bytes, len, 0o644);
+    ret sel e.ok;
 }
 
 # Report a failed step and say which one.
-fun failed(step: str, r: Result[bool, str]) bool {
-    if (!is_err[bool, str](r)) { ret false; }
-    p.printlnf("FAIL {}: {}", step, unwrap_err[bool, str](r));
+fun failed(step: str, r: err[snd.AudioError]) bool {
+    if (sel r.ok) { ret false; }
+    if (sel r.err) { p.printlnf("FAIL {}: {}", step, snd.audio_error_message(r.err)); }
     ret true;
+}
+
+# Release a clip, reporting a refused release.
+fun free_clip(s: *snd.Audio, clip: *snd.Sound) bool {
+    val freed: err[allo.Error] = snd.sound_free(s, clip);
+    if (sel freed.err) {
+        p.println("FAIL: a clip's samples could not be released");
+        ret false;
+    }
+    ret true;
+}
+
+# Tear the mixer down, reporting a refused release.
+fun teardown(s: *snd.Audio) bool {
+    val done: err[allo.Error] = snd.audio_dnit(s);
+    if (sel done.err) {
+        p.println("FAIL: the mixer's scratch could not be released");
+        ret false;
+    }
+    ret true;
+}
+
+# Whether a voice exists and is still playing.
+fun voice_playing(s: *snd.Audio, v: opt[snd.VoiceId]) bool {
+    ret sel v.some && snd.audio_playing(s, v.some);
 }
 
 # Play a clip and wait for the mixer to retire its voice on its own.
@@ -158,22 +172,22 @@ fun failed(step: str, r: Result[bool, str]) bool {
 # checking that the voice is released at all, and a tight bound would turn a
 # loaded machine into a failure.
 fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
-    val lr: Result[snd.Sound, str] = snd.sound_load(s, vpath);
-    if (is_err[snd.Sound, str](lr)) {
-        p.printlnf("FAIL {}: {}", label, unwrap_err[snd.Sound, str](lr));
+    val lr: res[snd.Sound, snd.AudioError] = snd.sound_load(s, vpath);
+    if (sel lr.err) {
+        p.printlnf("FAIL {}: {}", label, snd.audio_error_message(lr.err));
         ret false;
     }
-    var clip: snd.Sound = unwrap_ok[snd.Sound, str](lr);
+    var clip: snd.Sound = lr.ok;
 
-    val v: snd.VoiceId = snd.audio_play(s, ?clip, 0.5, false);
-    if (snd.audio_voice_count(s) == 0) {
+    val v: opt[snd.VoiceId] = snd.audio_play(s, ?clip, 0.5, false);
+    if (sel v.none || snd.audio_voice_count(s) == 0) {
         p.printlnf("FAIL {}: no voice was claimed", label);
         snd.sound_free(s, ?clip);
         ret false;
     }
 
     wait_ms((CLIP_MS * 3)::i64);
-    if (snd.audio_playing(s, v)) {
+    if (voice_playing(s, v)) {
         p.printlnf("FAIL {}: the voice is still playing after three times the clip", label);
         p.println("      Either the device never pulled, or the mixer cannot read this");
         p.println("      clip's format and is emitting silence without advancing. Both");
@@ -181,7 +195,7 @@ fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
         snd.sound_free(s, ?clip);
         ret false;
     }
-    snd.sound_free(s, ?clip);
+    if (!free_clip(s, ?clip)) { ret false; }
     p.printlnf("ok   {}", label);
     ret true;
 }
@@ -189,7 +203,11 @@ fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     var a: allo.Allocator;
-    page.make(?a);
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) {
+        p.println("FAIL: could not make the page allocator");
+        ret 1;
+    }
 
     # 48000 frames of stereo 16-bit is the largest clip this writes, plus the
     # 44-byte header. Sized here rather than allocated so the generator cannot
@@ -212,7 +230,7 @@ fun main(argc: i64, argv: **u8) i64 {
     p.println("ok   generated a mono 44.1 kHz clip and a stereo 48 kHz clip");
 
     var s: snd.Audio;
-    val ir: Result[bool, str] = snd.audio_init(?s, ?a, RATE, CHANS);
+    val ir: err[snd.AudioError] = snd.audio_init(?s, ?a, RATE, CHANS);
     if (failed("audio_init", ir)) {
         p.println("      No sound device, or none this backend can open. That is a");
         p.println("      real failure of this test's environment, not a pass.");
@@ -233,19 +251,24 @@ fun main(argc: i64, argv: **u8) i64 {
 
     # Overlapping voices, which is the whole reason this mixer exists rather
     # than mach-audio's own single-sound example.
-    val l1: Result[snd.Sound, str] = snd.sound_load(?s, "res://mono441.wav");
-    val l2: Result[snd.Sound, str] = snd.sound_load(?s, "res://stereo48.wav");
-    if (is_err[snd.Sound, str](l1) || is_err[snd.Sound, str](l2)) {
-        p.println("FAIL: could not reload the clips for the overlap check");
+    val l1: res[snd.Sound, snd.AudioError] = snd.sound_load(?s, "res://mono441.wav");
+    if (sel l1.err) {
+        p.println("FAIL: could not reload the mono clip for the overlap check");
         snd.audio_dnit(?s);
         ret 1;
     }
-    var c1: snd.Sound = unwrap_ok[snd.Sound, str](l1);
-    var c2: snd.Sound = unwrap_ok[snd.Sound, str](l2);
+    var c1: snd.Sound = l1.ok;
+    val l2: res[snd.Sound, snd.AudioError] = snd.sound_load(?s, "res://stereo48.wav");
+    if (sel l2.err) {
+        p.println("FAIL: could not reload the stereo clip for the overlap check");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    var c2: snd.Sound = l2.ok;
 
-    snd.audio_play(?s, ?c1, 0.5, false);
-    snd.audio_play(?s, ?c2, 0.5, false);
-    if (snd.audio_voice_count(?s) != 2) {
+    val o1: opt[snd.VoiceId] = snd.audio_play(?s, ?c1, 0.5, false);
+    val o2: opt[snd.VoiceId] = snd.audio_play(?s, ?c2, 0.5, false);
+    if (sel o1.none || sel o2.none || snd.audio_voice_count(?s) != 2) {
         p.printlnf("FAIL overlap: the mixer reports {} voices, expected 2", snd.audio_voice_count(?s));
         snd.audio_dnit(?s);
         ret 1;
@@ -261,14 +284,20 @@ fun main(argc: i64, argv: **u8) i64 {
 
     # A looping voice, which never ends on its own, taken back by the game
     # thread. This is the handoff the STOPPING state exists for.
-    val l3: Result[snd.Sound, str] = snd.sound_load(?s, "res://stereo48.wav");
-    if (is_err[snd.Sound, str](l3)) {
+    val l3: res[snd.Sound, snd.AudioError] = snd.sound_load(?s, "res://stereo48.wav");
+    if (sel l3.err) {
         p.println("FAIL: could not load the clip for the loop check");
         snd.audio_dnit(?s);
         ret 1;
     }
-    var c3: snd.Sound = unwrap_ok[snd.Sound, str](l3);
-    val loop: snd.VoiceId = snd.audio_play(?s, ?c3, 0.4, true);
+    var c3: snd.Sound = l3.ok;
+    val looped: opt[snd.VoiceId] = snd.audio_play(?s, ?c3, 0.4, true);
+    if (!sel looped.some) {
+        p.println("FAIL loop: the looping clip was not given a voice");
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    val loop: snd.VoiceId = looped.some;
     wait_ms((CLIP_MS * 2)::i64);
     if (!snd.audio_playing(?s, loop)) {
         p.println("FAIL loop: a looping voice ended on its own");
@@ -288,10 +317,11 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     p.println("ok   a looping voice runs past the clip and is reclaimed on request");
 
-    snd.sound_free(?s, ?c1);
-    snd.sound_free(?s, ?c2);
-    snd.sound_free(?s, ?c3);
-    snd.audio_dnit(?s);
+    if (!free_clip(?s, ?c1) || !free_clip(?s, ?c2) || !free_clip(?s, ?c3)) {
+        snd.audio_dnit(?s);
+        ret 1;
+    }
+    if (!teardown(?s)) { ret 1; }
     p.println("ok   teardown");
     p.println("PASS: a device opened, clips decoded and mixed, and every voice came back");
     p.println("     This does NOT check that anything was audible or correct. Nothing");
