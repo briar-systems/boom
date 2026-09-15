@@ -26,15 +26,13 @@ jobs:
           install -m 0755 /tmp/machdl/mach /usr/local/bin/mach
           mach info
 
-      # mach-glfw's [os.linux].libs cascades "glfw" into every boom link,
-      # mach-glfw vendors GLFW 3.4 and builds it from source, so the X11,
-      # Wayland, and xkbcommon development headers must be present. The stock
-      # libglfw3-dev also satisfies the link input for the system fallback.
+      # mach-glfw vendors GLFW 3.4 and builds it from source with the host cc,
+      # so the X11, Wayland, and xkbcommon development headers must be present.
       - name: Install GLFW build dependencies
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
+          sudo apt-get install -y xorg-dev libwayland-bin \
             libwayland-dev libxkbcommon-dev wayland-protocols \
             fonts-dejavu-core mesa-vulkan-drivers vulkan-tools xvfb
 
@@ -43,8 +41,9 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y spirv-tools
 
+      # the dependencies are the committed dep/ gitlinks, realized in place
       - name: Sync dependencies
-        run: mach dep pull
+        run: mach dep pull .
 
       - name: Build
         run: mach build .
@@ -52,42 +51,41 @@ jobs:
       # A uniform block is a contract between two separately compiled programs
       # and nothing at runtime checks it. A member at the wrong offset makes the
       # shader read whatever bytes are there, with no diagnostic anywhere.
-      # A glob over an empty directory makes the loop body run zero times and
-      # the step pass, which is exactly the state a failed shader build leaves.
-      # The expected set is derived from the root manifest, not written down
-      # here. A count restated in this file would go stale with the next shader.
+      # The expected set is derived from the shader-* artifacts the root manifest
+      # declares, not written down here. A count restated in this file would go
+      # stale with the next shader.
       - name: Validate the emitted SPIR-V
         run: |
           set -euo pipefail
-          expected=$(grep -oP '^out\s*=\s*"spv/\K[^"]+\.spv' mach.toml | sort)
-          actual=$(ls res/spv | sort)
-          if [ "$expected" != "$actual" ]; then
-            echo "res/spv does not match the shader artifacts mach.toml declares"
-            diff <(echo "$expected") <(echo "$actual") || true
+          mach build . --target spirv --profile release
+          expected=$(grep -oP '^\[artifact\.shader-\K[^\]]+' mach.toml | sort)
+          built=$(ls out/spirv/release/spv | sed 's/\.spv$//' | sort)
+          committed=$(ls res/spv | sed 's/\.spv$//' | sort)
+          if [ "$expected" != "$built" ] || [ "$expected" != "$committed" ]; then
+            echo "res/spv and the built modules do not match the shader artifacts mach.toml declares"
+            diff <(echo "$expected") <(echo "$committed") || true
             exit 1
           fi
-          for f in res/spv/*.spv; do spirv-val "$f"; done
-
-          # The committed modules must be what this source produces. They are
-          # checked in because a consumer pulling boom over git needs them and an
-          # #[embed] is not a build-graph edge (mach#2887), and the cost of
-          # committing generated files is exactly this: a shader edited without a
-          # rebuild would ship the old module, with the source and the binary
-          # disagreeing and nothing saying so.
-          if ! git diff --quiet -- res/spv; then
-            echo "res/spv does not match a fresh build of src/shaders"
-            git diff --stat -- res/spv
-            echo "run 'mach build .' and commit the result"
-            exit 1
-          fi
+          for m in $expected; do
+            spirv-val --target-env vulkan1.0 "out/spirv/release/spv/$m.spv"
+            # The committed modules must be what this source produces, because
+            # they are what boom.graphics.spirv embeds. A shader edited without
+            # refreshing res/spv would ship the old module, with the source and
+            # the binary disagreeing and nothing saying so.
+            if ! cmp -s "out/spirv/release/spv/$m.spv" "res/spv/$m.spv"; then
+              echo "res/spv/$m.spv does not match a fresh build of src/shaders"
+              echo "run 'mach build . --target spirv --profile release' and copy out/spirv/release/spv into res/spv"
+              exit 1
+            fi
+          done
 
       - name: Test
         run: mach test .
 
       # The examples are the only check on the shape of the public API: nothing
       # inside boom calls renderer_init or pass_draw_material the way a game
-      # does. They resolve boom by path, so this builds them against the branch
-      # rather than against what is already pushed.
+      # does. Each resolves boom by path, so its pull copies this branch rather
+      # than anything already pushed.
       - name: Build the examples
         run: |
           set -euo pipefail
