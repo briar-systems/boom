@@ -63,6 +63,7 @@ use std.types.string.str;
 use mem: std.memory;
 use vk;
 use glfw.glfw;
+use boom.window.Window;
 use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.Capacity;
@@ -319,18 +320,17 @@ pub rec Renderer {
 #
 # the window must have been opened with boom.window.window_open, which
 # creates no GL context: a window carrying one cannot back a Vulkan surface.
+# the renderer starts at the window's framebuffer size and follows it after.
 #
 # presents with vsync, which every implementation supports.
 # renderer_init_with_present asks for another, and renderer_set_present_mode
 # changes it later without the renderer being torn down.
 # ---
 # r:      renderer to initialize
-# window: the window to present to
-# width:  the window framebuffer width in pixels
-# height: the window framebuffer height in pixels
+# window: the open window to present to, which must outlive the renderer
 # ret:    ok, or the first step that failed
-pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32) err[Error] {
-    ret renderer_init_with_present(r, window, width, height, PresentMode.vsync{});
+pub fun renderer_init(r: *Renderer, window: *Window) err[Error] {
+    ret renderer_init_with_present(r, window, PresentMode.vsync{});
 }
 
 # initialize a renderer against a window, presenting a chosen way
@@ -340,14 +340,15 @@ pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32
 # renderer_present_mode_supported answers the question ahead of the attempt.
 # ---
 # r:       renderer to initialize
-# window:  the window to present to
-# width:   the window framebuffer width in pixels
-# height:  the window framebuffer height in pixels
+# window:  the open window to present to, which must outlive the renderer
 # present: how finished frames should reach the display
 # ret:     ok, or the first step that failed
-pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32, height: i32,
+pub fun renderer_init_with_present(r: *Renderer, window: *Window,
                                    present: PresentMode) err[Error] {
-    r.window      = window;
+    if (sel window.handle.none) { ret err[Error].err{Error.uninitialized{Stage.window{}}}; }
+    val width:  i32 = window.width;
+    val height: i32 = window.height;
+    r.window      = window.handle.some;
     r.width       = width;
     r.height      = height;
     r.drawing     = false;
@@ -376,7 +377,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     r.ready_stream = false;
     r.ready_store  = false;
 
-    val vr: err[Error] = vk_init(?r.vk, window, "boom");
+    val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
     r.ready_vk = true;
 

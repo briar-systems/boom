@@ -112,6 +112,7 @@ pub tag DeviceError: u8 {
 
 # the object an operation needs, which was never brought up
 pub tag Stage: u8 {
+    window;
     device;
     upload;
     swapchain;
@@ -371,6 +372,7 @@ fun device_message(e: DeviceError) str {
 }
 
 fun stage_message(e: Stage) str {
+    if (sel e.window)    { ret "the window is not open"; }
     if (sel e.device)    { ret "Vulkan device is not initialized"; }
     if (sel e.upload)    { ret "the upload context is not initialized"; }
     if (sel e.swapchain) { ret "the swapchain is not initialized"; }
