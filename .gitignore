@@ -1,8 +1,5 @@
 out/
 
-# mach dep checkouts materialized by `mach dep pull`; mach.lock is the source of truth
-dep/
-
 # res/spv/ is NOT ignored. The compiled SPIR-V is committed, because a consumer
 # that pulls boom over git has to have it: the modules are #[embed]ed, and an
 # embed is not a build-graph edge, so nothing runs the build-shaders step on a
