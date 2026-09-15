@@ -22,6 +22,7 @@ use boom.math.quat.Quat;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_matrix;
 use std.types.size.usize;
+use std.types.option.opt;
 use std.types.string.str;
 
 # the most joints a skeleton and its skinning palette carry
@@ -43,13 +44,13 @@ $if (MAX_JOINTS != 128) {
 # link, order for a parent-before-child evaluation sweep.
 # ---
 # count:        number of joints, at most MAX_JOINTS
-# parents:      per-joint parent joint index, or -1 for a root joint
+# parents:      per-joint parent joint index, none for a root joint
 # order:        joint indices ordered so every parent precedes its children
 # rest:         per-joint rest-pose local transform, the base a clip overrides
 # inverse_bind: per-joint inverse bind matrix, mesh space into joint space
 pub rec Skeleton {
     count:        usize;
-    parents:      [128]i64;
+    parents:      [128]opt[usize];
     order:        [128]usize;
     rest:         [128]Transform;
     inverse_bind: [128]Mat4;
@@ -71,12 +72,12 @@ pub fun skeleton_globals(sk: *Skeleton, locals: *Transform, out: *Mat4) {
     for (i < sk.count) {
         val j: usize = sk.order[i];
         var local: Mat4 = transform_matrix(?locals[j]);
-        val p: i64 = sk.parents[j];
-        if (p < 0) {
-            out[j] = local;
+        val p: opt[usize] = sk.parents[j];
+        if (sel p.some) {
+            out[j] = mat4_mul(?out[p.some], ?local);
         }
         or {
-            out[j] = mat4_mul(?out[p::usize], ?local);
+            out[j] = local;
         }
         i = i + 1;
     }
@@ -145,8 +146,8 @@ pub fun pose_matrices(pose: *Pose) *Mat4 {
 # build a two-joint chain skeleton for tests: root then a child of it
 fun fixture_chain(sk: *Skeleton) {
     sk.count = 2;
-    sk.parents[0] = 0 - 1;
-    sk.parents[1] = 0;
+    sk.parents[0] = opt[usize].none{};
+    sk.parents[1] = opt[usize].some{0};
     sk.order[0] = 0;
     sk.order[1] = 1;
     var i: usize = 0;
@@ -234,8 +235,8 @@ test "skeleton: the inverse bind matrix folds into the skinning matrix" {
 test "skeleton: socket globals retain parent rotation and translation before inverse bind" {
     var sk: Skeleton;
     fixture_chain(?sk);
-    sk.parents[0] = 1;
-    sk.parents[1] = 0 - 1;
+    sk.parents[0] = opt[usize].some{1};
+    sk.parents[1] = opt[usize].none{};
     sk.order[0] = 1;
     sk.order[1] = 0;
     sk.rest[1].position = vec3(2.0, 3.0, 0.0);
