@@ -44,13 +44,11 @@ use std.types.option.opt;
 use std.types.error.err;
 use allo:   std.allocator;
 use page:   std.allocator.page;
-use fs:     std.filesystem;
 use vector: std.collections.vector;
 use atomic: std.sync.atomic;
 use thread: std.sync.thread;
 use memory: std.memory;
 use os:     std.system.os;
-use text:   std.text.string;
 use audio;
 use vfs: boom.vfs;
 use boom.math.sqrtf;
@@ -86,8 +84,7 @@ val STOPPING: i64 = 2;
 # buffer:     a sample buffer could not be created, including a source with no channels
 # device:     the output device refused to open or start
 # decode:     the WAV bytes did not decode
-# path:       the virtual path did not resolve
-# read:       the file could not be read
+# load:       the clip's file could not be read through its virtual path
 # empty_clip: a clip reports no sample rate, channels, or frames, so it cannot be conformed
 # zero_frames: a clip resamples to zero frames at the device rate
 pub tag AudioError: u8 {
@@ -95,8 +92,7 @@ pub tag AudioError: u8 {
     buffer: audio.BufferError;
     device: audio.DeviceError;
     decode: audio.DecodeError;
-    path:   vfs.VfsError;
-    read:   fs.FsError;
+    load:   vfs.ReadError;
     empty_clip;
     zero_frames;
 }
@@ -110,8 +106,7 @@ pub fun audio_error_message(e: AudioError) str {
     if (sel e.buffer)     { ret "could not create a sample buffer"; }
     if (sel e.device)     { ret "the audio device could not be opened or started"; }
     if (sel e.decode)     { ret "the clip is not a WAV file boom decodes"; }
-    if (sel e.path)       { ret vfs.vfs_error_message(e.path); }
-    if (sel e.read)       { ret "could not read the clip"; }
+    if (sel e.load)       { ret vfs.read_error_message(e.load); }
     if (sel e.empty_clip) { ret "a decoded clip reports no rate, channels, or frames"; }
     ret "a clip resamples to zero frames";
 }
@@ -406,18 +401,9 @@ pub fun sound_from_buffer(s: *Audio, src: *audio.Buffer) res[Sound, AudioError] 
 # short music. `res://sfx/hit.wav` resolves through boom.vfs like every other
 # asset path.
 pub fun sound_load(s: *Audio, vpath: str) res[Sound, AudioError] {
-    val pr: res[str, vfs.VfsError] = vfs.vfs_resolve(s.a, vpath);
-    if (sel pr.err) { ret res[Sound, AudioError].err{AudioError.path{pr.err}}; }
-    val real: str = pr.ok;
-
-    val br: res[vector.Vector[u8], fs.FsError] = fs.read_bytes(s.a, real);
-    val freed: err[allo.Error] = text.str_free(s.a, real);
-    if (sel br.err) { ret res[Sound, AudioError].err{AudioError.read{br.err}}; }
+    val br: res[vector.Vector[u8], vfs.ReadError] = vfs.vfs_read_bytes(s.a, vpath);
+    if (sel br.err) { ret res[Sound, AudioError].err{AudioError.load{br.err}}; }
     var bytes: vector.Vector[u8] = br.ok;
-    if (sel freed.err) {
-        vector.dnit[u8](?bytes);
-        ret res[Sound, AudioError].err{AudioError.alloc{freed.err}};
-    }
 
     val sr: res[Sound, AudioError] = sound_from_bytes(s, bytes.data, bytes.len);
     val released: err[allo.Error] = vector.dnit[u8](?bytes);

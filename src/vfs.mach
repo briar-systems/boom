@@ -50,6 +50,8 @@ use page: std.allocator.page;
 use text: std.text.string;
 use env:  std.process.env;
 use path: std.types.path;
+use fs:   std.filesystem;
+use vector: std.collections.vector;
 
 # The separator between a scheme and its path
 val MARK: str = "://";
@@ -92,6 +94,51 @@ pub tag VfsError: u8 {
 pub tag RegisterError: u8 {
     builtin;
     full;
+}
+
+# why an asset could not be read through a virtual path
+# ---
+# path: the virtual path did not resolve, or its resolution could not be released
+# read: the resolved file could not be read
+pub tag ReadError: u8 {
+    path: VfsError;
+    read: fs.FsError;
+}
+
+# a human-readable description of a read failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun read_error_message(e: ReadError) str {
+    if (sel e.path) { ret vfs_error_message(e.path); }
+    ret "could not read the file";
+}
+
+# Read a whole file named by a virtual path.
+#
+# The one way an engine loader reaches the disk, so a sound, a texture, a mesh
+# and a font all honour the same schemes. The resolved path is released before
+# returning, and the caller owns the vector, released with vector.dnit.
+# ---
+# a:     allocator for the resolved path and the bytes
+# vpath: virtual path, e.g. `res://art/hero.qoi`, or a bare filesystem path
+# ret:   the file's bytes, or why they could not be read
+pub fun vfs_read_bytes(a: *allo.Allocator, vpath: str) res[vector.Vector[u8], ReadError] {
+    val resolved: res[str, VfsError] = vfs_resolve(a, vpath);
+    if (sel resolved.err) {
+        ret res[vector.Vector[u8], ReadError].err{ReadError.path{resolved.err}};
+    }
+    val read: res[vector.Vector[u8], fs.FsError] = fs.read_bytes(a, resolved.ok);
+    val freed: err[allo.Error] = text.str_free(a, resolved.ok);
+    if (sel read.err) {
+        ret res[vector.Vector[u8], ReadError].err{ReadError.read{read.err}};
+    }
+    if (sel freed.err) {
+        var bytes: vector.Vector[u8] = read.ok;
+        vector.dnit[u8](?bytes);
+        ret res[vector.Vector[u8], ReadError].err{ReadError.path{VfsError.alloc{freed.err}}};
+    }
+    ret res[vector.Vector[u8], ReadError].ok{read.ok};
 }
 
 # a human-readable description of a resolution failure
@@ -646,6 +693,19 @@ test "vfs: the built-in schemes are refused rather than silently ignored" {
     page.make(?a);
     val r: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
     if (!resolves_to(r, "res/sprite.qoi")) { ret 4; }
+    ret 0;
+}
+
+test "vfs: a missing file reports the read, not the path" {
+    var a: allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret 1; }
+    val r: res[vector.Vector[u8], ReadError] = vfs_read_bytes(?a, "/nonexistent/boom/asset.bin");
+    if (!sel r.err) { ret 2; }
+    if (!sel r.err.read) { ret 3; }
+    val bogus: res[vector.Vector[u8], ReadError] = vfs_read_bytes(?a, "bogus://asset.bin");
+    if (!sel bogus.err) { ret 4; }
+    if (!sel bogus.err.path) { ret 5; }
     ret 0;
 }
 
