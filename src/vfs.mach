@@ -39,12 +39,12 @@ use std.types.string.str;
 use std.types.string.str_len;
 use std.types.string.str_equals;
 use std.types.string.str_starts_with;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.string.OwnedString;
+use std.types.string.owned_adopt;
+use std.types.string.owned_release;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use allo: std.allocator;
 use page: std.allocator.page;
 use text: std.text.string;
@@ -70,15 +70,52 @@ pub var user_root: str = "";
 # How many extra schemes a game may register beyond res and user
 pub val MAX_SCHEMES: usize = 8;
 
+# why a virtual path could not be resolved
+# ---
+# unknown_scheme:        the path names a scheme that is neither built in nor registered
+# invalid_namespace:     an organization or application is not one portable path component
+# user_data_unavailable: the platform exposes no absolute per-user data directory
+# env:                   reading the platform's data directory variables failed
+# alloc:                 the resolved path could not be allocated
+pub tag VfsError: u8 {
+    unknown_scheme;
+    invalid_namespace;
+    user_data_unavailable;
+    env:   env.EnvError;
+    alloc: allo.Error;
+}
+
+# why vfs_register refused a scheme
+# ---
+# builtin: res and user are answered from res_root and user_root, never the table
+# full:    MAX_SCHEMES schemes are already registered
+pub tag RegisterError: u8 {
+    builtin;
+    full;
+}
+
+# a human-readable description of a resolution failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun vfs_error_message(e: VfsError) str {
+    if (sel e.unknown_scheme)        { ret "unknown path scheme"; }
+    if (sel e.invalid_namespace)     { ret "invalid user data namespace"; }
+    if (sel e.user_data_unavailable) { ret "user data directory is unavailable"; }
+    if (sel e.env)                   { ret "could not read the platform data directory"; }
+    ret "out of memory resolving a path";
+}
+
 rec Extra {
     name: str;
     root: str;
     used: bool;
 }
 
-rec Root {
-    value: str;
-    owned: bool;
+# a scheme root, either borrowed from a global or owned by the resolution
+tag Root: u8 {
+    borrowed: str;
+    owned:    OwnedString;
 }
 
 var extras: [8]Extra;
@@ -93,30 +130,32 @@ var extra_count: usize = 0;
 #
 # `res` AND `user` ARE REFUSED, they are not registerable. vfs_resolve answers
 # those two from res_root and user_root before it looks at this table, so an
-# entry under either name can never be consulted. Accepting one and returning
-# true, which this used to do, is a report of something that did not happen: the
-# caller believes it has redirected `res://` and every asset then loads from
+# entry under either name can never be consulted. Accepting one and reporting
+# success, which this used to do, is a report of something that did not happen:
+# the caller believes it has redirected `res://` and every asset then loads from
 # somewhere else. Assign res_root or user_root instead; both are public.
 # ---
 # name: scheme name, without the `://`
 # root: directory the scheme resolves against
-# ret:  false when the table is full, or when the name is a built-in scheme
-pub fun vfs_register(name: str, root: str) bool {
-    if (str_equals(name, "res") || str_equals(name, "user")) { ret false; }
+# ret:  ok, or why the scheme was refused
+pub fun vfs_register(name: str, root: str) err[RegisterError] {
+    if (str_equals(name, "res") || str_equals(name, "user")) {
+        ret err[RegisterError].err{RegisterError.builtin{}};
+    }
     var i: usize = 0;
     for (i < extra_count) {
         if (extras[i].used && str_equals(extras[i].name, name)) {
             extras[i].root = root;
-            ret true;
+            ret err[RegisterError].ok{};
         }
         i = i + 1;
     }
-    if (extra_count >= MAX_SCHEMES) { ret false; }
+    if (extra_count >= MAX_SCHEMES) { ret err[RegisterError].err{RegisterError.full{}}; }
     extras[extra_count].name = name;
     extras[extra_count].root = root;
     extras[extra_count].used = true;
     extra_count = extra_count + 1;
-    ret true;
+    ret err[RegisterError].ok{};
 }
 
 # Whether a virtual path carries a scheme
@@ -129,41 +168,51 @@ pub fun vfs_has_scheme(vpath: str) bool {
 # An explicit user_root is already considered the complete application root and
 # is cloned unchanged. otherwise this appends organization and application to
 # the platform data directory. both names must use the portable identifier
-# alphabet `[A-Za-z0-9._-]`. the caller owns the returned path; assign it to
-# user_root only while that allocation remains live.
+# alphabet `[A-Za-z0-9._-]`. the caller owns the returned path, released with
+# std.text.string.str_free; assign it to user_root only while it remains live.
 # ---
 # a:            allocator for the returned path
 # organization: stable publisher identifier, e.g. `briar-systems`
 # application:  stable application identifier, e.g. `ludus`
-# ret:          owned application data path, or an error
+# ret:          owned application data path, or why it could not be derived
 pub fun vfs_user_data_root(a: *allo.Allocator,
                            organization: str,
-                           application: str) Result[str, str] {
-    if (a == nil) { ret err[str, str]("allocator is nil"); }
+                           application: str) res[str, VfsError] {
     if (!valid_root_component(organization)
         || !valid_root_component(application)) {
-        ret err[str, str]("invalid user data namespace");
+        ret res[str, VfsError].err{VfsError.invalid_namespace{}};
     }
     if (user_root != nil && str_len(user_root) > 0) {
-        ret text.str_dup(a, user_root);
+        val copied: res[str, allo.Error] = text.str_dup(a, user_root);
+        if (sel copied.err) { ret res[str, VfsError].err{VfsError.alloc{copied.err}}; }
+        ret res[str, VfsError].ok{copied.ok};
     }
 
-    val base_result: Result[Root, str] = user_root_resolved(a);
-    if (is_err[Root, str](base_result)) {
-        ret err[str, str](unwrap_err[Root, str](base_result));
+    val base_result: res[Root, VfsError] = user_root_resolved(a);
+    if (sel base_result.err) { ret res[str, VfsError].err{base_result.err}; }
+    var base: Root = base_result.ok;
+    val organization_result: res[path.Path, allo.Error] = path.join(
+        a, root_value(?base), organization);
+    val released: err[allo.Error] = release_root(?base);
+    if (sel organization_result.err) {
+        ret res[str, VfsError].err{VfsError.alloc{organization_result.err}};
     }
-    val base: Root = unwrap_ok[Root, str](base_result);
-    val organization_result: Result[str, str] = path.join(
-        a, base.value, organization);
-    release_root(a, base);
-    if (is_err[str, str](organization_result)) {
-        ret err[str, str](unwrap_err[str, str](organization_result));
+    val organization_root: str = organization_result.ok;
+    if (sel released.err) {
+        text.str_free(a, organization_root);
+        ret res[str, VfsError].err{VfsError.alloc{released.err}};
     }
-    val organization_root: str = unwrap_ok[str, str](organization_result);
-    val application_result: Result[str, str] = path.join(
+    val application_result: res[path.Path, allo.Error] = path.join(
         a, organization_root, application);
-    allo.deallocate[u8](a, organization_root, str_len(organization_root) + 1);
-    ret application_result;
+    val freed: err[allo.Error] = text.str_free(a, organization_root);
+    if (sel application_result.err) {
+        ret res[str, VfsError].err{VfsError.alloc{application_result.err}};
+    }
+    if (sel freed.err) {
+        text.str_free(a, application_result.ok);
+        ret res[str, VfsError].err{VfsError.alloc{freed.err}};
+    }
+    ret res[str, VfsError].ok{application_result.ok};
 }
 
 fun valid_root_component(value: str) bool {
@@ -242,10 +291,10 @@ fun scheme_end(vpath: str) usize {
     ret 0;
 }
 
-# The root a scheme resolves against, or nil when the scheme is unknown
-fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[Root, str] {
+# The root a scheme resolves against
+fun root_for(a: *allo.Allocator, vpath: str, end: usize) res[Root, VfsError] {
     if (str_starts_with(vpath, "res://")) {
-        ret ok[Root, str](Root{value: res_root, owned: false});
+        ret res[Root, VfsError].ok{Root.borrowed{res_root}};
     }
     if (str_starts_with(vpath, "user://")) { ret user_root_resolved(a); }
 
@@ -259,59 +308,59 @@ fun root_for(a: *allo.Allocator, vpath: str, end: usize) Result[Root, str] {
                 k = k + 1;
             }
             if (m) {
-                ret ok[Root, str](Root{value: extras[i].root, owned: false});
+                ret res[Root, VfsError].ok{Root.borrowed{extras[i].root}};
             }
         }
         i = i + 1;
     }
-    ret err[Root, str]("unknown path scheme");
+    ret res[Root, VfsError].err{VfsError.unknown_scheme{}};
 }
 
 # Resolve a virtual path to a filesystem path
 #
-# The result is owned by the caller and allocated from `a`. a path with no
-# scheme is copied through unchanged, so the escape hatch costs a copy and
-# nothing else.
+# The result is owned by the caller, allocated from `a` and released with
+# std.text.string.str_free. a path with no scheme is copied through unchanged,
+# so the escape hatch costs a copy and nothing else.
 # ---
 # a:     allocator for the result
 # vpath: virtual path, e.g. `res://art/hero.qoi`
-# ret:   the filesystem path, or an error naming the unknown scheme
-pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
-    if (vpath == nil) { ret err[str, str]("nil path"); }
+# ret:   the filesystem path, or why it could not be resolved
+pub fun vfs_resolve(a: *allo.Allocator, vpath: str) res[str, VfsError] {
     val end: usize = scheme_end(vpath);
-    if (end == 0) { ret text.str_dup(a, vpath); }
+    if (end == 0) {
+        val copied: res[str, allo.Error] = text.str_dup(a, vpath);
+        if (sel copied.err) { ret res[str, VfsError].err{VfsError.alloc{copied.err}}; }
+        ret res[str, VfsError].ok{copied.ok};
+    }
 
-    val rr: Result[Root, str] = root_for(a, vpath, end);
-    if (is_err[Root, str](rr)) { ret err[str, str](unwrap_err[Root, str](rr)); }
-    val root: Root = unwrap_ok[Root, str](rr);
+    val rr: res[Root, VfsError] = root_for(a, vpath, end);
+    if (sel rr.err) { ret res[str, VfsError].err{rr.err}; }
+    var root: Root = rr.ok;
+    val value: str = root_value(?root);
 
     val n:    usize = str_len(vpath);
     val rest: usize = n - end;
-    val rlen: usize = str_len(root.value);
+    val rlen: usize = str_len(value);
 
     # A root of "" means the rest is already the whole path, which is what an
     # absolute user_root override collapses to
     if (rlen == 0) {
-        val result: Result[str, str] = text.str_dup_range(a, vpath, end, rest);
-        release_root(a, root);
-        ret result;
+        val result: res[str, allo.Error] = text.str_dup_range(a, vpath, end, rest);
+        ret finish_resolve(a, ?root, result);
     }
 
     # Join with exactly one separator regardless of whether the root carries a
     # trailing one, since both spellings are natural for a dev to write
     var sep: usize = 1;
-    if (path.is_separator(root.value[rlen - 1]::u8)) { sep = 0; }
+    if (path.is_separator(value[rlen - 1]::u8)) { sep = 0; }
 
-    val br: Result[*u8, str] = allo.allocate[u8](a, rlen + sep + rest + 1);
-    if (is_err[*u8, str](br)) {
-        release_root(a, root);
-        ret err[str, str](unwrap_err[*u8, str](br));
-    }
-    val buf: *u8 = unwrap_ok[*u8, str](br);
+    val br: res[*u8, allo.Error] = allo.allocate[u8](a, rlen + sep + rest + 1);
+    if (sel br.err) { ret finish_resolve(a, ?root, res[str, allo.Error].err{br.err}); }
+    val buf: *u8 = br.ok;
 
     var o: usize = 0;
     var i: usize = 0;
-    for (i < rlen) { buf[o] = root.value[i]::u8; o = o + 1; i = i + 1; }
+    for (i < rlen) { buf[o] = value[i]::u8; o = o + 1; i = i + 1; }
     if (sep == 1) { buf[o] = path.separator(); o = o + 1; }
     i = 0;
     for (i < rest) {
@@ -322,13 +371,29 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) Result[str, str] {
         i = i + 1;
     }
     buf[o] = 0;
-    release_root(a, root);
-    ret ok[str, str](buf:~str);
+    ret finish_resolve(a, ?root, res[str, allo.Error].ok{buf:~str});
 }
 
-fun release_root(a: *allo.Allocator, root: Root) {
-    if (!root.owned || root.value == nil) { ret; }
-    allo.deallocate[u8](a, root.value, str_len(root.value) + 1);
+# release a resolution's root, reporting the first failure and owning nothing on one
+fun finish_resolve(a: *allo.Allocator, root: *Root, result: res[str, allo.Error]) res[str, VfsError] {
+    val released: err[allo.Error] = release_root(root);
+    if (sel result.err) { ret res[str, VfsError].err{VfsError.alloc{result.err}}; }
+    if (sel released.err) {
+        text.str_free(a, result.ok);
+        ret res[str, VfsError].err{VfsError.alloc{released.err}};
+    }
+    ret res[str, VfsError].ok{result.ok};
+}
+
+fun root_value(root: *Root) str {
+    if (sel root.owned) { ret root.owned.data; }
+    if (sel root.borrowed) { ret root.borrowed; }
+    ret nil;
+}
+
+fun release_root(root: *Root) err[allo.Error] {
+    if (sel root.owned) { ret owned_release(?root.owned); }
+    ret err[allo.Error].ok{};
 }
 
 # The resolved `user://` root, deriving the platform default when unset
@@ -337,67 +402,73 @@ fun release_root(a: *allo.Allocator, root: Root) {
 # on linux, is itself configurable. the result is not cached: a game that
 # cares sets user_root explicitly, and a game that does not resolves it a
 # handful of times over its life.
-fun user_root_resolved(a: *allo.Allocator) Result[Root, str] {
+fun user_root_resolved(a: *allo.Allocator) res[Root, VfsError] {
     if (user_root != nil && str_len(user_root) > 0) {
-        ret ok[Root, str](Root{value: user_root, owned: false});
+        ret res[Root, VfsError].ok{Root.borrowed{user_root}};
     }
 
     $if ($mach.build.os == $mach.os.windows) {
         # Roaming application data, the documented home for per-user state
-        val r: Result[str, str] = env.value(a, "APPDATA");
-        if (!is_err[str, str](r)) {
-            val value: str = unwrap_ok[str, str](r);
-            if (path.is_abs(value)) {
-                ret ok[Root, str](Root{value: value, owned: true});
-            }
-            allo.deallocate[u8](a, value, str_len(value) + 1);
-        }
+        val r: res[opt[Root], VfsError] = absolute_env(a, "APPDATA", "");
+        if (sel r.err) { ret res[Root, VfsError].err{r.err}; }
+        if (sel r.ok.some) { ret res[Root, VfsError].ok{r.ok.some}; }
     }
     $or ($mach.build.os == $mach.os.darwin) {
-        val h: Result[str, str] = env.value(a, "HOME");
-        if (!is_err[str, str](h)) {
-            val home: str = unwrap_ok[str, str](h);
-            if (path.is_abs(home)) {
-                ret append_owned_root(a, home, "Library/Application Support");
-            }
-            allo.deallocate[u8](a, home, str_len(home) + 1);
-        }
+        val h: res[opt[Root], VfsError] = absolute_env(a, "HOME", "Library/Application Support");
+        if (sel h.err) { ret res[Root, VfsError].err{h.err}; }
+        if (sel h.ok.some) { ret res[Root, VfsError].ok{h.ok.some}; }
     }
     $or {
         # XDG first, since a user may have moved it; the specification defines
         # $HOME/.local/share as the default when the variable is absent
-        val x: Result[str, str] = env.value(a, "XDG_DATA_HOME");
-        if (!is_err[str, str](x)) {
-            val data: str = unwrap_ok[str, str](x);
-            if (path.is_abs(data)) {
-                ret ok[Root, str](Root{value: data, owned: true});
-            }
-            allo.deallocate[u8](a, data, str_len(data) + 1);
-        }
-        val h: Result[str, str] = env.value(a, "HOME");
-        if (!is_err[str, str](h)) {
-            val home: str = unwrap_ok[str, str](h);
-            if (path.is_abs(home)) {
-                ret append_owned_root(a, home, ".local/share");
-            }
-            allo.deallocate[u8](a, home, str_len(home) + 1);
-        }
+        val x: res[opt[Root], VfsError] = absolute_env(a, "XDG_DATA_HOME", "");
+        if (sel x.err) { ret res[Root, VfsError].err{x.err}; }
+        if (sel x.ok.some) { ret res[Root, VfsError].ok{x.ok.some}; }
+        val h: res[opt[Root], VfsError] = absolute_env(a, "HOME", ".local/share");
+        if (sel h.err) { ret res[Root, VfsError].err{h.err}; }
+        if (sel h.ok.some) { ret res[Root, VfsError].ok{h.ok.some}; }
     }
 
-    ret err[Root, str]("user data directory is unavailable");
+    ret res[Root, VfsError].err{VfsError.user_data_unavailable{}};
 }
 
-fun append_owned_root(a: *allo.Allocator, base: str, suffix: str) Result[Root, str] {
-    val joined: Result[str, str] = path.join(a, base, suffix);
-    allo.deallocate[u8](a, base, str_len(base) + 1);
-    if (is_err[str, str](joined)) {
-        ret err[Root, str](unwrap_err[str, str](joined));
+# an owned root from an environment variable holding an absolute path
+#
+# none when the variable is unset or relative. a non-empty suffix is joined
+# onto the value.
+fun absolute_env(a: *allo.Allocator, name: str, suffix: str) res[opt[Root], VfsError] {
+    val read: res[opt[OwnedString], env.EnvError] = env.value(a, name);
+    if (sel read.err) { ret res[opt[Root], VfsError].err{VfsError.env{read.err}}; }
+    if (sel read.ok.none) { ret res[opt[Root], VfsError].ok{opt[Root].none{}}; }
+    var value: OwnedString = read.ok.some;
+    if (!path.is_abs(value.data)) {
+        val dropped: err[allo.Error] = owned_release(?value);
+        if (sel dropped.err) { ret res[opt[Root], VfsError].err{VfsError.alloc{dropped.err}}; }
+        ret res[opt[Root], VfsError].ok{opt[Root].none{}};
     }
-    ret ok[Root, str](Root{
-        value: unwrap_ok[str, str](joined), owned: true});
+    if (str_len(suffix) == 0) {
+        ret res[opt[Root], VfsError].ok{opt[Root].some{Root.owned{value}}};
+    }
+    val joined: res[path.Path, allo.Error] = path.join(a, value.data, suffix);
+    val released: err[allo.Error] = owned_release(?value);
+    if (sel joined.err) { ret res[opt[Root], VfsError].err{VfsError.alloc{joined.err}}; }
+    if (sel released.err) {
+        text.str_free(a, joined.ok);
+        ret res[opt[Root], VfsError].err{VfsError.alloc{released.err}};
+    }
+    val len: usize = str_len(joined.ok);
+    ret res[opt[Root], VfsError].ok{opt[Root].some{Root.owned{owned_adopt(a, joined.ok, len, len + 1)}}};
 }
 
-# --------------------------------------------------------------------- tests
+# whether a resolution produced exactly the expected path
+fun resolves_to(r: res[str, VfsError], expected: str) bool {
+    ret sel r.ok && str_equals(r.ok, expected);
+}
+
+# whether a user data root was refused as an invalid namespace
+fun refused_namespace(r: res[str, VfsError]) bool {
+    ret sel r.err && sel r.err.invalid_namespace;
+}
 
 test "vfs: res:// resolves against res_root" {
     var a: allo.Allocator;
@@ -405,11 +476,9 @@ test "vfs: res:// resolves against res_root" {
     val saved: str = res_root;
     res_root = "assets";
 
-    val r: Result[str, str] = vfs_resolve(?a, "res://art/hero.qoi");
-    if (is_err[str, str](r)) { ret 1; }
-    if (!str_equals(unwrap_ok[str, str](r), "assets/art/hero.qoi")) { ret 1; }
-
+    val r: res[str, VfsError] = vfs_resolve(?a, "res://art/hero.qoi");
     res_root = saved;
+    if (!resolves_to(r, "assets/art/hero.qoi")) { ret 1; }
     ret 0;
 }
 
@@ -419,12 +488,10 @@ test "vfs: a root with a trailing slash does not double it" {
     val saved: str = res_root;
 
     res_root = "assets/";
-    val r: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
-    if (is_err[str, str](r)) { ret 1; }
-    # Both spellings of a root are natural to write, so both must land here
-    if (!str_equals(unwrap_ok[str, str](r), "assets/hero.qoi")) { ret 1; }
-
+    val r: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
     res_root = saved;
+    # Both spellings of a root are natural to write, so both must land here
+    if (!resolves_to(r, "assets/hero.qoi")) { ret 1; }
     ret 0;
 }
 
@@ -434,24 +501,22 @@ test "vfs: an absolute root works, including one that is only a slash" {
     val saved: str = res_root;
 
     res_root = "/opt/game/data";
-    val r: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
-    if (!str_equals(unwrap_ok[str, str](r), "/opt/game/data/hero.qoi")) { ret 1; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
+    if (!resolves_to(r, "/opt/game/data/hero.qoi")) { res_root = saved; ret 1; }
 
     res_root = "/";
-    val r2: Result[str, str] = vfs_resolve(?a, "res://hero.qoi");
-    if (!str_equals(unwrap_ok[str, str](r2), "/hero.qoi")) { ret 1; }
-
+    val r2: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
     res_root = saved;
+    if (!resolves_to(r2, "/hero.qoi")) { ret 2; }
     ret 0;
 }
 
 test "vfs: a bare path passes through unchanged" {
     var a: allo.Allocator;
     page.make(?a);
-    val r: Result[str, str] = vfs_resolve(?a, "some/plain/path.txt");
-    if (is_err[str, str](r)) { ret 1; }
-    if (!str_equals(unwrap_ok[str, str](r), "some/plain/path.txt")) { ret 1; }
-    if (vfs_has_scheme("some/plain/path.txt")) { ret 1; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "some/plain/path.txt");
+    if (!resolves_to(r, "some/plain/path.txt")) { ret 1; }
+    if (vfs_has_scheme("some/plain/path.txt")) { ret 2; }
     ret 0;
 }
 
@@ -461,8 +526,8 @@ test "vfs: :// after a separator is a directory, not a scheme" {
     if (vfs_has_scheme("weird/a://b")) { ret 1; }
     var a: allo.Allocator;
     page.make(?a);
-    val r: Result[str, str] = vfs_resolve(?a, "weird/a://b");
-    if (!str_equals(unwrap_ok[str, str](r), "weird/a://b")) { ret 1; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "weird/a://b");
+    if (!resolves_to(r, "weird/a://b")) { ret 2; }
     ret 0;
 }
 
@@ -471,7 +536,9 @@ test "vfs: an unknown scheme is an error, not a silent passthrough" {
     page.make(?a);
     # Passing it through would resolve `bogus://x` against the working
     # directory and fail later with a confusing not-found
-    if (!is_err[str, str](vfs_resolve(?a, "bogus://x"))) { ret 1; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "bogus://x");
+    if (!sel r.err) { ret 1; }
+    if (!sel r.err.unknown_scheme) { ret 2; }
     ret 0;
 }
 
@@ -479,16 +546,17 @@ test "vfs: a registered scheme resolves, and re-registering replaces it" {
     var a: allo.Allocator;
     page.make(?a);
 
-    if (!vfs_register("mods", "mods/enabled")) { ret 1; }
-    val r: Result[str, str] = vfs_resolve(?a, "mods://weapons.pack");
-    if (is_err[str, str](r)) { ret 1; }
-    if (!str_equals(unwrap_ok[str, str](r), "mods/enabled/weapons.pack")) { ret 1; }
+    val first: err[RegisterError] = vfs_register("mods", "mods/enabled");
+    if (!sel first.ok) { ret 1; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "mods://weapons.pack");
+    if (!resolves_to(r, "mods/enabled/weapons.pack")) { ret 2; }
 
     # Re-registering must replace rather than append, so a reload does not
     # leak table entries or leave the old root shadowing the new one
-    if (!vfs_register("mods", "other")) { ret 1; }
-    val r2: Result[str, str] = vfs_resolve(?a, "mods://weapons.pack");
-    if (!str_equals(unwrap_ok[str, str](r2), "other/weapons.pack")) { ret 1; }
+    val again: err[RegisterError] = vfs_register("mods", "other");
+    if (!sel again.ok) { ret 3; }
+    val r2: res[str, VfsError] = vfs_resolve(?a, "mods://weapons.pack");
+    if (!resolves_to(r2, "other/weapons.pack")) { ret 4; }
     ret 0;
 }
 
@@ -498,10 +566,9 @@ test "vfs: user:// honours an explicit override" {
     val saved: str = user_root;
 
     user_root = "/tmp/game-state";
-    val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
+    val r: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
     user_root = saved;
-    if (is_err[str, str](r)) { ret 1; }
-    if (!str_equals(unwrap_ok[str, str](r), "/tmp/game-state/save1.dat")) { ret 1; }
+    if (!resolves_to(r, "/tmp/game-state/save1.dat")) { ret 1; }
     ret 0;
 }
 
@@ -511,39 +578,40 @@ test "vfs: an explicit user root is already application scoped" {
     val saved: str = user_root;
 
     user_root = "/tmp/portable-ludus";
-    val r: Result[str, str] = vfs_user_data_root(
+    val r: res[str, VfsError] = vfs_user_data_root(
         ?a, "briar-systems", "ludus");
     user_root = saved;
-    if (is_err[str, str](r)) { ret 1; }
-    val root: str = unwrap_ok[str, str](r);
-    if (!str_equals(root, "/tmp/portable-ludus")) { ret 2; }
-    allo.deallocate[u8](?a, root, str_len(root) + 1);
+    if (!resolves_to(r, "/tmp/portable-ludus")) { ret 1; }
+    if (sel r.ok) {
+        val freed: err[allo.Error] = text.str_free(?a, r.ok);
+        if (sel freed.err) { ret 2; }
+    }
     ret 0;
 }
 
 test "vfs: user data namespaces are single path components" {
     var a: allo.Allocator;
     page.make(?a);
-    if (!is_err[str, str](vfs_user_data_root(?a, "..", "ludus"))) { ret 1; }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar/systems", "ludus"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "..", "ludus"))) { ret 1; }
+    if (!refused_namespace(vfs_user_data_root(?a, "briar/systems", "ludus"))) {
         ret 2;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar\\systems", "ludus"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "briar\\systems", "ludus"))) {
         ret 3;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar:systems", "ludus"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "briar:systems", "ludus"))) {
         ret 4;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems.", "ludus"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "briar-systems.", "ludus"))) {
         ret 5;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", "CON.log"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "briar-systems", "CON.log"))) {
         ret 6;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", "lPt9"))) {
+    if (!refused_namespace(vfs_user_data_root(?a, "briar-systems", "lPt9"))) {
         ret 7;
     }
-    if (!is_err[str, str](vfs_user_data_root(?a, "briar-systems", ""))) { ret 8; }
+    if (!refused_namespace(vfs_user_data_root(?a, "briar-systems", ""))) { ret 8; }
     ret 0;
 }
 
@@ -553,12 +621,12 @@ test "vfs: user:// derives a root or reports missing platform state" {
     val saved: str = user_root;
     user_root = "";
 
-    val r: Result[str, str] = vfs_resolve(?a, "user://save1.dat");
+    val r: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
     user_root = saved;
     # Sandboxed processes may expose no HOME or platform data directory. that
     # is an explicit error instead of writing into the working directory.
-    if (is_err[str, str](r)) { ret 0; }
-    if (str_len(unwrap_ok[str, str](r)) == 0) { ret 1; }
+    if (sel r.err) { ret 0; }
+    if (str_len(r.ok) == 0) { ret 1; }
     ret 0;
 }
 
@@ -567,15 +635,17 @@ test "vfs: the built-in schemes are refused rather than silently ignored" {
     # answers those from res_root and user_root first. Accepting one and
     # reporting success is worse than refusing: the caller believes it has
     # redirected res:// and every asset then loads from the old root.
-    if (vfs_register("res", "/tmp/somewhere"))  { ret 1; }
-    if (vfs_register("user", "/tmp/elsewhere")) { ret 2; }
+    val res_refused: err[RegisterError] = vfs_register("res", "/tmp/somewhere");
+    if (!sel res_refused.err) { ret 1; }
+    if (!sel res_refused.err.builtin) { ret 2; }
+    val user_refused: err[RegisterError] = vfs_register("user", "/tmp/elsewhere");
+    if (!sel user_refused.err) { ret 3; }
 
     # And the refusal must not have consumed a slot or shadowed the real root.
     var a: allo.Allocator;
     page.make(?a);
-    val r: Result[str, str] = vfs_resolve(?a, "res://sprite.qoi");
-    if (is_err[str, str](r)) { ret 3; }
-    if (!str_equals(unwrap_ok[str, str](r), "res/sprite.qoi")) { ret 4; }
+    val r: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
+    if (!resolves_to(r, "res/sprite.qoi")) { ret 4; }
     ret 0;
 }
 
@@ -585,9 +655,8 @@ test "vfs: res_root is what redirects the res scheme" {
     res_root = "assets/packed";
     var a: allo.Allocator;
     page.make(?a);
-    val r: Result[str, str] = vfs_resolve(?a, "res://sprite.qoi");
+    val r: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
     res_root = saved;
-    if (is_err[str, str](r)) { ret 1; }
-    if (!str_equals(unwrap_ok[str, str](r), "assets/packed/sprite.qoi")) { ret 2; }
+    if (!resolves_to(r, "assets/packed/sprite.qoi")) { ret 1; }
     ret 0;
 }
