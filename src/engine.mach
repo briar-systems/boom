@@ -23,6 +23,26 @@ use boom.clock.clock_advance;
 use boom.timestep.timestep_add;
 use boom.timestep.timestep_step;
 use boom.timestep.timestep_alpha;
+use std.types.bool.false;
+use std.types.result.res;
+use std.types.error.err;
+use std.types.string.str;
+use io_error: std.io.error;
+
+# why the frame loop stopped on its own account
+# ---
+# clock: the monotonic clock could not be read
+pub tag EngineError: u8 {
+    clock: io_error.Error;
+}
+
+# a one-line description of a frame loop failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun engine_error_message(e: EngineError) str {
+    ret "could not read the monotonic clock";
+}
 
 fun invoke(hook: fun(*Context), ctx: *Context) {
     if (hook != nil) {
@@ -46,7 +66,8 @@ fun tick_pending(ctx: *Context, app: *App) {
 # window is closed: each frame polls input, advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
 # ctx.alpha, and renders via f_draw. calls f_dnit once on exit. absent
-# hooks are skipped. the context status is returned after teardown.
+# hooks are skipped. the context status is returned after teardown. a loop
+# the engine itself cannot continue still calls f_dnit and reports why.
 #
 # the loop does not present: a Renderer brackets its own frame with an
 # acquire and a present. what the loop owns is the timing, the input fold,
@@ -54,8 +75,8 @@ fun tick_pending(ctx: *Context, app: *App) {
 # ---
 # ctx: initialized engine context to run
 # app: lifecycle hooks to drive
-# ret: the context's final process status
-pub fun run(ctx: *Context, app: *App) i64 {
+# ret: the context's final process status, or why the loop could not continue
+pub fun run(ctx: *Context, app: *App) res[i64, EngineError] {
     invoke(app.f_init, ctx);
 
     for (ctx.running && !window_should_close(?ctx.window)) {
@@ -73,7 +94,14 @@ pub fun run(ctx: *Context, app: *App) i64 {
         # than of how busy the machine was. Everything downstream reads the
         # clock the same way either side of this.
         if (ctx.frame_dt != 0) { clock_advance(?ctx.clock, ctx.frame_dt); }
-        or { clock_tick(?ctx.clock); }
+        or {
+            val ticked: err[io_error.Error] = clock_tick(?ctx.clock);
+            if (sel ticked.err) {
+                ctx.running = false;
+                invoke(app.f_dnit, ctx);
+                ret res[i64, EngineError].err{EngineError.clock{ticked.err}};
+            }
+        }
 
         timestep_add(?ctx.step, ctx.clock.delta);
         tick_pending(ctx, app);
@@ -90,7 +118,7 @@ pub fun run(ctx: *Context, app: *App) i64 {
     }
 
     invoke(app.f_dnit, ctx);
-    ret ctx.status;
+    ret res[i64, EngineError].ok{ctx.status};
 }
 
 use std.types.bool.true;
