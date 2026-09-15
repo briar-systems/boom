@@ -11,6 +11,10 @@ out/
 # target-independent, so one copy serves every target and profile, which is why
 # they live under res/ and not under out/. CI asserts they match a fresh build.
 
+# an example is a root of its own that realizes boom and its closure under dep/
+# as a path copy and plain clones; nothing there is source
+/examples/*/dep/
+
 # generated at runtime by examples/audio, not assets
 *.wav
 
