@@ -23,12 +23,11 @@ use std.types.bool.bool;
 use std.types.size.usize;
 use std.types.bool.true;
 use std.types.bool.false;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use boom.graphics.image.DEPTH_FORMAT;
 
@@ -201,7 +200,7 @@ pub fun pass_loading_mrt(formats: *i32, count: usize, initial: i32, final: i32) 
 }
 
 # Create a render pass from the shared description.
-pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, Error] {
+pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) err[Error] {
     val n: usize = clamp_count(o.color_count);
 
     # DEPTH IS LAST, AT INDEX n. Every consumer that builds a framebuffer or a
@@ -257,10 +256,11 @@ pub fun pass_create(v: *Vk, o: *PassOptions, out: *vk.RenderPass) Result[bool, E
     ci.dependencyCount = 2;
     ci.pDependencies   = ?deps[0];
 
-    if (vk.vkCreateRenderPass(v.device, ?ci, nil, out) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateRenderPass failed"));
+    val rc: i32 = vk.vkCreateRenderPass(v.device, ?ci, nil, out);
+    if (rc != vk.SUCCESS) {
+        ret err[Error].err{vk_failed(VkCall.create_render_pass{}, rc)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 fun depth_attachment(o: *PassOptions) vk.AttachmentDescription {

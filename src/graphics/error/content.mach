@@ -1,0 +1,52 @@
+# the texture and font load failures
+#
+# the cases an image or a TrueType face can fail on before its pixels reach the
+# device. mach-image's and mach-font's own refusals ride as payloads.
+
+use std.types.string.str;
+use std.types.option.opt;
+use image.codec.DecodeError;
+use image.format.Format;
+use font.error.FontError;
+
+# why a texture could not be decoded
+# ---
+# dimensions:  a width or height that is not positive
+# format:      the bytes are not a format boom decodes; carries what was detected, if anything
+# decode:      the decoder refused the bytes
+pub tag TextureError: u8 {
+    dimensions;
+    format: opt[Format];
+    decode: DecodeError;
+}
+
+# why a font could not be loaded
+# ---
+# pixel_height: the requested pixel height is not positive
+# oversample:   the oversample factor is zero
+# threshold:    a pixel raster with a zero coverage threshold
+# pixel_scale:  a pixel font needs a whole height at one-times raster
+# font:         the TrueType parser refused the face
+pub tag TextError: u8 {
+    pixel_height;
+    oversample;
+    threshold;
+    pixel_scale;
+    font: FontError;
+}
+
+# a one-line description of a texture failure
+pub fun texture_error_message(e: TextureError) str {
+    if (sel e.dimensions) { ret "texture dimensions must be positive"; }
+    if (sel e.format)     { ret "unsupported image format (only PNG, QOI and TGA are decoded)"; }
+    ret "the image did not decode";
+}
+
+# a one-line description of a font failure
+pub fun text_error_message(e: TextError) str {
+    if (sel e.pixel_height) { ret "font pixel height must be positive"; }
+    if (sel e.oversample)   { ret "font oversample must be at least one"; }
+    if (sel e.threshold)    { ret "font pixel threshold must be positive"; }
+    if (sel e.pixel_scale)  { ret "pixel fonts require a whole height at one-times raster"; }
+    ret "not a usable TrueType font";
+}

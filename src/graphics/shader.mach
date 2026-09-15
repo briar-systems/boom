@@ -38,14 +38,12 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.ShaderError;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.device.Device;
@@ -64,8 +62,7 @@ use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_eq;
 use boom.graphics.pass.pass_compatibility_one;
 use boom.graphics.depth.DepthConvention;
-use boom.graphics.depth.DEPTH_FORWARD;
-use boom.graphics.depth.DEPTH_REVERSED;
+use boom.graphics.depth.depth_convention_same;
 
 # How many pipelines one shader may build.
 #
@@ -116,15 +113,18 @@ pub rec Shader {
 # vlen: its length in bytes
 # frag: the fragment stage's SPIR-V bytes
 # flen: its length in bytes
-pub fun shader(s: *Shader, vert: *u8, vlen: usize, frag: *u8, flen: usize) Result[bool, Error] {
+pub fun shader(s: *Shader, vert: *u8, vlen: usize, frag: *u8, flen: usize) err[Error] {
     if (vert == nil || frag == nil) {
-        ret err[bool, Error](error("a shader needs both a vertex and a fragment module"));
+        ret err[Error].err{Error.shader{ShaderError.missing_stage{}}};
     }
     # SPIR-V is a stream of 32-bit words with a five-word header, so anything
     # shorter or misaligned is not a module and would be rejected far away from
     # here, inside pipeline creation, as an unexplained driver failure.
-    if (vlen < 20 || flen < 20 || (vlen % 4) != 0 || (flen % 4) != 0) {
-        ret err[bool, Error](error("a shader module must be a whole number of SPIR-V words"));
+    if (vlen < 20 || (vlen % 4) != 0) {
+        ret err[Error].err{Error.shader{ShaderError.spirv_words{vlen}}};
+    }
+    if (flen < 20 || (flen % 4) != 0) {
+        ret err[Error].err{Error.shader{ShaderError.spirv_words{flen}}};
     }
 
     s.vert  = vert;
@@ -139,7 +139,7 @@ pub fun shader(s: *Shader, vert: *u8, vlen: usize, frag: *u8, flen: usize) Resul
         i = i + 1;
     }
     s.ready = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Choose the blend, depth and cull state the shader draws with.
@@ -154,42 +154,45 @@ pub fun shader_set_state(s: *Shader, d: PipelineDesc) {
 # The pipeline for a render pass and vertex layout, building it on first use.
 #
 # Internal to the draw path: a game never calls this, which is the point of the
-# type. Returns nil when the shader is full or the pipeline could not be built,
-# and the caller reports that as a dropped draw rather than drawing with a
-# pipeline meant for different geometry.
+# type. Refused when the shader is full or the pipeline could not be built, and
+# the caller reports that as a dropped draw rather than drawing with a pipeline
+# meant for different geometry.
 pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
                         compatibility: *PassCompatibility, f: *VertexFormat,
-                        depth: DepthConvention) *Pipeline {
-    if (!s.ready || pass == nil) { ret nil; }
+                        depth: DepthConvention) res[*Pipeline, Error] {
+    if (!s.ready) { ret res[*Pipeline, Error].err{Error.shader{ShaderError.undeclared{}}}; }
+    if (pass == nil) { ret res[*Pipeline, Error].err{Error.uninitialized{Stage.frame{}}}; }
 
     var i: usize = 0;
     for (i < s.count) {
         if (s.built[i].live
-            && s.built[i].depth == depth
+            && depth_convention_same(s.built[i].depth, depth)
             && pass_compatibility_eq(?s.built[i].compatibility, compatibility)
             && vertex_format_eq(?s.built[i].format, f)) {
-            ret ?s.built[i].pipeline;
+            ret res[*Pipeline, Error].ok{?s.built[i].pipeline};
         }
         i = i + 1;
     }
 
-    if (s.count >= MAX_SHADER_PIPELINES) { ret nil; }
+    if (s.count >= MAX_SHADER_PIPELINES) {
+        ret res[*Pipeline, Error].err{Error.shader{ShaderError.full{}}};
+    }
 
     val n: usize = s.count;
     var lay: SetLayout = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init_depth(?s.built[n].pipeline, v, pass,
-                                                     compatibility.color_count,
-                                                     f, ?s.desc, depth,
-                                                     s.vert, s.vlen,
-                                                     s.frag, s.flen, ?lay);
-    if (is_err[bool, Error](r)) { ret nil; }
+    val r: err[Error] = pipeline_init_depth(?s.built[n].pipeline, v, pass,
+                                            compatibility.color_count,
+                                            f, ?s.desc, depth,
+                                            s.vert, s.vlen,
+                                            s.frag, s.flen, ?lay);
+    if (sel r.err) { ret res[*Pipeline, Error].err{r.err}; }
 
     s.built[n].compatibility = @compatibility;
     s.built[n].format = @f;
     s.built[n].depth  = depth;
     s.built[n].live   = true;
     s.count = n + 1;
-    ret ?s.built[n].pipeline;
+    ret res[*Pipeline, Error].ok{?s.built[n].pipeline};
 }
 
 # How many pipelines a shader has had to build.
@@ -239,20 +242,40 @@ test "shader: a module that is not a whole number of SPIR-V words is refused" {
     # an unexplained driver failure a long way from the call that caused it.
     var s: Shader;
     var bytes: [64]u8;
-    if (!is_err[bool, Error](shader(?s, ?bytes[0], 21, ?bytes[0], 64))) { ret 1; }
-    if (!is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 21))) { ret 2; }
+    if (!refused_words(shader(?s, ?bytes[0], 21, ?bytes[0], 64), 21)) { ret 1; }
+    if (!refused_words(shader(?s, ?bytes[0], 64, ?bytes[0], 21), 21)) { ret 2; }
     # Too short to hold a SPIR-V header at all.
-    if (!is_err[bool, Error](shader(?s, ?bytes[0], 16, ?bytes[0], 64))) { ret 3; }
+    if (!refused_words(shader(?s, ?bytes[0], 16, ?bytes[0], 64), 16)) { ret 3; }
     # And a valid pair is accepted.
-    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64)))  { ret 4; }
+    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64)))          { ret 4; }
     ret 0;
+}
+
+fun declared(r: err[Error]) bool {
+    ret sel r.ok;
+}
+
+fun refused_words(r: err[Error], len: usize) bool {
+    ret sel r.err && (sel r.err.shader && (sel r.err.shader.spirv_words && r.err.shader.spirv_words == len));
+}
+
+fun missing_stage(r: err[Error]) bool {
+    ret sel r.err && (sel r.err.shader && sel r.err.shader.missing_stage);
+}
+
+fun builds_nothing(r: res[*Pipeline, Error]) bool {
+    ret sel r.err;
+}
+
+fun hands_out(r: res[*Pipeline, Error], p: *Pipeline) bool {
+    ret sel r.ok && r.ok == p;
 }
 
 test "shader: a missing module is refused rather than deferred" {
     var s: Shader;
     var bytes: [64]u8;
-    if (!is_err[bool, Error](shader(?s, nil, 64, ?bytes[0], 64)))       { ret 1; }
-    if (!is_err[bool, Error](shader(?s, ?bytes[0], 64, nil, 64)))       { ret 2; }
+    if (!missing_stage(shader(?s, nil, 64, ?bytes[0], 64))) { ret 1; }
+    if (!missing_stage(shader(?s, ?bytes[0], 64, nil, 64))) { ret 2; }
     ret 0;
 }
 
@@ -261,7 +284,7 @@ test "shader: a fresh shader has built nothing" {
     # needs a render pass and a vertex layout that are not known until a draw.
     var s: Shader;
     var bytes: [64]u8;
-    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
     if (shader_pipelines(?s) != 0) { ret 2; }
     ret 0;
 }
@@ -279,7 +302,7 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
     var s: Shader;
     var v: Vk;
     var bytes: [64]u8;
-    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
 
     var pass_a: u32 = 1;
     var pass_b: u32 = 2;
@@ -293,29 +316,29 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
 
     s.built[0].compatibility = compatibility;
     s.built[0].format = std_fmt;
-    s.built[0].depth  = DEPTH_FORWARD;
+    s.built[0].depth  = DepthConvention.forward{};
     s.built[0].live   = true;
     s.count = 1;
 
     # The pair it was built for.
-    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
-                        DEPTH_FORWARD) != ?s.built[0].pipeline) { ret 2; }
+    if (!hands_out(shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
+                                   DepthConvention.forward{}), ?s.built[0].pipeline)) { ret 2; }
 
     # A distinct but compatible pass reuses it.
-    if (shader_pipeline(?s, ?v, b, ?compatibility, ?std_fmt,
-                        DEPTH_FORWARD) != ?s.built[0].pipeline) { ret 3; }
+    if (!hands_out(shader_pipeline(?s, ?v, b, ?compatibility, ?std_fmt,
+                                   DepthConvention.forward{}), ?s.built[0].pipeline)) { ret 3; }
 
     # A different attachment format is not compatible. Building instead fails
-    # here for want of a device, which is the nil.
-    if (shader_pipeline(?s, ?v, b, ?other, ?std_fmt,
-                        DEPTH_FORWARD) != nil) { ret 4; }
+    # here for want of a device.
+    if (!builds_nothing(shader_pipeline(?s, ?v, b, ?other, ?std_fmt,
+                                        DepthConvention.forward{}))) { ret 4; }
 
     # Same pass, a different layout: likewise.
-    if (shader_pipeline(?s, ?v, a, ?compatibility, ?skin_fmt,
-                        DEPTH_FORWARD) != nil) { ret 5; }
+    if (!builds_nothing(shader_pipeline(?s, ?v, a, ?compatibility, ?skin_fmt,
+                                        DepthConvention.forward{}))) { ret 5; }
 
-    if (shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
-                        DEPTH_REVERSED) != nil) { ret 6; }
+    if (!builds_nothing(shader_pipeline(?s, ?v, a, ?compatibility, ?std_fmt,
+                                        DepthConvention.reversed{}))) { ret 6; }
 
     # And a failed build leaves nothing behind to be handed out later.
     if (shader_pipelines(?s) != 1) { ret 7; }
@@ -329,7 +352,7 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     var s: Shader;
     var v: Vk;
     var bytes: [64]u8;
-    if (is_err[bool, Error](shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
+    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
 
     var fmt: VertexFormat = vertex_format_standard();
     var handles: [8]u32;
@@ -340,7 +363,7 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
         compatibilities[i] = pass_compatibility_one((i + 1)::i32);
         s.built[i].compatibility = compatibilities[i];
         s.built[i].format = fmt;
-        s.built[i].depth  = DEPTH_FORWARD;
+        s.built[i].depth  = DepthConvention.forward{};
         s.built[i].live   = true;
         i = i + 1;
     }
@@ -348,9 +371,11 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
 
     var extra: u32 = 99;
     var extra_compatibility: PassCompatibility = pass_compatibility_one(99);
-    if (shader_pipeline(?s, ?v, (?extra):~vk.RenderPass,
-                        ?extra_compatibility, ?fmt,
-                        DEPTH_FORWARD) != nil) { ret 2; }
+    val refused: res[*Pipeline, Error] = shader_pipeline(?s, ?v, (?extra):~vk.RenderPass,
+                                                         ?extra_compatibility, ?fmt,
+                                                         DepthConvention.forward{});
+    if (!sel refused.err) { ret 2; }
+    if (!sel refused.err.shader) { ret 5; }
     # Nothing was evicted to make room.
     if (shader_pipelines(?s) != MAX_SHADER_PIPELINES) { ret 3; }
     if (!s.built[0].live)                             { ret 4; }
@@ -367,7 +392,7 @@ test "shader: an unready shader builds nothing" {
     var compatibility: PassCompatibility = pass_compatibility_one(1);
     s.ready = false;
     s.count = 0;
-    if (shader_pipeline(?s, ?v, (?pass):~vk.RenderPass,
-                        ?compatibility, ?f, DEPTH_FORWARD) != nil) { ret 1; }
+    if (!builds_nothing(shader_pipeline(?s, ?v, (?pass):~vk.RenderPass,
+                                        ?compatibility, ?f, DepthConvention.forward{}))) { ret 1; }
     ret 0;
 }

@@ -23,12 +23,13 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.DeviceError;
+use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.enumerated;
 use boom.graphics.vk.format_is_srgb;
@@ -54,54 +55,42 @@ val MAX_PRESENT_MODES: u32 = 8;
 # Three members rather than a mirror of Vulkan's list, because three is the
 # number of distinct decisions behind a vsync setting: wait for the display,
 # do not wait but do not tear, or do not wait at all.
-pub def PresentMode: u8;
-
-# Wait for the display and show every frame in order. No tearing, and the frame
-# rate is capped at the refresh rate.
 #
-# THE ONLY MODE VULKAN REQUIRES AN IMPLEMENTATION TO SUPPORT, which is why it
-# is both the default and the fallback. It is also why a frame time measured
-# under it says nothing about the game: presentation blocks until the display
-# is ready, so a frame that cost two milliseconds and one that cost fifteen
-# both read as the display interval, and the headroom between them is invisible.
-pub val PRESENT_VSYNC: PresentMode = 0;
-
-# Render as fast as the GPU allows, show the most recent finished frame at the
-# display's next refresh, and discard the ones it overtook.
-#
-# No tearing and lower latency than vsync. What it costs is the discarded
-# frames: the GPU does work that is never seen, which on a laptop is heat and
-# battery spent on nothing. Optional, and absent often enough to matter: several
-# Wayland compositors offer FIFO and nothing else.
-pub val PRESENT_MAILBOX: PresentMode = 1;
-
-# Present as soon as a frame is finished, without waiting for the display.
-#
-# Tears, visibly, whenever a frame lands mid-scan. What it buys is the lowest
-# latency available and an honest frame time, which is why it is the mode to
-# profile under: the rate is the one the game can actually produce rather than
-# the one the display is willing to accept. Optional.
-pub val PRESENT_IMMEDIATE: PresentMode = 2;
-
-# Whether a value names a present mode.
-#
-# A mode restored from a settings file or a command line is an integer nobody
-# has checked yet. The game-facing setter refuses one that names nothing rather
-# than letting it fall through to vsync, since a menu would then be showing a
-# mode the renderer is not in.
-pub fun present_mode_valid(mode: PresentMode) bool {
-    ret mode == PRESENT_VSYNC || mode == PRESENT_MAILBOX || mode == PRESENT_IMMEDIATE;
+# A mode restored from a settings file or a command line is mapped onto a case at
+# that edge, so nothing past it can hold a value that names no mode.
+# ---
+# vsync:     Wait for the display and show every frame in order. No tearing, and
+#            the frame rate is capped at the refresh rate. THE ONLY MODE VULKAN
+#            REQUIRES AN IMPLEMENTATION TO SUPPORT, which is why it is both the
+#            default and the fallback. It is also why a frame time measured under
+#            it says nothing about the game: presentation blocks until the display
+#            is ready, so a frame that cost two milliseconds and one that cost
+#            fifteen both read as the display interval.
+# mailbox:   Render as fast as the GPU allows, show the most recent finished
+#            frame at the display's next refresh, and discard the ones it
+#            overtook. No tearing and lower latency than vsync. What it costs is
+#            the discarded frames: GPU work that is never seen. Optional, and
+#            absent often enough to matter: several Wayland compositors offer
+#            FIFO and nothing else.
+# immediate: Present as soon as a frame is finished, without waiting for the
+#            display. Tears, visibly, whenever a frame lands mid-scan. What it
+#            buys is the lowest latency available and an honest frame time, which
+#            is why it is the mode to profile under. Optional.
+pub tag PresentMode: u8 {
+    vsync;
+    mailbox;
+    immediate;
 }
 
 # The Vulkan constant behind a mode.
 #
 # Written out rather than cast. The two enumerations both start at zero and
-# disagree about which mode that is: PRESENT_VSYNC is 0 here and
+# disagree about which mode that is: vsync is the first case here and
 # VK_PRESENT_MODE_IMMEDIATE_KHR is 0 there, so a cast would turn the safe
 # default into the one that tears.
 fun present_mode_vk(mode: PresentMode) i32 {
-    if (mode == PRESENT_MAILBOX)   { ret vk.PRESENT_MODE_MAILBOX_KHR; }
-    if (mode == PRESENT_IMMEDIATE) { ret vk.PRESENT_MODE_IMMEDIATE_KHR; }
+    if (sel mode.mailbox)   { ret vk.PRESENT_MODE_MAILBOX_KHR; }
+    if (sel mode.immediate) { ret vk.PRESENT_MODE_IMMEDIATE_KHR; }
     ret vk.PRESENT_MODE_FIFO_KHR;
 }
 
@@ -113,9 +102,8 @@ fun present_mode_vk(mode: PresentMode) i32 {
 # start-up list the modes it can offer instead of accepting a choice and
 # quietly ignoring it.
 pub fun present_mode_supported(v: *Vk, mode: PresentMode) bool {
-    if (!present_mode_valid(mode)) { ret false; }
-    if (mode == PRESENT_VSYNC)     { ret true; }
-    if (v == nil || !v.ready)      { ret false; }
+    if (sel mode.vsync)       { ret true; }
+    if (v == nil || !v.ready) { ret false; }
 
     var count: u32 = 0;
     if (!enumerated(vk.vkGetPhysicalDeviceSurfacePresentModesKHR(v.physical, v.surface, ?count, nil))) {
@@ -151,9 +139,16 @@ pub fun present_mode_supported(v: *Vk, mode: PresentMode) bool {
 # A game that would rather have IMMEDIATE than vsync when MAILBOX is missing
 # asks `present_mode_supported` and decides for itself. That policy belongs to
 # the game; what belongs here is the query that makes it expressible.
+# whether two present modes are the same one
+pub fun present_mode_same(a: PresentMode, b: PresentMode) bool {
+    if (sel a.mailbox)   { ret sel b.mailbox; }
+    if (sel a.immediate) { ret sel b.immediate; }
+    ret sel b.vsync;
+}
+
 fun pick_present_mode(v: *Vk, want: PresentMode) PresentMode {
     if (present_mode_supported(v, want)) { ret want; }
-    ret PRESENT_VSYNC;
+    ret PresentMode.vsync{};
 }
 
 # The swapchain and the images it owns.
@@ -202,40 +197,38 @@ fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
 # Both are requests. What the surface allows is what gets created, and `s.width`,
 # `s.height` and `s.present` are the answers.
 #
-# An unrecognized mode is not refused here; it falls back like an unsupported
-# one, and `s.present` names what was taken. The check that turns a nonsense
-# value into an error lives at the game-facing edge, in
-# `boom.graphics.renderer`, so this stays total and the rebuild path keeps one
-# fewer way to fail.
+# An unsupported mode is not refused here; it falls back, and `s.present` names
+# what was taken.
 pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
-                       present: PresentMode) Result[bool, Error] {
+                       present: PresentMode) err[Error] {
     s.ready = false;
     s.count = 0;
     s.handle = nil;
     # Set before any early return, so a failed creation still reports a mode
-    # that names something.
-    s.present = PRESENT_VSYNC;
+    # the swapchain could be in.
+    s.present = PresentMode.vsync{};
 
-    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+    if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
     var caps: vk.SurfaceCapabilitiesKHR;
-    if (vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.physical, v.surface, ?caps) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not query surface capabilities"));
+    val queried: i32 = vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.physical, v.surface, ?caps);
+    if (queried != vk.SUCCESS) {
+        ret err[Error].err{vk_failed(VkCall.get_surface_capabilities{}, queried)};
     }
 
     # The format is the surface's and was chosen once, at device bring-up. It is
     # not re-queried here: a target created before the first swapchain rebuild
     # would then be built against a different answer than the one the window pass
     # holds, and the two render passes would stop being compatible.
-    if (v.color_format == 0) {
-        ret err[bool, Error](error("no surface format was chosen at device bring-up"));
+    if (v.color_format == vk.FORMAT_UNDEFINED) {
+        ret err[Error].err{Error.device{DeviceError.no_surface_format{}}};
     }
 
     var w: u32 = width;
     var h: u32 = height;
     clamp_extent(?caps, ?w, ?h);
     if (w == 0 || h == 0) {
-        ret err[bool, Error](error("surface extent is zero; window is minimized"));
+        ret err[Error].err{Error.device{DeviceError.minimized{}}};
     }
 
     # One more than the minimum, so the application is not forced to wait on
@@ -285,19 +278,23 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
         ci.pQueueFamilyIndices   = nil;
     }
 
-    if (vk.vkCreateSwapchainKHR(v.device, ?ci, nil, ?s.handle) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateSwapchainKHR failed"));
+    val created: i32 = vk.vkCreateSwapchainKHR(v.device, ?ci, nil, ?s.handle);
+    if (created != vk.SUCCESS) {
+        s.handle = nil;
+        ret err[Error].err{vk_failed(VkCall.create_swapchain{}, created)};
     }
 
     var got: u32 = 0;
-    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil))) {
+    val counted: i32 = vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil);
+    if (!enumerated(counted)) {
         swapchain_dnit(s, v);
-        ret err[bool, Error](error("could not count swapchain images"));
+        ret err[Error].err{vk_failed(VkCall.get_swapchain_images{}, counted)};
     }
     if (got::usize > MAX_IMAGES) { got = MAX_IMAGES::u32; }
-    if (!enumerated(vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]))) {
+    val listed: i32 = vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, ?s.images[0]);
+    if (!enumerated(listed)) {
         swapchain_dnit(s, v);
-        ret err[bool, Error](error("could not fetch swapchain images"));
+        ret err[Error].err{vk_failed(VkCall.get_swapchain_images{}, listed)};
     }
 
     s.format = v.color_format;
@@ -323,16 +320,18 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
         vci.subresourceRange.baseArrayLayer = 0;
         vci.subresourceRange.layerCount     = 1;
 
-        if (vk.vkCreateImageView(v.device, ?vci, nil, ?s.views[i]) != vk.SUCCESS) {
+        val viewed: i32 = vk.vkCreateImageView(v.device, ?vci, nil, ?s.views[i]);
+        if (viewed != vk.SUCCESS) {
+            s.views[i] = nil;
             swapchain_dnit(s, v);
-            ret err[bool, Error](error("could not create a swapchain image view"));
+            ret err[Error].err{vk_failed(VkCall.create_image_view{}, viewed)};
         }
         s.count = s.count + 1;
         i = i + 1;
     }
 
     s.ready = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Destroy the views and the swapchain.
@@ -361,7 +360,7 @@ pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
 # reason there is none for the first. The device must be idle first: rebuilding
 # while a frame is in flight destroys images the GPU is still reading.
 pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32,
-                          present: PresentMode) Result[bool, Error] {
+                          present: PresentMode) err[Error] {
     vk.vkDeviceWaitIdle(v.device);
     swapchain_dnit(s, v);
     ret swapchain_init(s, v, width, height, present);
@@ -435,20 +434,15 @@ test "swapchain: each present mode maps to the Vulkan constant it names" {
     # a mapping written as a cast turns vsync into the mode that tears. Nothing
     # catches that: the swapchain is created, it presents, and the only symptom
     # is an image the player did not ask to have torn.
-    if (present_mode_vk(PRESENT_VSYNC)     != vk.PRESENT_MODE_FIFO_KHR)      { ret 1; }
-    if (present_mode_vk(PRESENT_MAILBOX)   != vk.PRESENT_MODE_MAILBOX_KHR)   { ret 2; }
-    if (present_mode_vk(PRESENT_IMMEDIATE) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 3; }
+    if (present_mode_vk(PresentMode.vsync{})     != vk.PRESENT_MODE_FIFO_KHR)      { ret 1; }
+    if (present_mode_vk(PresentMode.mailbox{})   != vk.PRESENT_MODE_MAILBOX_KHR)   { ret 2; }
+    if (present_mode_vk(PresentMode.immediate{}) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 3; }
     ret 0;
 }
 
-test "swapchain: a value that names no present mode is not one" {
-    if (!present_mode_valid(PRESENT_VSYNC))     { ret 1; }
-    if (!present_mode_valid(PRESENT_MAILBOX))   { ret 2; }
-    if (!present_mode_valid(PRESENT_IMMEDIATE)) { ret 3; }
-    # A settings file written by a later version of boom, or one holding a value
-    # that was never a mode at all.
-    if (present_mode_valid(3))   { ret 4; }
-    if (present_mode_valid(255)) { ret 5; }
+test "swapchain: a zeroed present mode is vsync, the one every surface offers" {
+    var mode: PresentMode;
+    if (!sel mode.vsync) { ret 1; }
     ret 0;
 }
 
@@ -459,10 +453,9 @@ test "swapchain: vsync needs no device to be known supported" {
     # not be claimed on the strength of being asked about.
     var v: Vk;
     v.ready = false;
-    if (!present_mode_supported(?v, PRESENT_VSYNC))    { ret 1; }
-    if (present_mode_supported(?v, PRESENT_MAILBOX))   { ret 2; }
-    if (present_mode_supported(?v, PRESENT_IMMEDIATE)) { ret 3; }
-    if (present_mode_supported(?v, 200))               { ret 4; }
+    if (!present_mode_supported(?v, PresentMode.vsync{}))    { ret 1; }
+    if (present_mode_supported(?v, PresentMode.mailbox{}))   { ret 2; }
+    if (present_mode_supported(?v, PresentMode.immediate{})) { ret 3; }
     ret 0;
 }
 
@@ -472,11 +465,11 @@ test "swapchain: a mode the surface will not do falls back to vsync" {
     # player sees on hardware they never asked about.
     var v: Vk;
     v.ready = false;
-    if (pick_present_mode(?v, PRESENT_MAILBOX)   != PRESENT_VSYNC) { ret 1; }
-    if (pick_present_mode(?v, PRESENT_IMMEDIATE) != PRESENT_VSYNC) { ret 2; }
-    if (pick_present_mode(?v, PRESENT_VSYNC)     != PRESENT_VSYNC) { ret 3; }
-    # A nonsense value reaches the same place rather than being passed through
-    # to vkCreateSwapchainKHR as an undefined enumerator.
-    if (pick_present_mode(?v, 200)               != PRESENT_VSYNC) { ret 4; }
+    val mailbox: PresentMode = pick_present_mode(?v, PresentMode.mailbox{});
+    if (!sel mailbox.vsync) { ret 1; }
+    val immediate: PresentMode = pick_present_mode(?v, PresentMode.immediate{});
+    if (!sel immediate.vsync) { ret 2; }
+    val vsync: PresentMode = pick_present_mode(?v, PresentMode.vsync{});
+    if (!sel vsync.vsync) { ret 3; }
     ret 0;
 }

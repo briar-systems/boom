@@ -29,15 +29,12 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Capacity;
 use boom.graphics.vk.Vk;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vertex.vertex_format_eq;
@@ -60,8 +57,7 @@ use boom.graphics.spirv.SKINNED_VERT_SPV;
 use boom.graphics.spirv.UI_VERT_SPV;
 use boom.graphics.spirv.UI_FRAG_SPV;
 use boom.graphics.depth.DepthConvention;
-use boom.graphics.depth.DEPTH_FORWARD;
-use boom.graphics.depth.DEPTH_REVERSED;
+use boom.graphics.depth.depth_convention_same;
 
 # Which pair of shader modules a pipeline uses.
 pub def Program: u8;
@@ -119,21 +115,21 @@ pub fun cache_init(c: *PipelineCache) {
     for (i < MAX_PIPELINES) { c.entries[i].live = false; i = i + 1; }
 }
 
-# Find a live entry's index, or MAX_PIPELINES when there is none.
+# Find a live entry's index, if one matches.
 #
 # Separated from the lookup so the hit path is testable without a device.
 pub fun cache_find(c: *PipelineCache, program: Program, compatibility: *PassCompatibility,
-                   f: *VertexFormat, depth: DepthConvention) usize {
+                   f: *VertexFormat, depth: DepthConvention) opt[usize] {
     var i: usize = 0;
     for (i < c.count) {
         if (c.entries[i].live && c.entries[i].program == program
-            && c.entries[i].depth == depth
+            && depth_convention_same(c.entries[i].depth, depth)
             && pass_compatibility_eq(?c.entries[i].compatibility, compatibility)) {
-            if (vertex_format_eq(?c.entries[i].format, f)) { ret i; }
+            if (vertex_format_eq(?c.entries[i].format, f)) { ret opt[usize].some{i}; }
         }
         i = i + 1;
     }
-    ret MAX_PIPELINES;
+    ret opt[usize].none{};
 }
 
 # The description and shader modules a program is built with.
@@ -151,10 +147,10 @@ fun program_desc(program: Program) PipelineDesc {
 # Build and store the pipeline for a program and format.
 fun cache_add(c: *PipelineCache, v: *Vk, pass: vk.RenderPass,
               compatibility: *PassCompatibility, program: Program,
-              f: *VertexFormat, depth: DepthConvention) Result[usize, Error] {
+              f: *VertexFormat, depth: DepthConvention) res[usize, Error] {
     if (c.count >= MAX_PIPELINES) {
         c.missed = c.missed + 1;
-        ret err[usize, Error](error("the pipeline cache is full"));
+        ret res[usize, Error].err{Error.full{Capacity.pipelines{}}};
     }
 
     var vert: *u8  = ?MESH_VERT_SPV[0];
@@ -176,13 +172,11 @@ fun cache_add(c: *PipelineCache, v: *Vk, pass: vk.RenderPass,
     val i: usize = c.count;
     var desc: PipelineDesc = program_desc(program);
     var lay:  SetLayout    = set_layout_full();
-    val r: Result[bool, Error] = pipeline_init_depth(?c.entries[i].pipeline, v, pass,
-                                                     compatibility.color_count,
-                                                     f, ?desc, depth,
-                                                     vert, vlen, frag, flen, ?lay);
-    if (is_err[bool, Error](r)) {
-        ret err[usize, Error](unwrap_err[bool, Error](r));
-    }
+    val r: err[Error] = pipeline_init_depth(?c.entries[i].pipeline, v, pass,
+                                            compatibility.color_count,
+                                            f, ?desc, depth,
+                                            vert, vlen, frag, flen, ?lay);
+    if (sel r.err) { ret res[usize, Error].err{r.err}; }
 
     c.entries[i].program = program;
     c.entries[i].format  = @f;
@@ -190,31 +184,31 @@ fun cache_add(c: *PipelineCache, v: *Vk, pass: vk.RenderPass,
     c.entries[i].depth   = depth;
     c.entries[i].live    = true;
     c.count = c.count + 1;
-    ret ok[usize, Error](i);
+    ret res[usize, Error].ok{i};
 }
 
 # The pipeline for a program and vertex layout, building it on first use.
 #
-# Returns nil when the cache is full or the pipeline could not be built, which
-# the caller reports as a dropped draw. Returning a wrong pipeline instead would
-# draw geometry from the wrong byte offsets, which looks like corrupt art rather
-# than a missing one.
+# Refused when the cache is full or the pipeline could not be built, which the
+# caller reports as a dropped draw. Returning a wrong pipeline instead would draw
+# geometry from the wrong byte offsets, which looks like corrupt art rather than
+# a missing one.
 # ---
 # c:       the cache
 # v:       the device
 # program: which shader pair the draw needs
 # f:       the mesh's vertex layout
-# ret:     the pipeline, or nil
+# ret:     the pipeline, or why it could not be built
 pub fun cache_get(c: *PipelineCache, v: *Vk, pass: vk.RenderPass,
                   compatibility: *PassCompatibility, program: Program,
-                  f: *VertexFormat, depth: DepthConvention) *Pipeline {
-    var i: usize = cache_find(c, program, compatibility, f, depth);
-    if (i != MAX_PIPELINES) { ret ?c.entries[i].pipeline; }
+                  f: *VertexFormat, depth: DepthConvention) res[*Pipeline, Error] {
+    val found: opt[usize] = cache_find(c, program, compatibility, f, depth);
+    if (sel found.some) { ret res[*Pipeline, Error].ok{?c.entries[found.some].pipeline}; }
 
-    val r: Result[usize, Error] = cache_add(c, v, pass, compatibility,
-                                           program, f, depth);
-    if (is_err[usize, Error](r)) { ret nil; }
-    ret ?c.entries[unwrap_ok[usize, Error](r)].pipeline;
+    val r: res[usize, Error] = cache_add(c, v, pass, compatibility,
+                                         program, f, depth);
+    if (sel r.err) { ret res[*Pipeline, Error].err{r.err}; }
+    ret res[*Pipeline, Error].ok{?c.entries[r.ok].pipeline};
 }
 
 # Destroy every pipeline the cache holds.
@@ -241,9 +235,14 @@ test "cache: an empty cache finds nothing" {
     cache_init(?c);
     var f: VertexFormat = vertex_format_standard();
     var compatibility: PassCompatibility = pass_compatibility_one(1);
-    if (cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
-                   DEPTH_FORWARD) != MAX_PIPELINES) { ret 1; }
+    val found: opt[usize] = cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
+                                       DepthConvention.forward{});
+    if (!sel found.none) { ret 1; }
     ret 0;
+}
+
+fun misses(found: opt[usize]) bool {
+    ret sel found.none;
 }
 
 test "cache: an entry matches only its own program and format" {
@@ -255,31 +254,33 @@ test "cache: an entry matches only its own program and format" {
     c.entries[0].program = PROGRAM_MESH;
     c.entries[0].format  = vertex_format_standard();
     c.entries[0].compatibility = compatibility;
-    c.entries[0].depth   = DEPTH_FORWARD;
+    c.entries[0].depth   = DepthConvention.forward{};
     c.entries[0].live    = true;
     c.count = 1;
 
     var std_fmt: VertexFormat = vertex_format_standard();
-    if (cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
-                   DEPTH_FORWARD) != 0) { ret 1; }
+    val hit: opt[usize] = cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
+                                     DepthConvention.forward{});
+    if (!sel hit.some) { ret 1; }
+    if (hit.some != 0) { ret 6; }
 
     # Same layout, different program. Matching here would draw a skinned mesh
     # with the unskinned shader, which ignores the joints entirely.
-    if (cache_find(?c, PROGRAM_SKINNED, ?compatibility, ?std_fmt,
-                   DEPTH_FORWARD) != MAX_PIPELINES) { ret 2; }
+    if (!misses(cache_find(?c, PROGRAM_SKINNED, ?compatibility, ?std_fmt,
+                           DepthConvention.forward{}))) { ret 2; }
 
     # Same program, different layout. Matching here is the bug this cache
     # exists to prevent.
     var ui_fmt: VertexFormat = vertex_format_ui();
-    if (cache_find(?c, PROGRAM_MESH, ?compatibility, ?ui_fmt,
-                   DEPTH_FORWARD) != MAX_PIPELINES) { ret 3; }
+    if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?ui_fmt,
+                           DepthConvention.forward{}))) { ret 3; }
 
     # Same program and layout, different attachment format.
     var hdr: PassCompatibility = pass_compatibility_one(2);
-    if (cache_find(?c, PROGRAM_MESH, ?hdr, ?std_fmt,
-                   DEPTH_FORWARD) != MAX_PIPELINES) { ret 4; }
-    if (cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
-                   DEPTH_REVERSED) != MAX_PIPELINES) { ret 5; }
+    if (!misses(cache_find(?c, PROGRAM_MESH, ?hdr, ?std_fmt,
+                           DepthConvention.forward{}))) { ret 4; }
+    if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
+                           DepthConvention.reversed{}))) { ret 5; }
     ret 0;
 }
 
@@ -290,12 +291,12 @@ test "cache: a dead entry is not matched" {
     c.entries[0].program = PROGRAM_MESH;
     c.entries[0].format  = vertex_format_standard();
     c.entries[0].compatibility = compatibility;
-    c.entries[0].depth   = DEPTH_FORWARD;
+    c.entries[0].depth   = DepthConvention.forward{};
     c.entries[0].live    = false;
     c.count = 1;
     var f: VertexFormat = vertex_format_standard();
-    if (cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
-                   DEPTH_FORWARD) != MAX_PIPELINES) { ret 1; }
+    if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
+                           DepthConvention.forward{}))) { ret 1; }
     ret 0;
 }
 

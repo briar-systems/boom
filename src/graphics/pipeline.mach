@@ -20,13 +20,15 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
+use std.types.option.opt;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.ShaderError;
+use boom.graphics.error.PipelineError;
+use boom.graphics.error.vk_failed;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.vk.Vk;
 use boom.graphics.spirv.VERTEX_ENTRY;
@@ -42,12 +44,6 @@ use boom.graphics.vertex.COMP_I8;
 use boom.graphics.vertex.COMP_I16;
 use boom.graphics.storage.FRAME_STORAGE_BINDING;
 use boom.graphics.depth.DepthConvention;
-use boom.graphics.depth.DEPTH_FORWARD;
-use boom.graphics.depth.DEPTH_REVERSED;
-use boom.graphics.depth.depth_convention_valid;
-
-# The format returned when an attribute cannot be expressed in Vulkan.
-pub val FORMAT_UNSUPPORTED: i32 = 0;
 
 # A pipeline and the layouts it was built against.
 # ---
@@ -64,14 +60,15 @@ pub rec Pipeline {
 }
 
 # How a pipeline combines fragment output with an existing colour attachment.
-pub def BlendMode: i32;
-
-# Replace the attachment with the fragment output.
-pub val BLEND_OPAQUE: BlendMode = 0;
-# Compose the fragment over the attachment using source alpha.
-pub val BLEND_SOURCE_ALPHA: BlendMode = 1;
-# Add fragment channels to the existing attachment channels.
-pub val BLEND_ADDITIVE: BlendMode = 2;
+# ---
+# opaque:       replace the attachment with the fragment output
+# source_alpha: compose the fragment over the attachment using source alpha
+# additive:     add fragment channels to the existing attachment channels
+pub tag BlendMode: u8 {
+    opaque;
+    source_alpha;
+    additive;
+}
 
 # What a pipeline needs beyond its shaders and vertex format.
 # ---
@@ -97,7 +94,7 @@ pub rec PipelineDesc {
 # The default description: opaque, culled, depth-tested triangles.
 pub fun pipeline_desc_3d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend               = BLEND_OPAQUE;
+    d.blend               = BlendMode.opaque{};
     d.cull                = true;
     d.depth               = true;
     d.depth_bias          = false;
@@ -111,7 +108,7 @@ pub fun pipeline_desc_3d() PipelineDesc {
 # The 2D description: blended, unculled, no depth.
 pub fun pipeline_desc_2d() PipelineDesc {
     var d: PipelineDesc;
-    d.blend               = BLEND_SOURCE_ALPHA;
+    d.blend               = BlendMode.source_alpha{};
     d.cull                = false;
     d.depth               = false;
     d.depth_bias          = false;
@@ -165,111 +162,99 @@ fun rasterization_state(d: *PipelineDesc) vk.PipelineRasterizationStateCreateInf
 # or SNORM, which is how a colour packed into four bytes reaches the shader as a
 # vec4 in [0, 1].
 #
-# Returns FORMAT_UNSUPPORTED rather than guessing, because a wrong format is
-# accepted by pipeline creation and produces silently wrong values in the shader.
-pub fun attribute_format(c: Component, count: u32, normalized: u8, integer: u8) i32 {
-    if (count < 1 || count > 4) { ret FORMAT_UNSUPPORTED; }
+# None rather than a guess, because a wrong format is accepted by pipeline
+# creation and produces silently wrong values in the shader.
+pub fun attribute_format(c: Component, count: u32, normalized: u8, integer: u8) opt[i32] {
+    if (count < 1 || count > 4) { ret opt[i32].none{}; }
 
     if (c == COMP_F32) {
-        if (count == 1) { ret vk.FORMAT_R32_SFLOAT; }
-        if (count == 2) { ret vk.FORMAT_R32G32_SFLOAT; }
-        if (count == 3) { ret vk.FORMAT_R32G32B32_SFLOAT; }
-        ret vk.FORMAT_R32G32B32A32_SFLOAT;
+        ret by_count(count, vk.FORMAT_R32_SFLOAT, vk.FORMAT_R32G32_SFLOAT,
+                     vk.FORMAT_R32G32B32_SFLOAT, vk.FORMAT_R32G32B32A32_SFLOAT);
     }
 
     # A normalized 32-bit integer attribute has no Vulkan format, and glTF never
     # produces one. Rejecting is better than silently reading it as raw.
     if (c == COMP_U32) {
-        if (normalized != 0) { ret FORMAT_UNSUPPORTED; }
-        if (count == 1) { ret vk.FORMAT_R32_UINT; }
-        if (count == 2) { ret vk.FORMAT_R32G32_UINT; }
-        if (count == 3) { ret vk.FORMAT_R32G32B32_UINT; }
-        ret vk.FORMAT_R32G32B32A32_UINT;
+        if (normalized != 0) { ret opt[i32].none{}; }
+        ret by_count(count, vk.FORMAT_R32_UINT, vk.FORMAT_R32G32_UINT,
+                     vk.FORMAT_R32G32B32_UINT, vk.FORMAT_R32G32B32A32_UINT);
     }
 
     if (c == COMP_U16) {
         if (normalized != 0) {
-            if (count == 1) { ret vk.FORMAT_R16_UNORM; }
-            if (count == 2) { ret vk.FORMAT_R16G16_UNORM; }
-            if (count == 3) { ret vk.FORMAT_R16G16B16_UNORM; }
-            ret vk.FORMAT_R16G16B16A16_UNORM;
+            ret by_count(count, vk.FORMAT_R16_UNORM, vk.FORMAT_R16G16_UNORM,
+                         vk.FORMAT_R16G16B16_UNORM, vk.FORMAT_R16G16B16A16_UNORM);
         }
-        if (count == 1) { ret vk.FORMAT_R16_UINT; }
-        if (count == 2) { ret vk.FORMAT_R16G16_UINT; }
-        if (count == 3) { ret vk.FORMAT_R16G16B16_UINT; }
-        ret vk.FORMAT_R16G16B16A16_UINT;
+        ret by_count(count, vk.FORMAT_R16_UINT, vk.FORMAT_R16G16_UINT,
+                     vk.FORMAT_R16G16B16_UINT, vk.FORMAT_R16G16B16A16_UINT);
     }
 
     if (c == COMP_U8) {
         if (normalized != 0) {
-            if (count == 1) { ret vk.FORMAT_R8_UNORM; }
-            if (count == 2) { ret vk.FORMAT_R8G8_UNORM; }
-            if (count == 3) { ret vk.FORMAT_R8G8B8_UNORM; }
-            ret vk.FORMAT_R8G8B8A8_UNORM;
+            ret by_count(count, vk.FORMAT_R8_UNORM, vk.FORMAT_R8G8_UNORM,
+                         vk.FORMAT_R8G8B8_UNORM, vk.FORMAT_R8G8B8A8_UNORM);
         }
-        if (count == 1) { ret vk.FORMAT_R8_UINT; }
-        if (count == 2) { ret vk.FORMAT_R8G8_UINT; }
-        if (count == 3) { ret vk.FORMAT_R8G8B8_UINT; }
-        ret vk.FORMAT_R8G8B8A8_UINT;
+        ret by_count(count, vk.FORMAT_R8_UINT, vk.FORMAT_R8G8_UINT,
+                     vk.FORMAT_R8G8B8_UINT, vk.FORMAT_R8G8B8A8_UINT);
     }
 
     if (c == COMP_I16) {
         if (normalized != 0) {
-            if (count == 1) { ret vk.FORMAT_R16_SNORM; }
-            if (count == 2) { ret vk.FORMAT_R16G16_SNORM; }
-            if (count == 3) { ret vk.FORMAT_R16G16B16_SNORM; }
-            ret vk.FORMAT_R16G16B16A16_SNORM;
+            ret by_count(count, vk.FORMAT_R16_SNORM, vk.FORMAT_R16G16_SNORM,
+                         vk.FORMAT_R16G16B16_SNORM, vk.FORMAT_R16G16B16A16_SNORM);
         }
-        if (count == 1) { ret vk.FORMAT_R16_SINT; }
-        if (count == 2) { ret vk.FORMAT_R16G16_SINT; }
-        if (count == 3) { ret vk.FORMAT_R16G16B16_SINT; }
-        ret vk.FORMAT_R16G16B16A16_SINT;
+        ret by_count(count, vk.FORMAT_R16_SINT, vk.FORMAT_R16G16_SINT,
+                     vk.FORMAT_R16G16B16_SINT, vk.FORMAT_R16G16B16A16_SINT);
     }
 
     if (c == COMP_I8) {
         if (normalized != 0) {
-            if (count == 1) { ret vk.FORMAT_R8_SNORM; }
-            if (count == 2) { ret vk.FORMAT_R8G8_SNORM; }
-            if (count == 3) { ret vk.FORMAT_R8G8B8_SNORM; }
-            ret vk.FORMAT_R8G8B8A8_SNORM;
+            ret by_count(count, vk.FORMAT_R8_SNORM, vk.FORMAT_R8G8_SNORM,
+                         vk.FORMAT_R8G8B8_SNORM, vk.FORMAT_R8G8B8A8_SNORM);
         }
-        if (count == 1) { ret vk.FORMAT_R8_SINT; }
-        if (count == 2) { ret vk.FORMAT_R8G8_SINT; }
-        if (count == 3) { ret vk.FORMAT_R8G8B8_SINT; }
-        ret vk.FORMAT_R8G8B8A8_SINT;
+        ret by_count(count, vk.FORMAT_R8_SINT, vk.FORMAT_R8G8_SINT,
+                     vk.FORMAT_R8G8B8_SINT, vk.FORMAT_R8G8B8A8_SINT);
     }
 
-    ret FORMAT_UNSUPPORTED;
+    ret opt[i32].none{};
+}
+
+# the format for a component count of one through four
+fun by_count(count: u32, one: i32, two: i32, three: i32, four: i32) opt[i32] {
+    if (count == 1) { ret opt[i32].some{one}; }
+    if (count == 2) { ret opt[i32].some{two}; }
+    if (count == 3) { ret opt[i32].some{three}; }
+    ret opt[i32].some{four};
 }
 
 # Fill Vulkan attribute descriptions from a vertex format.
 #
 # The location, offset, and stride all come from the format, so the pipeline and
-# the uploaded geometry cannot disagree. Returns the number written, or 0 when
-# any attribute has no Vulkan format.
-pub fun vertex_attributes(f: *VertexFormat, out: *vk.VertexInputAttributeDescription, cap: usize) u32 {
-    if (f.count::usize > cap) { ret 0; }
+# the uploaded geometry cannot disagree. The number written, or none when the
+# format does not fit `cap` or any attribute has no Vulkan format.
+pub fun vertex_attributes(f: *VertexFormat, out: *vk.VertexInputAttributeDescription, cap: usize) opt[u32] {
+    if (f.count::usize > cap) { ret opt[u32].none{}; }
     var i: u32 = 0;
     for (i < f.count) {
         val a: *VertexAttribute = ?f.attributes[i];
-        val fmt: i32 = attribute_format(a.component, a.count, a.normalized, a.integer);
-        if (fmt == FORMAT_UNSUPPORTED) { ret 0; }
+        val fmt: opt[i32] = attribute_format(a.component, a.count, a.normalized, a.integer);
+        if (sel fmt.none) { ret opt[u32].none{}; }
         out[i].location = a.location;
         out[i].binding  = 0;
-        out[i].format   = fmt;
+        out[i].format   = fmt.some;
         out[i].offset   = a.offset;
         i = i + 1;
     }
-    ret f.count;
+    ret opt[u32].some{f.count};
 }
 
 # Wrap SPIR-V bytes in a shader module.
 #
 # The length must be a multiple of four: SPIR-V is a word stream, and a byte
 # count that is not word-aligned means the file is truncated or is not SPIR-V.
-pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) Result[bool, Error] {
+pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) err[Error] {
     if (len == 0 || (len % 4) != 0) {
-        ret err[bool, Error](error("SPIR-V length is not a whole number of words"));
+        ret err[Error].err{Error.shader{ShaderError.spirv_words{len}}};
     }
     var ci: vk.ShaderModuleCreateInfo;
     ci.sType    = vk.STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -277,10 +262,11 @@ pub fun shader_module(v: *Vk, spv: *u8, len: usize, out: *vk.ShaderModule) Resul
     ci.flags    = 0;
     ci.codeSize = len::u64;
     ci.pCode    = spv:~*u32;
-    if (vk.vkCreateShaderModule(v.device, ?ci, nil, out) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateShaderModule failed"));
+    val rc: i32 = vk.vkCreateShaderModule(v.device, ?ci, nil, out);
+    if (rc != vk.SUCCESS) {
+        ret err[Error].err{vk_failed(VkCall.create_shader_module{}, rc)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # What a shader binds, as a list of binding kinds.
@@ -435,7 +421,7 @@ pub fun set_layout_count(l: *SetLayout, kind: Binding) u32 {
 }
 
 # Create the Vulkan descriptor set layout for a description.
-fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[bool, Error] {
+fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) err[Error] {
     var bindings: [16]vk.DescriptorSetLayoutBinding;
     var n: u32 = 0;
     var i: u32 = 0;
@@ -464,7 +450,7 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[
         }
         i = i + 1;
     }
-    if (n == 0) { ret err[bool, Error](error("a descriptor set layout with no bindings")); }
+    if (n == 0) { ret err[Error].err{Error.pipeline{PipelineError.no_bindings{}}}; }
 
     var ci: vk.DescriptorSetLayoutCreateInfo;
     ci.sType        = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -472,10 +458,12 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) Result[
     ci.flags        = 0;
     ci.bindingCount = n;
     ci.pBindings    = ?bindings[0];
-    if (vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateDescriptorSetLayout failed"));
+    val rc: i32 = vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out);
+    if (rc != vk.SUCCESS) {
+        @out = nil;
+        ret err[Error].err{vk_failed(VkCall.create_descriptor_set_layout{}, rc)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Map a public blend mode to the fixed state baked into a Vulkan pipeline.
@@ -491,13 +479,13 @@ fun blend_attachment(mode: BlendMode) vk.PipelineColorBlendAttachmentState {
     cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ZERO;
     cb.alphaBlendOp        = vk.BLEND_OP_ADD;
 
-    if (mode == BLEND_SOURCE_ALPHA) {
+    if (sel mode.source_alpha) {
         cb.blendEnable         = vk.TRUE;
         cb.srcColorBlendFactor = vk.BLEND_FACTOR_SRC_ALPHA;
         cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     }
-    or (mode == BLEND_ADDITIVE) {
+    or (sel mode.additive) {
         cb.blendEnable         = vk.TRUE;
         cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE;
         cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
@@ -513,8 +501,8 @@ fun blend_attachment(mode: BlendMode) vk.PipelineColorBlendAttachmentState {
 pub fun pipeline_init(p: *Pipeline, v: *Vk, pass: vk.RenderPass, targets: usize,
                       f: *VertexFormat, d: *PipelineDesc,
                       vert: *u8, vlen: usize, frag: *u8, flen: usize,
-                      layout: *SetLayout) Result[bool, Error] {
-    ret pipeline_init_depth(p, v, pass, targets, f, d, DEPTH_FORWARD,
+                      layout: *SetLayout) err[Error] {
+    ret pipeline_init_depth(p, v, pass, targets, f, d, DepthConvention.forward{},
                                vert, vlen, frag, flen, layout);
 }
 
@@ -523,32 +511,26 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
                             targets: usize, f: *VertexFormat,
                             d: *PipelineDesc, depth: DepthConvention,
                             vert: *u8, vlen: usize, frag: *u8, flen: usize,
-                            layout: *SetLayout) Result[bool, Error] {
+                            layout: *SetLayout) err[Error] {
     p.ready      = false;
     p.handle     = nil;
     p.layout     = nil;
     p.set_layout = nil;
 
-    if (!depth_convention_valid(depth)) {
-        ret err[bool, Error](error("invalid pipeline depth convention"));
-    }
-    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
-    if (d.blend < BLEND_OPAQUE || d.blend > BLEND_ADDITIVE) {
-        ret err[bool, Error](error("invalid pipeline blend mode"));
-    }
+    if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
     var vmod: vk.ShaderModule;
     var fmod: vk.ShaderModule;
-    val vr: Result[bool, Error] = shader_module(v, vert, vlen, ?vmod);
-    if (is_err[bool, Error](vr)) { ret vr; }
-    val fr: Result[bool, Error] = shader_module(v, frag, flen, ?fmod);
-    if (is_err[bool, Error](fr)) {
+    val vr: err[Error] = shader_module(v, vert, vlen, ?vmod);
+    if (sel vr.err) { ret vr; }
+    val fr: err[Error] = shader_module(v, frag, flen, ?fmod);
+    if (sel fr.err) {
         vk.vkDestroyShaderModule(v.device, vmod, nil);
         ret fr;
     }
 
-    val sr: Result[bool, Error] = make_set_layout(v, layout, ?p.set_layout);
-    if (is_err[bool, Error](sr)) {
+    val sr: err[Error] = make_set_layout(v, layout, ?p.set_layout);
+    if (sel sr.err) {
         vk.vkDestroyShaderModule(v.device, vmod, nil);
         vk.vkDestroyShaderModule(v.device, fmod, nil);
         ret sr;
@@ -563,10 +545,13 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     lci.pSetLayouts            = ?set_layout;
     lci.pushConstantRangeCount = 0;
     lci.pPushConstantRanges    = nil;
-    if (vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?p.layout) != vk.SUCCESS) {
+    val laid: i32 = vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?p.layout);
+    if (laid != vk.SUCCESS) {
+        p.layout = nil;
+        pipeline_dnit(p, v);
         vk.vkDestroyShaderModule(v.device, vmod, nil);
         vk.vkDestroyShaderModule(v.device, fmod, nil);
-        ret err[bool, Error](error("vkCreatePipelineLayout failed"));
+        ret err[Error].err{vk_failed(VkCall.create_pipeline_layout{}, laid)};
     }
 
     var stages: [2]vk.PipelineShaderStageCreateInfo;
@@ -591,13 +576,14 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     binding.inputRate = vk.VERTEX_INPUT_RATE_VERTEX;
 
     var attrs: [8]vk.VertexInputAttributeDescription;
-    val nattrs: u32 = vertex_attributes(f, ?attrs[0], 8);
-    if (nattrs == 0) {
+    val described: opt[u32] = vertex_attributes(f, ?attrs[0], 8);
+    if (sel described.none) {
         pipeline_dnit(p, v);
         vk.vkDestroyShaderModule(v.device, vmod, nil);
         vk.vkDestroyShaderModule(v.device, fmod, nil);
-        ret err[bool, Error](error("vertex format has an attribute Vulkan cannot express"));
+        ret err[Error].err{Error.pipeline{PipelineError.vertex_attribute{}}};
     }
+    val nattrs: u32 = described.some;
 
     var vi: vk.PipelineVertexInputStateCreateInfo;
     vi.sType                           = vk.STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -718,16 +704,17 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     vk.vkDestroyShaderModule(v.device, fmod, nil);
 
     if (rc != vk.SUCCESS) {
+        p.handle = nil;
         pipeline_dnit(p, v);
-        ret err[bool, Error](error("vkCreateGraphicsPipelines failed"));
+        ret err[Error].err{vk_failed(VkCall.create_graphics_pipelines{}, rc)};
     }
 
     p.ready = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 fun depth_compare_op(depth: DepthConvention) i32 {
-    if (depth == DEPTH_REVERSED) { ret vk.COMPARE_OP_GREATER; }
+    if (sel depth.reversed) { ret vk.COMPARE_OP_GREATER; }
     ret vk.COMPARE_OP_LESS;
 }
 
@@ -790,43 +777,54 @@ use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
 use boom.graphics.vertex.SEMANTIC_JOINTS_0;
 
+fun format_is(f: opt[i32], expected: i32) bool {
+    ret sel f.some && f.some == expected;
+}
+
+fun attributes_are(n: opt[u32], expected: u32) bool {
+    ret sel n.some && n.some == expected;
+}
+
 test "pipeline: float attributes map by component count" {
-    if (attribute_format(COMP_F32, 1, 0, 0) != vk.FORMAT_R32_SFLOAT)          { ret 1; }
-    if (attribute_format(COMP_F32, 2, 0, 0) != vk.FORMAT_R32G32_SFLOAT)       { ret 2; }
-    if (attribute_format(COMP_F32, 3, 0, 0) != vk.FORMAT_R32G32B32_SFLOAT)    { ret 3; }
-    if (attribute_format(COMP_F32, 4, 0, 0) != vk.FORMAT_R32G32B32A32_SFLOAT) { ret 4; }
+    if (!format_is(attribute_format(COMP_F32, 1, 0, 0), vk.FORMAT_R32_SFLOAT))          { ret 1; }
+    if (!format_is(attribute_format(COMP_F32, 2, 0, 0), vk.FORMAT_R32G32_SFLOAT))       { ret 2; }
+    if (!format_is(attribute_format(COMP_F32, 3, 0, 0), vk.FORMAT_R32G32B32_SFLOAT))    { ret 3; }
+    if (!format_is(attribute_format(COMP_F32, 4, 0, 0), vk.FORMAT_R32G32B32A32_SFLOAT)) { ret 4; }
     ret 0;
 }
 
 test "pipeline: normalized changes the format, not merely the flag" {
     # A packed byte colour must arrive in the shader as a float in [0, 1]. UINT
     # here would deliver 0..255 and every colour would clamp to white.
-    if (attribute_format(COMP_U8, 4, 1, 0) != vk.FORMAT_R8G8B8A8_UNORM) { ret 1; }
-    if (attribute_format(COMP_U8, 4, 0, 0) != vk.FORMAT_R8G8B8A8_UINT)  { ret 2; }
-    if (attribute_format(COMP_I8, 4, 1, 0) != vk.FORMAT_R8G8B8A8_SNORM) { ret 3; }
-    if (attribute_format(COMP_I8, 4, 0, 0) != vk.FORMAT_R8G8B8A8_SINT)  { ret 4; }
+    if (!format_is(attribute_format(COMP_U8, 4, 1, 0), vk.FORMAT_R8G8B8A8_UNORM)) { ret 1; }
+    if (!format_is(attribute_format(COMP_U8, 4, 0, 0), vk.FORMAT_R8G8B8A8_UINT))  { ret 2; }
+    if (!format_is(attribute_format(COMP_I8, 4, 1, 0), vk.FORMAT_R8G8B8A8_SNORM)) { ret 3; }
+    if (!format_is(attribute_format(COMP_I8, 4, 0, 0), vk.FORMAT_R8G8B8A8_SINT))  { ret 4; }
     ret 0;
 }
 
 test "pipeline: joint indices map to an unsigned integer format" {
     # glTF JOINTS_0 is an unnormalized u16 vec4 and must reach the shader as
     # integers; a normalized format would make every joint index zero.
-    if (attribute_format(COMP_U16, 4, 0, 1) != vk.FORMAT_R16G16B16A16_UINT) { ret 1; }
+    if (!format_is(attribute_format(COMP_U16, 4, 0, 1), vk.FORMAT_R16G16B16A16_UINT)) { ret 1; }
     ret 0;
 }
 
 test "pipeline: an out-of-range component count is rejected" {
-    if (attribute_format(COMP_F32, 0, 0, 0) != FORMAT_UNSUPPORTED) { ret 1; }
-    if (attribute_format(COMP_F32, 5, 0, 0) != FORMAT_UNSUPPORTED) { ret 2; }
+    val zero: opt[i32] = attribute_format(COMP_F32, 0, 0, 0);
+    if (!sel zero.none) { ret 1; }
+    val five: opt[i32] = attribute_format(COMP_F32, 5, 0, 0);
+    if (!sel five.none) { ret 2; }
     # There is no normalized 32-bit integer vertex format.
-    if (attribute_format(COMP_U32, 4, 1, 0) != FORMAT_UNSUPPORTED) { ret 3; }
+    val unorm32: opt[i32] = attribute_format(COMP_U32, 4, 1, 0);
+    if (!sel unorm32.none) { ret 3; }
     ret 0;
 }
 
 test "pipeline: vertex input follows the format's locations and offsets" {
     var f: VertexFormat = vertex_format_standard();
     var out: [8]vk.VertexInputAttributeDescription;
-    if (vertex_attributes(?f, ?out[0], 8) != 3) { ret 1; }
+    if (!attributes_are(vertex_attributes(?f, ?out[0], 8), 3)) { ret 1; }
 
     # The offsets must be the format's, not a recomputation, or the pipeline and
     # the uploaded geometry disagree about where each attribute starts.
@@ -848,7 +846,7 @@ test "pipeline: a two-component attribute is described as a two-component format
     vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
     vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
     var out: [8]vk.VertexInputAttributeDescription;
-    if (vertex_attributes(?f, ?out[0], 8) != 2)       { ret 1; }
+    if (!attributes_are(vertex_attributes(?f, ?out[0], 8), 2)) { ret 1; }
     if (out[0].format != vk.FORMAT_R32G32_SFLOAT)     { ret 2; }
     if (out[1].location != 1 || out[1].offset != 8)   { ret 3; }
     ret 0;
@@ -861,14 +859,16 @@ test "pipeline: an unrepresentable attribute fails the whole format" {
     var out: [8]vk.VertexInputAttributeDescription;
     # Writing the first attribute and reporting a partial count would build a
     # pipeline that silently drops the colour.
-    if (vertex_attributes(?f, ?out[0], 8) != 0) { ret 1; }
+    val described: opt[u32] = vertex_attributes(?f, ?out[0], 8);
+    if (!sel described.none) { ret 1; }
     ret 0;
 }
 
 test "pipeline: a format larger than the output array is refused" {
     var f: VertexFormat = vertex_format_standard();
     var out: [8]vk.VertexInputAttributeDescription;
-    if (vertex_attributes(?f, ?out[0], 2) != 0) { ret 1; }
+    val described: opt[u32] = vertex_attributes(?f, ?out[0], 2);
+    if (!sel described.none) { ret 1; }
     ret 0;
 }
 
@@ -877,8 +877,8 @@ test "pipeline: 2D and 3D descriptions differ where it matters" {
     val b: PipelineDesc = pipeline_desc_2d();
     # Sprites and glyphs need blending and must not be culled or depth-tested;
     # sharing one description would make overlays disappear behind geometry.
-    if (a.blend != BLEND_OPAQUE || !a.cull || !a.depth) { ret 1; }
-    if (b.blend != BLEND_SOURCE_ALPHA || b.cull || b.depth) { ret 2; }
+    if (!sel a.blend.opaque || !a.cull || !a.depth) { ret 1; }
+    if (!sel b.blend.source_alpha || b.cull || b.depth) { ret 2; }
     if (a.depth_bias || a.depth_bias_constant != 0.0
         || a.depth_bias_clamp != 0.0 || a.depth_bias_slope != 0.0) { ret 3; }
     if (b.depth_bias || b.depth_bias_constant != 0.0
@@ -902,25 +902,25 @@ test "pipeline: raster depth bias maps exactly to Vulkan state" {
 }
 
 test "pipeline: depth convention selects the matching comparison" {
-    if (depth_compare_op(DEPTH_FORWARD) != vk.COMPARE_OP_LESS)     { ret 1; }
-    if (depth_compare_op(DEPTH_REVERSED) != vk.COMPARE_OP_GREATER) { ret 2; }
+    if (depth_compare_op(DepthConvention.forward{}) != vk.COMPARE_OP_LESS)     { ret 1; }
+    if (depth_compare_op(DepthConvention.reversed{}) != vk.COMPARE_OP_GREATER) { ret 2; }
     ret 0;
 }
 
 test "pipeline: blend modes map to exact attachment factors" {
-    val opaque: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_OPAQUE);
+    val opaque: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.opaque{});
     if (opaque.blendEnable != vk.FALSE
         || opaque.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
         || opaque.dstColorBlendFactor != vk.BLEND_FACTOR_ZERO) { ret 1; }
 
-    val alpha: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_SOURCE_ALPHA);
+    val alpha: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.source_alpha{});
     if (alpha.blendEnable != vk.TRUE
         || alpha.srcColorBlendFactor != vk.BLEND_FACTOR_SRC_ALPHA
         || alpha.dstColorBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
         || alpha.srcAlphaBlendFactor != vk.BLEND_FACTOR_ONE
         || alpha.dstAlphaBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA) { ret 2; }
 
-    val additive: vk.PipelineColorBlendAttachmentState = blend_attachment(BLEND_ADDITIVE);
+    val additive: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.additive{});
     if (additive.blendEnable != vk.TRUE
         || additive.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
         || additive.dstColorBlendFactor != vk.BLEND_FACTOR_ONE

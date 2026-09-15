@@ -37,6 +37,7 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use boom.graphics.texture.Texture;
+use std.types.option.opt;
 use boom.graphics.sprite.Rect;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
@@ -65,14 +66,14 @@ pub val SPRITE_FLOATS: usize = SPRITE_VERTICES * VERTEX_FLOATS;
 # whose projection its vertices were placed for, and so two passes cannot
 # accumulate into each other.
 # ---
-# texture: what the open run samples; nil means the renderer's white texel
+# texture: what the open run samples; none means the renderer's white texel
 # first:   index of the run's first vertex within its block
 # block:   which arena block the run lives in. A draw names one vertex buffer,
 #          so a run cannot span two of them.
 # count:   vertices accumulated so far
 # open:    whether a run has been started at all
 pub rec Batch2D {
-    texture: *Texture;
+    texture: opt[*Texture];
     first:   u32;
     block:   usize;
     count:   u32;
@@ -81,7 +82,7 @@ pub rec Batch2D {
 
 # Forget any open run, without drawing it.
 pub fun batch_reset(b: *Batch2D) {
-    b.texture = nil;
+    b.texture = opt[*Texture].none{};
     b.first   = 0;
     b.block   = 0;
     b.count   = 0;
@@ -93,10 +94,16 @@ pub fun batch_reset(b: *Batch2D) {
 # A run that is not open has nothing to draw. A run sampling a different texture
 # has to be drawn now to keep submission order, since the new geometry must land
 # on top of it rather than beside it.
-pub fun batch_breaks(b: *Batch2D, texture: *Texture) bool {
+pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture]) bool {
     if (!b.open)              { ret false; }
     if (b.count == 0)         { ret false; }
-    ret b.texture != texture;
+    ret !same_texture(b.texture, texture);
+}
+
+# whether two runs sample the same texture, the white texel being its own
+pub fun same_texture(a: opt[*Texture], b: opt[*Texture]) bool {
+    if (sel a.some) { ret sel b.some && b.some == a.some; }
+    ret sel b.none;
 }
 
 # Whether vertices landing at `first` in `block` continue the open run.
@@ -252,15 +259,15 @@ test "batch: a run breaks on a texture change and not on a repeat" {
     batch_reset(?t);
 
     # Nothing accumulated yet, so there is nothing to break.
-    if (batch_breaks(?t, ?a)) { ret 1; }
+    if (batch_breaks(?t, opt[*Texture].some{?a})) { ret 1; }
 
     t.open    = true;
-    t.texture = ?a;
+    t.texture = opt[*Texture].some{?a};
     t.count   = 6;
-    if (batch_breaks(?t, ?a))  { ret 2; }
-    if (!batch_breaks(?t, ?b)) { ret 3; }
-    # nil is the white texel, which is a different texture from any other.
-    if (!batch_breaks(?t, nil)) { ret 4; }
+    if (batch_breaks(?t, opt[*Texture].some{?a}))  { ret 2; }
+    if (!batch_breaks(?t, opt[*Texture].some{?b})) { ret 3; }
+    # none is the white texel, which is a different texture from any other.
+    if (!batch_breaks(?t, opt[*Texture].none{})) { ret 4; }
     ret 0;
 }
 
