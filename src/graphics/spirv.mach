@@ -8,6 +8,9 @@
 #
 # These seven modules are the whole shader surface of the engine. There is no
 # runtime shader compilation and no shader source in a shipped build.
+#
+# Each embed is 4-byte aligned to state Vulkan's word-read contract, not to fix
+# an observed bug.
 
 use std.types.bool.bool;
 use std.types.bool.true;
@@ -34,26 +37,31 @@ use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.uniform.TintUniforms;
 
 # Directional-light fragment stage.
+#[align(4)]
 #[embed("{artifact.shader-lit_frag.out}")]
 pub val LIT_FRAG_SPV: [_]u8;
 
 # Mesh vertex stage: model-view-projection from a uniform block.
+#[align(4)]
 #[embed("{artifact.shader-mesh_vert.out}")]
 pub val MESH_VERT_SPV: [_]u8;
 
 # Skinned mesh vertex stage: the view-projection and model matrices from a
 # uniform block, and the joint palette from a storage buffer at binding 3.
+#[align(4)]
 #[embed("{artifact.shader-skinned_vert.out}")]
 pub val SKINNED_VERT_SPV: [_]u8;
 
 # Immediate-mode vertex stage: positions already in pixels, a colour per vertex,
 # and a projection at binding 0. What a UI draw list, a particle system or a
 # debug overlay needs, none of which have a per-draw model matrix.
+#[align(4)]
 #[embed("{artifact.shader-ui_vert.out}")]
 pub val UI_VERT_SPV: [_]u8;
 
 # Immediate-mode fragment stage: the atlas texel times the vertex colour. No
 # tint uniform, because one draw covers a whole draw list.
+#[align(4)]
 #[embed("{artifact.shader-ui_frag.out}")]
 pub val UI_FRAG_SPV: [_]u8;
 
