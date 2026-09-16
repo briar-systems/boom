@@ -19,6 +19,7 @@
 
 use boom.graphics.device.Device;
 use boom.graphics.error.Error;
+use boom.graphics.error.ImageError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.content.TextureError;
 use boom.graphics.image.ColorSpace;
@@ -26,6 +27,7 @@ use boom.graphics.image.Image;
 use boom.graphics.image.image_dnit;
 use boom.graphics.image.image_format;
 use boom.graphics.image.image_upload;
+use boom.graphics.image.image_upload_region;
 use boom.graphics.vk.vk_wait_idle;
 use boom.vfs;
 use img: image;
@@ -289,6 +291,42 @@ pub fun texture_load(d: *Device, path: str) res[Texture, Error] {
     ret texture_load_as(d, path, ColorSpace.srgb{});
 }
 
+# overwrite a rectangle of an already-uploaded texture
+#
+# the texture keeps everything the rectangle does not cover, which is what
+# separates this from uploading a new texture: a glyph atlas is filled one cell
+# at a time as a game asks for codepoints, and re-uploading the whole page per
+# glyph would cost megabytes per character.
+#
+# THE TEXTURE'S DIMENSIONS DO NOT CHANGE. a sprite quad bakes its UVs into the
+# frame's vertex arena when it is appended and the batch is not drawn until the
+# pass ends, so resizing a texture that a recorded quad samples would silently
+# move every earlier quad's source rectangle. growing a texture is therefore not
+# offered at all. a caller that needs more space makes another texture.
+# ---
+# d:      the upload context the texture was created against
+# t:      the texture to write into
+# pixels: width * height * 4 RGBA8 bytes, tightly packed
+# x:      left edge of the destination rectangle in texels
+# y:      top edge of the destination rectangle in texels
+# width:  rectangle width in texels
+# height: rectangle height in texels
+# ret:    ok, or a dimension, bounds or upload error
+pub fun texture_upload_region(d: *Device, t: *Texture, pixels: *u8,
+    x: i32, y: i32, width: i32, height: i32) err[Error] {
+    if (!d.ready) {
+        ret err[Error].err{Error.uninitialized{Stage.upload{}}};
+    }
+    if (width <= 0 || height <= 0) {
+        ret err[Error].err{Error.texture{TextureError.dimensions{}}};
+    }
+    if (x < 0 || y < 0) {
+        ret err[Error].err{Error.image{ImageError.region{}}};
+    }
+    ret image_upload_region(?t.image, d.vk, d.pool, pixels,
+        x::u32, y::u32, width::u32, height::u32);
+}
+
 # the image view a descriptor binds this texture through
 #
 # there is no bind-to-a-unit step in Vulkan: a texture reaches a shader by
@@ -353,6 +391,21 @@ test "texture: non-positive dimensions are refused before allocating" {
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
     if (!refused_dimensions(texture(?d, ?px[0], 0, 1, ColorSpace.srgb{})))  { ret 1; }
     if (!refused_dimensions(texture(?d, ?px[0], 1, -4, ColorSpace.srgb{}))) { ret 2; }
+    ret 0;
+}
+
+test "texture: a region write validates before touching the device" {
+    var d:  Device;
+    var t:  Texture;
+    var px: [4]u8 = [4]u8{255, 255, 255, 255};
+    d.ready = false;
+    val cold: err[Error] = texture_upload_region(?d, ?t, ?px[0], 0, 0, 1, 1);
+    if (!(sel cold.err && sel cold.err.uninitialized)) { ret 1; }
+    d.ready = true;
+    val flat: err[Error] = texture_upload_region(?d, ?t, ?px[0], 0, 0, 0, 1);
+    if (!(sel flat.err && (sel flat.err.texture && sel flat.err.texture.dimensions))) { ret 2; }
+    val left: err[Error] = texture_upload_region(?d, ?t, ?px[0], -1, 0, 1, 1);
+    if (!(sel left.err && (sel left.err.image && sel left.err.image.region))) { ret 3; }
     ret 0;
 }
 

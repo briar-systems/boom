@@ -21,10 +21,14 @@ for m in $expected; do
   echo "$m.spv: valid"
 done
 
-# unit tests cover invalid borrowed bytes without touching Vulkan. this finite
-# example exercises the successful upload, releases its encoded source before
-# drawing, then samples and deletes the returned atlas.
-timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
-  ./examples/text/out/linux-x86_64/debug/bin/text \
-  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-echo "text example ran with borrowed font bytes"
+# unit tests cover the UTF-8 walk and the atlas arithmetic without touching
+# Vulkan. this finite example releases the encoded font before any glyph is
+# rasterized, draws Han text and a line break into a target it reads back, and
+# fills a whole atlas page. it runs against a face without Han glyphs, which
+# draws .notdef boxes, and against a TrueType Han face, which draws the glyphs.
+for font in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+            /usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf; do
+  timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
+    ./examples/text/out/linux-x86_64/debug/bin/text --font "$font"
+  echo "text example passed with $font"
+done
