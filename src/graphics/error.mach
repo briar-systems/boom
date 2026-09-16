@@ -155,12 +155,14 @@ pub tag BufferError: u8 {
 # empty:           an image with a zero dimension
 # not_created:     the image was never created
 # transition:      a layout transition boom does not perform
+# region:          a partial write whose rectangle falls outside the image
 # readback_format: the image format has no raw readback layout
 # readback_short:  the destination is smaller than the image; carries the bytes required
 pub tag ImageError: u8 {
     empty;
     not_created;
     transition;
+    region;
     readback_format;
     readback_short: usize;
 }
@@ -400,6 +402,7 @@ fun image_message(e: ImageError) str {
     if (sel e.empty)           { ret "cannot create a zero-sized image"; }
     if (sel e.not_created)     { ret "the image was never created"; }
     if (sel e.transition)      { ret "unhandled image layout transition"; }
+    if (sel e.region)          { ret "the image region falls outside the image"; }
     if (sel e.readback_format) { ret "this image format does not support raw readback"; }
     ret "the destination is smaller than the image";
 }

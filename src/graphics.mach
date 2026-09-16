@@ -137,6 +137,7 @@ fwd boom.graphics.texture.texture_from_bytes_as;
 fwd boom.graphics.texture.texture_from_bytes;
 fwd boom.graphics.texture.texture_load_as;
 fwd boom.graphics.texture.texture_load;
+fwd boom.graphics.texture.texture_upload_region;
 fwd boom.graphics.texture.texture_view;
 fwd boom.graphics.texture.texture_delete;
 
