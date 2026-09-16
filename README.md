@@ -116,9 +116,10 @@ a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
 keeps them, keyed by that choice, the mesh's vertex layout, and the target's
 attachment formats, because Vulkan bakes both vertex input and render-pass
 compatibility into the pipeline. The shaders themselves live in
-`src/shaders/` as Mach source, are compiled for the `vulkan1.0` SPIR-V
-environment by the `shader-*` artifacts in the root project, and are embedded
-from the committed `res/spv/`, which CI checks against a fresh build.
+`src/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
+environment by the `shader-*` artifacts the library requires, then embedded
+from what those artifacts produce. A consumer builds them too, because a
+library artifact's requirements travel with the dependency.
 
 **Every draw takes a uniform slot.** A Vulkan draw reads a buffer range that
 must already hold its values when the command buffer executes, so each draw
@@ -378,13 +379,13 @@ mach build .
 mach test .
 ```
 
-The built-in shaders are the `shader-*` artifacts on the `spirv` target.
-After editing one, rebuild them and refresh the committed modules, which CI
-compares against a fresh build:
+The built-in shaders are the `shader-*` artifacts on the `spirv` target, which
+`mach build .` produces before the library that embeds them. To build or
+validate them on their own:
 
 ```sh
 mach build . --target spirv --profile release
-cp out/spirv/release/spv/*.spv res/spv/
+spirv-val --target-env vulkan1.0 out/spirv/release/spv/ui_frag.spv
 ```
 
 Building a game that links against boom's window layer needs GLFW available to

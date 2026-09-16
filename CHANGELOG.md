@@ -25,8 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   debug profile and `boom` library artifact are the defaults, so a consumer's
   `use boom;` binds `boom.lib.boom`. A consumer declares `[dep.boom]` alone.
 - build: the built-in shaders are `shader-*` artifacts on a `spirv` target in
-  the `vulkan1.0` environment, and the committed `res/spv` modules are SPIR-V
-  1.0, which every Vulkan instance version accepts.
+  the `vulkan1.0` environment, which the library artifact requires and embeds
+  through `{artifact.shader-<name>.out}`. The committed `res/spv` modules are
+  gone: a library artifact's requirements travel with the dependency
+  (mach#3420), so a consumer builds them as part of building boom. The modules
+  are SPIR-V 1.0, which every Vulkan instance version accepts.
 - api: **Breaking.** Every failure is a closed error tag and every absence is
   `opt`, following std 2's representation rules. `Result[T, E]` is `res[T, E]`,
   `Result[bool, E]` whose payload was always true is `err[E]`, and each error

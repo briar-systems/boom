@@ -51,7 +51,11 @@ jobs:
       # A uniform block is a contract between two separately compiled programs
       # and nothing at runtime checks it. A member at the wrong offset makes the
       # shader read whatever bytes are there, with no diagnostic anywhere.
-      # The expected set is derived from the shader-* artifacts the root manifest
+      # boom.graphics.spirv reads the modules it embeds and checks them against
+      # the CPU records; what a validator adds is that they are well formed for
+      # the environment they declare.
+      #
+      # The set is derived from the shader-* artifacts the root manifest
       # declares, not written down here. A count restated in this file would go
       # stale with the next shader.
       - name: Validate the emitted SPIR-V
@@ -60,23 +64,13 @@ jobs:
           mach build . --target spirv --profile release
           expected=$(grep -oP '^\[artifact\.shader-\K[^\]]+' mach.toml | sort)
           built=$(ls out/spirv/release/spv | sed 's/\.spv$//' | sort)
-          committed=$(ls res/spv | sed 's/\.spv$//' | sort)
-          if [ "$expected" != "$built" ] || [ "$expected" != "$committed" ]; then
-            echo "res/spv and the built modules do not match the shader artifacts mach.toml declares"
-            diff <(echo "$expected") <(echo "$committed") || true
+          if [ "$expected" != "$built" ]; then
+            echo "the built modules do not match the shader artifacts mach.toml declares"
+            diff <(echo "$expected") <(echo "$built") || true
             exit 1
           fi
           for m in $expected; do
             spirv-val --target-env vulkan1.0 "out/spirv/release/spv/$m.spv"
-            # The committed modules must be what this source produces, because
-            # they are what boom.graphics.spirv embeds. A shader edited without
-            # refreshing res/spv would ship the old module, with the source and
-            # the binary disagreeing and nothing saying so.
-            if ! cmp -s "out/spirv/release/spv/$m.spv" "res/spv/$m.spv"; then
-              echo "res/spv/$m.spv does not match a fresh build of src/shaders"
-              echo "run 'mach build . --target spirv --profile release' and copy out/spirv/release/spv into res/spv"
-              exit 1
-            fi
           done
 
       - name: Test

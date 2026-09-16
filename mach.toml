@@ -42,6 +42,9 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
+# The shader modules are required rather than committed: a library artifact's
+# requirements travel with the dependency, so a consumer's build produces them
+# before it compiles the module that embeds them.
 [artifact.boom]
 default = true
 kind = "static"
@@ -49,7 +52,7 @@ entry = "lib/boom.mach"
 out = "lib/boom{artifact.suffix}"
 targets = ["linux-x86_64", "windows", "darwin"]
 link = []
-need = []
+need = ["artifact.shader-*"]
 
 [artifact.shader-lit_frag]
 kind = "bin"
