@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-16
+
 ### Added
 - graphics: `pass_set_region` restricts the draws that follow to a pixel
   viewport and matching scissor inside the pass without changing its projection,
