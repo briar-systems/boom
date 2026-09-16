@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-16
+
 ### Added
 - graphics: `texture_upload_region` overwrites a rectangle of a texture that is
   already live and keeps everything it does not cover. The glyph atlas fills
@@ -27,7 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer a range that can be named at compile time. `ATLAS_PAGE`,
   `ATLAS_PAGE_MAX` and `MAX_PAGES` describe the paged atlas instead.
 - graphics: **Breaking.** `text_measure` reports the widest line rather than
-  the sum of every advance. The answers match for text without a line break.
+  the sum of every advance. For a string that is all ASCII and has no line
+  break, the result is bit-identical to 0.24.0 at every size and in both raster
+  modes. It differs in two cases only:
+  - a string containing `\n` returns its widest line instead of the sum of all
+    its lines
+  - a byte of 0x80 or above now counts. A whole UTF-8 sequence measures as its
+    glyph, and a byte measured on its own (a lead or continuation byte out of
+    context) measures as U+FFFD. In 0.24.0 both measured 0. A caller that
+    measures text one byte at a time now needs to measure whole codepoints.
 
 ### Fixed
 - graphics: `text_draw` and `text_measure` display non-English text (#112).
