@@ -56,18 +56,21 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use std.types.string.str;
 use mem: std.memory;
 use vk;
 use glfw.glfw;
+use boom.window.Window;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.Capacity;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.MeshError;
+use boom.graphics.error.RendererError;
+use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.vk_init;
 use boom.graphics.vk.vk_dnit;
@@ -80,10 +83,7 @@ use boom.graphics.swapchain.swapchain_init;
 use boom.graphics.swapchain.swapchain_rebuild;
 use boom.graphics.swapchain.swapchain_dnit;
 use boom.graphics.swapchain.PresentMode;
-use boom.graphics.swapchain.PRESENT_VSYNC;
-use boom.graphics.swapchain.PRESENT_MAILBOX;
-use boom.graphics.swapchain.PRESENT_IMMEDIATE;
-use boom.graphics.swapchain.present_mode_valid;
+use boom.graphics.swapchain.present_mode_same;
 use boom.graphics.swapchain.present_mode_supported;
 use boom.graphics.vk.format_is_srgb;
 use boom.graphics.frame.FrameLoop;
@@ -96,7 +96,7 @@ use boom.graphics.frame.frame_suspend_pass;
 use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_dnit;
 use boom.graphics.pipeline.Pipeline;
-use boom.graphics.pipeline.pipeline_bind;
+use boom.graphics.pipeline.pipeline_bind_region;
 use boom.graphics.cache.PipelineCache;
 use boom.graphics.cache.Program;
 use boom.graphics.cache.PROGRAM_MESH;
@@ -104,6 +104,7 @@ use boom.graphics.cache.PROGRAM_SKINNED;
 use boom.graphics.cache.cache_init;
 use boom.graphics.cache.PROGRAM_UI;
 use boom.graphics.stream.VertexStream;
+use boom.graphics.stream.StreamSpan;
 use boom.graphics.stream.stream_init;
 use boom.graphics.stream.stream_begin;
 use boom.graphics.stream.stream_push;
@@ -127,6 +128,7 @@ use boom.graphics.batch.Batch2D;
 use boom.graphics.batch.batch_reset;
 use boom.graphics.batch.batch_breaks;
 use boom.graphics.batch.batch_continues;
+use boom.graphics.batch.same_texture;
 use boom.graphics.batch.sprite_expand;
 use boom.graphics.batch.SPRITE_FLOATS;
 use boom.graphics.batch.SPRITE_VERTICES;
@@ -149,7 +151,6 @@ use boom.graphics.cache.cache_get;
 use boom.graphics.cache.cache_dnit;
 use boom.graphics.descriptor.Descriptors;
 use boom.graphics.descriptor.MAX_SLOTS;
-use boom.graphics.descriptor.NO_SLOT;
 use boom.graphics.descriptor.SLOTS_PER_BLOCK;
 use boom.graphics.descriptor.MAX_SAMPLERS;
 use boom.graphics.descriptor.descriptors_init;
@@ -163,14 +164,13 @@ use boom.graphics.descriptor.descriptors_write_slot_at;
 use boom.graphics.descriptor.descriptors_take_palette;
 use boom.graphics.descriptor.descriptors_write_palette;
 use boom.graphics.descriptor.descriptors_bind_palette;
-use boom.graphics.descriptor.MAX_PALETTES;
 use boom.graphics.descriptor.COLOUR_OFFSET;
 use boom.graphics.descriptor.USER_OFFSET;
 use boom.graphics.descriptor.USER_BYTES;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_pipeline;
 use boom.graphics.image.sampler_init;
-use boom.graphics.image.COLOR_SRGB;
+use boom.graphics.image.ColorSpace;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
@@ -196,7 +196,7 @@ use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.material.Material;
 use boom.graphics.material.material_texture;
 use boom.graphics.material.material_add_texture;
-use boom.graphics.material.TEXTURE_LINEAR;
+use boom.graphics.material.MaterialError;
 use boom.graphics.camera.Camera;
 use boom.graphics.camera.camera_view;
 use boom.graphics.camera.camera_projection;
@@ -230,8 +230,6 @@ use boom.math.transform.Transform;
 use boom.math.transform.transform_identity;
 use boom.math.transform.transform_matrix;
 use boom.graphics.depth.DepthConvention;
-use boom.graphics.depth.DEPTH_FORWARD;
-use boom.graphics.depth.DEPTH_REVERSED;
 
 pub val MAX_RETIRED_MESHES: usize = 1024;
 pub val MAX_PENDING_MESH_UPLOADS: usize = 1024;
@@ -322,42 +320,35 @@ pub rec Renderer {
 #
 # the window must have been opened with boom.window.window_open, which
 # creates no GL context: a window carrying one cannot back a Vulkan surface.
+# the renderer starts at the window's framebuffer size and follows it after.
 #
-# presents with PRESENT_VSYNC, which every implementation supports.
+# presents with vsync, which every implementation supports.
 # renderer_init_with_present asks for another, and renderer_set_present_mode
 # changes it later without the renderer being torn down.
 # ---
 # r:      renderer to initialize
-# window: the window to present to
-# width:  the window framebuffer width in pixels
-# height: the window framebuffer height in pixels
-# ret:    true on success, or the first step that failed
-pub fun renderer_init(r: *Renderer, window: glfw.Window, width: i32, height: i32) Result[bool, Error] {
-    ret renderer_init_with_present(r, window, width, height, PRESENT_VSYNC);
+# window: the open window to present to, which must outlive the renderer
+# ret:    ok, or the first step that failed
+pub fun renderer_init(r: *Renderer, window: *Window) err[Error] {
+    ret renderer_init_with_present(r, window, PresentMode.vsync{});
 }
 
 # initialize a renderer against a window, presenting a chosen way
 #
 # the mode is a request. a surface that does not offer it falls back to
-# PRESENT_VSYNC, and renderer_present_mode reports what was actually taken;
+# vsync, and renderer_present_mode reports what was actually taken;
 # renderer_present_mode_supported answers the question ahead of the attempt.
 # ---
 # r:       renderer to initialize
-# window:  the window to present to
-# width:   the window framebuffer width in pixels
-# height:  the window framebuffer height in pixels
+# window:  the open window to present to, which must outlive the renderer
 # present: how finished frames should reach the display
-# ret:     true on success, or the first step that failed
-pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32, height: i32,
-                                   present: PresentMode) Result[bool, Error] {
-    # Checked before anything is created, so a mode restored from a settings
-    # file that names nothing fails here rather than being silently presented
-    # as vsync by a renderer that then reports vsync back.
-    if (!present_mode_valid(present)) {
-        ret err[bool, Error](error("unknown present mode"));
-    }
-
-    r.window      = window;
+# ret:     ok, or the first step that failed
+pub fun renderer_init_with_present(r: *Renderer, window: *Window,
+                                   present: PresentMode) err[Error] {
+    if (sel window.handle.none) { ret err[Error].err{Error.uninitialized{Stage.window{}}}; }
+    val width:  i32 = window.width;
+    val height: i32 = window.height;
+    r.window      = window.handle.some;
     r.width       = width;
     r.height      = height;
     r.drawing     = false;
@@ -386,20 +377,20 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     r.ready_stream = false;
     r.ready_store  = false;
 
-    val vr: Result[bool, Error] = vk_init(?r.vk, window, "boom");
-    if (is_err[bool, Error](vr)) { ret vr; }
+    val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
+    if (sel vr.err) { ret vr; }
     r.ready_vk = true;
 
-    val dr: Result[bool, Error] = device_init(?r.dev, ?r.vk);
-    if (is_err[bool, Error](dr)) { renderer_rollback(r); ret dr; }
+    val dr: err[Error] = device_init(?r.dev, ?r.vk);
+    if (sel dr.err) { renderer_rollback(r); ret dr; }
     r.ready_dev = true;
 
-    val sr: Result[bool, Error] = swapchain_init(?r.swap, ?r.vk, width::u32, height::u32, r.present);
-    if (is_err[bool, Error](sr)) { renderer_rollback(r); ret sr; }
+    val sr: err[Error] = swapchain_init(?r.swap, ?r.vk, width::u32, height::u32, r.present);
+    if (sel sr.err) { renderer_rollback(r); ret sr; }
     r.ready_swap = true;
 
-    val fr: Result[bool, Error] = frame_init(?r.frame, ?r.vk, ?r.swap);
-    if (is_err[bool, Error](fr)) { renderer_rollback(r); ret fr; }
+    val fr: err[Error] = frame_init(?r.frame, ?r.vk, ?r.swap);
+    if (sel fr.err) { renderer_rollback(r); ret fr; }
     r.ready_frame = true;
 
     # The colour pipeline assumes the sRGB encode happens exactly once, at the
@@ -410,11 +401,11 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     # can say so.
     r.srgb = format_is_srgb(r.swap.format);
 
-    val samr: Result[bool, Error] = sampler_init(?r.nearest, ?r.vk, true);
-    if (is_err[bool, Error](samr)) { renderer_rollback(r); ret samr; }
+    val samr: err[Error] = sampler_init(?r.nearest, ?r.vk, true);
+    if (sel samr.err) { renderer_rollback(r); ret samr; }
     r.ready_near = true;
-    val saml: Result[bool, Error] = sampler_init(?r.linear, ?r.vk, false);
-    if (is_err[bool, Error](saml)) {
+    val saml: err[Error] = sampler_init(?r.linear, ?r.vk, false);
+    if (sel saml.err) {
         renderer_rollback(r);
         ret saml;
     }
@@ -432,16 +423,16 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     # building one up front just means there is one to ask. This one, because it
     # is the pipeline every frame uses.
     val window_compatibility: PassCompatibility = pass_compatibility_one(r.vk.color_format);
-    val two_d: *Pipeline = cache_get(?r.pipes, ?r.vk, r.frame.pass,
-                                      ?window_compatibility, PROGRAM_UI,
-                                      ?r.ui_format, DEPTH_FORWARD);
-    if (two_d == nil) {
+    val two_d: res[*Pipeline, Error] = cache_get(?r.pipes, ?r.vk, r.frame.pass,
+                                                 ?window_compatibility, PROGRAM_UI,
+                                                 ?r.ui_format, DepthConvention.forward{});
+    if (sel two_d.err) {
         renderer_rollback(r);
-        ret err[bool, Error](error("could not build the 2D pipeline"));
+        ret err[Error].err{two_d.err};
     }
 
-    val der: Result[bool, Error] = descriptors_init(?r.desc, ?r.vk, two_d.set_layout);
-    if (is_err[bool, Error](der)) { renderer_rollback(r); ret der; }
+    val der: err[Error] = descriptors_init(?r.desc, ?r.vk, two_d.ok.set_layout);
+    if (sel der.err) { renderer_rollback(r); ret der; }
     r.ready_desc = true;
 
     # Every fragment stage samples, so a draw with no texture of its own needs
@@ -452,29 +443,29 @@ pub fun renderer_init_with_present(r: *Renderer, window: glfw.Window, width: i32
     # sRGB, so it decodes to exactly 1.0 and multiplying by it is the identity.
     # A linear white would also be 1.0 today, but naming the space keeps this
     # correct if the fallback ever becomes something other than pure white.
-    val wr: Result[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1, COLOR_SRGB);
-    if (is_err[Texture, Error](wr)) {
+    val wr: res[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1, ColorSpace.srgb{});
+    if (sel wr.err) {
         renderer_rollback(r);
-        ret err[bool, Error](unwrap_err[Texture, Error](wr));
+        ret err[Error].err{wr.err};
     }
-    r.white = unwrap_ok[Texture, Error](wr);
+    r.white = wr.ok;
     r.ready_white = true;
 
     # The per-frame arena for geometry that is rebuilt every frame: every 2D
     # draw boom makes goes through it.
-    val str_r: Result[bool, Error] = stream_init(?r.stream, ?r.vk);
-    if (is_err[bool, Error](str_r)) { renderer_rollback(r); ret str_r; }
+    val str_r: err[Error] = stream_init(?r.stream, ?r.vk);
+    if (sel str_r.err) { renderer_rollback(r); ret str_r; }
     r.ready_stream = true;
 
     # The frame's storage buffer. Created here rather than on the first write,
     # because binding 8 is in every set layout and a set bound with it unwritten
     # is undefined behaviour: there has to be a buffer to name before the first
     # draw, whether or not a game ever fills it.
-    val sto_r: Result[bool, Error] = storage_init(?r.store, ?r.vk);
-    if (is_err[bool, Error](sto_r)) { renderer_rollback(r); ret sto_r; }
+    val sto_r: err[Error] = storage_init(?r.store, ?r.vk);
+    if (sel sto_r.err) { renderer_rollback(r); ret sto_r; }
     r.ready_store = true;
 
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # whether the surface encodes sRGB on write
@@ -539,7 +530,6 @@ fun collect_mesh_uploads(r: *Renderer) {
 # geometry a game generates is written once rather than assembled in its own
 # array and copied again on the way to staging.
 #
-# When ok is false nothing but reason is meaningful.
 # ---
 # vertices:       writable vertex staging, vertex_bytes long
 # indices:        writable index staging, index_bytes long
@@ -548,8 +538,7 @@ fun collect_mesh_uploads(r: *Renderer) {
 # format:         the layout the vertices are written in
 # vertex_bytes:   the writable vertex extent, vertex_count * format.stride
 # index_bytes:    the writable index extent, four bytes per index
-# ok:             whether the staging was reserved
-# reason:         why a reservation was refused
+# live:           whether the reservation is still open, cleared by end or cancel
 # vertex_staging: the vertex staging buffer, owned until end or cancel
 # index_staging:  the index staging buffer, owned until end or cancel
 pub rec MeshUpload {
@@ -560,8 +549,7 @@ pub rec MeshUpload {
     format:         VertexFormat;
     vertex_bytes:   u64;
     index_bytes:    u64;
-    ok:             bool;
-    reason:         Error;
+    live:           bool;
     vertex_staging: Buffer;
     index_staging:  Buffer;
 }
@@ -610,25 +598,19 @@ fun mesh_upload_empty() MeshUpload {
     u.index_count  = 0;
     u.vertex_bytes = 0;
     u.index_bytes  = 0;
-    u.ok           = false;
+    u.live         = false;
     u.vertex_staging.handle = nil;
     u.index_staging.handle  = nil;
     ret u;
 }
 
-fun mesh_upload_refused(message: str) MeshUpload {
-    var u: MeshUpload = mesh_upload_empty();
-    u.reason = error(message);
-    ret u;
-}
-
 # release everything a failed end holds, staging and half-built mesh alike
 fun mesh_end_fail(r: *Renderer, pending: *PendingMeshUpload, m: *Mesh,
-                  reason: Error) Result[Mesh, Error] {
+                  reason: Error) res[Mesh, Error] {
     release_mesh_upload(r, pending);
     buffer_dnit(?m.vertices, ?r.vk);
     buffer_dnit(?m.indices, ?r.vk);
-    ret err[Mesh, Error](reason);
+    ret res[Mesh, Error].err{reason};
 }
 
 # Reserve host-visible staging for a runtime mesh and hand back its pointers.
@@ -647,62 +629,62 @@ fun mesh_end_fail(r: *Renderer, pending: *PendingMeshUpload, m: *Mesh,
 # format:       the layout the vertices will be written in
 # vertex_count: vertices to make room for
 # index_count:  indices to make room for
-# ret:          the staging to write through, or ok false and the reason
+# ret:          the staging to write through, or why it was refused
 pub fun renderer_mesh_begin(r: *Renderer, format: *VertexFormat,
                             vertex_count: i32,
-                            index_count: i32) MeshUpload {
-    if (r == nil || !r.ready_dev) {
-        ret mesh_upload_refused("the renderer is not initialized");
+                            index_count: i32) res[MeshUpload, Error] {
+    if (!r.ready_dev) {
+        ret res[MeshUpload, Error].err{Error.uninitialized{Stage.renderer{}}};
     }
     if (vertex_count <= 0 || index_count <= 0) {
-        ret mesh_upload_refused("a mesh needs at least one vertex and one index");
+        ret res[MeshUpload, Error].err{Error.mesh{MeshError.empty{}}};
     }
-    if (format == nil || format.stride == 0) {
-        ret mesh_upload_refused("the vertex format has a zero stride");
+    if (format.stride == 0) {
+        ret res[MeshUpload, Error].err{Error.mesh{MeshError.zero_stride{}}};
     }
     collect_mesh_uploads(r);
     if (!mesh_upload_fits(r.upload_count, r.upload_reserved)) {
-        ret mesh_upload_refused("the runtime mesh upload queue is full");
+        ret res[MeshUpload, Error].err{Error.full{Capacity.mesh_uploads{}}};
     }
 
     var u: MeshUpload = mesh_upload_empty();
     mesh_upload_sizes(?u, format, vertex_count, index_count);
 
-    val vsr: Result[bool, Error] = buffer_init(?u.vertex_staging, ?r.vk,
+    val vsr: err[Error] = buffer_init(?u.vertex_staging, ?r.vk,
         u.vertex_bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
             | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](vsr)) {
-        u.reason = unwrap_err[bool, Error](vsr);
-        ret u;
-    }
-    val isr: Result[bool, Error] = buffer_init(?u.index_staging, ?r.vk,
+    if (sel vsr.err) { ret res[MeshUpload, Error].err{vsr.err}; }
+    val isr: err[Error] = buffer_init(?u.index_staging, ?r.vk,
         u.index_bytes, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT
             | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](isr)) {
+    if (sel isr.err) {
         buffer_dnit(?u.vertex_staging, ?r.vk);
-        u.reason = unwrap_err[bool, Error](isr);
-        ret u;
+        ret res[MeshUpload, Error].err{isr.err};
     }
 
     # Mapped for the life of the reservation rather than per write: the caller
     # holds these pointers, and the memory is host-coherent, so there is nothing
     # to flush between the last write and the transfer.
-    u.vertices = buffer_map(?u.vertex_staging, ?r.vk);
-    u.indices  = buffer_map(?u.index_staging, ?r.vk):~*u32;
-    if (u.vertices == nil || u.indices == nil) {
+    val vmap: res[ptr, Error] = buffer_map(?u.vertex_staging, ?r.vk);
+    if (sel vmap.err) {
         buffer_dnit(?u.vertex_staging, ?r.vk);
         buffer_dnit(?u.index_staging, ?r.vk);
-        u.vertices = nil;
-        u.indices  = nil;
-        u.reason   = error("could not map runtime mesh staging buffers");
-        ret u;
+        ret res[MeshUpload, Error].err{vmap.err};
     }
+    val imap: res[ptr, Error] = buffer_map(?u.index_staging, ?r.vk);
+    if (sel imap.err) {
+        buffer_dnit(?u.vertex_staging, ?r.vk);
+        buffer_dnit(?u.index_staging, ?r.vk);
+        ret res[MeshUpload, Error].err{imap.err};
+    }
+    u.vertices = vmap.ok;
+    u.indices  = imap.ok:~*u32;
 
     r.upload_reserved = r.upload_reserved + 1;
-    u.ok = true;
-    ret u;
+    u.live = true;
+    ret res[MeshUpload, Error].ok{u};
 }
 
 # Submit a reserved upload and hand back the mesh it becomes.
@@ -720,13 +702,12 @@ pub fun renderer_mesh_begin(r: *Renderer, format: *VertexFormat,
 # bounds: the geometry's extent in the mesh's own space
 # ret:    the drawable Mesh handle, or the first upload error
 pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
-                          bounds: Aabb) Result[Mesh, Error] {
-    if (upload == nil) {
-        ret err[Mesh, Error](error("there is no mesh upload to finish"));
+                          bounds: Aabb) res[Mesh, Error] {
+    if (!upload.live) {
+        ret res[Mesh, Error].err{Error.renderer{RendererError.no_mesh_upload{}}};
     }
-    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
-    if (r == nil || !r.ready_dev) {
-        ret err[Mesh, Error](error("the renderer is not initialized"));
+    if (!r.ready_dev) {
+        ret res[Mesh, Error].err{Error.uninitialized{Stage.renderer{}}};
     }
 
     val vsize: u64 = upload.vertex_bytes;
@@ -744,26 +725,24 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
     upload.indices  = nil;
     upload.vertex_staging.handle = nil;
     upload.index_staging.handle  = nil;
-    upload.ok = false;
+    upload.live = false;
     r.upload_reserved = r.upload_reserved - 1;
 
-    val vdr: Result[bool, Error] = buffer_init(?mesh_out.vertices, ?r.vk,
+    val vdr: err[Error] = buffer_init(?mesh_out.vertices, ?r.vk,
         vsize,
         vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
             | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
         vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (is_err[bool, Error](vdr)) {
-        ret mesh_end_fail(r, ?pending, ?mesh_out,
-            unwrap_err[bool, Error](vdr));
+    if (sel vdr.err) {
+        ret mesh_end_fail(r, ?pending, ?mesh_out, vdr.err);
     }
-    val idr: Result[bool, Error] = buffer_init(?mesh_out.indices, ?r.vk,
+    val idr: err[Error] = buffer_init(?mesh_out.indices, ?r.vk,
         isize,
         vk.BUFFER_USAGE_INDEX_BUFFER_BIT
             | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
         vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (is_err[bool, Error](idr)) {
-        ret mesh_end_fail(r, ?pending, ?mesh_out,
-            unwrap_err[bool, Error](idr));
+    if (sel idr.err) {
+        ret mesh_end_fail(r, ?pending, ?mesh_out, idr.err);
     }
 
     var ai: vk.CommandBufferAllocateInfo;
@@ -772,12 +751,12 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
     ai.commandPool = r.dev.pool;
     ai.level = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
-    if (vk.vkAllocateCommandBuffers(r.vk.device, ?ai, ?pending.command)
-        != vk.SUCCESS) {
+    val allocated: i32 = vk.vkAllocateCommandBuffers(r.vk.device, ?ai, ?pending.command);
+    if (allocated != vk.SUCCESS) {
         # Nothing was allocated, so there is no command buffer to free.
         pending.command = nil;
         ret mesh_end_fail(r, ?pending, ?mesh_out,
-            error("could not allocate a runtime mesh upload command"));
+            vk_failed(VkCall.allocate_command_buffers{}, allocated));
     }
 
     var bi: vk.CommandBufferBeginInfo;
@@ -785,9 +764,10 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
     bi.pNext = nil;
     bi.flags = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bi.pInheritanceInfo = nil;
-    if (vk.vkBeginCommandBuffer(pending.command, ?bi) != vk.SUCCESS) {
+    val begun: i32 = vk.vkBeginCommandBuffer(pending.command, ?bi);
+    if (begun != vk.SUCCESS) {
         ret mesh_end_fail(r, ?pending, ?mesh_out,
-            error("could not begin a runtime mesh upload"));
+            vk_failed(VkCall.begin_command_buffer{}, begun));
     }
 
     var vertex_copy: vk.BufferCopy;
@@ -826,20 +806,21 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
         vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_VERTEX_INPUT_BIT,
         0, 0, nil, 2, ?barriers[0], 0, nil);
 
-    if (vk.vkEndCommandBuffer(pending.command) != vk.SUCCESS) {
+    val ended: i32 = vk.vkEndCommandBuffer(pending.command);
+    if (ended != vk.SUCCESS) {
         ret mesh_end_fail(r, ?pending, ?mesh_out,
-            error("could not finish a runtime mesh upload"));
+            vk_failed(VkCall.end_command_buffer{}, ended));
     }
 
     var fci: vk.FenceCreateInfo;
     fci.sType = vk.STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fci.pNext = nil;
     fci.flags = 0;
-    if (vk.vkCreateFence(r.vk.device, ?fci, nil, ?pending.fence)
-        != vk.SUCCESS) {
+    val fenced: i32 = vk.vkCreateFence(r.vk.device, ?fci, nil, ?pending.fence);
+    if (fenced != vk.SUCCESS) {
         pending.fence = nil;
         ret mesh_end_fail(r, ?pending, ?mesh_out,
-            error("could not fence a runtime mesh upload"));
+            vk_failed(VkCall.create_fence{}, fenced));
     }
 
     var si: vk.SubmitInfo;
@@ -852,15 +833,15 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
     si.pCommandBuffers = ?pending.command;
     si.signalSemaphoreCount = 0;
     si.pSignalSemaphores = nil;
-    if (vk.vkQueueSubmit(r.vk.graphics_queue, 1, ?si, pending.fence)
-        != vk.SUCCESS) {
+    val submitted: i32 = vk.vkQueueSubmit(r.vk.graphics_queue, 1, ?si, pending.fence);
+    if (submitted != vk.SUCCESS) {
         ret mesh_end_fail(r, ?pending, ?mesh_out,
-            error("could not submit a runtime mesh upload"));
+            vk_failed(VkCall.queue_submit{}, submitted));
     }
 
     r.uploads[r.upload_count] = pending;
     r.upload_count = r.upload_count + 1;
-    ret ok[Mesh, Error](mesh_out);
+    ret res[Mesh, Error].ok{mesh_out};
 }
 
 # Release a reservation without uploading it.
@@ -871,18 +852,17 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
 # r:      the renderer the staging was reserved from
 # upload: the reservation, consumed by this call
 pub fun renderer_mesh_cancel(r: *Renderer, upload: *MeshUpload) {
-    if (r == nil || upload == nil || !upload.ok) { ret; }
+    if (!upload.live) { ret; }
     buffer_dnit(?upload.vertex_staging, ?r.vk);
     buffer_dnit(?upload.index_staging, ?r.vk);
     upload.vertices = nil;
     upload.indices  = nil;
-    upload.ok       = false;
+    upload.live     = false;
     r.upload_reserved = r.upload_reserved - 1;
 }
 
 # reservations opened by renderer_mesh_begin and not yet ended or cancelled
 pub fun renderer_mesh_reserved(r: *Renderer) usize {
-    if (r == nil) { ret 0; }
     ret r.upload_reserved;
 }
 
@@ -904,10 +884,11 @@ pub fun renderer_mesh_reserved(r: *Renderer) usize {
 pub fun renderer_mesh_with_bounds(r: *Renderer, vertices: ptr,
                                   vertex_count: i32, format: *VertexFormat,
                                   indices: *u32, index_count: i32,
-                                  bounds: Aabb) Result[Mesh, Error] {
-    var upload: MeshUpload = renderer_mesh_begin(r, format, vertex_count,
+                                  bounds: Aabb) res[Mesh, Error] {
+    val begun: res[MeshUpload, Error] = renderer_mesh_begin(r, format, vertex_count,
         index_count);
-    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
+    if (sel begun.err) { ret res[Mesh, Error].err{begun.err}; }
+    var upload: MeshUpload = begun.ok;
     mesh_upload_fill(?upload, vertices:~*u8, indices:~*u8);
     ret renderer_mesh_end(r, ?upload, bounds);
 }
@@ -919,10 +900,11 @@ pub fun renderer_mesh_with_bounds(r: *Renderer, vertices: ptr,
 # its geometry in place skips this copy too with renderer_mesh_begin.
 pub fun renderer_mesh(r: *Renderer, vertices: ptr, vertex_count: i32,
                       format: *VertexFormat, indices: *u32,
-                      index_count: i32) Result[Mesh, Error] {
-    var upload: MeshUpload = renderer_mesh_begin(r, format, vertex_count,
+                      index_count: i32) res[Mesh, Error] {
+    val begun: res[MeshUpload, Error] = renderer_mesh_begin(r, format, vertex_count,
         index_count);
-    if (!upload.ok) { ret err[Mesh, Error](upload.reason); }
+    if (sel begun.err) { ret res[Mesh, Error].err{begun.err}; }
+    var upload: MeshUpload = begun.ok;
     mesh_upload_fill(?upload, vertices:~*u8, indices:~*u8);
     ret renderer_mesh_end(r, ?upload,
         mesh_bounds_of(vertices:~*u8, vertex_count, format));
@@ -955,28 +937,28 @@ pub fun renderer_height(r: *Renderer) i32 {
 # width:  the new framebuffer width in pixels
 # height: the new framebuffer height in pixels
 # ret:    success, or the first swapchain or framebuffer rebuild error
-pub fun renderer_resize(r: *Renderer, width: i32, height: i32) Result[bool, Error] {
+pub fun renderer_resize(r: *Renderer, width: i32, height: i32) err[Error] {
     ret renderer_rebuild(r, width, height, false);
 }
 
 fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
-                     force: bool) Result[bool, Error] {
-    if (width <= 0 || height <= 0) { ret ok[bool, Error](true); }
+                     force: bool) err[Error] {
+    if (width <= 0 || height <= 0) { ret err[Error].ok{}; }
 
     # Already the right size, so there is nothing to rebuild. Without this the
     # per-frame check below would idle the device and recreate every swapchain
     # image on every frame, which is a rebuild storm rather than a resize.
     if (!force && width == r.width && height == r.height
         && r.swap.ready && r.frame.fb_count > 0) {
-        ret ok[bool, Error](true);
+        ret err[Error].ok{};
     }
 
     vk.vkDeviceWaitIdle(r.vk.device);
     frame_release_targets(?r.frame, ?r.vk);
-    val sr: Result[bool, Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32, r.present);
-    if (is_err[bool, Error](sr)) { ret sr; }
-    val fr: Result[bool, Error] = frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
-    if (is_err[bool, Error](fr)) { ret fr; }
+    val sr: err[Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32, r.present);
+    if (sel sr.err) { ret sr; }
+    val fr: err[Error] = frame_rebuild_targets(?r.frame, ?r.vk, ?r.swap);
+    if (sel fr.err) { ret fr; }
 
     # THE SURFACE DECIDES, NOT THE REQUEST. A surface reporting a concrete
     # currentExtent overrides whatever size was asked for, which is the usual
@@ -990,7 +972,7 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
     # correction back.
     r.width  = r.swap.width::i32;
     r.height = r.swap.height::i32;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # choose how finished frames reach the display, with the game running
@@ -1011,14 +993,11 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
 # r:       the renderer
 # present: how finished frames should reach the display
 # ret:     success, or the first swapchain or framebuffer rebuild error
-pub fun renderer_set_present_mode(r: *Renderer, present: PresentMode) Result[bool, Error] {
-    if (!present_mode_valid(present)) {
-        ret err[bool, Error](error("unknown present mode"));
-    }
+pub fun renderer_set_present_mode(r: *Renderer, present: PresentMode) err[Error] {
     if (!r.ready_swap) {
-        ret err[bool, Error](error("cannot set a present mode before the renderer is initialized"));
+        ret err[Error].err{Error.uninitialized{Stage.swapchain{}}};
     }
-    if (!present_mode_changed(r, present)) { ret ok[bool, Error](true); }
+    if (!present_mode_changed(r, present)) { ret err[Error].ok{}; }
 
     r.present = present;
     # Forced, because the extent is unchanged and the size check alone would
@@ -1037,13 +1016,13 @@ pub fun renderer_set_present_mode(r: *Renderer, present: PresentMode) Result[boo
 # runs, so comparing against the mode in use would rebuild forever on exactly
 # the hardware the fallback exists for.
 fun present_mode_changed(r: *Renderer, present: PresentMode) bool {
-    ret present != r.present;
+    ret !present_mode_same(present, r.present);
 }
 
 # how finished frames are actually reaching the display
 #
 # The requested mode unless the surface did not offer it, in which case
-# PRESENT_VSYNC: the only mode every implementation must support. Worth reading
+# vsync: the only mode every implementation must support. Worth reading
 # after asking for MAILBOX or IMMEDIATE, because a game profiling itself under
 # an unnoticed fallback is measuring the display's refresh rate and reading it
 # as its own frame rate.
@@ -1070,7 +1049,7 @@ pub fun renderer_present_mode_requested(r: *Renderer) PresentMode {
 # whether the surface can present this way
 #
 # For a menu that offers what it can actually deliver rather than one that
-# accepts a choice and quietly ignores it. PRESENT_VSYNC is always true, since
+# accepts a choice and quietly ignores it. Vsync is always true, since
 # every implementation must support it; the other two are the surface's answer.
 #
 # Also how a game expresses a second choice. The fallback here is to vsync and
@@ -1088,15 +1067,13 @@ pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
 # begin this renderer's frame
 #
 # waits for the frame's fence, acquires a swapchain image, begins the
-# render pass, and resets the uniform ring. returns false in out_ok when
-# the swapchain was out of date and was rebuilt, in which case the caller
-# should skip drawing and try again next frame; that is a resize, not an
-# error.
+# render pass, and resets the uniform ring. false when the swapchain was out
+# of date and was rebuilt, or the window is minimized, in which case the caller
+# should skip drawing and try again next frame; that is a resize, not an error.
 # ---
-# r:      renderer to begin on
-# out_ok: set to true when a frame was actually opened
-pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
-    @out_ok = false;
+# r:   renderer to begin on
+# ret: whether a frame was opened, or the failure that prevented one
+pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
     r.dropped = 0;
     r.refused = 0;
     r.culled  = 0;
@@ -1125,20 +1102,19 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     glfw.get_framebuffer_size(r.window, ?fw, ?fh);
     # Zero in either dimension is a minimized window: a legal state, and not one
     # a swapchain can be built for, so the frame is skipped rather than rebuilt.
-    if (fw <= 0 || fh <= 0) { ret ok[bool, Error](true); }
+    if (fw <= 0 || fh <= 0) { ret res[bool, Error].ok{false}; }
     if (renderer_needs_rebuild(r, fw, fh)) {
-        val rr: Result[bool, Error] = renderer_resize(r, fw, fh);
-        if (is_err[bool, Error](rr)) { ret rr; }
+        val rr: err[Error] = renderer_resize(r, fw, fh);
+        if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
     }
 
-    var began: bool = false;
-    val br: Result[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap, ?began);
-    if (is_err[bool, Error](br)) { ret br; }
+    val br: res[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap);
+    if (sel br.err) { ret br; }
 
-    if (!began) {
-        val rr: Result[bool, Error] = renderer_rebuild(r, fw, fh, true);
-        if (is_err[bool, Error](rr)) { ret rr; }
-        ret ok[bool, Error](true);
+    if (!br.ok) {
+        val rr: err[Error] = renderer_rebuild(r, fw, fh, true);
+        if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
+        ret res[bool, Error].ok{false};
     }
 
     r.frame_index = r.frame.current;
@@ -1156,8 +1132,7 @@ pub fun renderer_begin_frame(r: *Renderer, out_ok: *bool) Result[bool, Error] {
     # does not allocate for them again.
     storage_begin_frame(?r.store, r.frame_index);
     r.drawing = true;
-    @out_ok = true;
-    ret ok[bool, Error](true);
+    ret res[bool, Error].ok{true};
 }
 
 fun renderer_needs_rebuild(r: *Renderer, width: i32, height: i32) bool {
@@ -1169,18 +1144,17 @@ fun renderer_needs_rebuild(r: *Renderer, width: i32, height: i32) bool {
 # end the frame, submit it, and present
 # ---
 # r: renderer to finalize
-pub fun renderer_end_frame(r: *Renderer) Result[bool, Error] {
-    if (!r.drawing) { ret ok[bool, Error](true); }
+pub fun renderer_end_frame(r: *Renderer) err[Error] {
+    if (!r.drawing) { ret err[Error].ok{}; }
     r.drawing = false;
 
-    var ended: bool = false;
-    val er: Result[bool, Error] = frame_end(?r.frame, ?r.vk, ?r.swap, ?ended);
-    if (is_err[bool, Error](er)) { ret er; }
-    if (!ended) {
-        val rr: Result[bool, Error] = renderer_rebuild(r, r.width, r.height, true);
-        if (is_err[bool, Error](rr)) { ret rr; }
+    val er: res[bool, Error] = frame_end(?r.frame, ?r.vk, ?r.swap);
+    if (sel er.err) { ret err[Error].err{er.err}; }
+    if (!er.ok) {
+        val rr: err[Error] = renderer_rebuild(r, r.width, r.height, true);
+        if (sel rr.err) { ret rr; }
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # wait until the GPU has finished everything this renderer has submitted
@@ -1208,11 +1182,14 @@ pub fun renderer_wait_idle(r: *Renderer) {
 }
 
 # retire a mesh when this frame's fence next proves its last use complete
-pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) bool {
-    if (r == nil || m == nil || !r.ready_dev) { ret false; }
+#
+# refused, leaving the mesh as it was, when the renderer never came up or too
+# many meshes already wait on this frame's fence.
+pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) err[Error] {
+    if (!r.ready_dev) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
     val frame: usize = r.frame_index;
     val count: usize = r.retired[frame].count;
-    if (count >= MAX_RETIRED_MESHES) { ret false; }
+    if (count >= MAX_RETIRED_MESHES) { ret err[Error].err{Error.full{Capacity.retired_meshes{}}}; }
     r.retired[frame].meshes[count] = @m;
     r.retired[frame].count = count + 1;
     m.vertices.handle = nil;
@@ -1224,11 +1201,10 @@ pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) bool {
     m.indices.size = 0;
     m.indices.mapped = nil;
     m.index_count = 0;
-    ret true;
+    ret err[Error].ok{};
 }
 
 pub fun renderer_retired_meshes(r: *Renderer) usize {
-    if (r == nil) { ret 0; }
     ret r.retired[0].count + r.retired[1].count;
 }
 
@@ -1360,84 +1336,72 @@ test "renderer: failed target rebuild remains retryable" {
     ret 0;
 }
 
-test "renderer: a present mode request has to name a mode" {
-    var r: Renderer;
-    # Ready, so the refusal is the argument check and not the state check: a
-    # value restored from a settings file is refused wherever the renderer
-    # happens to be in its life.
-    r.ready_swap = true;
-    r.present    = PRESENT_VSYNC;
-    if (!is_err[bool, Error](renderer_set_present_mode(?r, 200))) { ret 1; }
-    # Refused rather than partly applied, so the menu and the renderer still
-    # agree afterwards.
-    if (r.present != PRESENT_VSYNC) { ret 2; }
-
-    var w: glfw.Window;
-    if (!is_err[bool, Error](renderer_init_with_present(?r, w, 640, 480, 200))) { ret 3; }
-    ret 0;
-}
-
 test "renderer: a present mode cannot be set before there is a swapchain" {
     var r: Renderer;
     r.ready_swap = false;
-    r.present    = PRESENT_VSYNC;
+    r.present    = PresentMode.vsync{};
     # There is nothing to rebuild, and recording the request anyway would leave
     # a renderer that never opened claiming to be presenting a mode.
-    if (!is_err[bool, Error](renderer_set_present_mode(?r, PRESENT_MAILBOX))) { ret 1; }
-    if (r.present != PRESENT_VSYNC) { ret 2; }
+    val set: err[Error] = renderer_set_present_mode(?r, PresentMode.mailbox{});
+    if (!sel set.err) { ret 1; }
+    if (!sel r.present.vsync) { ret 2; }
     ret 0;
 }
 
 test "renderer: the requested present mode outlives the surface refusing it" {
     var r: Renderer;
-    r.present      = PRESENT_MAILBOX;
-    r.swap.present = PRESENT_VSYNC;
+    r.present      = PresentMode.mailbox{};
+    r.swap.present = PresentMode.vsync{};
     # The two answer different questions, and a settings screen needs both:
     # writing the mode in use back to disk would replace the player's MAILBOX
     # with the vsync this driver fell back to, and the choice would never return
     # on hardware able to honour it.
-    if (renderer_present_mode(?r) != PRESENT_VSYNC)             { ret 1; }
-    if (renderer_present_mode_requested(?r) != PRESENT_MAILBOX) { ret 2; }
+    val in_use: PresentMode = renderer_present_mode(?r);
+    if (!sel in_use.vsync) { ret 1; }
+    val requested: PresentMode = renderer_present_mode_requested(?r);
+    if (!sel requested.mailbox) { ret 2; }
     # Asking again for the mode already requested is not a change, even though
     # the swapchain is not in it. Comparing against the mode in use instead
     # would rebuild the swapchain every frame a settings screen was open, and
     # only ever on the hardware that could not honour the request.
-    if (present_mode_changed(?r, PRESENT_MAILBOX))    { ret 3; }
-    if (!present_mode_changed(?r, PRESENT_IMMEDIATE)) { ret 4; }
-    if (!present_mode_changed(?r, PRESENT_VSYNC))     { ret 5; }
+    if (present_mode_changed(?r, PresentMode.mailbox{}))    { ret 3; }
+    if (!present_mode_changed(?r, PresentMode.immediate{})) { ret 4; }
+    if (!present_mode_changed(?r, PresentMode.vsync{}))     { ret 5; }
     ret 0;
+}
+
+# what a pass is seen through
+# ---
+# pixels: pixel space, origin at the target's top left and one world unit to one
+#         pixel, which is what a UI overlay wants
+# world:  a 2D camera mapping world units onto the target; borrowed for the pass
+# scene:  a 3D camera providing view, projection and depth convention; borrowed
+pub tag PassView: u8 {
+    pixels;
+    world: *Camera2D;
+    scene: *Camera;
 }
 
 # how a pass is configured before it begins
 # ---
-# target:      the offscreen target to render into, or nil for the window
-# perspective: 1 to take view and projection from camera, 0 for 2D ortho
-# camera:      the 3D viewpoint, read when perspective is 1
-# clear:       1 to clear when the pass begins
-# clear_color: the color cleared to when clear is 1
-# depth:       the projection and depth-buffer convention
+# target: the offscreen target to render into, or none for the window
+# view:   the projection the pass draws through
+# clear:  the colour cleared to when the pass begins, or none to keep what is there
+# depth:  the depth-buffer convention of a 2D pass; a scene takes its camera's
+# cull:   whether the pass skips draws whose bounds are outside its view
+#
+# cull is on in every description boom builds, because a draw that cannot be
+# seen is not worth submitting and a game should not have to remember to ask.
+# It is turned off for a pass whose output is not what the camera sees: a shadow
+# map rendered from the light's point of view, or a pass deliberately capturing
+# geometry behind the viewer. Also turned off by a game doing its own culling
+# upstream, where this second test is redundant rather than wrong.
 pub rec PassDesc {
-    target:      *RenderTarget;
-    perspective: u8;
-    camera:      *Camera;
-    # The 2D view, for a pass that is not perspective. nil is the pixel-space
-    # default: origin at the target's top left, one world unit to one pixel,
-    # which is what a UI overlay wants.
-    camera2d:    *Camera2D;
-    clear:       u8;
-    clear_color: Vec4;
-    depth:       DepthConvention;
-
-    # Whether the pass skips draws whose bounds are outside its view. Non-zero
-    # by default, because a draw that cannot be seen is not worth submitting and
-    # a game should not have to remember to ask.
-    #
-    # Turned off for a pass whose output is not what the camera sees: a shadow
-    # map rendered from the light's point of view, or a pass deliberately
-    # capturing geometry behind the viewer. Also turned off by a game doing its
-    # own culling upstream, where this second test is redundant rather than
-    # wrong.
-    cull:        u8;
+    target: opt[*RenderTarget];
+    view:   PassView;
+    clear:  opt[Vec4];
+    depth:  DepthConvention;
+    cull:   bool;
 }
 
 # a 3D scene pass description: perspective camera, depth test, opaque
@@ -1446,14 +1410,11 @@ pub rec PassDesc {
 # ret:    the pass description
 pub fun pass_scene(camera: *Camera) PassDesc {
     ret PassDesc{
-        target:      nil,
-        perspective: 1,
-        camera:      camera,
-        camera2d:    nil,
-        clear:       1,
-        clear_color: vec4(0.08, 0.09, 0.12, 1.0),
-        depth:       camera_depth_convention(camera),
-        cull:        1,
+        target: opt[*RenderTarget].none{},
+        view:   PassView.scene{camera},
+        clear:  opt[Vec4].some{vec4(0.08, 0.09, 0.12, 1.0)},
+        depth:  camera_depth_convention(camera),
+        cull:   true,
     };
 }
 
@@ -1462,14 +1423,11 @@ pub fun pass_scene(camera: *Camera) PassDesc {
 # ret: the pass description
 pub fun pass_overlay() PassDesc {
     ret PassDesc{
-        target:      nil,
-        perspective: 0,
-        camera:      nil,
-        camera2d:    nil,
-        clear:       0,
-        clear_color: vec4(0.0, 0.0, 0.0, 0.0),
-        depth:       DEPTH_FORWARD,
-        cull:        1,
+        target: opt[*RenderTarget].none{},
+        view:   PassView.pixels{},
+        clear:  opt[Vec4].none{},
+        depth:  DepthConvention.forward{},
+        cull:   true,
     };
 }
 
@@ -1487,14 +1445,11 @@ pub fun pass_overlay() PassDesc {
 # ret:    the pass description
 pub fun pass_world(camera: *Camera2D) PassDesc {
     ret PassDesc{
-        target:      nil,
-        perspective: 0,
-        camera:      nil,
-        camera2d:    camera,
-        clear:       0,
-        clear_color: vec4(0.0, 0.0, 0.0, 0.0),
-        depth:       DEPTH_FORWARD,
-        cull:        1,
+        target: opt[*RenderTarget].none{},
+        view:   PassView.world{camera},
+        clear:  opt[Vec4].none{},
+        depth:  DepthConvention.forward{},
+        cull:   true,
     };
 }
 
@@ -1502,7 +1457,7 @@ pub fun pass_world(camera: *Camera2D) PassDesc {
 # ---
 # renderer:   the renderer this pass draws through
 # cmd:        the command buffer draws are recorded into
-# target:     the offscreen target this pass renders into, or nil
+# target:     the offscreen target this pass renders into, or none for the window
 # width:      the target width in pixels
 # height:     the target height in pixels
 # view:       the view matrix draws combine into their transform
@@ -1514,9 +1469,13 @@ pub rec Pass {
     targets:    usize;
     compatibility: PassCompatibility;
     cmd:        vk.CommandBuffer;
-    target:     *RenderTarget;
+    target:     opt[*RenderTarget];
     width:      i32;
     height:     i32;
+    region_x:   i32;
+    region_y:   i32;
+    region_width: i32;
+    region_height: i32;
     view:       Mat4;
     projection: Mat4;
     depth:      DepthConvention;
@@ -1537,8 +1496,8 @@ pub rec Pass {
     #
     # Setting either flushes the open run, so a run never spans two programs or
     # two materials.
-    shader2d:   *Shader;
-    mat2d:      *Material;
+    shader2d:   opt[*Shader];
+    mat2d:      opt[*Material];
 
     # What this pass can see, resolved once when it opens.
     #
@@ -1642,7 +1601,7 @@ fun clear_attachments(targets: usize, color: Vec4, depth: DepthConvention,
 }
 
 fun depth_clear_value(depth: DepthConvention) f32 {
-    if (depth == DEPTH_REVERSED) { ret 0.0; }
+    if (sel depth.reversed) { ret 0.0; }
     ret 1.0;
 }
 
@@ -1681,27 +1640,28 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
     batch_reset(?p.batch);
-    p.shader2d = nil;
-    p.mat2d    = nil;
-    p.cull     = d.cull != 0;
+    p.shader2d = opt[*Shader].none{};
+    p.mat2d    = opt[*Material].none{};
+    p.cull     = d.cull;
     p.depth    = d.depth;
-    if (d.perspective != 0) {
-        p.depth = camera_depth_convention(d.camera);
+    if (sel d.view.scene) {
+        p.depth = camera_depth_convention(d.view.scene);
     }
     p.user     = nil;
     p.user_len = 0;
 
     p.target = d.target;
-    if (d.target != nil) {
-        p.width  = d.target.width;
-        p.height = d.target.height;
+    if (sel d.target.some) {
+        val target: *RenderTarget = d.target.some;
+        p.width  = target.width;
+        p.height = target.height;
         # PassDesc.clear selects the pass, and until now it did not: the target
         # path always began the clearing pass, so a game asking to preserve
         # what was there had its target wiped and nothing said so.
-        p.pass    = d.target.pass;
-        if (d.clear == 0) { p.pass = d.target.pass_load; }
-        p.targets = render_target_count(d.target);
-        p.compatibility = d.target.compatibility;
+        p.pass    = target.pass;
+        if (sel d.clear.none) { p.pass = target.pass_load; }
+        p.targets = render_target_count(target);
+        p.compatibility = target.compatibility;
     }
     or {
         p.width  = r.width;
@@ -1713,80 +1673,97 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         # The frame's render pass has been recording since frame_begin, so the
         # one chance to clear on load is already spent and what is left is to
         # clear the attachments in place. clear_mid_pass says what that costs.
-        if (d.clear != 0) {
-            clear_mid_pass(?p, d.clear_color);
+        if (sel d.clear.some) {
+            clear_mid_pass(?p, d.clear.some);
         }
     }
 
-    if (d.perspective != 0) {
-        p.view       = camera_view(d.camera);
-        p.projection = camera_projection(d.camera);
+    p.region_width = p.width;
+    p.region_height = p.height;
+    p.view = mat4_identity();
+    p.visible = rect(0.0, 0.0, p.width::f32, p.height::f32);
+    if (sel d.view.scene) {
+        p.view       = camera_view(d.view.scene);
+        p.projection = camera_projection(d.view.scene);
+    }
+    or (sel d.view.world) {
+        # The camera folds into the projection rather than riding in the view,
+        # because the 2D program takes a single matrix: its vertices arrive
+        # already placed, so there is no model transform to combine a separate
+        # view with.
+        p.projection = camera2d_matrix(d.view.world, p.width::f32, p.height::f32);
+        p.visible = camera2d_visible(d.view.world, p.width::f32, p.height::f32);
     }
     or {
-        p.view = mat4_identity();
-        if (d.camera2d != nil) {
-            # The camera folds into the projection rather than riding in the
-            # view, because the 2D program takes a single matrix: its vertices
-            # arrive already placed, so there is no model transform to combine
-            # a separate view with.
-            p.projection = camera2d_matrix(d.camera2d, p.width::f32, p.height::f32);
-        }
-        or {
-            p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
-        }
+        p.projection = mat4_orthographic(0.0, p.width::f32, p.height::f32, 0.0, 0.0 - 1.0, 1.0);
     }
 
     # Resolve what this pass can see, once. The frustum serves 3D draws and the
-    # rectangle serves 2D ones; both come out of the matrices just built, so a
-    # pass with no camera still gets a correct answer from its fixed projection.
+    # rectangle above serves 2D ones; both come out of the matrices just built,
+    # so a pass with no camera still gets a correct answer from its fixed
+    # projection.
     var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
     p.frustum = frustum_from_matrix(?vp);
-    if (d.camera2d != nil) {
-        p.visible = camera2d_visible(d.camera2d, p.width::f32, p.height::f32);
-    }
-    or {
-        p.visible = rect(0.0, 0.0, p.width::f32, p.height::f32);
-    }
 
-    if (d.target != nil) {
+    if (sel d.target.some) {
+        val target: *RenderTarget = d.target.some;
         frame_suspend_pass(?r.frame);
-
-        # ONE CLEAR VALUE PER ATTACHMENT, and depth last, matching the order
-        # pass_create declared. A short array here is read past its end by the
-        # driver for every attachment beyond the second.
-        var clears: [5]vk.ClearValue;
-        var cvi: usize = 0;
-        for (cvi < p.targets) {
-            clears[cvi].color.float32[0] = d.clear_color[0];
-            clears[cvi].color.float32[1] = d.clear_color[1];
-            clears[cvi].color.float32[2] = d.clear_color[2];
-            clears[cvi].color.float32[3] = d.clear_color[3];
-            cvi = cvi + 1;
-        }
-        # depth clears to the far value of the pass convention
-        clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
-        clears[p.targets].depthStencil.stencil = 0;
 
         var rbi: vk.RenderPassBeginInfo;
         rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rbi.pNext                    = nil;
         rbi.renderPass               = p.pass;
-        rbi.framebuffer              = d.target.framebuffer;
+        rbi.framebuffer              = target.framebuffer;
         rbi.renderArea.offset.x      = 0;
         rbi.renderArea.offset.y      = 0;
-        rbi.renderArea.extent.width  = d.target.width::u32;
-        rbi.renderArea.extent.height = d.target.height::u32;
+        rbi.renderArea.extent.width  = target.width::u32;
+        rbi.renderArea.extent.height = target.height::u32;
         # A loading pass declares no clear, and passing values for one is both
         # meaningless and a validation error.
         rbi.clearValueCount          = 0;
         rbi.pClearValues             = nil;
-        if (d.clear != 0) {
+
+        # ONE CLEAR VALUE PER ATTACHMENT, and depth last, matching the order
+        # pass_create declared. A short array here is read past its end by the
+        # driver for every attachment beyond the second.
+        var clears: [5]vk.ClearValue;
+        if (sel d.clear.some) {
+            val colour: Vec4 = d.clear.some;
+            var cvi: usize = 0;
+            for (cvi < p.targets) {
+                clears[cvi].color.float32[0] = colour[0];
+                clears[cvi].color.float32[1] = colour[1];
+                clears[cvi].color.float32[2] = colour[2];
+                clears[cvi].color.float32[3] = colour[3];
+                cvi = cvi + 1;
+            }
+            # depth clears to the far value of the pass convention
+            clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
+            clears[p.targets].depthStencil.stencil = 0;
             rbi.clearValueCount = (p.targets + 1)::u32;
             rbi.pClearValues    = ?clears[0];
         }
         vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
     }
     ret p;
+}
+
+# restrict subsequent draws to a pixel viewport and matching scissor, preserving projection
+#
+# a region outside the pass is refused, counted in renderer_refused, and leaves
+# the region as it was.
+pub fun pass_set_region(p: *Pass, x: i32, y: i32, width: i32, height: i32) err[Error] {
+    if (x < 0 || y < 0 || width <= 0 || height <= 0
+        || width > p.width || height > p.height || x > p.width-width || y > p.height-height) {
+        p.renderer.refused = p.renderer.refused+1;
+        ret err[Error].err{Error.renderer{RendererError.region{}}};
+    }
+    batch_flush(p);
+    p.region_x = x;
+    p.region_y = y;
+    p.region_width = width;
+    p.region_height = height;
+    ret err[Error].ok{};
 }
 
 # finish a pass
@@ -1803,7 +1780,7 @@ pub fun pass_end(p: *Pass) {
     # it drops it silently.
     batch_flush(p);
 
-    if (p.target == nil) { ret; }
+    if (sel p.target.none) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
     frame_resume_pass(?p.renderer.frame, ?p.renderer.swap);
 }
@@ -1837,10 +1814,10 @@ fun skinned_bounds(m: *Mesh, pose: *Pose, model: *Mat4) Aabb {
     ret acc;
 }
 
-# take a uniform slot for one draw, or report the ring is full
-fun take_slot(p: *Pass) usize {
-    val s: usize = descriptors_take(?p.renderer.desc, ?p.renderer.vk);
-    if (s == NO_SLOT) {
+# take a uniform slot for one draw, counting a full ring as a dropped draw
+fun take_slot(p: *Pass) opt[usize] {
+    val s: opt[usize] = descriptors_take(?p.renderer.desc, ?p.renderer.vk);
+    if (sel s.none) {
         p.renderer.dropped = p.renderer.dropped + 1;
     }
     ret s;
@@ -1863,7 +1840,7 @@ pub fun batch_flush(p: *Pass) {
     # Only the built-in program is limited to one attachment. A game's own
     # shader declares its own outputs, so a multi-attachment pass is legal once
     # one is set.
-    if (p.targets != 1 && p.shader2d == nil) {
+    if (p.targets != 1 && sel p.shader2d.none) {
         if (p.batch.count != 0) { p.renderer.dropped = p.renderer.dropped + 1; }
         batch_reset(?p.batch);
         ret;
@@ -1877,20 +1854,14 @@ pub fun batch_flush(p: *Pass) {
     val count: u32 = p.batch.count;
     val first: u32 = p.batch.first;
     val block: usize = p.batch.block;
-    var tex:   *Texture = p.batch.texture;
-    # WHETHER THE RUN NAMED A TEXTURE, ANSWERED HERE BECAUSE NOTHING BELOW CAN.
-    # The reset on the next line clears the batch, and the white-texel default
-    # further down replaces a nil `tex`, so by the descriptor fill an untextured
-    # run and a run that sampled the white texel are the same value. Binding 1
-    # is filled differently for the two, so the question has to be asked while
-    # there is still something to ask.
-    val had_texture: bool = p.batch.texture != nil;
+    val tex:   opt[*Texture] = p.batch.texture;
     # The run is closed before anything that can fail, so an early return below
     # cannot leave it open to be drawn a second time by the next flush.
     batch_reset(?p.batch);
 
-    val slot: usize = take_slot(p);
-    if (slot == NO_SLOT) { ret; }
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) { ret; }
+    val slot: usize = taken.some;
 
     var u: ScreenUniforms;
     u.projection = p.projection;
@@ -1923,16 +1894,11 @@ pub fun batch_flush(p: *Pass) {
         }
     }
 
-    # The 2D program always samples, so an untextured run gets the renderer's
-    # white texel and `colour * texel` is the flat vertex colour. That is how a
-    # solid rectangle, a tinted sprite and a glyph share one shader.
-    if (tex == nil) { tex = ?r.white; }
-
     # No tint block: the colour is per vertex. Passing 0 for its size is what
     # tells the descriptor layer binding 2 is not part of this draw.
     var views2d:    [4]vk.ImageView;
     var samplers2d: [4]vk.Sampler;
-    fill_views_batch(r, ?views2d[0], p.mat2d, tex, had_texture);
+    fill_views_batch(r, ?views2d[0], p.mat2d, tex);
     fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
     # A set that was not written must not be bound: the shader would read
     # descriptors nothing filled. The answer used to be discarded here, which is
@@ -1946,21 +1912,14 @@ pub fun batch_flush(p: *Pass) {
         ret;
     }
 
-    var pipe: *Pipeline = nil;
-    if (p.shader2d != nil) {
-        pipe = shader_pipeline(p.shader2d, ?r.vk, p.pass, ?p.compatibility,
-                               ?r.ui_format, p.depth);
-    }
-    or {
-        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         PROGRAM_UI, ?r.ui_format, p.depth);
-    }
-    if (pipe == nil) {
+    val pipe: res[*Pipeline, Error] = surface_pipeline(p, ?r.ui_format, PROGRAM_UI, p.shader2d);
+    if (sel pipe.err) {
         r.dropped = r.dropped + 1;
         ret;
     }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    if (!descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot)) {
+    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
+                         p.region_width::u32, p.region_height::u32);
+    if (!descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -1984,38 +1943,38 @@ pub fun batch_flush(p: *Pass) {
 # free its buffer the moment this returns.
 # ---
 # p:            the open pass
-# texture:      what these vertices sample, or nil for the white texel
+# texture:      what these vertices sample, or none for the white texel
 # vertices:     vertex data in the shared 2D layout
 # vertex_count: how many vertices
-fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize) {
+fun batch_append(p: *Pass, texture: opt[*Texture], vertices: *u8, vertex_count: usize) {
     val r: *Renderer = p.renderer;
     if (vertex_count == 0) { ret; }
 
     if (batch_breaks(?p.batch, texture)) { batch_flush(p); }
 
     val stride: usize = r.ui_format.stride::usize;
-    var first: u32 = 0;
-    var block: usize = 0;
-    if (!stream_push(?r.stream, ?r.vk, r.frame_index, vertices,
-                     vertex_count * stride, stride, ?first, ?block)) {
+    val pushed: opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, vertices,
+                                              vertex_count * stride, stride);
+    if (sel pushed.none) {
         # The arena is full for this frame. Counted as a dropped draw, so a
         # frame that outgrows the arena is a number a game can read rather than
         # geometry that quietly disappears.
         r.dropped = r.dropped + 1;
         ret;
     }
+    val span: StreamSpan = pushed.some;
 
     # A push that did not land next to the open run means something else took
     # arena space in between, so the run has to be drawn as it stands and a new
     # one started here. Extending it across the gap would draw the intervening
     # geometry with this run's texture.
-    if (p.batch.open && !batch_continues(?p.batch, block, first)) { batch_flush(p); }
+    if (p.batch.open && !batch_continues(?p.batch, span.block, span.first)) { batch_flush(p); }
 
     if (!p.batch.open) {
         p.batch.open    = true;
         p.batch.texture = texture;
-        p.batch.block   = block;
-        p.batch.first   = first;
+        p.batch.block   = span.block;
+        p.batch.first   = span.first;
         p.batch.count   = 0;
     }
     p.batch.count = p.batch.count + vertex_count::u32;
@@ -2030,7 +1989,8 @@ fun batch_append(p: *Pass, texture: *Texture, vertices: *u8, vertex_count: usize
 # m: the mesh to draw
 # t: the model transform
 pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, nil, vec4(1.0, 1.0, 1.0, 1.0), nil, nil);
+    pass_draw_textured(p, m, t, opt[*Material].none{}, opt[*Texture].none{},
+                       vec4(1.0, 1.0, 1.0, 1.0), opt[*Pose].none{}, opt[*Shader].none{});
 }
 
 # submit a 3D mesh draw with a material
@@ -2043,15 +2003,20 @@ pub fun pass_draw(p: *Pass, m: *Mesh, t: *Transform) {
 # mat: the material to draw with
 # t:   the model transform
 pub fun pass_draw_material(p: *Pass, m: *Mesh, mat: *Material, t: *Transform) {
-    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, nil);
+    pass_draw_textured(p, m, t, opt[*Material].some{mat}, material_texture(mat), mat.base_color,
+                       opt[*Pose].none{}, opt[*Shader].none{});
+}
+
+# a texture, or the renderer's white texel in its absence
+fun or_white(r: *Renderer, tex: opt[*Texture]) *Texture {
+    if (sel tex.some) { ret tex.some; }
+    ret ?r.white;
 }
 
 # Fill a draw's sampler views from a single texture: slot 0 is it, the rest are
 # the renderer's white texel.
-fun fill_views(r: *Renderer, out: *vk.ImageView, tex: *Texture) {
-    var src: *Texture = tex;
-    if (src == nil) { src = ?r.white; }
-    out[0] = texture_view(src);
+fun fill_views(r: *Renderer, out: *vk.ImageView, tex: opt[*Texture]) {
+    out[0] = texture_view(or_white(r, tex));
     var i: usize = 1;
     for (i < MAX_SAMPLERS) { out[i] = texture_view(?r.white); i = i + 1; }
 }
@@ -2061,27 +2026,22 @@ fun fill_views(r: *Renderer, out: *vk.ImageView, tex: *Texture) {
 # An unfilled slot gets the renderer's white texel rather than being left unwritten,
 # so a shader sampling a texture the material never set reads a known value
 # instead of whatever the previous draw put in that descriptor set.
-fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *Texture) {
-    var i: usize = 0;
-    for (i < MAX_SAMPLERS) { out[i] = texture_view(?r.white); i = i + 1; }
-    if (mat == nil) {
-        var src: *Texture = fallback;
-        if (src == nil) { src = ?r.white; }
-        out[0] = texture_view(src);
+fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: opt[*Material], fallback: opt[*Texture]) {
+    if (sel mat.none) {
+        fill_views(r, out, fallback);
         ret;
     }
-    var n: usize = mat.texture_count::usize;
+    var i: usize = 0;
+    for (i < MAX_SAMPLERS) { out[i] = texture_view(?r.white); i = i + 1; }
+    val m: *Material = mat.some;
+    var n: usize = m.texture_count::usize;
     if (n > MAX_SAMPLERS) { n = MAX_SAMPLERS; }
     i = 0;
     for (i < n) {
-        if (mat.textures[i].texture != nil) { out[i] = texture_view(mat.textures[i].texture); }
+        out[i] = texture_view(m.textures[i].texture);
         i = i + 1;
     }
-    if (n == 0) {
-        var src2: *Texture = fallback;
-        if (src2 == nil) { src2 = ?r.white; }
-        out[0] = texture_view(src2);
-    }
+    if (n == 0) { out[0] = texture_view(or_white(r, fallback)); }
 }
 
 # Fill a batched 2D run's sampler views.
@@ -2103,40 +2063,39 @@ fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: *Material, fallback: *
 # texture, it looks like a saturated frame: examples/lighting wrote a white
 # G-buffer and every check comparing two of its texels read 255.
 #
-# The flag rather than a nil test on `tex`, because the caller has already
-# replaced a nil with the white texel and by here the two cannot be told apart.
+# The run's texture stays optional to here, so an untextured run and a run that
+# samples the white texel remain distinguishable where binding 1 is chosen.
 # ---
-# r:           the renderer, for its white texel
-# out:         MAX_SAMPLERS views to fill
-# mat:         the material bound on the pass, or nil
-# tex:         the run's texture, already defaulted to the white texel
-# had_texture: whether the run named a texture of its own
-fun fill_views_batch(r: *Renderer, out: *vk.ImageView, mat: *Material, tex: *Texture,
-                     had_texture: bool) {
-    if (mat == nil) {
+# r:   the renderer, for its white texel
+# out: MAX_SAMPLERS views to fill
+# mat: the material bound on the pass, if any
+# tex: the run's own texture, if it named one
+fun fill_views_batch(r: *Renderer, out: *vk.ImageView, mat: opt[*Material], tex: opt[*Texture]) {
+    if (sel mat.none) {
         fill_views(r, out, tex);
         ret;
     }
     fill_views_mat(r, out, mat, tex);
-    if (had_texture) { out[0] = texture_view(tex); }
+    if (sel tex.some) { out[0] = texture_view(tex.some); }
 }
 
 # Fill the sampler array parallel to a draw's image views.
-fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: *Material) {
+fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: opt[*Material]) {
     var i: usize = 0;
     for (i < MAX_SAMPLERS) { out[i] = r.nearest; i = i + 1; }
-    if (mat == nil) { ret; }
-    var n: usize = mat.texture_count::usize;
+    if (sel mat.none) { ret; }
+    val m: *Material = mat.some;
+    var n: usize = m.texture_count::usize;
     if (n > MAX_SAMPLERS) { n = MAX_SAMPLERS; }
     i = 0;
     for (i < n) {
-        if (mat.textures[i].filter == TEXTURE_LINEAR) { out[i] = r.linear; }
+        if (sel m.textures[i].filter.linear) { out[i] = r.linear; }
         i = i + 1;
     }
 }
 
 # write the descriptors shared by every shaded 3D surface
-fun write_surface_slot(p: *Pass, slot: usize, mat: *Material, tex: *Texture,
+fun write_surface_slot(p: *Pass, slot: usize, mat: opt[*Material], tex: opt[*Texture],
                        tint: Vec4) bool {
     val r: *Renderer = p.renderer;
     var basec: TintUniforms;
@@ -2152,11 +2111,9 @@ fun write_surface_slot(p: *Pass, slot: usize, mat: *Material, tex: *Texture,
         }
     }
 
-    var src: *Texture = tex;
-    if (src == nil) { src = ?r.white; }
     var views:    [4]vk.ImageView;
     var samplers: [4]vk.Sampler;
-    fill_views_mat(r, ?views[0], mat, src);
+    fill_views_mat(r, ?views[0], mat, tex);
     fill_samplers_mat(r, ?samplers[0], mat);
     ret descriptors_bind_slot(?r.desc, ?r.vk, r.frame_index, slot,
         $size_of(SkinnedUniforms)::u64, ?views[0], ?samplers[0],
@@ -2165,32 +2122,45 @@ fun write_surface_slot(p: *Pass, slot: usize, mat: *Material, tex: *Texture,
         storage_capacity(?r.store, r.frame_index)::u64);
 }
 
+# the pipeline for this pass and vertex layout: a game's shader, or the built-in program
+fun surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
+                     sh: opt[*Shader]) res[*Pipeline, Error] {
+    val r: *Renderer = p.renderer;
+    if (sel sh.some) {
+        ret shader_pipeline(sh.some, ?r.vk, p.pass, ?p.compatibility, format, p.depth);
+    }
+    ret cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility, program, format, p.depth);
+}
+
 # bind the pipeline cached for this pass and vertex layout
 fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
-                          sh: *Shader, slot: usize) bool {
+                          sh: opt[*Shader], slot: usize) bool {
     val r: *Renderer = p.renderer;
-    var pipe: *Pipeline = nil;
-    if (sh != nil) {
-        pipe = shader_pipeline(sh, ?r.vk, p.pass, ?p.compatibility,
-                               format, p.depth);
-    }
-    or {
-        pipe = cache_get(?r.pipes, ?r.vk, p.pass, ?p.compatibility,
-                         program, format, p.depth);
-    }
-    if (pipe == nil) { ret false; }
-    pipeline_bind(pipe, p.cmd, p.width::u32, p.height::u32);
-    ret descriptors_bind(?r.desc, p.cmd, pipe.layout, r.frame_index, slot);
+    val pipe: res[*Pipeline, Error] = surface_pipeline(p, format, program, sh);
+    if (sel pipe.err) { ret false; }
+    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
+                         p.region_width::u32, p.region_height::u32);
+    ret descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot);
 }
 
 # Draw the 2D runs that follow with a game's own shader.
 #
-# Passing nil restores the built-in program. Flushes first, so the run already
-# open is drawn with the program it was pushed for.
-pub fun pass_set_shader(p: *Pass, sh: *Shader) {
-    if (p.shader2d == sh) { ret; }
+# None restores the built-in program. Flushes first, so the run already open is
+# drawn with the program it was pushed for.
+pub fun pass_set_shader(p: *Pass, sh: opt[*Shader]) {
+    if (same_shader(p.shader2d, sh)) { ret; }
     batch_flush(p);
     p.shader2d = sh;
+}
+
+fun same_shader(a: opt[*Shader], b: opt[*Shader]) bool {
+    if (sel a.some) { ret sel b.some && b.some == a.some; }
+    ret sel b.none;
+}
+
+fun same_material(a: opt[*Material], b: opt[*Material]) bool {
+    if (sel a.some) { ret sel b.some && b.some == a.some; }
+    ret sel b.none;
 }
 
 # Bind a material's textures on the 2D runs that follow, rather than the single
@@ -2200,8 +2170,8 @@ pub fun pass_set_shader(p: *Pass, sh: *Shader) {
 # companion channels does not have to repeat it. A run whose sprites were pushed
 # without a texture has none to keep, and takes the material's first binding
 # instead, which is how such a run names its atlas at all.
-pub fun pass_set_material(p: *Pass, mat: *Material) {
-    if (p.mat2d == mat) { ret; }
+pub fun pass_set_material(p: *Pass, mat: opt[*Material]) {
+    if (same_material(p.mat2d, mat)) { ret; }
     batch_flush(p);
     p.mat2d = mat;
 }
@@ -2219,7 +2189,7 @@ pub fun pass_set_material(p: *Pass, mat: *Material) {
 # it, and draw again, and each draw sees what the struct held when it was
 # submitted. The pointer must stay valid until the last draw that uses it.
 #
-# Passing nil clears it, and the following draws read an undefined block if
+# pass_clear_user clears it, and the following draws read an undefined block if
 # their shader declares binding 4.
 #
 # TOO LARGE IS COUNTED AS WELL AS REFUSED. A game that ignores the answer used
@@ -2228,24 +2198,26 @@ pub fun pass_set_material(p: *Pass, mat: *Material) {
 # like the shading rather than like a budget. renderer_refused reports it, and
 # renderer_storage_write is where a payload that does not fit belongs.
 # ---
-# p:   the open pass
-# data: the block's bytes, or nil to clear
+# p:    the open pass
+# data: the block's bytes
 # len:  its length, at most USER_BYTES
-# ret:  false when the block is larger than a slot's user region, in which case
-#       nothing is set and the draws that follow are unaffected
-pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
-    if (data == nil) {
-        p.user     = nil;
-        p.user_len = 0;
-        ret true;
-    }
+# ret:  ok, or user_block when the block is empty or larger than a slot's user
+#       region, in which case nothing is set and the draws that follow are
+#       unaffected
+pub fun pass_set_user(p: *Pass, data: *u8, len: usize) err[Error] {
     if (len == 0 || len > USER_BYTES) {
         p.renderer.refused = p.renderer.refused + 1;
-        ret false;
+        ret err[Error].err{Error.renderer{RendererError.user_block{len}}};
     }
     p.user     = data;
     p.user_len = len;
-    ret true;
+    ret err[Error].ok{};
+}
+
+# Clear the game's own uniform block for the draws that follow.
+pub fun pass_clear_user(p: *Pass) {
+    p.user     = nil;
+    p.user_len = 0;
 }
 
 # Submit a mesh drawn with the game's own shader.
@@ -2265,7 +2237,8 @@ pub fun pass_set_user(p: *Pass, data: *u8, len: usize) bool {
 # t:   the model transform
 # sh:  the game's shader
 pub fun pass_draw_shaded(p: *Pass, m: *Mesh, mat: *Material, t: *Transform, sh: *Shader) {
-    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, nil, sh);
+    pass_draw_textured(p, m, t, opt[*Material].some{mat}, material_texture(mat), mat.base_color,
+                       opt[*Pose].none{}, opt[*Shader].some{sh});
 }
 
 # submit static meshes that share one shaded surface state
@@ -2319,13 +2292,14 @@ pub fun pass_draw_shaded_batch(p: *Pass, meshes: **Mesh, mesh_count: usize,
     }
     if (visible == 0) { ret; }
 
-    val slot: usize = take_slot(p);
-    if (slot == NO_SLOT) {
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) {
         # take_slot counted one refused slot. the remaining visible meshes are
         # absent for the same refusal and belong in the draw count too.
         if (visible > 1) { r.dropped = r.dropped + visible - 1; }
         ret;
     }
+    val slot: usize = taken.some;
 
     var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
     var mvp: Mat4 = mat4_mul(?vp, ?model);
@@ -2337,11 +2311,11 @@ pub fun pass_draw_shaded_batch(p: *Pass, meshes: **Mesh, mesh_count: usize,
         r.dropped = r.dropped + visible;
         ret;
     }
-    if (!write_surface_slot(p, slot, mat, material_texture(mat), mat.base_color)) {
+    if (!write_surface_slot(p, slot, opt[*Material].some{mat}, material_texture(mat), mat.base_color)) {
         r.dropped = r.dropped + visible;
         ret;
     }
-    if (!bind_surface_pipeline(p, ?meshes[0].format, PROGRAM_MESH, sh, slot)) {
+    if (!bind_surface_pipeline(p, ?meshes[0].format, PROGRAM_MESH, opt[*Shader].some{sh}, slot)) {
         r.dropped = r.dropped + visible;
         ret;
     }
@@ -2426,16 +2400,17 @@ pub fun pass_draw_shaded_triangles(p: *Pass, vertices: ptr, vertex_count: i32,
     }
 
     val stride: usize = format.stride::usize;
-    var first: u32 = 0;
-    var block: usize = 0;
-    if (!stream_push(?r.stream, ?r.vk, r.frame_index, vertices:~*u8,
-                     vertex_count::usize * stride, stride, ?first, ?block)) {
+    val pushed: opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, vertices:~*u8,
+                                              vertex_count::usize * stride, stride);
+    if (sel pushed.none) {
         r.dropped = r.dropped + 1;
         ret;
     }
+    val span: StreamSpan = pushed.some;
 
-    val slot: usize = take_slot(p);
-    if (slot == NO_SLOT) { ret; }
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) { ret; }
+    val slot: usize = taken.some;
 
     var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
     var mvp: Mat4 = mat4_mul(?vp, ?model);
@@ -2447,24 +2422,24 @@ pub fun pass_draw_shaded_triangles(p: *Pass, vertices: ptr, vertex_count: i32,
         r.dropped = r.dropped + 1;
         ret;
     }
-    if (!write_surface_slot(p, slot, mat, material_texture(mat),
+    if (!write_surface_slot(p, slot, opt[*Material].some{mat}, material_texture(mat),
                             mat.base_color)) {
         r.dropped = r.dropped + 1;
         ret;
     }
-    if (!bind_surface_pipeline(p, format, PROGRAM_MESH, sh, slot)) {
+    if (!bind_surface_pipeline(p, format, PROGRAM_MESH, opt[*Shader].some{sh}, slot)) {
         r.dropped = r.dropped + 1;
         ret;
     }
 
-    var buffer: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
+    var buffer: vk.Buffer = stream_buffer(?r.stream, r.frame_index, span.block);
     if (buffer == nil) {
         r.dropped = r.dropped + 1;
         ret;
     }
     var offset: u64 = 0;
     vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buffer, ?offset);
-    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, first, 0);
+    vk.vkCmdDraw(p.cmd, vertex_count::u32, 1, span.first, 0);
     r.draws = r.draws + 1;
 }
 
@@ -2496,23 +2471,25 @@ fun dynamic_bounds_visible(p: *Pass, local_bounds: *Aabb,
 # t:    the model transform
 # sh:   the game's shader
 pub fun pass_draw_shaded_skinned(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform, sh: *Shader) {
-    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, pose, sh);
+    pass_draw_textured(p, m, t, opt[*Material].some{mat}, material_texture(mat), mat.base_color,
+                       opt[*Pose].some{pose}, opt[*Shader].some{sh});
 }
 
 # the shared body of the mesh draws, skinned and not
 #
-# a pose of nil is an unskinned draw. the two differ in which program they use,
+# no pose is an unskinned draw. the two differ in which program they use,
 # what goes in the uniform block, and whether a joint palette is uploaded, but
 # share the texture binding, the base colour, and the slot bookkeeping, so
 # splitting them would duplicate the parts that are easy to get subtly wrong.
 #
-# a shader of nil draws through the built-in program for the mesh; a shader
-# replaces only the program, so a game's own shading gets the same culling,
-# slot handling, texture binding and palette upload as a built-in draw.
-fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *Texture, tint: Vec4, pose: *Pose, sh: *Shader) {
+# no shader draws through the built-in program for the mesh; a shader replaces
+# only the program, so a game's own shading gets the same culling, slot
+# handling, texture binding and palette upload as a built-in draw.
+fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: opt[*Material], tex: opt[*Texture],
+                       tint: Vec4, pose: opt[*Pose], sh: opt[*Shader]) {
     # See batch_flush: only a game's own Shader can write a multi-attachment
     # pass, because the built-in programs declare one output.
-    if (p.targets != 1 && sh == nil) {
+    if (p.targets != 1 && sel sh.none) {
         p.renderer.dropped = p.renderer.dropped + 1;
         ret;
     }
@@ -2536,21 +2513,22 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     # edges of the screen while it is plainly still on them.
     if (p.cull) {
         var wb: Aabb = aabb_transform(?m.bounds, ?model);
-        if (pose != nil) { wb = skinned_bounds(m, pose, ?model); }
+        if (sel pose.some) { wb = skinned_bounds(m, pose.some, ?model); }
         if (!frustum_contains_aabb(?p.frustum, ?wb)) {
             r.culled = r.culled + 1;
             ret;
         }
     }
 
-    val slot: usize = take_slot(p);
-    if (slot == NO_SLOT) { ret; }
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) { ret; }
+    val slot: usize = taken.some;
 
     # A pose is only usable on geometry that carries joints and weights. Drawing
     # an unskinned mesh through the skinned program leaves those two vertex
     # inputs with no attribute behind them, which is invalid vertex input rather
     # than a mesh that ignores its pose.
-    val skinned: bool = pose != nil && vertex_format_is_skinned(?m.format);
+    val skinned: bool = sel pose.some && vertex_format_is_skinned(?m.format);
 
     var vp:    Mat4 = mat4_mul(?p.projection, ?p.view);
 
@@ -2586,27 +2564,29 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
     }
 
     var program: Program = PROGRAM_MESH;
-    if (skinned) {
-        program = PROGRAM_SKINNED;
+    if (sel pose.some) {
+        if (skinned) {
+            program = PROGRAM_SKINNED;
 
-        val pal: usize = descriptors_take_palette(?r.desc, ?r.vk, r.frame_index);
-        if (pal == MAX_PALETTES) {
-            r.dropped = r.dropped + 1;
-            ret;
-        }
-        # The pose's matrices are already column-major Mat4 values, and std430
-        # gives the shader's array of columns a natural 16-byte stride, so the
-        # palette uploads as a copy rather than a repack.
-        if (!descriptors_write_palette(?r.desc, r.frame_index, pal,
-                                       (pose_matrices(pose)):~*u8, MAX_JOINTS * 64)) {
-            r.dropped = r.dropped + 1;
-            ret;
-        }
-        # A skinned draw whose binding 3 was not written reads a palette nothing
-        # filled, which places the character by whatever the descriptor held.
-        if (!descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal)) {
-            r.dropped = r.dropped + 1;
-            ret;
+            val pal: opt[usize] = descriptors_take_palette(?r.desc, ?r.vk, r.frame_index);
+            if (sel pal.none) {
+                r.dropped = r.dropped + 1;
+                ret;
+            }
+            # The pose's matrices are already column-major Mat4 values, and std430
+            # gives the shader's array of columns a natural 16-byte stride, so the
+            # palette uploads as a copy rather than a repack.
+            if (!descriptors_write_palette(?r.desc, r.frame_index, pal.some,
+                                           (pose_matrices(pose.some)):~*u8, MAX_JOINTS * 64)) {
+                r.dropped = r.dropped + 1;
+                ret;
+            }
+            # A skinned draw whose binding 3 was not written reads a palette nothing
+            # filled, which places the character by whatever the descriptor held.
+            if (!descriptors_bind_palette(?r.desc, ?r.vk, r.frame_index, slot, pal.some)) {
+                r.dropped = r.dropped + 1;
+                ret;
+            }
         }
     }
 
@@ -2632,7 +2612,8 @@ fun pass_draw_textured(p: *Pass, m: *Mesh, t: *Transform, mat: *Material, tex: *
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, nil, nil, vec4(1.0, 1.0, 1.0, 1.0), pose, nil);
+    pass_draw_textured(p, m, t, opt[*Material].none{}, opt[*Texture].none{},
+                       vec4(1.0, 1.0, 1.0, 1.0), opt[*Pose].some{pose}, opt[*Shader].none{});
 }
 
 # submit a skinned mesh draw with a material
@@ -2643,27 +2624,30 @@ pub fun pass_draw_skinned(p: *Pass, m: *Mesh, pose: *Pose, t: *Transform) {
 # pose: the pose whose joint matrices place the vertices
 # t:    the model transform
 pub fun pass_draw_skinned_material(p: *Pass, m: *Mesh, mat: *Material, pose: *Pose, t: *Transform) {
-    pass_draw_textured(p, m, t, mat, material_texture(mat), mat.base_color, pose, nil);
+    pass_draw_textured(p, m, t, opt[*Material].some{mat}, material_texture(mat), mat.base_color,
+                       opt[*Pose].some{pose}, opt[*Shader].none{});
 }
 
 # submit a 2D sprite draw covering a whole texture
 # ---
 # p:       the open pass
-# texture: the texture to draw
+# texture: the texture to draw, or none for the white texel or the pass material's atlas
 # dest:    the destination rectangle in pixels
 # tint:    the color multiplied into the texture
-pub fun pass_draw_sprite(p: *Pass, texture: *Texture, dest: Rect, tint: Vec4) {
+pub fun pass_draw_sprite(p: *Pass, texture: opt[*Texture], dest: Rect, tint: Vec4) {
     pass_draw_sprite_uv(p, texture, dest, rect(0.0, 0.0, 1.0, 1.0), tint);
 }
 
 # submit a 2D sprite draw of a sub-rectangle of a texture
 # ---
 # p:       the open pass
-# texture: the texture to sample
+# texture: the texture to sample, or none for the white texel or the pass
+#          material's atlas, which is how a solid rectangle and a sprite named
+#          only by pass_set_material are drawn
 # dest:    the destination rectangle in pixels
 # src:     the source rectangle in texture space, 0 to 1
 # tint:    the color multiplied into the sample
-pub fun pass_draw_sprite_uv(p: *Pass, texture: *Texture, dest: Rect, src: Rect, tint: Vec4) {
+pub fun pass_draw_sprite_uv(p: *Pass, texture: opt[*Texture], dest: Rect, src: Rect, tint: Vec4) {
     # Expanded to two triangles and appended to the open run rather than drawn.
     # A run of sprites sharing a texture becomes one draw and one uniform slot,
     # which is what lets a screenful of them cost what a handful used to. See
@@ -2749,8 +2733,8 @@ pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: 
 # p:            the open pass
 # vertices:     the vertex data, vertex_count * 32 bytes
 # vertex_count: how many vertices, a multiple of 3
-# texture:      the atlas the uvs address, or nil for the renderer's white texel
-pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture: *Texture) {
+# texture:      the atlas the uvs address, or none for the renderer's white texel
+pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture: opt[*Texture]) {
     val r: *Renderer = p.renderer;
     if (vertex_count <= 0) { ret; }
     if ((vertex_count % 3) != 0) {
@@ -2818,9 +2802,9 @@ pub fun renderer_stream_reserved(r: *Renderer) usize {
 # r:   the renderer, with a frame open
 # src: the bytes to copy
 # len: how many
-# ret: false when no frame is open or the buffer could not grow, in which case
-#      nothing was written and renderer_storage_refused counts it
-pub fun renderer_storage_write(r: *Renderer, src: *u8, len: usize) bool {
+# ret: ok, or why nothing was written; a buffer that could not grow is also
+#      counted by renderer_storage_refused
+pub fun renderer_storage_write(r: *Renderer, src: *u8, len: usize) err[Error] {
     ret renderer_storage_write_at(r, 0, src, len);
 }
 
@@ -2838,8 +2822,8 @@ pub fun renderer_storage_write(r: *Renderer, src: *u8, len: usize) bool {
 # offset: where in the buffer the bytes go
 # src:    the bytes to copy
 # len:    how many
-pub fun renderer_storage_write_at(r: *Renderer, offset: usize, src: *u8, len: usize) bool {
-    if (!r.drawing) { ret false; }
+pub fun renderer_storage_write_at(r: *Renderer, offset: usize, src: *u8, len: usize) err[Error] {
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
     ret storage_write(?r.store, ?r.vk, r.frame_index, offset, src, len);
 }
 
@@ -2862,10 +2846,10 @@ pub fun renderer_storage_write_at(r: *Renderer, offset: usize, src: *u8, len: us
 # ---
 # r:     the renderer
 # bytes: the capacity to guarantee
-# ret:   false when the buffer could not grow, which renderer_storage_refused
-#        counts
-pub fun renderer_storage_reserve(r: *Renderer, bytes: usize) bool {
-    if (!r.ready_store) { ret false; }
+# ret:   ok, or why the buffer could not grow, which renderer_storage_refused
+#        also counts
+pub fun renderer_storage_reserve(r: *Renderer, bytes: usize) err[Error] {
+    if (!r.ready_store) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
     ret storage_reserve(?r.store, ?r.vk, bytes);
 }
 
@@ -2957,7 +2941,7 @@ test "renderer: a scene pass takes its matrices from the camera" {
     # the alternative is pass_begin carrying a nil check that exists for a test
     # which never opened a frame, and the engine does not answer to that.
     var d: PassDesc = pass_scene(?c);
-    d.clear = 0;
+    d.clear = opt[Vec4].none{};
     var p: Pass = pass_begin(?r, ?d);
     # An identity view would mean the camera position was ignored, which
     # draws the scene from the origin no matter where the camera is.
@@ -2973,11 +2957,11 @@ test "renderer: a reversed camera carries its depth convention into the pass" {
         vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0),
         1.0, 1.333, 0.1);
     var d: PassDesc = pass_scene(?c);
-    if (d.depth != DEPTH_REVERSED) { ret 1; }
+    if (!sel d.depth.reversed) { ret 1; }
 
-    d.clear = 0;
+    d.clear = opt[Vec4].none{};
     var p: Pass = pass_begin(?r, ?d);
-    if (p.depth != DEPTH_REVERSED) { ret 2; }
+    if (!sel p.depth.reversed) { ret 2; }
 
     val zn: f32 = (p.projection.m[2][2] * (0.0 - c.near)
                     + p.projection.m[3][2]) / c.near;
@@ -2986,13 +2970,18 @@ test "renderer: a reversed camera carries its depth convention into the pass" {
 }
 
 test "renderer: pass descriptions differ in what they clear and project" {
-    val s: PassDesc = pass_scene(nil);
+    var c: Camera;
+    var c2: Camera2D;
+    val s: PassDesc = pass_scene(?c);
     val o: PassDesc = pass_overlay();
-    if (s.perspective == 0) { ret 1; }
-    if (o.perspective != 0) { ret 2; }
+    val w: PassDesc = pass_world(?c2);
+    if (!sel s.view.scene)  { ret 1; }
+    if (!sel o.view.pixels) { ret 2; }
+    if (!sel w.view.world)  { ret 5; }
     # An overlay that cleared would erase the scene it is drawn over.
-    if (s.clear == 0)       { ret 3; }
-    if (o.clear != 0)       { ret 4; }
+    if (!sel s.clear.some)  { ret 3; }
+    if (!sel o.clear.none)  { ret 4; }
+    if (!sel w.clear.none)  { ret 6; }
     ret 0;
 }
 
@@ -3000,7 +2989,7 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
     var atts: [5]vk.ClearAttachment;
 
     val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0),
-                                       DEPTH_FORWARD, ?atts[0]);
+                                       DepthConvention.forward{}, ?atts[0]);
     if (one != 2)                                        { ret 1; }
     if (atts[0].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 2; }
     if (atts[0].colorAttachment != 0)                    { ret 3; }
@@ -3014,7 +3003,7 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
     # A pass with four sheets clears four. Clearing only the first would leave
     # the rest holding the previous frame, which is a picture, just the wrong one.
     val four: usize = clear_attachments(4, vec4(0.0, 0.0, 0.0, 1.0),
-                                        DEPTH_FORWARD, ?atts[0]);
+                                        DepthConvention.forward{}, ?atts[0]);
     if (four != 5)                                       { ret 7; }
     if (atts[3].aspectMask != vk.IMAGE_ASPECT_COLOR_BIT) { ret 8; }
     if (atts[3].colorAttachment != 3)                    { ret 9; }
@@ -3025,9 +3014,9 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
 test "renderer: reversed depth clears to zero" {
     var atts: [2]vk.ClearAttachment;
     if (clear_attachments(1, vec4(0.0, 0.0, 0.0, 1.0),
-                          DEPTH_REVERSED, ?atts[0]) != 2) { ret 1; }
-    if (atts[1].clearValue.depthStencil.depth != 0.0) { ret 2; }
-    if (depth_clear_value(DEPTH_FORWARD) != 1.0)      { ret 3; }
+                          DepthConvention.reversed{}, ?atts[0]) != 2) { ret 1; }
+    if (atts[1].clearValue.depthStencil.depth != 0.0)            { ret 2; }
+    if (depth_clear_value(DepthConvention.forward{}) != 1.0)     { ret 3; }
     ret 0;
 }
 
@@ -3046,8 +3035,9 @@ test "renderer: a full uniform ring drops draws and counts them" {
 
     # Silently drawing with a wrapped slot would give this draw another
     # draw's transform, so exhaustion has to be visible instead.
-    if (take_slot(?p) != NO_SLOT) { ret 1; }
-    if (r.dropped != 1)           { ret 2; }
+    val taken: opt[usize] = take_slot(?p);
+    if (!sel taken.none) { ret 1; }
+    if (r.dropped != 1)  { ret 2; }
     ret 0;
 }
 
@@ -3103,7 +3093,7 @@ test "renderer: dynamic 3D bounds are transformed before culling" {
     var projection: Mat4 = camera_projection(?c);
     var vp: Mat4 = mat4_mul(?projection, ?view);
     var p: Pass;
-    p.cull = 1;
+    p.cull = true;
     p.frustum = frustum_from_matrix(?vp);
 
     var bounds: Aabb = Aabb{
@@ -3118,7 +3108,7 @@ test "renderer: dynamic 3D bounds are transformed before culling" {
     model = transform_matrix(?t);
     if (dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 2; }
 
-    p.cull = 0;
+    p.cull = false;
     if (!dynamic_bounds_visible(?p, ?bounds, ?model)) { ret 3; }
     ret 0;
 }
@@ -3136,7 +3126,9 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     p.user_len = 0;
     var block: [512]u8;
 
-    if (pass_set_user(?p, ?block[0], USER_BYTES + 1)) { ret 1; }
+    val oversized: err[Error] = pass_set_user(?p, ?block[0], USER_BYTES + 1);
+    if (!sel oversized.err)                           { ret 1; }
+    if (!sel oversized.err.renderer)                  { ret 10; }
     if (p.user != nil || p.user_len != 0)             { ret 2; }
     # AND COUNTED. A caller that ignores the answer used to get no sign at all:
     # the draws that followed read whatever their slot's user region last held,
@@ -3144,12 +3136,13 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     if (renderer_refused(?r) != 1)                    { ret 7; }
 
     # A block of exactly the advertised size is accepted.
-    if (!pass_set_user(?p, ?block[0], USER_BYTES))    { ret 3; }
+    val exact: err[Error] = pass_set_user(?p, ?block[0], USER_BYTES);
+    if (!sel exact.ok)                                   { ret 3; }
     if (p.user != ?block[0] || p.user_len != USER_BYTES) { ret 4; }
     if (renderer_refused(?r) != 1)                       { ret 8; }
 
-    # And nil clears it rather than being treated as a zero-length block.
-    if (!pass_set_user(?p, nil, 0)) { ret 5; }
+    # And clearing it is its own call rather than a zero-length block.
+    pass_clear_user(?p);
     if (p.user != nil)              { ret 6; }
     if (renderer_refused(?r) != 1)  { ret 9; }
     ret 0;
@@ -3166,8 +3159,10 @@ test "renderer: a storage write outside an open frame is refused" {
     r.frame_index = 0;
     r.store.ready = true;
     var bytes: [64]u8;
-    if (renderer_storage_write(?r, ?bytes[0], 64))       { ret 1; }
-    if (renderer_storage_write_at(?r, 0, ?bytes[0], 64)) { ret 2; }
+    val whole: err[Error] = renderer_storage_write(?r, ?bytes[0], 64);
+    if (!sel whole.err) { ret 1; }
+    val at: err[Error] = renderer_storage_write_at(?r, 0, ?bytes[0], 64);
+    if (!sel at.err) { ret 2; }
     ret 0;
 }
 
@@ -3177,7 +3172,8 @@ test "renderer: reserving before the storage exists is refused, not a fault" {
     # be a fault rather than an answer.
     var r: Renderer;
     r.ready_store = false;
-    if (renderer_storage_reserve(?r, 4096)) { ret 1; }
+    val reserved: err[Error] = renderer_storage_reserve(?r, 4096);
+    if (!sel reserved.err) { ret 1; }
     ret 0;
 }
 
@@ -3202,31 +3198,31 @@ test "renderer: a material owns binding 1 only for an untextured run" {
     var mat: Material;
     mat.base_color    = vec4(1.0, 1.0, 1.0, 1.0);
     mat.texture_count = 0;
-    if (!material_add_texture(?mat, "albedo", ?atlas)) { ret 1; }
+    val added: err[MaterialError] = material_add_texture(?mat, "albedo", ?atlas);
+    if (!sel added.ok) { ret 1; }
 
-    # An untextured run under a material. `tex` arrives already defaulted to the
-    # white texel, which is exactly the value a nil test at the guard would be
-    # fooled by, so it is passed that way here.
+    # An untextured run under a material. The run names no texture, which is
+    # exactly the case a white-texel default applied too early would hide.
     var views: [4]vk.ImageView;
-    fill_views_batch(?r, ?views[0], ?mat, ?r.white, false);
+    fill_views_batch(?r, ?views[0], opt[*Material].some{?mat}, opt[*Texture].none{});
     if (views[0] != texture_view(?atlas)) { ret 2; }
 
     # A textured run under the same material keeps its own sheet, because its
     # uvs were normalised against that sheet and not against the material's.
-    fill_views_batch(?r, ?views[0], ?mat, ?sheet, true);
+    fill_views_batch(?r, ?views[0], opt[*Material].some{?mat}, opt[*Texture].some{?sheet});
     if (views[0] != texture_view(?sheet)) { ret 3; }
 
     # No material: the run's own texture at binding 1 and the white texel in the
     # companion channels, so a shader sampling a slot nothing set reads a known
     # value rather than whatever the previous draw left in that descriptor.
-    fill_views_batch(?r, ?views[0], nil, ?sheet, true);
+    fill_views_batch(?r, ?views[0], opt[*Material].none{}, opt[*Texture].some{?sheet});
     if (views[0] != texture_view(?sheet))   { ret 4; }
     if (views[1] != texture_view(?r.white)) { ret 5; }
 
     # And no material and no texture is the flat-colour case a solid rectangle
     # or a glyph takes: white at binding 1, so `colour * texel` is the vertex
     # colour.
-    fill_views_batch(?r, ?views[0], nil, ?r.white, false);
+    fill_views_batch(?r, ?views[0], opt[*Material].none{}, opt[*Texture].none{});
     if (views[0] != texture_view(?r.white)) { ret 6; }
     ret 0;
 }
@@ -3353,17 +3349,42 @@ test "renderer: a mesh upload begun before the device is refused, not a fault" {
     r.upload_reserved = 0;
     var f: VertexFormat = vertex_format_standard();
 
-    var u: MeshUpload = renderer_mesh_begin(?r, ?f, 3, 3);
-    if (u.ok) { ret 1; }
-    # A refused reservation hands back no pointers to write through and charges
-    # nothing, so a caller that ignores ok writes to nil rather than to memory
-    # the renderer thinks it owns.
-    if (u.vertices != nil || u.indices != nil) { ret 2; }
+    val begun: res[MeshUpload, Error] = renderer_mesh_begin(?r, ?f, 3, 3);
+    if (!sel begun.err) { ret 1; }
+    if (!sel begun.err.uninitialized) { ret 2; }
+    # A refused reservation charges nothing.
     if (renderer_mesh_reserved(?r) != 0) { ret 3; }
 
-    val m: Result[Mesh, Error] = renderer_mesh_end(?r, ?u, aabb_empty());
-    if (!is_err[Mesh, Error](m)) { ret 4; }
+    # And a reservation that was never opened can be neither ended nor cancelled.
+    var u: MeshUpload;
+    u.live = false;
+    val m: res[Mesh, Error] = renderer_mesh_end(?r, ?u, aabb_empty());
+    if (!sel m.err) { ret 4; }
     renderer_mesh_cancel(?r, ?u);
     if (renderer_mesh_reserved(?r) != 0 || r.upload_count != 0) { ret 5; }
     ret 0;
+}
+
+test "renderer: pass regions bound viewport and scissor without changing projection" {
+    var renderer: Renderer;
+    var pass: Pass;
+    pass.renderer = ?renderer;
+    pass.targets = 1;
+    pass.width = 2048;
+    pass.height = 2048;
+    pass.projection = mat4_identity();
+    if (!region_set(pass_set_region(?pass,1536,1024,512,512))) { ret 1; }
+    if (pass.region_x != 1536 || pass.region_y != 1024
+        || pass.region_width != 512 || pass.region_height != 512) { ret 2; }
+    if (pass.width != 2048 || pass.height != 2048 || pass.projection.m[0][0] != 1.0) { ret 3; }
+    if (region_set(pass_set_region(?pass,-1,0,512,512)) || region_set(pass_set_region(?pass,0,0,0,512))) { ret 4; }
+    if (region_set(pass_set_region(?pass,1537,0,512,512)) || region_set(pass_set_region(?pass,0,0,2049,512))) { ret 5; }
+    if (region_set(pass_set_region(?pass,2147483647,0,512,512))) { ret 6; }
+    if (renderer.refused != 5 || pass.region_x != 1536 || pass.region_y != 1024) { ret 7; }
+    if (!region_set(pass_set_region(?pass,0,0,2048,2048)) || renderer.refused != 5) { ret 8; }
+    ret 0;
+}
+
+fun region_set(r: err[Error]) bool {
+    ret sel r.ok;
 }

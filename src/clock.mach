@@ -7,6 +7,9 @@
 # the monotonic clock; the pure core (clock_sample) takes the current
 # time explicitly so the derivation is deterministic and testable.
 
+use std.types.result.res;
+use std.types.error.err;
+use io_error: std.io.error;
 use std.chrono.time.Time;
 use std.chrono.time.monotonic;
 use std.chrono.time.time_sub;
@@ -55,9 +58,11 @@ pub fun clock_at(base: Time) Clock {
 
 # create a clock anchored at the current monotonic time
 # ---
-# ret: a fresh Clock anchored at the monotonic clock's current reading
-pub fun clock_new() Clock {
-    ret clock_at(monotonic());
+# ret: a fresh Clock anchored at the monotonic clock's current reading, or the clock's refusal
+pub fun clock_new() res[Clock, io_error.Error] {
+    val now: res[Time, io_error.Error] = monotonic();
+    if (sel now.err) { ret res[Clock, io_error.Error].err{now.err}; }
+    ret res[Clock, io_error.Error].ok{clock_at(now.ok)};
 }
 
 # advance the clock to a given instant
@@ -88,9 +93,13 @@ pub fun clock_sample(c: *Clock, now: Time) {
 
 # advance the clock to the current monotonic time
 # ---
-# c: clock to advance
-pub fun clock_tick(c: *Clock) {
-    clock_sample(c, monotonic());
+# c:   clock to advance
+# ret: ok, or the clock's refusal, leaving c unchanged
+pub fun clock_tick(c: *Clock) err[io_error.Error] {
+    val now: res[Time, io_error.Error] = monotonic();
+    if (sel now.err) { ret err[io_error.Error].err{now.err}; }
+    clock_sample(c, now.ok);
+    ret err[io_error.Error].ok{};
 }
 
 # advance the clock by exactly `dt`, ignoring the wall clock
@@ -105,6 +114,17 @@ pub fun clock_tick(c: *Clock) {
 # dt: how long this frame is to be told it took
 pub fun clock_advance(c: *Clock, dt: Duration) {
     clock_sample(c, time_add(c.last, dt));
+}
+
+test "clock: a live clock starts and ticks forward" {
+    val made: res[Clock, io_error.Error] = clock_new();
+    if (!sel made.ok) { ret 1; }
+    var c: Clock = made.ok;
+    val ticked: err[io_error.Error] = clock_tick(?c);
+    if (!sel ticked.ok) { ret 2; }
+    if (c.frame != 1) { ret 3; }
+    if (c.delta < 0) { ret 4; }
+    ret 0;
 }
 
 test "clock: fresh clock has zeroed derived fields" {

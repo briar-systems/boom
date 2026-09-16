@@ -1,51 +1,453 @@
-# a fixed-size, value-returned error for the graphics facade
+# the graphics failure domain
 #
-# graphics operations that can fail return Result[T, Error]. Error carries
-# its message inline in a fixed buffer, so a failure needs neither a heap
-# allocation nor a module-global scratch buffer: the error travels by
-# value on the stack like any other return. messages longer than the
-# buffer are truncated.
+# every fallible graphics operation reports one Error. the cases name the layer
+# that refused, and each carries what that layer knows: the Vulkan entry point
+# and the VkResult it returned, the capacity that was exhausted, the dependency
+# error a loader received. a failure is matched on, not read as text, and
+# error_message renders one static line per case for a log or a dialog.
+#
+# the areas that load content keep their own case tags beside this module
+# (boom.graphics.error.mesh and boom.graphics.error.content), so a case added to
+# one area is a line in that area's file rather than an edit to the umbrella.
 
-use std.types.char.char;
 use std.types.string.str;
 use std.types.size.usize;
+use allo: std.allocator;
+use glfw.vulkan.SurfaceError;
+use vfs: boom.vfs;
+use boom.graphics.error.mesh.mesh_error_message;
+use boom.graphics.error.mesh.model_error_message;
+use boom.graphics.error.content.texture_error_message;
+use boom.graphics.error.content.text_error_message;
 
-# the message buffer capacity, including the null terminator
-pub val ERROR_CAP: usize = 256;
+fwd boom.graphics.error.mesh.MeshError;
+fwd boom.graphics.error.mesh.ModelError;
+fwd boom.graphics.error.content.TextureError;
+fwd boom.graphics.error.content.TextError;
 
-# an inline, null-terminated error message
-# ---
-# message: the message bytes, null-terminated
-pub rec Error {
-    message: [256]char;
+# a Vulkan entry point whose failure boom reports
+pub tag VkCall: u8 {
+    create_instance;
+    create_device;
+    create_command_pool;
+    allocate_command_buffers;
+    begin_command_buffer;
+    end_command_buffer;
+    queue_submit;
+    queue_present;
+    acquire_next_image;
+    wait_for_fences;
+    reset_fences;
+    create_semaphore;
+    create_fence;
+    create_framebuffer;
+    create_render_pass;
+    create_buffer;
+    allocate_memory;
+    bind_buffer_memory;
+    bind_image_memory;
+    map_memory;
+    create_image;
+    create_image_view;
+    create_sampler;
+    create_swapchain;
+    get_swapchain_images;
+    get_surface_capabilities;
+    get_surface_formats;
+    enumerate_physical_devices;
+    create_shader_module;
+    create_descriptor_set_layout;
+    create_descriptor_pool;
+    allocate_descriptor_sets;
+    create_pipeline_layout;
+    create_graphics_pipelines;
 }
 
-# build an Error from a null-terminated string, truncating if needed
+# a Vulkan call that returned a failing VkResult
 # ---
-# message: the source message
-# ret:     an Error holding a copy of the message
-pub fun error(message: str) Error {
-    var e: Error;
-    var i: usize = 0;
-    for (i < ERROR_CAP - 1 && message[i] != 0) {
-        e.message[i] = message[i];
-        i = i + 1;
-    }
-    e.message[i] = 0;
-    ret e;
+# call:   the entry point
+# result: the VkResult it returned
+pub rec VkFailure {
+    call:   VkCall;
+    result: i32;
 }
 
-# the message text of an Error
+# which set of Vulkan commands the loader could not resolve
 # ---
-# e:   error to read
-# ret: the null-terminated message
-pub fun error_msg(e: *Error) str {
-    ret ?e.message[0];
+# unavailable:      no Vulkan loader or ICD is present
+# global:           the pre-instance commands
+# instance:         the instance-level commands
+# device_proc_addr: the loader does not export vkGetDeviceProcAddr
+# device:           the device-level commands
+pub tag LoaderError: u8 {
+    unavailable;
+    global;
+    instance;
+    device_proc_addr;
+    device;
 }
 
-test "error: message round-trips through the buffer" {
-    val e: Error = error("boom");
-    val m: str = error_msg(?e);
-    if (m[0] != 'b' || m[1] != 'o' || m[2] != 'o' || m[3] != 'm' || m[4] != 0) { ret 1; }
+# why bring-up could not produce a usable device and surface
+# ---
+# no_instance_extensions:  glfw reported no instance extensions for this platform
+# instance_extensions:     glfw requires more instance extensions than boom enables
+# surface:                 the window surface could not be created
+# no_surface_format:       the surface reported no formats
+# no_physical_device:      no Vulkan physical device is present
+# no_capable_device:       no device can both render and present to the surface
+# no_memory_type:          no memory type satisfies a resource's required properties
+# no_present_mode:         the surface reported no present modes
+# minimized:               the surface extent is zero, as it is while minimized
+pub tag DeviceError: u8 {
+    no_instance_extensions;
+    instance_extensions: u32;
+    surface:             SurfaceError;
+    no_surface_format;
+    no_physical_device;
+    no_capable_device;
+    no_memory_type;
+    no_present_mode;
+    minimized;
+}
+
+# the object an operation needs, which was never brought up
+pub tag Stage: u8 {
+    window;
+    device;
+    upload;
+    swapchain;
+    frame;
+    renderer;
+}
+
+# a fixed table with no free entry
+# ---
+# assets:          the asset store
+# pipelines:       the pipeline cache
+# descriptor_sets: the per-frame descriptor slot blocks
+# palettes:        the per-frame joint palette blocks
+# storage:         the per-frame storage buffer chain or its byte ceiling
+# stream:          the per-frame vertex arena blocks
+# mesh_uploads:    the runtime mesh upload queue
+# retired_meshes:  the meshes waiting for a frame fence to release them
+pub tag Capacity: u8 {
+    assets;
+    pipelines;
+    descriptor_sets;
+    palettes;
+    storage;
+    stream;
+    mesh_uploads;
+    retired_meshes;
+}
+
+# why a buffer operation was refused
+# ---
+# empty:      a buffer of zero bytes
+# overrun:    a write or copy larger than a buffer; carries the requested bytes
+pub tag BufferError: u8 {
+    empty;
+    overrun: u64;
+}
+
+# why an image operation was refused
+# ---
+# empty:           an image with a zero dimension
+# not_created:     the image was never created
+# transition:      a layout transition boom does not perform
+# readback_format: the image format has no raw readback layout
+# readback_short:  the destination is smaller than the image; carries the bytes required
+pub tag ImageError: u8 {
+    empty;
+    not_created;
+    transition;
+    readback_format;
+    readback_short: usize;
+}
+
+# why a shader was refused
+# ---
+# missing_stage: a vertex or fragment module is absent
+# spirv_words:   a module is not a whole number of SPIR-V words; carries its byte length
+# undeclared:    a draw named a shader that was never declared or was deleted
+# full:          the shader has built MAX_SHADER_PIPELINES pipelines
+pub tag ShaderError: u8 {
+    missing_stage;
+    spirv_words: usize;
+    undeclared;
+    full;
+}
+
+# why a pipeline or its layout was refused
+# ---
+# no_bindings:      a descriptor set layout declared with no bindings
+# vertex_attribute: a vertex attribute Vulkan cannot express
+pub tag PipelineError: u8 {
+    no_bindings;
+    vertex_attribute;
+}
+
+# why a render target operation was refused
+# ---
+# dimensions:         a width or height that is not positive
+# format_unsupported: the device cannot render into the requested format
+# attachment:         an attachment index past the target's colour attachments
+# readback_format:    the operation reads only four-byte colour formats
+pub tag TargetError: u8 {
+    dimensions;
+    format_unsupported;
+    attachment: usize;
+    readback_format;
+}
+
+# why a renderer operation was refused
+# ---
+# no_mesh_upload: renderer_mesh_end with no open reservation
+# region:         a pass region outside the pass's extent
+# user_block:     a game uniform block empty or larger than USER_BYTES; carries its length
+# no_frame:       an operation that needs an open frame outside one
+pub tag RendererError: u8 {
+    no_mesh_upload;
+    region;
+    user_block: usize;
+    no_frame;
+}
+
+# a graphics failure
+# ---
+# alloc:         a host allocation was refused
+# vulkan:        a Vulkan call returned a failure
+# loader:        Vulkan commands could not be resolved
+# device:        bring-up could not produce a usable device
+# uninitialized: an operation needs an object that was never brought up
+# full:          a fixed table has no free entry
+# load:          an asset's file could not be read through its virtual path
+# buffer:        a buffer operation was refused
+# image:         an image operation was refused
+# shader:        a shader was refused
+# pipeline:      a pipeline was refused
+# target:        a render target operation was refused
+# renderer:      a renderer operation was refused
+# mesh:          mesh geometry could not be loaded or uploaded
+# model:         a model's skeleton or animations could not be loaded
+# texture:       a texture could not be decoded
+# text:          a font could not be loaded
+pub tag Error: u8 {
+    alloc:         allo.Error;
+    vulkan:        VkFailure;
+    loader:        LoaderError;
+    device:        DeviceError;
+    uninitialized: Stage;
+    full:          Capacity;
+    load:          vfs.ReadError;
+    buffer:        BufferError;
+    image:         ImageError;
+    shader:        ShaderError;
+    pipeline:      PipelineError;
+    target:        TargetError;
+    renderer:      RendererError;
+    mesh:          MeshError;
+    model:         ModelError;
+    texture:       TextureError;
+    text:          TextError;
+}
+
+# the Error for a failed Vulkan call
+# ---
+# call:   the entry point
+# result: the VkResult it returned
+# ret:    the vulkan case
+pub fun vk_failed(call: VkCall, result: i32) Error {
+    ret Error.vulkan{VkFailure{call: call, result: result}};
+}
+
+# a one-line description of a graphics failure
+#
+# static text naming the case. the payloads, a VkResult or a byte count, are
+# for a caller that matches on the case.
+# ---
+# e:   the failure
+# ret: static text
+pub fun error_message(e: Error) str {
+    if (sel e.alloc)         { ret "out of memory"; }
+    if (sel e.vulkan)        { ret vk_call_message(e.vulkan.call); }
+    if (sel e.loader)        { ret loader_message(e.loader); }
+    if (sel e.device)        { ret device_message(e.device); }
+    if (sel e.uninitialized) { ret stage_message(e.uninitialized); }
+    if (sel e.full)          { ret capacity_message(e.full); }
+    if (sel e.load)          { ret vfs.read_error_message(e.load); }
+    if (sel e.buffer)        { ret buffer_message(e.buffer); }
+    if (sel e.image)         { ret image_message(e.image); }
+    if (sel e.shader)        { ret shader_message(e.shader); }
+    if (sel e.pipeline)      { ret pipeline_message(e.pipeline); }
+    if (sel e.target)        { ret target_message(e.target); }
+    if (sel e.renderer)      { ret renderer_message(e.renderer); }
+    if (sel e.mesh)          { ret mesh_error_message(e.mesh); }
+    if (sel e.model)         { ret model_error_message(e.model); }
+    if (sel e.texture)       { ret texture_error_message(e.texture); }
+    if (sel e.text)          { ret text_error_message(e.text); }
+    ret "graphics failure";
+}
+
+# a description of a VkResult a failed call returned
+#
+# the common failure results are named, because a bring-up failure that says
+# only "failed" costs a report-and-reply round trip to learn whether the machine
+# lacks a driver or the request was wrong.
+# ---
+# result: the VkResult
+# ret:    static text naming it
+pub fun vk_result_message(result: i32) str {
+    if (result == -1)  { ret "VK_ERROR_OUT_OF_HOST_MEMORY"; }
+    if (result == -2)  { ret "VK_ERROR_OUT_OF_DEVICE_MEMORY"; }
+    if (result == -3)  { ret "VK_ERROR_INITIALIZATION_FAILED"; }
+    if (result == -4)  { ret "VK_ERROR_DEVICE_LOST"; }
+    if (result == -5)  { ret "VK_ERROR_MEMORY_MAP_FAILED"; }
+    if (result == -6)  { ret "VK_ERROR_LAYER_NOT_PRESENT"; }
+    if (result == -7)  { ret "VK_ERROR_EXTENSION_NOT_PRESENT"; }
+    if (result == -8)  { ret "VK_ERROR_FEATURE_NOT_PRESENT"; }
+    if (result == -9)  { ret "VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver)"; }
+    if (result == -10) { ret "VK_ERROR_TOO_MANY_OBJECTS"; }
+    if (result == -11) { ret "VK_ERROR_FORMAT_NOT_SUPPORTED"; }
+    if (result == -1000000000) { ret "VK_ERROR_SURFACE_LOST_KHR"; }
+    if (result == -1000001004) { ret "VK_ERROR_OUT_OF_DATE_KHR"; }
+    ret "an unlisted VkResult";
+}
+
+fun vk_call_message(call: VkCall) str {
+    if (sel call.create_instance)              { ret "vkCreateInstance failed"; }
+    if (sel call.create_device)                { ret "vkCreateDevice failed"; }
+    if (sel call.create_command_pool)          { ret "vkCreateCommandPool failed"; }
+    if (sel call.allocate_command_buffers)     { ret "vkAllocateCommandBuffers failed"; }
+    if (sel call.begin_command_buffer)         { ret "vkBeginCommandBuffer failed"; }
+    if (sel call.end_command_buffer)           { ret "vkEndCommandBuffer failed"; }
+    if (sel call.queue_submit)                 { ret "vkQueueSubmit failed"; }
+    if (sel call.queue_present)                { ret "vkQueuePresentKHR failed"; }
+    if (sel call.acquire_next_image)           { ret "vkAcquireNextImageKHR failed"; }
+    if (sel call.wait_for_fences)              { ret "vkWaitForFences failed"; }
+    if (sel call.reset_fences)                 { ret "vkResetFences failed"; }
+    if (sel call.create_semaphore)             { ret "vkCreateSemaphore failed"; }
+    if (sel call.create_fence)                 { ret "vkCreateFence failed"; }
+    if (sel call.create_framebuffer)           { ret "vkCreateFramebuffer failed"; }
+    if (sel call.create_render_pass)           { ret "vkCreateRenderPass failed"; }
+    if (sel call.create_buffer)                { ret "vkCreateBuffer failed"; }
+    if (sel call.allocate_memory)              { ret "vkAllocateMemory failed"; }
+    if (sel call.bind_buffer_memory)           { ret "vkBindBufferMemory failed"; }
+    if (sel call.bind_image_memory)            { ret "vkBindImageMemory failed"; }
+    if (sel call.map_memory)                   { ret "vkMapMemory failed"; }
+    if (sel call.create_image)                 { ret "vkCreateImage failed"; }
+    if (sel call.create_image_view)            { ret "vkCreateImageView failed"; }
+    if (sel call.create_sampler)               { ret "vkCreateSampler failed"; }
+    if (sel call.create_swapchain)             { ret "vkCreateSwapchainKHR failed"; }
+    if (sel call.get_swapchain_images)         { ret "vkGetSwapchainImagesKHR failed"; }
+    if (sel call.get_surface_capabilities)     { ret "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed"; }
+    if (sel call.get_surface_formats)          { ret "vkGetPhysicalDeviceSurfaceFormatsKHR failed"; }
+    if (sel call.enumerate_physical_devices)   { ret "vkEnumeratePhysicalDevices failed"; }
+    if (sel call.create_shader_module)         { ret "vkCreateShaderModule failed"; }
+    if (sel call.create_descriptor_set_layout) { ret "vkCreateDescriptorSetLayout failed"; }
+    if (sel call.create_descriptor_pool)       { ret "vkCreateDescriptorPool failed"; }
+    if (sel call.allocate_descriptor_sets)     { ret "vkAllocateDescriptorSets failed"; }
+    if (sel call.create_pipeline_layout)       { ret "vkCreatePipelineLayout failed"; }
+    ret "vkCreateGraphicsPipelines failed";
+}
+
+fun loader_message(e: LoaderError) str {
+    if (sel e.unavailable)      { ret "no Vulkan loader or ICD available"; }
+    if (sel e.global)           { ret "could not resolve global Vulkan commands"; }
+    if (sel e.instance)         { ret "could not resolve instance Vulkan commands"; }
+    if (sel e.device_proc_addr) { ret "the loader does not provide vkGetDeviceProcAddr"; }
+    ret "could not resolve device Vulkan commands";
+}
+
+fun device_message(e: DeviceError) str {
+    if (sel e.no_instance_extensions) { ret "GLFW reported no required instance extensions"; }
+    if (sel e.instance_extensions)    { ret "GLFW requires more instance extensions than boom can enable"; }
+    if (sel e.surface)                { ret "could not create a window surface"; }
+    if (sel e.no_surface_format)      { ret "surface reported no formats"; }
+    if (sel e.no_physical_device)     { ret "no Vulkan physical devices"; }
+    if (sel e.no_capable_device)      { ret "no device can both render and present to this surface"; }
+    if (sel e.no_memory_type)         { ret "no memory type satisfies the requested properties"; }
+    if (sel e.no_present_mode)        { ret "surface reported no present modes"; }
+    ret "surface extent is zero; window is minimized";
+}
+
+fun stage_message(e: Stage) str {
+    if (sel e.window)    { ret "the window is not open"; }
+    if (sel e.device)    { ret "Vulkan device is not initialized"; }
+    if (sel e.upload)    { ret "the upload context is not initialized"; }
+    if (sel e.swapchain) { ret "the swapchain is not initialized"; }
+    if (sel e.frame)     { ret "frame loop is not initialized"; }
+    ret "the renderer is not initialized";
+}
+
+fun capacity_message(e: Capacity) str {
+    if (sel e.assets)    { ret "asset store is full"; }
+    if (sel e.pipelines) { ret "the pipeline cache is full"; }
+    if (sel e.palettes)  { ret "the joint palette ring is full"; }
+    if (sel e.storage)   { ret "the frame storage buffer cannot grow further"; }
+    if (sel e.stream)    { ret "the per-frame vertex arena cannot grow further"; }
+    if (sel e.mesh_uploads)   { ret "the runtime mesh upload queue is full"; }
+    if (sel e.retired_meshes) { ret "too many meshes are waiting to be released"; }
+    ret "the descriptor slot ring is full";
+}
+
+fun buffer_message(e: BufferError) str {
+    if (sel e.empty) { ret "cannot create a zero-sized buffer"; }
+    ret "a write or copy exceeds the buffer";
+}
+
+fun image_message(e: ImageError) str {
+    if (sel e.empty)           { ret "cannot create a zero-sized image"; }
+    if (sel e.not_created)     { ret "the image was never created"; }
+    if (sel e.transition)      { ret "unhandled image layout transition"; }
+    if (sel e.readback_format) { ret "this image format does not support raw readback"; }
+    ret "the destination is smaller than the image";
+}
+
+fun shader_message(e: ShaderError) str {
+    if (sel e.missing_stage) { ret "a shader needs both a vertex and a fragment module"; }
+    if (sel e.spirv_words)   { ret "a shader module must be a whole number of SPIR-V words"; }
+    if (sel e.undeclared)    { ret "the shader was never declared"; }
+    ret "the shader has built as many pipelines as it may hold";
+}
+
+fun pipeline_message(e: PipelineError) str {
+    if (sel e.no_bindings) { ret "a descriptor set layout with no bindings"; }
+    ret "vertex format has an attribute Vulkan cannot express";
+}
+
+fun target_message(e: TargetError) str {
+    if (sel e.dimensions)         { ret "render target dimensions must be positive"; }
+    if (sel e.format_unsupported) { ret "render target format is not supported by this device"; }
+    if (sel e.attachment)         { ret "render target attachment index is out of range"; }
+    ret "render target readback supports only four-byte colour formats";
+}
+
+fun renderer_message(e: RendererError) str {
+    if (sel e.no_mesh_upload) { ret "there is no mesh upload to finish"; }
+    if (sel e.region)         { ret "the pass region lies outside the pass"; }
+    if (sel e.user_block)     { ret "the uniform block is empty or larger than a slot's user region"; }
+    ret "no frame is open";
+}
+
+test "error: a Vulkan failure keeps its call and result" {
+    val e: Error = vk_failed(VkCall.create_buffer{}, -2);
+    if (!sel e.vulkan) { ret 1; }
+    if (!sel e.vulkan.call.create_buffer) { ret 2; }
+    if (e.vulkan.result != -2) { ret 3; }
+    ret 0;
+}
+
+test "error: the driver-missing result is named" {
+    val m: str = vk_result_message(-9);
+    if (m[0] != 'V' || m[9] != 'I') { ret 1; }
+    ret 0;
+}
+
+test "error: every case renders a message" {
+    val m: str = error_message(Error.full{Capacity.pipelines{}});
+    if (m[0] != 't') { ret 1; }
+    val v: str = error_message(vk_failed(VkCall.queue_present{}, -4));
+    if (v[0] != 'v') { ret 2; }
     ret 0;
 }

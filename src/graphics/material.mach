@@ -26,15 +26,32 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
 use std.types.string.str_equals;
+use std.types.option.opt;
+use std.types.error.err;
 
 # the most texture bindings a material carries
 pub val MAX_TEXTURES: i32 = 4;
 
 # How a material binding samples its texture between texels.
-pub def TextureFilter: u8;
+# ---
+# nearest: point sampling
+# linear:  bilinear sampling
+pub tag TextureFilter: u8 {
+    nearest;
+    linear;
+}
 
-pub val TEXTURE_NEAREST: TextureFilter = 0;
-pub val TEXTURE_LINEAR:  TextureFilter = 1;
+# why a texture binding was refused
+# ---
+# full: the material already holds MAX_TEXTURES bindings
+pub tag MaterialError: u8 {
+    full;
+}
+
+# a one-line description of a material failure
+pub fun material_error_message(e: MaterialError) str {
+    ret "the material already holds MAX_TEXTURES texture bindings";
+}
 
 # one named texture binding within a material
 # ---
@@ -78,15 +95,15 @@ pub fun material_set_color(m: *Material, color: Vec4) {
 
 # add a named texture binding
 #
-# returns false without modifying the material when it already holds
-# MAX_TEXTURES bindings.
+# refuses without modifying the material when it already holds MAX_TEXTURES
+# bindings.
 # ---
 # m:       material to modify
 # name:    the sampler uniform name
 # texture: the texture to bind, owned by the game
-# ret:     true if the binding was added, false if the material is full
-pub fun material_add_texture(m: *Material, name: str, texture: *Texture) bool {
-    ret material_add_texture_filtered(m, name, texture, TEXTURE_NEAREST);
+# ret:     ok, or full when the material has no free binding
+pub fun material_add_texture(m: *Material, name: str, texture: *Texture) err[MaterialError] {
+    ret material_add_texture_filtered(m, name, texture, TextureFilter.nearest{});
 }
 
 # Add a named texture binding with an explicit sampling filter.
@@ -94,29 +111,29 @@ pub fun material_add_texture(m: *Material, name: str, texture: *Texture) bool {
 # Filtering belongs to a binding rather than an image: the same rendered target
 # may be inspected with nearest sampling and composited with linear sampling.
 pub fun material_add_texture_filtered(m: *Material, name: str, texture: *Texture,
-                                      filter: TextureFilter) bool {
+                                      filter: TextureFilter) err[MaterialError] {
     if (m.texture_count >= MAX_TEXTURES) {
-        ret false;
+        ret err[MaterialError].err{MaterialError.full{}};
     }
     m.textures[m.texture_count] = MaterialTexture{name: name, texture: texture, filter: filter};
     m.texture_count = m.texture_count + 1;
-    ret true;
+    ret err[MaterialError].ok{};
 }
 
-# the texture a draw samples, or nil when the material has none
+# the texture a draw samples, none when the material has none
 #
 # there is no bind step: a texture reaches a shader by being written into
 # a descriptor set, which the renderer does per draw. this names which
 # texture that write should use.
 # ---
 # m:   the material
-# ret: the first bound texture, or nil
-pub fun material_texture(m: *Material) *Texture {
-    if (m.texture_count == 0) { ret nil; }
-    ret m.textures[0].texture;
+# ret: the first bound texture, or none
+pub fun material_texture(m: *Material) opt[*Texture] {
+    if (m.texture_count == 0) { ret opt[*Texture].none{}; }
+    ret opt[*Texture].some{m.textures[0].texture};
 }
 
-# A named texture binding, or nil.
+# A named texture binding, or none.
 #
 # WHY THE SLOTS EXIST WHEN THE BUILT-IN PROGRAM READS ONE. boom's own mesh and
 # lit programs sample a single albedo texture, which is what material_texture
@@ -133,16 +150,27 @@ pub fun material_texture(m: *Material) *Texture {
 # ---
 # m:    the material
 # name: the binding to look up, matched exactly
-# ret:  the texture, or nil when the material has no such binding
-pub fun material_texture_named(m: *Material, name: str) *Texture {
+# ret:  the texture, or none when the material has no such binding
+pub fun material_texture_named(m: *Material, name: str) opt[*Texture] {
     var i: i32 = 0;
     for (i < m.texture_count) {
         if (str_equals(m.textures[i].name, name)) {
-            ret m.textures[i].texture;
+            ret opt[*Texture].some{m.textures[i].texture};
         }
         i = i + 1;
     }
-    ret nil;
+    ret opt[*Texture].none{};
+}
+
+# whether a binding was accepted
+fun bound(r: err[MaterialError]) bool {
+    ret sel r.ok;
+}
+
+# whether a lookup found exactly this texture, or found none when expected is nil
+fun names(found: opt[*Texture], expected: *Texture) bool {
+    if (expected == nil) { ret sel found.none; }
+    ret sel found.some && found.some == expected;
 }
 
 test "material: base color defaults to white" {
@@ -157,11 +185,14 @@ test "material: texture bindings fill then reject overflow" {
     var m: Material = material();
     var i: i32 = 0;
     for (i < MAX_TEXTURES) {
-        if (!material_add_texture(?m, "u_texture", ?t)) { ret 1; }
+        if (!bound(material_add_texture(?m, "u_texture", ?t))) { ret 1; }
         i = i + 1;
     }
     if (m.texture_count != MAX_TEXTURES) { ret 2; }
-    if (material_add_texture(?m, "u_texture", ?t)) { ret 3; }
+    val over: err[MaterialError] = material_add_texture(?m, "u_texture", ?t);
+    if (!sel over.err) { ret 3; }
+    if (!sel over.err.full) { ret 4; }
+    if (m.texture_count != MAX_TEXTURES) { ret 5; }
     ret 0;
 }
 
@@ -169,22 +200,22 @@ test "material: texture bindings default to nearest and may request linear" {
     var a: Texture;
     var b: Texture;
     var m: Material = material();
-    if (!material_add_texture(?m, "albedo", ?a)) { ret 1; }
-    if (!material_add_texture_filtered(?m, "field", ?b, TEXTURE_LINEAR)) { ret 2; }
-    if (m.textures[0].filter != TEXTURE_NEAREST) { ret 3; }
-    if (m.textures[1].filter != TEXTURE_LINEAR)  { ret 4; }
+    if (!bound(material_add_texture(?m, "albedo", ?a))) { ret 1; }
+    if (!bound(material_add_texture_filtered(?m, "field", ?b, TextureFilter.linear{}))) { ret 2; }
+    if (!sel m.textures[0].filter.nearest) { ret 3; }
+    if (!sel m.textures[1].filter.linear)  { ret 4; }
     ret 0;
 }
 
 test "material: an untextured material names no texture" {
     var m: Material = material();
-    # nil rather than a dangling first entry, so the renderer writes the
+    # none rather than a dangling first entry, so the renderer writes the
     # uniform binding alone instead of a sampler pointing at nothing.
-    if (material_texture(?m) != nil) { ret 1; }
+    if (!names(material_texture(?m), nil)) { ret 1; }
 
     var t: Texture;
-    material_add_texture(?m, "base", ?t);
-    if (material_texture(?m) != ?t) { ret 2; }
+    if (!bound(material_add_texture(?m, "base", ?t))) { ret 2; }
+    if (!names(material_texture(?m), ?t)) { ret 3; }
     ret 0;
 }
 
@@ -196,14 +227,14 @@ test "material: a named lookup finds the binding it names" {
     var albedo: Texture;
     var normal: Texture;
     var m: Material = material();
-    if (!material_add_texture(?m, "albedo", ?albedo)) { ret 1; }
-    if (!material_add_texture(?m, "normal", ?normal)) { ret 2; }
+    if (!bound(material_add_texture(?m, "albedo", ?albedo))) { ret 1; }
+    if (!bound(material_add_texture(?m, "normal", ?normal))) { ret 2; }
 
-    if (material_texture_named(?m, "albedo") != ?albedo) { ret 3; }
-    if (material_texture_named(?m, "normal") != ?normal) { ret 4; }
+    if (!names(material_texture_named(?m, "albedo"), ?albedo)) { ret 3; }
+    if (!names(material_texture_named(?m, "normal"), ?normal)) { ret 4; }
     # A binding the material does not carry is absent, not slot zero.
-    if (material_texture_named(?m, "emissive") != nil)   { ret 5; }
+    if (!names(material_texture_named(?m, "emissive"), nil))   { ret 5; }
     # And the unnamed accessor the built-in programs use is still the first.
-    if (material_texture(?m) != ?albedo)                 { ret 6; }
+    if (!names(material_texture(?m), ?albedo))                 { ret 6; }
     ret 0;
 }

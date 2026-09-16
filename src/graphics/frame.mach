@@ -32,13 +32,13 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
+use std.types.result.res;
+use std.types.error.err;
 use vk;
 use boom.graphics.error.Error;
-use boom.graphics.error.error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use boom.graphics.swapchain.Swapchain;
 use boom.graphics.swapchain.MAX_IMAGES;
@@ -103,16 +103,15 @@ pub rec FrameLoop {
 }
 
 # Create the render pass, pool, framebuffers, and per-frame objects.
-pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     f.ready   = false;
     f.current = 0;
 
-    if (!v.ready || !s.ready) {
-        ret err[bool, Error](error("device or swapchain is not initialized"));
-    }
+    if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
+    if (!s.ready) { ret err[Error].err{Error.uninitialized{Stage.swapchain{}}}; }
 
-    val pr: Result[bool, Error] = make_pass(f, v, s);
-    if (is_err[bool, Error](pr)) { ret pr; }
+    val pr: err[Error] = make_pass(f, v, s);
+    if (sel pr.err) { ret pr; }
 
     var pci: vk.CommandPoolCreateInfo;
     pci.sType            = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -122,12 +121,13 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     # whole pool, which would clobber the other in-flight frame.
     pci.flags            = vk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     pci.queueFamilyIndex = v.graphics_family;
-    if (vk.vkCreateCommandPool(v.device, ?pci, nil, ?f.pool) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateCommandPool failed"));
+    val pooled: i32 = vk.vkCreateCommandPool(v.device, ?pci, nil, ?f.pool);
+    if (pooled != vk.SUCCESS) {
+        ret err[Error].err{vk_failed(VkCall.create_command_pool{}, pooled)};
     }
 
-    val fr: Result[bool, Error] = make_framebuffers(f, v, s);
-    if (is_err[bool, Error](fr)) { ret fr; }
+    val fr: err[Error] = make_framebuffers(f, v, s);
+    if (sel fr.err) { ret fr; }
 
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
@@ -137,16 +137,18 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
         abi.commandPool        = f.pool;
         abi.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
         abi.commandBufferCount = 1;
-        if (vk.vkAllocateCommandBuffers(v.device, ?abi, ?f.frames[i].command) != vk.SUCCESS) {
-            ret err[bool, Error](error("vkAllocateCommandBuffers failed"));
+        val allocated: i32 = vk.vkAllocateCommandBuffers(v.device, ?abi, ?f.frames[i].command);
+        if (allocated != vk.SUCCESS) {
+            ret err[Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
         }
 
         var sci: vk.SemaphoreCreateInfo;
         sci.sType = vk.STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         sci.pNext = nil;
         sci.flags = 0;
-        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.frames[i].available) != vk.SUCCESS) {
-            ret err[bool, Error](error("vkCreateSemaphore failed"));
+        val semaphore: i32 = vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.frames[i].available);
+        if (semaphore != vk.SUCCESS) {
+            ret err[Error].err{vk_failed(VkCall.create_semaphore{}, semaphore)};
         }
 
         var fci: vk.FenceCreateInfo;
@@ -156,8 +158,9 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
         # Unsignalled, the first frame would block forever on a fence nothing
         # has submitted work against.
         fci.flags = vk.FENCE_CREATE_SIGNALED_BIT;
-        if (vk.vkCreateFence(v.device, ?fci, nil, ?f.frames[i].in_flight) != vk.SUCCESS) {
-            ret err[bool, Error](error("vkCreateFence failed"));
+        val fence: i32 = vk.vkCreateFence(v.device, ?fci, nil, ?f.frames[i].in_flight);
+        if (fence != vk.SUCCESS) {
+            ret err[Error].err{vk_failed(VkCall.create_fence{}, fence)};
         }
         i = i + 1;
     }
@@ -171,14 +174,15 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
     sci.flags = 0;
     var k: usize = 0;
     for (k < MAX_IMAGES) {
-        if (vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.finished[k]) != vk.SUCCESS) {
-            ret err[bool, Error](error("vkCreateSemaphore failed for a swapchain image"));
+        val finished: i32 = vk.vkCreateSemaphore(v.device, ?sci, nil, ?f.finished[k]);
+        if (finished != vk.SUCCESS) {
+            ret err[Error].err{vk_failed(VkCall.create_semaphore{}, finished)};
         }
         k = k + 1;
     }
 
     f.ready = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # The window's two render passes.
@@ -197,10 +201,10 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
 # which is the only place that does know. Declaring it on the clearing pass, as
 # this did, made the resume pass illegal on every frame that used it: its
 # initialLayout said colour-attachment-optimal and the image was in present-src.
-fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     val clearing: PassOptions = pass_clearing(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    val cr: Result[bool, Error] = pass_create(v, ?clearing, ?f.pass);
-    if (is_err[bool, Error](cr)) { ret cr; }
+    val cr: err[Error] = pass_create(v, ?clearing, ?f.pass);
+    if (sel cr.err) { ret cr; }
 
     # The same attachments, preserved rather than cleared. A pass that renders
     # into an offscreen target has to end the window's render pass and begin the
@@ -218,13 +222,12 @@ fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
 # Sharing one depth buffer between them is a write-write hazard with no
 # synchronization expressing it, which shows as geometry from one frame
 # occluding another's and only under load.
-fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     f.fb_count = 0;
     var i: u32 = 0;
     for (i < s.count) {
-        val dr: Result[bool, Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
-        if (is_err[bool, Error](dr)) {
-            depth_attachment_dnit(?f.depths[i], v);
+        val dr: err[Error] = depth_attachment_init(?f.depths[i], v, s.width::i32, s.height::i32);
+        if (sel dr.err) {
             frame_release_targets(f, v);
             ret dr;
         }
@@ -242,44 +245,52 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] 
         fci.width           = s.width;
         fci.height          = s.height;
         fci.layers          = 1;
-        if (vk.vkCreateFramebuffer(v.device, ?fci, nil, ?f.framebuffers[i]) != vk.SUCCESS) {
+        val framed: i32 = vk.vkCreateFramebuffer(v.device, ?fci, nil, ?f.framebuffers[i]);
+        if (framed != vk.SUCCESS) {
             depth_attachment_dnit(?f.depths[i], v);
             frame_release_targets(f, v);
-            ret err[bool, Error](error("vkCreateFramebuffer failed"));
+            ret err[Error].err{vk_failed(VkCall.create_framebuffer{}, framed)};
         }
         f.fb_count = f.fb_count + 1;
         i = i + 1;
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Begin a frame: wait for its fence, acquire an image, and start recording.
 #
-# Returns false when the swapchain is out of date, which is not an error: the
-# caller rebuilds and tries again next frame. Treating it as a failure would
-# make every window resize look like a crash.
-pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bool, Error] {
-    @out_ok = false;
-    if (!f.ready) { ret err[bool, Error](error("frame loop is not initialized")); }
+# False when the swapchain is out of date, which is not an error: the caller
+# rebuilds and tries again next frame. Treating it as a failure would make every
+# window resize look like a crash.
+pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
+    if (!f.ready) { ret res[bool, Error].err{Error.uninitialized{Stage.frame{}}}; }
 
     val i: usize = f.current;
 
     # Bounds the CPU's lead over the GPU. Without it frames queue without limit.
-    vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
+    # A timeout proceeds as it always has; only a failure such as a lost device
+    # is reported.
+    val waited: i32 = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
+    if (waited < 0) {
+        ret res[bool, Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
+    }
 
     var index: u32 = 0;
     val ar: i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
                                            f.frames[i].available, nil, ?index);
-    if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret ok[bool, Error](true); }
+    if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret res[bool, Error].ok{false}; }
     if (ar != vk.SUCCESS && ar != vk.SUBOPTIMAL_KHR) {
-        ret err[bool, Error](error("vkAcquireNextImageKHR failed"));
+        ret res[bool, Error].err{vk_failed(VkCall.acquire_next_image{}, ar)};
     }
     f.image_index = index;
 
     # Reset only after the acquire succeeds. Resetting first would leave the
     # fence unsignalled with no submission to signal it, deadlocking the next
     # wait when the swapchain is out of date.
-    vk.vkResetFences(v.device, 1, ?f.frames[i].in_flight);
+    val reset: i32 = vk.vkResetFences(v.device, 1, ?f.frames[i].in_flight);
+    if (reset != vk.SUCCESS) {
+        ret res[bool, Error].err{vk_failed(VkCall.reset_fences{}, reset)};
+    }
     vk.vkResetCommandBuffer(f.frames[i].command, 0);
 
     var bi: vk.CommandBufferBeginInfo;
@@ -287,14 +298,13 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[
     bi.pNext            = nil;
     bi.flags            = 0;
     bi.pInheritanceInfo = nil;
-    if (vk.vkBeginCommandBuffer(f.frames[i].command, ?bi) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkBeginCommandBuffer failed"));
+    val begun: i32 = vk.vkBeginCommandBuffer(f.frames[i].command, ?bi);
+    if (begun != vk.SUCCESS) {
+        ret res[bool, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
     }
 
     frame_begin_pass(f, s, 0.0, 0.0, 0.0, 1.0);
-
-    @out_ok = true;
-    ret ok[bool, Error](true);
+    ret res[bool, Error].ok{true};
 }
 
 # Begin the window render pass, clearing to a colour.
@@ -353,10 +363,9 @@ pub fun frame_resume_pass(f: *FrameLoop, s: *Swapchain) {
 
 # End the render pass, submit, and present.
 #
-# Returns false in out_ok when the swapchain needs rebuilding.
-pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bool, Error] {
-    @out_ok = false;
-    if (!f.ready) { ret err[bool, Error](error("frame loop is not initialized")); }
+# False when the swapchain needs rebuilding.
+pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
+    if (!f.ready) { ret res[bool, Error].err{Error.uninitialized{Stage.frame{}}}; }
 
     val i: usize = f.current;
     vk.vkCmdEndRenderPass(f.frames[i].command);
@@ -387,8 +396,9 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
                             vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                             0, 0, nil, 0, nil, 1, ?b);
 
-    if (vk.vkEndCommandBuffer(f.frames[i].command) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkEndCommandBuffer failed"));
+    val ended: i32 = vk.vkEndCommandBuffer(f.frames[i].command);
+    if (ended != vk.SUCCESS) {
+        ret res[bool, Error].err{vk_failed(VkCall.end_command_buffer{}, ended)};
     }
 
     var wait_stage: u32 = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -403,8 +413,9 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = ?f.finished[f.image_index];
 
-    if (vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkQueueSubmit failed"));
+    val submitted: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight);
+    if (submitted != vk.SUCCESS) {
+        ret res[bool, Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
     }
 
     var index: u32 = f.image_index;
@@ -426,12 +437,12 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain, out_ok: *bool) Result[bo
     f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
 
     if (prr == vk.ERROR_OUT_OF_DATE_KHR || prr == vk.SUBOPTIMAL_KHR) {
-        ret ok[bool, Error](true);
+        ret res[bool, Error].ok{false};
     }
-    if (prr != vk.SUCCESS) { ret err[bool, Error](error("vkQueuePresentKHR failed")); }
-
-    @out_ok = true;
-    ret ok[bool, Error](true);
+    if (prr != vk.SUCCESS) {
+        ret res[bool, Error].err{vk_failed(VkCall.queue_present{}, prr)};
+    }
+    ret res[bool, Error].ok{true};
 }
 
 # Destroy the framebuffers and render pass, keeping the pool and frames.
@@ -448,7 +459,7 @@ pub fun frame_release_targets(f: *FrameLoop, v: *Vk) {
 }
 
 # Rebuild the framebuffers against a resized swapchain.
-pub fun frame_rebuild_targets(f: *FrameLoop, v: *Vk, s: *Swapchain) Result[bool, Error] {
+pub fun frame_rebuild_targets(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     frame_release_targets(f, v);
     ret make_framebuffers(f, v, s);
 }

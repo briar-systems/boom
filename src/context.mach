@@ -13,10 +13,10 @@
 use boom.window.Window;
 use boom.window.window_open_mode;
 use boom.window.window_close;
-use boom.window.window_is_valid;
 use boom.window.window_set_event_sink;
 use boom.window.WindowMode;
-use boom.window.window_mode_is_valid;
+use boom.window.WindowError;
+use boom.window.window_error_message;
 use boom.clock.Clock;
 use boom.clock.clock_new;
 use boom.timestep.Timestep;
@@ -30,6 +30,9 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
+use std.types.result.res;
+use std.types.error.err;
+use io_error: std.io.error;
 
 # the parameters context_init brings the engine up with
 # ---
@@ -73,8 +76,28 @@ pub rec Config {
 # cfg: configuration to validate
 # ret: true when context_init can use the timing values safely
 pub fun config_is_valid(cfg: Config) bool {
-    ret cfg.fixed_dt > 0 && cfg.max_frame >= cfg.fixed_dt && cfg.frame_dt >= 0
-        && window_mode_is_valid(cfg.mode);
+    ret cfg.fixed_dt > 0 && cfg.max_frame >= cfg.fixed_dt && cfg.frame_dt >= 0;
+}
+
+# why the engine could not be brought up
+# ---
+# config: the timing configuration cannot drive the frame loop
+# window: the window could not be opened
+# clock:  the monotonic clock could not be read
+pub tag ContextError: u8 {
+    config;
+    window: WindowError;
+    clock:  io_error.Error;
+}
+
+# a one-line description of a bring-up failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun context_error_message(e: ContextError) str {
+    if (sel e.config) { ret "invalid engine timing configuration"; }
+    if (sel e.window) { ret window_error_message(e.window); }
+    ret "could not read the monotonic clock";
 }
 
 # the live state of a running engine
@@ -110,37 +133,38 @@ pub rec Context {
 #
 # opens the window, attaches the input queue as its event
 # sink, starts the clock, and arms the fixed-timestep accumulator.
-# returns false if the timing configuration is invalid or the window could
-# not be opened, in which case context_shutdown must not be called.
+# on a failure nothing is left open, and context_shutdown must not be called.
 # ---
 # ctx: context to initialize
 # cfg: window and timestep parameters
-# ret: true on success, false if validation or window creation failed
-pub fun context_init(ctx: *Context, cfg: Config) bool {
+# ret: ok, or why the engine could not be brought up
+pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
     ctx.alpha    = 0.0;
     ctx.running  = false;
     ctx.status   = 1;
     ctx.user     = nil;
     ctx.frame_dt = cfg.frame_dt;
-    if (!config_is_valid(cfg)) { ret false; }
+    if (!config_is_valid(cfg)) { ret err[ContextError].err{ContextError.config{}}; }
+
+    val started: res[Clock, io_error.Error] = clock_new();
+    if (sel started.err) { ret err[ContextError].err{ContextError.clock{started.err}}; }
 
     ctx.events = queue_new();
     ctx.input   = inp.input_new();
-    ctx.window = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
-    if (!window_is_valid(?ctx.window)) {
-        ret false;
-    }
+    val opened: res[Window, WindowError] = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
+    if (sel opened.err) { ret err[ContextError].err{ContextError.window{opened.err}}; }
+    ctx.window = opened.ok;
     # the sink lives in the Context so it outlives the window, which the
     # platform callbacks require: they reach it through the GLFW user pointer
     # long after context_init has returned.
     ctx.sink.queue = ?ctx.events;
     ctx.sink.input = ?ctx.input;
     window_set_event_sink(?ctx.window, ?ctx.sink);
-    ctx.clock   = clock_new();
+    ctx.clock   = started.ok;
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.running = true;
     ctx.status  = 0;
-    ret true;
+    ret err[ContextError].ok{};
 }
 
 # request the run loop to exit after the current callback
@@ -246,7 +270,7 @@ test "context: timing configuration rejects invalid loops" {
         fixed_dt:  10,
         max_frame: 20,
         frame_dt:  0,
-        mode:      window.WINDOW_MODE_WINDOWED,
+        mode:      WindowMode.windowed{},
     };
     if (!config_is_valid(base)) { ret 1; }
 

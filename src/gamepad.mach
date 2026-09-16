@@ -20,6 +20,8 @@ use std.types.bool.true;
 use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
+use std.types.option.opt;
+use std.types.error.err;
 use glfw.glfw;
 use glfw.c;
 use inp: boom.input;
@@ -30,12 +32,12 @@ use inp: boom.input;
 pub fun gamepad_poll(i: *inp.Input) {
     var jid: i32 = 0;
     for (jid::usize < inp.MAX_PADS) {
-        var st: c.Gamepadstate;
-        val ok: bool = glfw.joystick_present(jid)
-                       && glfw.joystick_is_gamepad(jid)
-                       && glfw.get_gamepad_state(jid, ?st);
-        if (ok) {
-            inp.input_pad_poll(i, jid::usize, true, ?st.buttons[0], ?st.axes[0]);
+        var state: opt[c.Gamepadstate] = opt[c.Gamepadstate].none{};
+        if (glfw.joystick_present(jid) && glfw.joystick_is_gamepad(jid)) {
+            state = glfw.get_gamepad_state(jid);
+        }
+        if (sel state.some) {
+            inp.input_pad_poll(i, jid::usize, true, ?state.some.buttons[0], ?state.some.axes[0]);
         }
         or {
             inp.input_pad_poll(i, jid::usize, false, nil, nil);
@@ -52,13 +54,13 @@ pub fun gamepad_poll(i: *inp.Input) {
 # GLFW upgrade.
 # ---
 # text: SDL mapping lines
-# ret:  whether the mappings parsed
-pub fun gamepad_add_mappings(text: str) bool {
+# ret:  ok, or why glfw refused the mappings
+pub fun gamepad_add_mappings(text: str) err[glfw.Error] {
     ret glfw.update_gamepad_mappings(text);
 }
 
-# The mapped name of a pad, or nil when it is absent or unmapped
-pub fun gamepad_name(pad: usize) str {
-    if (pad >= inp.MAX_PADS) { ret nil; }
+# The mapped name of a pad, or none when it is absent or unmapped
+pub fun gamepad_name(pad: usize) opt[str] {
+    if (pad >= inp.MAX_PADS) { ret opt[str].none{}; }
     ret glfw.get_gamepad_name(pad::i32);
 }

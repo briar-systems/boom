@@ -16,8 +16,8 @@
 # sources into a frame is what render targets and passes are for; it is not a
 # reason to have two renderers.
 #
-# NO SHADERS HERE. The renderer's programs are compiled from Mach to SPIR-V at
-# build time and embedded, so a game selects a pipeline by the kind of pass it
+# NO SHADERS HERE. The renderer's programs are compiled from Mach to SPIR-V as
+# boom's shader artifacts and embedded, so a game selects a pipeline by the kind of pass it
 # begins rather than by handing over source. Everything goes through boom
 # handles: the game never imports vk, mach-glfw, mach-image, or mach-gltf. Run
 # it from this directory so the relative asset paths resolve. Geometry math
@@ -31,17 +31,22 @@ use boom.context.context_init;
 use boom.context.context_set_user;
 use boom.context.context_user;
 use boom.context.context_shutdown;
+use boom.context.context_fail;
+use boom.context.ContextError;
+use boom.context.context_error_message;
 use boom.engine.run;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.window.WindowMode;
 use boom.app.App;
 use input: boom.input;
 use gfx: boom.graphics;
 use gm:  boom.math;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
@@ -79,10 +84,10 @@ fun on_init(ctx: *Context) {
     val w: i32 = ctx.window.width;
     val h: i32 = ctx.window.height;
 
-    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
-    if (is_err[bool, gfx.Error](ri)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
-        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+    val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel ri.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(ri.err));
+        context_fail(ctx, 1);
         ret;
     }
 
@@ -91,32 +96,46 @@ fun on_init(ctx: *Context) {
     # ambient state a GL loader could rely on.
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
-    val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "assets/cube.glb");
-    if (is_err[gfx.Mesh, gfx.Error](loaded)) {
-        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](loaded);
-        print.eprintlnf("mesh load error: {}", gfx.error_msg(?e));
+    val loaded: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "assets/cube.glb");
+    if (sel loaded.err) {
+        print.eprintlnf("mesh load error: {}", gfx.error_message(loaded.err));
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
         ret;
     }
-    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](loaded);
+    g.mesh = loaded.ok;
 
-    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load(d, "assets/checker.qoi");
-    if (is_err[gfx.Texture, gfx.Error](tex)) {
-        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tex);
-        print.eprintlnf("texture load error: {}", gfx.error_msg(?e));
+    val tex: res[gfx.Texture, gfx.Error] = gfx.texture_load(d, "assets/checker.qoi");
+    if (sel tex.err) {
+        print.eprintlnf("texture load error: {}", gfx.error_message(tex.err));
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
         ret;
     }
-    g.texture = unwrap_ok[gfx.Texture, gfx.Error](tex);
+    g.texture = tex.ok;
 
     g.material = gfx.material();
-    gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
-
-    val st: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, w, h);
-    if (is_err[gfx.RenderTarget, gfx.Error](st)) {
-        var e: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](st);
-        print.eprintlnf("render target error: {}", gfx.error_msg(?e));
+    val added: err[gfx.MaterialError] = gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
+    if (sel added.err) {
+        print.eprintlnf("material error: {}", gfx.material_error_message(added.err));
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
         ret;
     }
-    g.scene = unwrap_ok[gfx.RenderTarget, gfx.Error](st);
+
+    val st: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, w, h);
+    if (sel st.err) {
+        print.eprintlnf("render target error: {}", gfx.error_message(st.err));
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.scene = st.ok;
 
     val aspect: f32 = w::f32 / h::f32;
     g.camera = gfx.camera_perspective(
@@ -176,22 +195,20 @@ fun on_draw(ctx: *Context) {
     # A frame that did not open is a swapchain that went out of date and was
     # rebuilt, which happens on every resize. Skipping the frame is the
     # correct response; drawing into it is not possible.
-    var opened: bool = false;
-    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
-    if (is_err[bool, gfx.Error](br)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
-        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
         ret;
     }
-    if (!opened) {
+    if (!br.ok) {
         ret;
     }
 
     # Scene pass: draw the 3D cube into the offscreen target.
     var scene_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
-    scene_desc.target      = ?g.scene;
-    scene_desc.clear       = 1;
-    scene_desc.clear_color = gm.vec4(0.05, 0.06, 0.09, 1.0);
+    scene_desc.target = opt[*gfx.RenderTarget].some{?g.scene};
+    scene_desc.clear  = opt[gm.Vec4].some{gm.vec4(0.05, 0.06, 0.09, 1.0)};
     var scene_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?scene_desc);
     gfx.pass_draw_material(?scene_pass, ?g.mesh, ?g.material, ?g.transform);
     gfx.pass_end(?scene_pass);
@@ -202,7 +219,7 @@ fun on_draw(ctx: *Context) {
     var post_desc: gfx.PassDesc = gfx.pass_overlay();
     var post_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?post_desc);
     gfx.pass_draw_sprite(?post_pass,
-                         gfx.render_target_texture(?g.scene),
+                         opt[*gfx.Texture].some{gfx.render_target_texture(?g.scene)},
                          gfx.rect(0.0, 0.0, w, h),
                          gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?post_pass);
@@ -210,15 +227,15 @@ fun on_draw(ctx: *Context) {
     var hud_desc: gfx.PassDesc = gfx.pass_overlay();
     var hud_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?hud_desc);
     gfx.pass_draw_sprite(?hud_pass,
-                         ?g.texture,
+                         opt[*gfx.Texture].some{?g.texture},
                          gfx.rect(16.0, 16.0, 96.0, 96.0),
                          gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?hud_pass);
 
-    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
-    if (is_err[bool, gfx.Error](er)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
-        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
     }
 
     # A dropped draw is otherwise invisible: the thing simply does not appear.
@@ -257,14 +274,21 @@ fun main(argc: i64, argv: **u8) i64 {
         title:     "boom.graphics: 3D, offscreen, and 2D passes",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
     };
 
-    if (!context_init(?ctx, cfg)) {
-        print.eprintln("failed to open window");
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
         ret 1;
     }
     context_set_user(?ctx, (?game)::ptr);
-    run(?ctx, ?app);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
     context_shutdown(?ctx);
-    ret 0;
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    ret ran.ok;
 }

@@ -11,10 +11,9 @@ use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.error.err;
+use std.types.option.opt;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
 use std.print;
@@ -28,8 +27,14 @@ use boom.context.Context;
 use boom.context.context_init;
 use boom.context.context_set_user;
 use boom.context.context_user;
+use boom.context.context_fail;
 use boom.context.context_shutdown;
+use boom.context.ContextError;
+use boom.context.context_error_message;
 use boom.engine.run;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.window.WindowMode;
 use gfx: boom.graphics;
 use gm: boom.math;
 
@@ -49,43 +54,49 @@ fun on_init(ctx: *Context) {
     c.renderer_ok = false;
     c.font_ok = false;
     c.drawn = 0;
-    page.make(?c.a);
+    val made: err[allo.Error] = page.make(?c.a);
+    if (sel made.err) {
+        print.eprintln("could not make the page allocator");
+        context_fail(ctx, 1);
+        ret;
+    }
 
-    val rr: Result[bool, gfx.Error] = gfx.renderer_init(
-        ?c.renderer, ctx.window.handle, ctx.window.width, ctx.window.height);
-    if (is_err[bool, gfx.Error](rr)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](rr);
-        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
-        ctx.running = false;
+    val rr: err[gfx.Error] = gfx.renderer_init(?c.renderer, ?ctx.window);
+    if (sel rr.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(rr.err));
+        context_fail(ctx, 1);
         ret;
     }
     c.renderer_ok = true;
 
-    val br: Result[vector.Vector[u8], str] = fs.read_bytes(?c.a, FONT_PATH);
-    if (is_err[vector.Vector[u8], str](br)) {
-        print.eprintlnf("font fixture read error: {}",
-                       unwrap_err[vector.Vector[u8], str](br));
-        ctx.running = false;
+    val br: res[vector.Vector[u8], fs.FsError] = fs.read_bytes(?c.a, FONT_PATH);
+    if (sel br.err) {
+        print.eprintlnf("font fixture read error: {}", FONT_PATH);
+        context_fail(ctx, 1);
         ret;
     }
-    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-    val fr: Result[gfx.Font, gfx.Error] = gfx.font_from_bytes(
+    var bytes: vector.Vector[u8] = br.ok;
+    val fr: res[gfx.Font, gfx.Error] = gfx.font_from_bytes(
         ?c.a, gfx.renderer_device(?c.renderer), bytes.data, bytes.len, 18.0);
 
     # The source lifetime ends here, before metrics are inspected or the atlas
     # is sampled by a draw.
-    vector.dnit[u8](?bytes);
-    if (is_err[gfx.Font, gfx.Error](fr)) {
-        var e: gfx.Error = unwrap_err[gfx.Font, gfx.Error](fr);
-        print.eprintlnf("font bytes error: {}", gfx.error_msg(?e));
-        ctx.running = false;
+    val released: err[allo.Error] = vector.dnit[u8](?bytes);
+    if (sel fr.err) {
+        print.eprintlnf("font bytes error: {}", gfx.error_message(fr.err));
+        context_fail(ctx, 1);
         ret;
     }
-    c.font = unwrap_ok[gfx.Font, gfx.Error](fr);
+    c.font = fr.ok;
     c.font_ok = true;
+    if (sel released.err) {
+        print.eprintln("the encoded font bytes could not be released");
+        context_fail(ctx, 1);
+        ret;
+    }
     if (gfx.text_measure(?c.font, "borrowed bytes") <= 0.0) {
         print.eprintln("font metrics did not survive their encoded source");
-        ctx.running = false;
+        context_fail(ctx, 1);
     }
 }
 
@@ -93,31 +104,27 @@ fun on_tick(ctx: *Context) {}
 
 fun on_draw(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
-    if (!c.font_ok) { ctx.running = false; ret; }
+    if (!c.font_ok) { context_fail(ctx, 1); ret; }
 
-    var opened: bool = false;
-    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?c.renderer, ?opened);
-    if (is_err[bool, gfx.Error](br)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
-        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
-        ctx.running = false;
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?c.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
         ret;
     }
-    if (!opened) { ret; }
+    if (!br.ok) { ret; }
 
     var desc: gfx.PassDesc = gfx.pass_overlay();
-    desc.clear = 1;
-    desc.clear_color = gm.vec4(0.02, 0.02, 0.03, 1.0);
+    desc.clear = opt[gm.Vec4].some{gm.vec4(0.02, 0.02, 0.03, 1.0)};
     var pass: gfx.Pass = gfx.pass_begin(?c.renderer, ?desc);
     gfx.text_draw(?pass, ?c.font, "borrowed bytes", 16.0, 16.0,
                   gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?pass);
 
-    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?c.renderer);
-    if (is_err[bool, gfx.Error](er)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
-        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
-        ctx.running = false;
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?c.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
         ret;
     }
     c.drawn = c.drawn + 1;
@@ -166,14 +173,21 @@ fun main(argc: i64, argv: **u8) i64 {
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
         frame_dt:  SECOND / 60,
+        mode:      WindowMode.windowed{},
     };
-    if (!context_init(?ctx, cfg)) {
-        print.eprintln("failed to open window");
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
         ret 1;
     }
     context_set_user(?ctx, (?check)::ptr);
-    run(?ctx, ?app);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
     context_shutdown(?ctx);
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    if (ran.ok != 0) { ret ran.ok; }
 
     if (check.drawn != 2) {
         print.eprintlnf("font check drew {} of 2 frames", check.drawn);

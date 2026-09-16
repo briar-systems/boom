@@ -13,10 +13,11 @@
 # game keeps. Identical cubes would mean the game's fragment stage was not the
 # one that ran.
 #
-# THE SHADERS ARE THIS EXAMPLE'S OWN, in shaders/, compiled to SPIR-V by a build
-# step and embedded below. boom does not compile them and does not know what is
-# in them. That is the whole arrangement being demonstrated: a game carries a
-# spirv project of its own, and the engine takes two byte buffers.
+# THE SHADERS ARE THIS EXAMPLE'S OWN, in src/shaders/, compiled to SPIR-V as the
+# shader-* artifacts in mach.toml and embedded below. boom does not compile them
+# and does not know what is in them. That is the whole arrangement being
+# demonstrated: a game builds its stages as artifacts of its own, and the engine
+# takes two byte buffers.
 #
 # The fragment stage shades entirely from what the game supplies, so the
 # right-hand cube is evidence rather than decoration: if either descriptor were
@@ -35,7 +36,7 @@
 #     times what the block could carry, and the reason the buffer exists.
 #
 # The probe below checks the second of those by reading an entry back rather
-# than by looking at it. See PROBE MODE in shaders/src/game_frag.mach.
+# than by looking at it. See PROBE MODE in src/shaders/game_frag.mach.
 #
 # The assets are the cube example's, referenced rather than copied: two binary
 # files duplicated in a repository is two files to keep in step. Run it from this
@@ -49,17 +50,22 @@ use boom.context.context_init;
 use boom.context.context_set_user;
 use boom.context.context_user;
 use boom.context.context_shutdown;
+use boom.context.context_fail;
+use boom.context.ContextError;
+use boom.context.context_error_message;
 use boom.engine.run;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.window.WindowMode;
 use boom.app.App;
 use input: boom.input;
 use gfx: boom.graphics;
 use gm:  boom.math;
 use std.chrono.duration.SECOND;
 use std.chrono.duration.MILLISECOND;
-use std.types.result.Result;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
+use std.types.result.res;
+use std.types.option.opt;
+use std.types.error.err;
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
@@ -67,12 +73,11 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 
-# The game's compiled stages. Produced by the build-shaders step in mach.toml,
-# which is why the artifact declares `need` on it: an embed is not an edge in
-# the build graph, so nothing would otherwise have been asked to produce these.
-#[embed("../res/spv/game_vert.spv")]
+# The game's compiled stages, named by the shader artifacts the game's own
+# artifact requires, so the build produces them before it embeds them.
+#[embed("{artifact.shader-game_vert.out}")]
 val GAME_VERT_SPV: [_]u8;
-#[embed("../res/spv/game_frag.spv")]
+#[embed("{artifact.shader-game_frag.out}")]
 val GAME_FRAG_SPV: [_]u8;
 
 # What a game's shader reads at binding 4.
@@ -81,7 +86,7 @@ val GAME_FRAG_SPV: [_]u8;
 # them. The only rule is that it fits in gfx.USER_BYTES and matches what the
 # shader declares, and the usual std140 rules apply, which is why the direction
 # is a vec4 rather than a vec3. The matching declaration is `rec Params` in
-# shaders/src/game_frag.mach, and nothing checks that the two agree: a mismatch
+# src/shaders/game_frag.mach, and nothing checks that the two agree: a mismatch
 # reads the colour out of the direction's padding and still draws.
 rec Params {
     direction: gm.Vec4;
@@ -143,6 +148,11 @@ rec Game {
     lights:   [32]Light;
     ready:    u8;
     paused:   bool;
+    # which startup steps completed, so a failed start releases what it built
+    renderer_ok: bool;
+    mesh_ok:     bool;
+    texture_ok:  bool;
+    shader_ok:   bool;
 
     # --frames N draws N frames and quits, so the example can be checked without
     # someone watching it: the exit code says whether it managed to, and a run
@@ -181,12 +191,13 @@ fun on_init(ctx: *Context) {
     val w: i32 = ctx.window.width;
     val h: i32 = ctx.window.height;
 
-    val ri: Result[bool, gfx.Error] = gfx.renderer_init(?g.renderer, ctx.window.handle, w, h);
-    if (is_err[bool, gfx.Error](ri)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](ri);
-        print.eprintlnf("renderer init error: {}", gfx.error_msg(?e));
+    val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel ri.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(ri.err));
+        context_fail(ctx, 1);
         ret;
     }
+    g.renderer_ok = true;
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
@@ -198,92 +209,79 @@ fun on_init(ctx: *Context) {
     # rather than anywhere a test without a GPU can see.
     g.gbuf_ok = false;
     var formats: [4]gfx.RenderFormat;
-    formats[0] = gfx.RENDER_RGBA8_SRGB;
-    formats[1] = gfx.RENDER_RGBA8_UNORM;
-    formats[2] = gfx.RENDER_RGBA8_UNORM;
-    formats[3] = gfx.RENDER_RGBA16_FLOAT;
+    formats[0] = gfx.RenderFormat.rgba8_srgb{};
+    formats[1] = gfx.RenderFormat.rgba8_unorm{};
+    formats[2] = gfx.RenderFormat.rgba8_unorm{};
+    formats[3] = gfx.RenderFormat.rgba16_float{};
     val gdesc: gfx.RenderTargetDesc = gfx.render_target_desc_mrt(?formats[0], 4);
-    val gb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 320, 180, ?gdesc);
-    if (is_err[gfx.RenderTarget, gfx.Error](gb)) {
-        var ge: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](gb);
-        print.eprintlnf("mrt target error: {}", gfx.error_msg(?ge));
+    val gb: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 320, 180, ?gdesc);
+    if (sel gb.err) { init_failed(ctx, "mrt target error: {}", gb.err); ret; }
+    g.gbuf = gb.ok;
+    g.gbuf_ok = true;
+    val hdr_bytes: opt[usize] = gfx.render_target_raw_bytes_at(?g.gbuf, 3);
+    if (sel hdr_bytes.some) {
+        print.printlnf("mixed mrt target: {} attachments at 320x180; hdr readback is {} bytes",
+                       gfx.render_target_count(?g.gbuf), hdr_bytes.some);
+    }
+    or {
+        print.eprintln("the mrt target's float attachment has no raw readback layout");
+        context_fail(ctx, 1);
         ret;
     }
-    g.gbuf = unwrap_ok[gfx.RenderTarget, gfx.Error](gb);
-    g.gbuf_ok = true;
-    print.printlnf("mixed mrt target: {} attachments at 320x180; hdr readback is {} bytes",
-                   gfx.render_target_count(?g.gbuf),
-                   gfx.render_target_raw_bytes_at(?g.gbuf, 3));
 
     g.probe_ok  = false;
     g.probe_lit = 0;
-    val pb: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, 64, 64);
-    if (is_err[gfx.RenderTarget, gfx.Error](pb)) {
-        var pe: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](pb);
-        print.eprintlnf("probe target error: {}", gfx.error_msg(?pe));
-        ret;
-    }
-    g.probe = unwrap_ok[gfx.RenderTarget, gfx.Error](pb);
+    val pb: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, 64, 64);
+    if (sel pb.err) { init_failed(ctx, "probe target error: {}", pb.err); ret; }
+    g.probe = pb.ok;
     g.probe_ok = true;
 
     g.hdr_ok = false;
     g.hdr_kept = false;
-    val hdesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RENDER_RGBA16_FLOAT, 1);
-    val hp: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?hdesc);
-    if (is_err[gfx.RenderTarget, gfx.Error](hp)) {
-        var he: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](hp);
-        print.eprintlnf("hdr probe target error: {}", gfx.error_msg(?he));
-        ret;
-    }
-    g.hdr_probe = unwrap_ok[gfx.RenderTarget, gfx.Error](hp);
+    val hdesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
+    val hp: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?hdesc);
+    if (sel hp.err) { init_failed(ctx, "hdr probe target error: {}", hp.err); ret; }
+    g.hdr_probe = hp.ok;
     g.hdr_ok = true;
 
     g.lit_ok   = false;
     g.lit_kept = false;
-    val ldesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RENDER_RGBA16_FLOAT, 1);
-    val lp: Result[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?ldesc);
-    if (is_err[gfx.RenderTarget, gfx.Error](lp)) {
-        var le: gfx.Error = unwrap_err[gfx.RenderTarget, gfx.Error](lp);
-        print.eprintlnf("light probe target error: {}", gfx.error_msg(?le));
-        ret;
-    }
-    g.lit_probe = unwrap_ok[gfx.RenderTarget, gfx.Error](lp);
+    val ldesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
+    val lp: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?ldesc);
+    if (sel lp.err) { init_failed(ctx, "light probe target error: {}", lp.err); ret; }
+    g.lit_probe = lp.ok;
     g.lit_ok = true;
 
-    val loaded: Result[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
-    if (is_err[gfx.Mesh, gfx.Error](loaded)) {
-        var e: gfx.Error = unwrap_err[gfx.Mesh, gfx.Error](loaded);
-        print.eprintlnf("mesh load error: {}", gfx.error_msg(?e));
-        ret;
-    }
-    g.mesh = unwrap_ok[gfx.Mesh, gfx.Error](loaded);
+    val loaded: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
+    if (sel loaded.err) { init_failed(ctx, "mesh load error: {}", loaded.err); ret; }
+    g.mesh = loaded.ok;
+    g.mesh_ok = true;
 
     # This example knows the checker is display colour and names that explicitly.
-    # A normal or material map uses the same loader with COLOR_LINEAR; examples
-    # such as cube retain the shorter, source-compatible sRGB form.
-    val tex: Result[gfx.Texture, gfx.Error] = gfx.texture_load_as(
-        d, "../cube/assets/checker.qoi", gfx.COLOR_SRGB);
-    if (is_err[gfx.Texture, gfx.Error](tex)) {
-        var e: gfx.Error = unwrap_err[gfx.Texture, gfx.Error](tex);
-        print.eprintlnf("texture load error: {}", gfx.error_msg(?e));
-        ret;
-    }
-    g.texture = unwrap_ok[gfx.Texture, gfx.Error](tex);
+    # A normal or material map uses the same loader with ColorSpace.linear;
+    # examples such as cube retain the shorter, source-compatible sRGB form.
+    val tex: res[gfx.Texture, gfx.Error] = gfx.texture_load_as(
+        d, "../cube/assets/checker.qoi", gfx.ColorSpace.srgb{});
+    if (sel tex.err) { init_failed(ctx, "texture load error: {}", tex.err); ret; }
+    g.texture = tex.ok;
+    g.texture_ok = true;
 
     g.material = gfx.material();
-    gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
+    val added: err[gfx.MaterialError] = gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
+    if (sel added.err) {
+        print.eprintlnf("material error: {}", gfx.material_error_message(added.err));
+        context_fail(ctx, 1);
+        ret;
+    }
 
     # THE WHOLE OF THE HATCH. Two SPIR-V modules in, a Shader out. Nothing is
     # built yet: the pipelines a shader needs depend on the render pass and the
     # vertex layout it is drawn with, and neither is known until a draw.
-    val sr: Result[bool, gfx.Error] = gfx.shader(?g.shader,
-                                                 ?GAME_VERT_SPV[0], $length_of(GAME_VERT_SPV),
-                                                 ?GAME_FRAG_SPV[0], $length_of(GAME_FRAG_SPV));
-    if (is_err[bool, gfx.Error](sr)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](sr);
-        print.eprintlnf("shader error: {}", gfx.error_msg(?e));
-        ret;
-    }
+    val sr: err[gfx.Error] = gfx.shader(?g.shader,
+                                        ?GAME_VERT_SPV[0], $length_of(GAME_VERT_SPV),
+                                        ?GAME_FRAG_SPV[0], $length_of(GAME_FRAG_SPV));
+    if (sel sr.err) { init_failed(ctx, "shader error: {}", sr.err); ret; }
+    g.shader_ok = true;
 
     g.params.direction = gm.vec4(0.4, 0.8, 0.45, 0.0);
     g.params.colour    = gm.vec4(1.0, 0.96, 0.88, 1.0);
@@ -291,14 +289,12 @@ fun on_init(ctx: *Context) {
 
     # RESERVE WHAT THE SHADER DECLARES, ONCE. The descriptor's range is the
     # buffer's whole capacity, so it is also the largest storage block a shader
-    # may legally declare: `rec Lights` in shaders/src/game_frag.mach is 128
+    # may legally declare: `rec Lights` in src/shaders/game_frag.mach is 128
     # f32x4, and a range shorter than that is invalid usage the layers report
     # and a driver may honour anyway. The starting capacity is already larger,
     # so this changes nothing today and keeps being true if either number moves.
-    if (!gfx.renderer_storage_reserve(?g.renderer, 128 * $size_of(gm.Vec4))) {
-        print.eprintln("could not reserve the storage buffer");
-        ret;
-    }
+    val reserved: err[gfx.Error] = gfx.renderer_storage_reserve(?g.renderer, 128 * $size_of(gm.Vec4));
+    if (sel reserved.err) { init_failed(ctx, "could not reserve the storage buffer: {}", reserved.err); ret; }
 
     # The list itself. Colours are fixed and positions are animated, so the
     # entry the probe reads back is stable across the run: a probe comparing
@@ -335,6 +331,12 @@ fun on_init(ctx: *Context) {
 
 var spin: f32 = 0.0;
 
+# report a startup step that failed and stop the run with a failing status
+fun init_failed(ctx: *Context, what: str, e: gfx.Error) {
+    print.eprintlnf(what, gfx.error_message(e));
+    context_fail(ctx, 1);
+}
+
 fun on_tick(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (g.ready == 0) { ret; }
@@ -358,14 +360,13 @@ fun on_draw(ctx: *Context) {
     if (w <= 0.0 || h <= 0.0) { ret; }
     g.camera.aspect = w / h;
 
-    var opened: bool = false;
-    val br: Result[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer, ?opened);
-    if (is_err[bool, gfx.Error](br)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](br);
-        print.eprintlnf("begin frame error: {}", gfx.error_msg(?e));
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
         ret;
     }
-    if (!opened) { ret; }
+    if (!br.ok) { ret; }
 
     # FILL THE BUFFER ONCE, HERE. Every draw in the frame reads the same bytes,
     # so this is not per draw and must not be: a payload larger than a uniform
@@ -385,9 +386,10 @@ fun on_draw(ctx: *Context) {
                                      2.2);
         li = li + 1;
     }
-    if (!gfx.renderer_storage_write(?g.renderer, (?g.lights[0]):~*u8,
-                                    LIGHT_COUNT * $size_of(Light))) {
-        print.eprintln("the light list could not be written");
+    val wrote: err[gfx.Error] = gfx.renderer_storage_write(?g.renderer, (?g.lights[0]):~*u8,
+                                                           LIGHT_COUNT * $size_of(Light));
+    if (sel wrote.err) {
+        print.eprintlnf("the light list could not be written: {}", gfx.error_message(wrote.err));
     }
 
     # THE STORAGE-BUFFER PROBE, on the first frame only.
@@ -404,13 +406,13 @@ fun on_draw(ctx: *Context) {
     # per draw, and the buffer is the frame's.
     if (g.lit_ok && g.drawn == 0) {
         var ld: gfx.PassDesc = gfx.pass_overlay();
-        ld.target      = ?g.lit_probe;
-        ld.clear       = 1;
-        ld.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+        ld.target = opt[*gfx.RenderTarget].some{?g.lit_probe};
+        ld.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
         var lpass: gfx.Pass = gfx.pass_begin(?g.renderer, ?ld);
 
         g.params.control = gm.vec4(LIGHT_COUNT::f32, PROBE_ENTRY::f32, 0.0, 0.0);
-        if (!gfx.pass_set_user(?lpass, (?g.params):~*u8, $size_of(Params))) {
+        val probe_user: err[gfx.Error] = gfx.pass_set_user(?lpass, (?g.params):~*u8, $size_of(Params));
+        if (sel probe_user.err) {
             print.eprintln("the params block does not fit in a uniform slot");
         }
 
@@ -440,13 +442,12 @@ fun on_draw(ctx: *Context) {
     # the pixels back and says which happened.
     if (g.probe_ok && g.drawn < 2) {
         var pd: gfx.PassDesc = gfx.pass_overlay();
-        pd.target      = ?g.probe;
-        pd.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
-        pd.clear       = 0;
-        if (g.drawn == 0) { pd.clear = 1; }
+        pd.target = opt[*gfx.RenderTarget].some{?g.probe};
+        pd.clear  = opt[gm.Vec4].none{};
+        if (g.drawn == 0) { pd.clear = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)}; }
         var pp: gfx.Pass = gfx.pass_begin(?g.renderer, ?pd);
         if (g.drawn == 0) {
-            gfx.pass_draw_sprite(?pp, nil, gfx.rect(0.0, 0.0, 32.0, 32.0),
+            gfx.pass_draw_sprite(?pp, opt[*gfx.Texture].none{}, gfx.rect(0.0, 0.0, 32.0, 32.0),
                                  gm.vec4(1.0, 1.0, 1.0, 1.0));
         }
         gfx.pass_end(?pp);
@@ -455,23 +456,21 @@ fun on_draw(ctx: *Context) {
 
     if (g.hdr_ok && g.drawn == 0) {
         var hd: gfx.PassDesc = gfx.pass_overlay();
-        hd.target = ?g.hdr_probe;
-        hd.clear = 1;
-        hd.clear_color = gm.vec4(2.0, 0.5, 0.25, 1.0);
+        hd.target = opt[*gfx.RenderTarget].some{?g.hdr_probe};
+        hd.clear  = opt[gm.Vec4].some{gm.vec4(2.0, 0.5, 0.25, 1.0)};
         var hp: gfx.Pass = gfx.pass_begin(?g.renderer, ?hd);
         gfx.pass_end(?hp);
     }
 
     if (g.gbuf_ok) {
         var gd: gfx.PassDesc = gfx.pass_overlay();
-        gd.target      = ?g.gbuf;
-        gd.clear       = 1;
-        gd.clear_color = gm.vec4(0.0, 0.0, 0.0, 1.0);
+        gd.target = opt[*gfx.RenderTarget].some{?g.gbuf};
+        gd.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
         var gp: gfx.Pass = gfx.pass_begin(?g.renderer, ?gd);
         # Once, not every frame: one refusal is the evidence, 120 of them is
         # noise that buries the rest of the output.
         if (g.drawn == 0) {
-            gfx.pass_draw_sprite(?gp, nil, gfx.rect(0.0, 0.0, 32.0, 32.0),
+            gfx.pass_draw_sprite(?gp, opt[*gfx.Texture].none{}, gfx.rect(0.0, 0.0, 32.0, 32.0),
                                  gm.vec4(1.0, 1.0, 1.0, 1.0));
         }
         gfx.pass_end(?gp);
@@ -490,17 +489,18 @@ fun on_draw(ctx: *Context) {
     # a game with one light sets it here and a game with per-object parameters
     # sets it again before each draw. The light list it names is already in the
     # frame's storage buffer, written once at the top of this function.
-    if (!gfx.pass_set_user(?p, (?g.params):~*u8, $size_of(Params))) {
+    val scene_user: err[gfx.Error] = gfx.pass_set_user(?p, (?g.params):~*u8, $size_of(Params));
+    if (sel scene_user.err) {
         print.eprintln("the params block does not fit in a uniform slot");
     }
     gfx.pass_draw_shaded(?p, ?g.mesh, ?g.material, ?g.right, ?g.shader);
 
     gfx.pass_end(?p);
 
-    val er: Result[bool, gfx.Error] = gfx.renderer_end_frame(?g.renderer);
-    if (is_err[bool, gfx.Error](er)) {
-        var e: gfx.Error = unwrap_err[bool, gfx.Error](er);
-        print.eprintlnf("end frame error: {}", gfx.error_msg(?e));
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
     }
 
     # A shaded draw that could not build its pipeline is dropped and counted, so
@@ -523,7 +523,11 @@ fun on_draw(ctx: *Context) {
 
 fun on_dnit(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
-    if (g.ready == 0) { ret; }
+    if (!g.renderer_ok) { ret; }
+    if (g.ready == 0) {
+        release(g);
+        ret;
+    }
 
     # One per render pass and vertex layout the shader was drawn with, so two
     # here: the window's pass and the float probe's. A number that climbs with
@@ -545,10 +549,9 @@ fun on_dnit(ctx: *Context) {
 
     if (g.probe_ok) {
         var px: [16384]u8;
-        val rr: Result[bool, gfx.Error] = gfx.render_target_read(d, ?g.probe, ?px[0], 16384);
-        if (is_err[bool, gfx.Error](rr)) {
-            var re: gfx.Error = unwrap_err[bool, gfx.Error](rr);
-            print.eprintlnf("probe read error: {}", gfx.error_msg(?re));
+        val rr: err[gfx.Error] = gfx.render_target_read(d, ?g.probe, ?px[0], 16384);
+        if (sel rr.err) {
+            print.eprintlnf("probe read error: {}", gfx.error_message(rr.err));
         }
         or {
             var lit: usize = 0;
@@ -566,17 +569,15 @@ fun on_dnit(ctx: *Context) {
                 print.printlnf("PROBE FAIL: expected about 1024 pixels, found {}", lit);
             }
         }
-        gfx.render_target_delete(d, ?g.probe);
     }
 
 
     if (g.hdr_ok) {
         var raw: [32]u8;
-        val hr: Result[bool, gfx.Error] = gfx.render_target_read_raw_at(
+        val hr: err[gfx.Error] = gfx.render_target_read_raw_at(
             d, ?g.hdr_probe, 0, ?raw[0], 32);
-        if (is_err[bool, gfx.Error](hr)) {
-            var hre: gfx.Error = unwrap_err[bool, gfx.Error](hr);
-            print.eprintlnf("hdr probe read error: {}", gfx.error_msg(?hre));
+        if (sel hr.err) {
+            print.eprintlnf("hdr probe read error: {}", gfx.error_message(hr.err));
         }
         or {
             # Half-float 2.0 is 0x4000. Seeing it proves the float attachment
@@ -585,7 +586,6 @@ fun on_dnit(ctx: *Context) {
             if (g.hdr_kept) { print.println("HDR PROBE OK: float target retained 2.0"); }
             or              { print.println("HDR PROBE FAIL: float target clipped or changed 2.0"); }
         }
-        gfx.render_target_delete(d, ?g.hdr_probe);
     }
 
     # THE STORAGE-BUFFER PROBE, read back and compared.
@@ -597,11 +597,10 @@ fun on_dnit(ctx: *Context) {
     # at the wrong offset, or arrived with the wrong stride.
     if (g.lit_ok) {
         var lraw: [32]u8;
-        val lr: Result[bool, gfx.Error] = gfx.render_target_read_raw_at(
+        val lr: err[gfx.Error] = gfx.render_target_read_raw_at(
             d, ?g.lit_probe, 0, ?lraw[0], 32);
-        if (is_err[bool, gfx.Error](lr)) {
-            var lre: gfx.Error = unwrap_err[bool, gfx.Error](lr);
-            print.eprintlnf("light probe read error: {}", gfx.error_msg(?lre));
+        if (sel lr.err) {
+            print.eprintlnf("light probe read error: {}", gfx.error_message(lr.err));
         }
         or {
             g.lit_kept = lraw[0] == 0x00 && lraw[1] == 0x38
@@ -619,13 +618,21 @@ fun on_dnit(ctx: *Context) {
                                lraw[4], lraw[5], lraw[6], lraw[7]);
             }
         }
-        gfx.render_target_delete(d, ?g.lit_probe);
     }
 
-    if (g.gbuf_ok) { gfx.render_target_delete(d, ?g.gbuf); }
-    gfx.shader_delete(?g.shader, d);
-    gfx.mesh_delete(d, ?g.mesh);
-    gfx.texture_delete(d, ?g.texture);
+    release(g);
+}
+
+# release whatever startup built, in reverse, the renderer last
+fun release(g: *Game) {
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    if (g.lit_ok)     { gfx.render_target_delete(d, ?g.lit_probe); }
+    if (g.hdr_ok)     { gfx.render_target_delete(d, ?g.hdr_probe); }
+    if (g.probe_ok)   { gfx.render_target_delete(d, ?g.probe); }
+    if (g.gbuf_ok)    { gfx.render_target_delete(d, ?g.gbuf); }
+    if (g.shader_ok)  { gfx.shader_delete(?g.shader, d); }
+    if (g.mesh_ok)    { gfx.mesh_delete(d, ?g.mesh); }
+    if (g.texture_ok) { gfx.texture_delete(d, ?g.texture); }
     gfx.renderer_dnit(?g.renderer);
 }
 
@@ -647,6 +654,15 @@ fun main(argc: i64, argv: **u8) i64 {
     var game: Game;
     game.budget = 0;
     game.drawn  = 0;
+    game.ready  = 0;
+    game.renderer_ok = false;
+    game.mesh_ok     = false;
+    game.texture_ok  = false;
+    game.shader_ok   = false;
+    game.gbuf_ok     = false;
+    game.probe_ok    = false;
+    game.hdr_ok      = false;
+    game.lit_ok      = false;
     var argi: i64 = 1;
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
@@ -669,15 +685,23 @@ fun main(argc: i64, argv: **u8) i64 {
         title:     "boom.graphics: a game's own shader",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
     };
 
-    if (!context_init(?ctx, cfg)) {
-        print.eprintln("failed to open window");
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
         ret 1;
     }
     context_set_user(?ctx, (?game)::ptr);
-    run(?ctx, ?app);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
     context_shutdown(?ctx);
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    if (ran.ok != 0) { ret ran.ok; }
 
     # A failed startup step leaves ready at 0, and a run that was asked for a
     # fixed number of frames and drew fewer did not do what it was asked. Both

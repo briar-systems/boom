@@ -16,7 +16,6 @@
 use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
-use std.types.result.Result;
 
 # an axis-aligned rectangle: position and size
 #

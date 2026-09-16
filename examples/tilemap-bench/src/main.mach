@@ -20,6 +20,7 @@
 # the thing being measured is what a game writes today: a loop over its own grid
 # calling pass_draw_sprite_uv, whose culling is a rectangle overlap per cell.
 
+use std.types.option.opt;
 use std.runtime;
 use std.print;
 use std.types.size.usize;
@@ -27,7 +28,9 @@ use std.types.bool.bool;
 use std.types.bool.true;
 use std.types.bool.false;
 use std.types.string.str;
+use std.types.result.res;
 use std.chrono.time.Time;
+use std.chrono.time.Clock;
 use std.chrono.time.monotonic;
 use std.chrono.time.time_sub;
 use std.chrono.duration.Duration;
@@ -163,7 +166,7 @@ fun main(argc: i64, argv: **u8) i64 {
     frames[4] = gfx.rect(0.5, 0.5, 0.5, 0.5);
 
     var layer: gfx.TileLayer = gfx.tile_layer(?grid[0], COLS, ROWS, TILE, gm.vec2(0.0, 0.0));
-    var sheet: gfx.TileSheet = gfx.tile_sheet(nil, ?frames[0], FRAME_COUNT);
+    var sheet: gfx.TileSheet = gfx.tile_sheet(opt[*gfx.Texture].none{}, ?frames[0], FRAME_COUNT);
 
     print.printlnf("grid            {} x {} cells of {} units, {} non-empty",
                    COLS, ROWS, TILE, live);
@@ -196,7 +199,8 @@ fun main(argc: i64, argv: **u8) i64 {
 # Measure one camera and print what it found.
 #
 # ret: false when the two paths disagreed about what to draw, which makes the
-#      timing meaningless rather than merely uninteresting
+#      timing meaningless rather than merely uninteresting, or when the clock
+#      could not be read
 fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
              sheet: *gfx.TileSheet, camera: *gfx.Camera2D, out: *f32) bool {
     val view: gfx.Rect = gfx.camera2d_visible(camera, WINDOW_W, WINDOW_H);
@@ -221,21 +225,27 @@ fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
     }
 
     var sink: usize = 0;
-    var t0: Time = monotonic();
+    val t0: Clock = monotonic();
+    if (sel t0.err) { ret clock_failed(); }
     var k: i64 = 0;
     for (k < REPS) {
         sink = sink + naive_draw(grid, frames, view, out, ?naive_cells);
         k = k + 1;
     }
-    val naive_us: i64 = duration_usec(time_sub(monotonic(), t0));
+    val naive_end: Clock = monotonic();
+    if (sel naive_end.err) { ret clock_failed(); }
+    val naive_us: i64 = duration_usec(time_sub(naive_end.ok, t0.ok));
 
-    var t1: Time = monotonic();
+    val t1: Clock = monotonic();
+    if (sel t1.err) { ret clock_failed(); }
     k = 0;
     for (k < REPS) {
         sink = sink + tilemap_draw(layer, sheet, view, out, ?tile_cells);
         k = k + 1;
     }
-    val tile_us: i64 = duration_usec(time_sub(monotonic(), t1));
+    val tile_end: Clock = monotonic();
+    if (sel tile_end.err) { ret clock_failed(); }
+    val tile_us: i64 = duration_usec(time_sub(tile_end.ok, t1.ok));
 
     print.printlnf("naive           {} us per frame", naive_us::f64 / REPS::f64);
     print.printlnf("tilemap         {} us per frame", tile_us::f64 / REPS::f64);
@@ -245,4 +255,10 @@ fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
     # Read back, so neither loop can be discarded as having no effect.
     print.printlnf("checksum        {} {}", sink, out[0]);
     ret true;
+}
+
+# report a clock that could not be read, which leaves no timing to print
+fun clock_failed() bool {
+    print.println("CLOCK: the monotonic clock could not be read");
+    ret false;
 }

@@ -27,8 +27,6 @@ use boom.math.ray.ray_at;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_project_point;
 use boom.graphics.depth.DepthConvention;
-use boom.graphics.depth.DEPTH_FORWARD;
-use boom.graphics.depth.DEPTH_REVERSED;
 
 # a perspective camera
 # ---
@@ -48,27 +46,28 @@ pub rec Camera {
     near:     f32;
     far:      f32;
 
-    # Which projection to build. PROJECTION_PERSPECTIVE is zero so a
+    # Which projection to build. Perspective is the first case so a
     # zero-initialised Camera, and every camera built before this field existed,
     # still means perspective.
-    projection: u8;
+    projection: Projection;
     # Vertical extent in world units, for an orthographic camera. Ignored under
     # perspective, where `fov` and the distance to the subject set the extent.
     height:     f32;
 }
 
-# A camera with foreshortening: things further away are smaller.
-pub val PROJECTION_PERSPECTIVE: u8 = 0;
-
-# A camera without foreshortening: parallel lines stay parallel and an object's
-# size on screen does not change with distance.
-#
-# What an isometric or 2.5D game is built on, and not expressible by a
-# perspective camera at any field of view.
-pub val PROJECTION_ORTHOGRAPHIC: u8 = 1;
-
-# an infinite perspective projection with reversed depth
-pub val PROJECTION_PERSPECTIVE_REVERSED: u8 = 2;
+# Which projection a camera builds.
+# ---
+# perspective:          foreshortening, things further away are smaller
+# orthographic:         no foreshortening, parallel lines stay parallel and an
+#                       object's size on screen does not change with distance.
+#                       What an isometric or 2.5D game is built on, and not
+#                       expressible by a perspective camera at any field of view.
+# perspective_reversed: an infinite perspective projection with reversed depth
+pub tag Projection: u8 {
+    perspective;
+    orthographic;
+    perspective_reversed;
+}
 
 # a perspective camera looking from position toward target
 # ---
@@ -88,7 +87,7 @@ pub fun camera_perspective(position: Vec3, target: Vec3, fov: f32, aspect: f32, 
         aspect:     aspect,
         near:       near,
         far:        far,
-        projection: PROJECTION_PERSPECTIVE,
+        projection: Projection.perspective{},
         height:     0.0,
     };
 }
@@ -105,7 +104,7 @@ pub fun camera_perspective_reversed_infinite(position: Vec3, target: Vec3,
         aspect:     aspect,
         near:       near,
         far:        0.0,
-        projection: PROJECTION_PERSPECTIVE_REVERSED,
+        projection: Projection.perspective_reversed{},
         height:     0.0,
     };
 }
@@ -136,7 +135,7 @@ pub fun camera_orthographic(position: Vec3, target: Vec3, height: f32, aspect: f
         aspect:     aspect,
         near:       near,
         far:        far,
-        projection: PROJECTION_ORTHOGRAPHIC,
+        projection: Projection.orthographic{},
         height:     height,
     };
 }
@@ -154,7 +153,7 @@ pub fun camera_view(c: *Camera) Mat4 {
 # c:   camera to read
 # ret: the view-to-clip matrix
 pub fun camera_projection(c: *Camera) Mat4 {
-    if (c.projection == PROJECTION_ORTHOGRAPHIC) {
+    if (sel c.projection.orthographic) {
         val h: f32 = camera_ortho_height(c);
         val w: f32 = h * c.aspect;
         # Centred on the view axis, and Y-up in world space:
@@ -164,7 +163,7 @@ pub fun camera_projection(c: *Camera) Mat4 {
                               0.0 - h * 0.5, h * 0.5,
                               c.near, c.far);
     }
-    if (c.projection == PROJECTION_PERSPECTIVE_REVERSED) {
+    if (sel c.projection.perspective_reversed) {
         ret mat4_perspective_reversed_infinite(c.fov, c.aspect, c.near);
     }
     ret mat4_perspective(c.fov, c.aspect, c.near, c.far);
@@ -172,10 +171,10 @@ pub fun camera_projection(c: *Camera) Mat4 {
 
 # the depth-buffer convention required by this camera's projection
 pub fun camera_depth_convention(c: *Camera) DepthConvention {
-    if (c != nil && c.projection == PROJECTION_PERSPECTIVE_REVERSED) {
-        ret DEPTH_REVERSED;
+    if (c != nil && sel c.projection.perspective_reversed) {
+        ret DepthConvention.reversed{};
     }
-    ret DEPTH_FORWARD;
+    ret DepthConvention.forward{};
 }
 
 # The orthographic height a camera will actually be used with.
@@ -221,7 +220,7 @@ pub fun camera_ray(c: *Camera, sx: f32, sy: f32, width: f32, height: f32) Ray {
     # approximate up and need not be perpendicular to the view direction.
     val up:      Vec3 = vec3_cross(right, forward);
 
-    if (c.projection == PROJECTION_ORTHOGRAPHIC) {
+    if (sel c.projection.orthographic) {
         val hh: f32 = camera_ortho_height(c) * 0.5;
         val hw: f32 = hh * c.aspect;
         # Screen y grows downward and world up grows upward, hence the negation.
@@ -262,8 +261,9 @@ test "camera: projection is non-degenerate and targets Vulkan clip space" {
 test "camera: reversed perspective selects an infinite reversed depth projection" {
     var c: Camera = camera_perspective_reversed_infinite(
         vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1);
-    if (c.projection != PROJECTION_PERSPECTIVE_REVERSED) { ret 1; }
-    if (camera_depth_convention(?c) != DEPTH_REVERSED)   { ret 2; }
+    if (!sel c.projection.perspective_reversed) { ret 1; }
+    val reversed: DepthConvention = camera_depth_convention(?c);
+    if (!sel reversed.reversed) { ret 2; }
     if (c.far != 0.0)                                    { ret 3; }
 
     var p: Mat4 = camera_projection(?c);
@@ -273,7 +273,8 @@ test "camera: reversed perspective selects an infinite reversed depth projection
 
     var forward: Camera = camera_perspective(
         c.position, c.target, c.fov, c.aspect, c.near, 100.0);
-    if (camera_depth_convention(?forward) != DEPTH_FORWARD) { ret 5; }
+    val forward_depth: DepthConvention = camera_depth_convention(?forward);
+    if (!sel forward_depth.forward) { ret 5; }
     ret 0;
 }
 
