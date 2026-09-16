@@ -26,12 +26,18 @@ pub tag TextureError: u8 {
 # oversample:   the oversample factor is zero
 # threshold:    a pixel raster with a zero coverage threshold
 # pixel_scale:  a pixel font needs a whole height at one-times raster
+# empty:        the font byte span is empty
+# cell_empty:   the pixel height rounds to an empty glyph cell
+# page_limit:   one glyph cell needs an atlas page past ATLAS_PAGE_MAX
 # font:         the TrueType parser refused the face
 pub tag TextError: u8 {
     pixel_height;
     oversample;
     threshold;
     pixel_scale;
+    empty;
+    cell_empty;
+    page_limit;
     font: FontError;
 }
 
@@ -48,5 +54,8 @@ pub fun text_error_message(e: TextError) str {
     if (sel e.oversample)   { ret "font oversample must be at least one"; }
     if (sel e.threshold)    { ret "font pixel threshold must be positive"; }
     if (sel e.pixel_scale)  { ret "pixel fonts require a whole height at one-times raster"; }
+    if (sel e.empty)        { ret "font byte stream is empty"; }
+    if (sel e.cell_empty)   { ret "font pixel height rounds to an empty glyph cell"; }
+    if (sel e.page_limit)   { ret "font pixel height needs an atlas page past the portable limit"; }
     ret "not a usable TrueType font";
 }

@@ -130,6 +130,7 @@ pub tag Stage: u8 {
 # stream:          the per-frame vertex arena blocks
 # mesh_uploads:    the runtime mesh upload queue
 # retired_meshes:  the meshes waiting for a frame fence to release them
+# glyph_pages:     a face's glyph atlas pages
 pub tag Capacity: u8 {
     assets;
     pipelines;
@@ -139,6 +140,7 @@ pub tag Capacity: u8 {
     stream;
     mesh_uploads;
     retired_meshes;
+    glyph_pages;
 }
 
 # why a buffer operation was refused
@@ -390,6 +392,7 @@ fun capacity_message(e: Capacity) str {
     if (sel e.stream)         { ret "the per-frame vertex arena cannot grow further"; }
     if (sel e.mesh_uploads)   { ret "the runtime mesh upload queue is full"; }
     if (sel e.retired_meshes) { ret "too many meshes are waiting to be released"; }
+    if (sel e.glyph_pages)    { ret "the glyph atlas is full"; }
     ret "the descriptor slot ring is full";
 }
 
