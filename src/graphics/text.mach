@@ -1428,3 +1428,16 @@ test "text: the scratch is sized from the face and the curve, not a guess" {
     if (hostile[1] != 4)         { ret 9; }
     ret 0;
 }
+
+test "text: a decode after an earlier decode reads its own bytes" {
+    # the shape of a mach opt 2 miscompile: an indexed address flowing into an
+    # inlined utf8.decode returned U+FFFD after a decode on another stack array.
+    # this is meaningful under the release profile, which CI runs.
+    var cp:   u32   = 0;
+    var head: [2]u8 = [2]u8{0x41, 0};
+    if (decode_at(?head[0], 0, 1, ?cp) != 1 || cp != 0x41) { ret 1; }
+    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
+    if (decode_at(?ni[0], 0, 3, ?cp) != 3) { ret 2; }
+    if (cp != 0x4F60)                      { ret 3; }
+    ret 0;
+}
