@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `skeleton_globals` exposes posed joint transforms, so a game can attach props
   to sockets without depending on exporter joint order.
 
+- graphics: `texture_upload_region` overwrites a rectangle of a texture that is
+  already live and keeps everything it does not cover. The glyph atlas fills
+  one cell at a time this way. Unlike a fresh upload it transitions from
+  `SHADER_READ_ONLY_OPTIMAL` rather than `UNDEFINED`, because a partial write
+  has to preserve the rest of the image. A rectangle outside the image is
+  `ImageError.region`. Dimensions never change, since resizing a texture that a
+  recorded quad samples would move that quad's source rectangle.
+- graphics: `font_preload` rasterizes every codepoint in a string without
+  drawing it, moving the first-use cost of a screen of text to load.
+  `text_height` and `text_lines` report the block a string draws as, and
+  `font_glyph_count`, `font_page_count` and `font_missing` report what the atlas
+  holds.
+
 ### Changed
 - build: **Breaking.** Builds with Mach 5.0 and std 2.1. Dependencies are
   declared under their project ids (`std`, `glfw`, `audio`, `image`, `font`,
@@ -112,7 +125,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `opt[TransitionMasks]`, `stream_push` returns `opt[StreamSpan]`, and the
   `spirvread` lookups return `opt`.
 
+- graphics: **Breaking.** `FIRST_CP`, `LAST_CP` and `GLYPH_COUNT` are gone
+  along with the fixed 95-glyph table behind them. A face's coverage is no
+  longer a range that can be named at compile time. `ATLAS_PAGE`,
+  `ATLAS_PAGE_MAX` and `MAX_PAGES` describe the paged atlas instead.
+- graphics: **Breaking.** `text_measure` reports the widest line rather than
+  the sum of every advance. The answers match for text without a line break.
+
 ### Fixed
+- graphics: `text_draw` and `text_measure` display non-English text (#112).
+  The atlas covered ASCII 32 to 126 and the string was walked one byte at a
+  time, so every byte of a multi-byte UTF-8 sequence was dropped and Chinese
+  text drew nothing. Strings are decoded as UTF-8 and any codepoint the face has
+  a glyph for draws, so CJK, Cyrillic, Greek and accented Latin render. A
+  codepoint the face lacks draws its `.notdef` box, and a malformed byte draws
+  U+FFFD instead of stalling the walk. Glyphs are rasterized the first time they
+  are asked for and kept for the face's life, since a CJK face carries tens of
+  thousands of them. The atlas is paged and a page never resizes, so quads
+  already recorded keep their UVs. A cell belongs to a glyph rather than a
+  codepoint, so every unsupported character shares one `.notdef` cell. Past
+  `MAX_PAGES` a glyph keeps its advance and draws blank, and `font_missing`
+  counts it.
+- graphics: `\n` starts a new line box instead of being dropped, and other
+  control characters contribute neither a quad nor an advance.
+- graphics: glyph outline scratch is sized from the face's `maxp` maxima and
+  the rasterizer's curve subdivision at the cell size, not a fixed 512 points
+  and 1024 edges that a dense Han glyph overflows.
+- graphics: a `Font` owns a copy of its encoded bytes, because it rasterizes
+  after load. `font_from_bytes` still borrows the caller's span only for the
+  call. A face without a usable cmap or horizontal metrics is refused at load.
 - graphics: render passes store depth and declare attachment read and write
   access in their subpass dependencies, so a loading continuation after an
   offscreen excursion sees the depth drawn before it and an attachment reused
