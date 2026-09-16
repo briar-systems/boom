@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-16
+
 ### Added
 - graphics: `texture_upload_region` overwrites a rectangle of a texture that is
   already live and keeps everything it does not cover. The glyph atlas fills
