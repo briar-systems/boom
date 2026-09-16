@@ -28,27 +28,27 @@
 # is a real race: the second wait may observe the first signal. Per image, the
 # acquire that returns the image is itself the proof its last present retired.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.result.res;
-use std.types.error.err;
-use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
-use boom.graphics.vk.Vk;
-use boom.graphics.swapchain.Swapchain;
-use boom.graphics.swapchain.MAX_IMAGES;
-use boom.graphics.pass.PassOptions;
-use boom.graphics.pass.pass_create;
-use boom.graphics.pass.pass_clearing;
-use boom.graphics.pass.pass_loading;
 use boom.graphics.image.DepthAttachment;
-use boom.graphics.image.depth_attachment_init;
 use boom.graphics.image.depth_attachment_dnit;
+use boom.graphics.image.depth_attachment_init;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_clearing;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_loading;
+use boom.graphics.swapchain.MAX_IMAGES;
+use boom.graphics.swapchain.Swapchain;
+use boom.graphics.vk.Vk;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
 
 # How far the CPU may run ahead of the GPU.
 #
@@ -114,8 +114,8 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     if (sel pr.err) { ret pr; }
 
     var pci: vk.CommandPoolCreateInfo;
-    pci.sType            = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pci.pNext            = nil;
+    pci.sType = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pci.pNext = nil;
     # Buffers are re-recorded every frame, so they must be individually
     # resettable. Without this flag a buffer can only be reset by resetting the
     # whole pool, which would clobber the other in-flight frame.
@@ -203,7 +203,7 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
 # initialLayout said colour-attachment-optimal and the image was in present-src.
 fun make_pass(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     val clearing: PassOptions = pass_clearing(s.format, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    val cr: err[Error] = pass_create(v, ?clearing, ?f.pass);
+    val cr:       err[Error]  = pass_create(v, ?clearing, ?f.pass);
     if (sel cr.err) { ret cr; }
 
     # The same attachments, preserved rather than cleared. A pass that renders
@@ -252,7 +252,7 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
             ret err[Error].err{vk_failed(VkCall.create_framebuffer{}, framed)};
         }
         f.fb_count = f.fb_count + 1;
-        i = i + 1;
+        i          = i + 1;
     }
     ret err[Error].ok{};
 }
@@ -276,8 +276,8 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     }
 
     var index: u32 = 0;
-    val ar: i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
-                                           f.frames[i].available, nil, ?index);
+    val ar:    i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
+        f.frames[i].available, nil, ?index);
     if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret res[bool, Error].ok{false}; }
     if (ar != vk.SUCCESS && ar != vk.SUBOPTIMAL_KHR) {
         ret res[bool, Error].err{vk_failed(VkCall.acquire_next_image{}, ar)};
@@ -375,26 +375,26 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     # way through, and no pass knows whether it is the last. This is the point
     # that does.
     var b: vk.ImageMemoryBarrier;
-    b.sType               = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.pNext               = nil;
-    b.srcAccessMask       = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    b.sType         = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.pNext         = nil;
+    b.srcAccessMask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     # A present is not a memory read the barrier has to name; the semaphore the
     # submit signals is what orders it. Zero here is what the spec asks for.
-    b.dstAccessMask       = 0;
-    b.oldLayout           = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    b.newLayout           = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
-    b.image               = s.images[f.image_index];
+    b.dstAccessMask                   = 0;
+    b.oldLayout                       = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    b.newLayout                       = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    b.srcQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
+    b.image                           = s.images[f.image_index];
     b.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
     b.subresourceRange.baseMipLevel   = 0;
     b.subresourceRange.levelCount     = 1;
     b.subresourceRange.baseArrayLayer = 0;
     b.subresourceRange.layerCount     = 1;
     vk.vkCmdPipelineBarrier(f.frames[i].command,
-                            vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                            vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            0, 0, nil, 0, nil, 1, ?b);
+        vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0, 0, nil, 0, nil, 1, ?b);
 
     val ended: i32 = vk.vkEndCommandBuffer(f.frames[i].command);
     if (ended != vk.SUCCESS) {
@@ -402,7 +402,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     }
 
     var wait_stage: u32 = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    var si: vk.SubmitInfo;
+    var si:         vk.SubmitInfo;
     si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
     si.pNext                = nil;
     si.waitSemaphoreCount   = 1;
@@ -418,9 +418,9 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
         ret res[bool, Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
     }
 
-    var index: u32 = f.image_index;
+    var index: u32             = f.image_index;
     var chain: vk.SwapchainKHR = s.handle;
-    var pi: vk.PresentInfoKHR;
+    var pi:    vk.PresentInfoKHR;
     pi.sType              = vk.STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.pNext              = nil;
     pi.waitSemaphoreCount = 1;
@@ -497,11 +497,11 @@ test "frame: the frame index rotates and wraps" {
     var f: FrameLoop;
     f.current = 0;
     var seen: [4]usize;
-    var i: usize = 0;
+    var i:    usize = 0;
     for (i < 4) {
-        seen[i] = f.current;
+        seen[i]   = f.current;
         f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
-        i = i + 1;
+        i         = i + 1;
     }
     # Two frames in flight, so the sequence is 0,1,0,1. A wrap that skipped or
     # repeated would let two frames share a command buffer and fence.
@@ -518,7 +518,7 @@ test "frame: every in-flight frame has its own slot" {
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
         f.frames[i].command = nil;
-        i = i + 1;
+        i                   = i + 1;
     }
     ret 0;
 }
@@ -533,7 +533,7 @@ test "frame: there is a render-finished semaphore for every swapchain image" {
     var k: usize = 0;
     for (k < MAX_IMAGES) {
         f.finished[k] = nil;
-        k = k + 1;
+        k             = k + 1;
     }
     if (MAX_IMAGES <= MAX_FRAMES_IN_FLIGHT) { ret 1; }
     ret 0;

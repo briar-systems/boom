@@ -10,15 +10,15 @@
 # (boom.graphics.error.mesh and boom.graphics.error.content), so a case added to
 # one area is a line in that area's file rather than an edit to the umbrella.
 
-use std.types.string.str;
-use std.types.size.usize;
-use allo: std.allocator;
-use glfw.vulkan.SurfaceError;
-use vfs: boom.vfs;
+use boom.graphics.error.content.text_error_message;
+use boom.graphics.error.content.texture_error_message;
 use boom.graphics.error.mesh.mesh_error_message;
 use boom.graphics.error.mesh.model_error_message;
-use boom.graphics.error.content.texture_error_message;
-use boom.graphics.error.content.text_error_message;
+use boom.vfs;
+use glfw.vulkan.SurfaceError;
+use allo: std.allocator;
+use std.types.size.usize;
+use std.types.string.str;
 
 fwd boom.graphics.error.mesh.MeshError;
 fwd boom.graphics.error.mesh.ModelError;
@@ -89,15 +89,15 @@ pub tag LoaderError: u8 {
 
 # why bring-up could not produce a usable device and surface
 # ---
-# no_instance_extensions:  glfw reported no instance extensions for this platform
-# instance_extensions:     glfw requires more instance extensions than boom enables
-# surface:                 the window surface could not be created
-# no_surface_format:       the surface reported no formats
-# no_physical_device:      no Vulkan physical device is present
-# no_capable_device:       no device can both render and present to the surface
-# no_memory_type:          no memory type satisfies a resource's required properties
-# no_present_mode:         the surface reported no present modes
-# minimized:               the surface extent is zero, as it is while minimized
+# no_instance_extensions: glfw reported no instance extensions for this platform
+# instance_extensions:    glfw requires more instance extensions than boom enables
+# surface:                the window surface could not be created
+# no_surface_format:      the surface reported no formats
+# no_physical_device:     no Vulkan physical device is present
+# no_capable_device:      no device can both render and present to the surface
+# no_memory_type:         no memory type satisfies a resource's required properties
+# no_present_mode:        the surface reported no present modes
+# minimized:              the surface extent is zero, as it is while minimized
 pub tag DeviceError: u8 {
     no_instance_extensions;
     instance_extensions: u32;
@@ -143,8 +143,8 @@ pub tag Capacity: u8 {
 
 # why a buffer operation was refused
 # ---
-# empty:      a buffer of zero bytes
-# overrun:    a write or copy larger than a buffer; carries the requested bytes
+# empty:   a buffer of zero bytes
+# overrun: a write or copy larger than a buffer; carries the requested bytes
 pub tag BufferError: u8 {
     empty;
     overrun: u64;
@@ -298,17 +298,17 @@ pub fun error_message(e: Error) str {
 # result: the VkResult
 # ret:    static text naming it
 pub fun vk_result_message(result: i32) str {
-    if (result == -1)  { ret "VK_ERROR_OUT_OF_HOST_MEMORY"; }
-    if (result == -2)  { ret "VK_ERROR_OUT_OF_DEVICE_MEMORY"; }
-    if (result == -3)  { ret "VK_ERROR_INITIALIZATION_FAILED"; }
-    if (result == -4)  { ret "VK_ERROR_DEVICE_LOST"; }
-    if (result == -5)  { ret "VK_ERROR_MEMORY_MAP_FAILED"; }
-    if (result == -6)  { ret "VK_ERROR_LAYER_NOT_PRESENT"; }
-    if (result == -7)  { ret "VK_ERROR_EXTENSION_NOT_PRESENT"; }
-    if (result == -8)  { ret "VK_ERROR_FEATURE_NOT_PRESENT"; }
-    if (result == -9)  { ret "VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver)"; }
-    if (result == -10) { ret "VK_ERROR_TOO_MANY_OBJECTS"; }
-    if (result == -11) { ret "VK_ERROR_FORMAT_NOT_SUPPORTED"; }
+    if (result == -1)          { ret "VK_ERROR_OUT_OF_HOST_MEMORY"; }
+    if (result == -2)          { ret "VK_ERROR_OUT_OF_DEVICE_MEMORY"; }
+    if (result == -3)          { ret "VK_ERROR_INITIALIZATION_FAILED"; }
+    if (result == -4)          { ret "VK_ERROR_DEVICE_LOST"; }
+    if (result == -5)          { ret "VK_ERROR_MEMORY_MAP_FAILED"; }
+    if (result == -6)          { ret "VK_ERROR_LAYER_NOT_PRESENT"; }
+    if (result == -7)          { ret "VK_ERROR_EXTENSION_NOT_PRESENT"; }
+    if (result == -8)          { ret "VK_ERROR_FEATURE_NOT_PRESENT"; }
+    if (result == -9)          { ret "VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver)"; }
+    if (result == -10)         { ret "VK_ERROR_TOO_MANY_OBJECTS"; }
+    if (result == -11)         { ret "VK_ERROR_FORMAT_NOT_SUPPORTED"; }
     if (result == -1000000000) { ret "VK_ERROR_SURFACE_LOST_KHR"; }
     if (result == -1000001004) { ret "VK_ERROR_OUT_OF_DATE_KHR"; }
     ret "an unlisted VkResult";
@@ -381,11 +381,11 @@ fun stage_message(e: Stage) str {
 }
 
 fun capacity_message(e: Capacity) str {
-    if (sel e.assets)    { ret "asset store is full"; }
-    if (sel e.pipelines) { ret "the pipeline cache is full"; }
-    if (sel e.palettes)  { ret "the joint palette ring is full"; }
-    if (sel e.storage)   { ret "the frame storage buffer cannot grow further"; }
-    if (sel e.stream)    { ret "the per-frame vertex arena cannot grow further"; }
+    if (sel e.assets)         { ret "asset store is full"; }
+    if (sel e.pipelines)      { ret "the pipeline cache is full"; }
+    if (sel e.palettes)       { ret "the joint palette ring is full"; }
+    if (sel e.storage)        { ret "the frame storage buffer cannot grow further"; }
+    if (sel e.stream)         { ret "the per-frame vertex arena cannot grow further"; }
     if (sel e.mesh_uploads)   { ret "the runtime mesh upload queue is full"; }
     if (sel e.retired_meshes) { ret "too many meshes are waiting to be released"; }
     ret "the descriptor slot ring is full";
@@ -432,9 +432,9 @@ fun renderer_message(e: RendererError) str {
 
 test "error: a Vulkan failure keeps its call and result" {
     val e: Error = vk_failed(VkCall.create_buffer{}, -2);
-    if (!sel e.vulkan) { ret 1; }
+    if (!sel e.vulkan)                    { ret 1; }
     if (!sel e.vulkan.call.create_buffer) { ret 2; }
-    if (e.vulkan.result != -2) { ret 3; }
+    if (e.vulkan.result != -2)            { ret 3; }
     ret 0;
 }
 

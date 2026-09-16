@@ -20,23 +20,23 @@
 # family and a present-capable family are frequently the same one and are not
 # required to be, so both are resolved independently and may coincide.
 
+use boom.graphics.error.DeviceError;
+use boom.graphics.error.Error;
+use boom.graphics.error.LoaderError;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
+use gc: glfw.c;
+use glfw.glfw;
+use glfw.vulkan.SurfaceError;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
 use vk;
-use glfw.glfw;
-use gc: glfw.c;
-use glfw.vulkan.SurfaceError;
-use boom.graphics.error.Error;
-use boom.graphics.error.VkCall;
-use boom.graphics.error.LoaderError;
-use boom.graphics.error.DeviceError;
-use boom.graphics.error.vk_failed;
 
 # Packed API versions, as (major << 22) | (minor << 12) | patch.
 #
@@ -52,8 +52,8 @@ val API_VERSION_1_3: u32 = 0x00403000;
 # as mach-vk spells KHR_SWAPCHAIN_EXTENSION_NAME: the registry's name without
 # the VK_ prefix the generator drops.
 val INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x00000001;
-val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: *u8 = "VK_KHR_portability_enumeration";
-val KHR_PORTABILITY_SUBSET_EXTENSION_NAME: *u8 = "VK_KHR_portability_subset";
+val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME:    *u8 = "VK_KHR_portability_enumeration";
+val KHR_PORTABILITY_SUBSET_EXTENSION_NAME:         *u8 = "VK_KHR_portability_subset";
 
 # The version the instance requests.
 #
@@ -70,23 +70,23 @@ fun requested_api_version() u32 {
     if (vk.vkEnumerateInstanceVersion == nil) { ret API_VERSION_1_0; }
     var supported: u32 = 0;
     if (vk.vkEnumerateInstanceVersion(?supported) != vk.SUCCESS) { ret API_VERSION_1_0; }
-    if (supported < API_VERSION_1_3) { ret supported; }
+    if (supported < API_VERSION_1_3)                             { ret supported; }
     ret API_VERSION_1_3;
 }
 
 # The device-level objects a renderer needs before it can build a swapchain.
 # ---
-# instance:       The Vulkan instance.
-# surface:        The window surface. GLFW hands it back as a u64 because a
-#                 non-dispatchable handle is 64-bit everywhere; mach-vk types it
-#                 as ptr, so the conversion happens once, here.
-# physical:       The selected physical device.
-# device:         The logical device.
-# graphics_queue: Queue for draw submission.
-# present_queue:  Queue for presentation; may equal graphics_queue.
+# instance:        The Vulkan instance.
+# surface:         The window surface. GLFW hands it back as a u64 because a
+#                  non-dispatchable handle is 64-bit everywhere; mach-vk types it
+#                  as ptr, so the conversion happens once, here.
+# physical:        The selected physical device.
+# device:          The logical device.
+# graphics_queue:  Queue for draw submission.
+# present_queue:   Queue for presentation; may equal graphics_queue.
 # graphics_family: Family index behind graphics_queue.
 # present_family:  Family index behind present_queue.
-# ready:          Whether bring-up completed.
+# ready:           Whether bring-up completed.
 pub rec Vk {
     instance:        vk.Instance;
     surface:         vk.SurfaceKHR;
@@ -118,8 +118,8 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
 
     # The surface extensions GLFW requires for this platform. An instance
     # created without them cannot present.
-    var ext_count: u32 = 0;
-    val exts: **u8 = glfw.required_instance_extensions(?ext_count);
+    var ext_count: u32  = 0;
+    val exts:      **u8 = glfw.required_instance_extensions(?ext_count);
     if (exts == nil || ext_count == 0) {
         ret err[Error].err{Error.device{DeviceError.no_instance_extensions{}}};
     }
@@ -140,11 +140,11 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     if (ext_count > 15) {
         ret err[Error].err{Error.device{DeviceError.instance_extensions{ext_count}}};
     }
-    var enabled: [16]*u8;
+    var enabled:       [16]*u8;
     var enabled_count: u32 = 0;
     for (enabled_count < ext_count) {
         enabled[enabled_count] = exts[enabled_count];
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     $if ($mach.build.os == $mach.os.darwin) {
@@ -159,7 +159,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
         # at device selection, with a message that names nothing to do with
         # portability.
         enabled[enabled_count] = KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     var app: vk.ApplicationInfo;
@@ -253,7 +253,7 @@ fun destroy_surface_and_instance(v: *Vk) {
 # surface offers at least one, and a renderer that insists on a preferred format
 # cannot start on hardware that does not offer it.
 fun pick_format(v: *Vk) res[vk.SurfaceFormatKHR, Error] {
-    var count: u32 = 0;
+    var count:   u32 = 0;
     val counted: i32 = vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?count, nil);
     if (!enumerated(counted)) {
         ret res[vk.SurfaceFormatKHR, Error].err{vk_failed(VkCall.get_surface_formats{}, counted)};
@@ -263,7 +263,7 @@ fun pick_format(v: *Vk) res[vk.SurfaceFormatKHR, Error] {
     }
 
     var formats: [32]vk.SurfaceFormatKHR;
-    var cap: u32 = 32;
+    var cap:     u32 = 32;
     if (count < cap) { cap = count; }
     val listed: i32 = vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?cap, ?formats[0]);
     if (!enumerated(listed)) {
@@ -321,7 +321,7 @@ pub fun vk_wait_idle(v: *Vk) {
 # refinement, not a correctness matter, and is deliberately left out until
 # there is a reason to rank devices.
 fun pick_physical(v: *Vk) err[Error] {
-    var count: u32 = 0;
+    var count:   u32 = 0;
     val counted: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?count, nil);
     if (!enumerated(counted)) {
         ret err[Error].err{vk_failed(VkCall.enumerate_physical_devices{}, counted)};
@@ -331,7 +331,7 @@ fun pick_physical(v: *Vk) err[Error] {
     }
 
     var devices: [16]vk.PhysicalDevice;
-    var cap: u32 = 16;
+    var cap:     u32 = 16;
     if (count < cap) { cap = count; }
     val listed: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?cap, ?devices[0]);
     if (!enumerated(listed)) {
@@ -341,7 +341,7 @@ fun pick_physical(v: *Vk) err[Error] {
     var i: u32 = 0;
     for (i < cap) {
         val d: vk.PhysicalDevice = devices[i];
-        val f: Families = find_families(v, d);
+        val f: Families          = find_families(v, d);
         if (sel f.graphics.some) {
             if (sel f.present.some) {
                 v.physical        = d;
@@ -376,23 +376,23 @@ fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
     if (count == 0) { ret f; }
 
     var props: [16]vk.QueueFamilyProperties;
-    var cap: u32 = 16;
+    var cap:   u32 = 16;
     if (count < cap) { cap = count; }
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?cap, ?props[0]);
 
     var have_graphics: bool = false;
-    var have_present: bool = false;
-    var i: u32 = 0;
+    var have_present:  bool = false;
+    var i:             u32  = 0;
     for (i < cap) {
         if (!have_graphics && (props[i].queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0) {
-            f.graphics = opt[u32].some{i};
+            f.graphics    = opt[u32].some{i};
             have_graphics = true;
         }
         if (!have_present) {
             var supported: u32 = 0;
             if (vk.vkGetPhysicalDeviceSurfaceSupportKHR(d, i, v.surface, ?supported) == vk.SUCCESS) {
                 if (supported != 0) {
-                    f.present = opt[u32].some{i};
+                    f.present    = opt[u32].some{i};
                     have_present = true;
                 }
             }
@@ -424,7 +424,7 @@ fun create_device(v: *Vk) err[Error] {
         qci[1].queueFamilyIndex = v.present_family;
         qci[1].queueCount       = 1;
         qci[1].pQueuePriorities = ?prio;
-        qcount = 2;
+        qcount                  = 2;
     }
 
     # The device extension list, fixed for the same reason the instance's is.
@@ -433,10 +433,10 @@ fun create_device(v: *Vk) err[Error] {
     # so that the next one to be needed is a line rather than a resize. What
     # does not go here is an extension boom could do without, for the reason the
     # features paragraph below gives about optional things.
-    var enabled: [8]*u8;
+    var enabled:       [8]*u8;
     var enabled_count: u32 = 0;
     enabled[enabled_count] = vk.KHR_SWAPCHAIN_EXTENSION_NAME;
-    enabled_count = enabled_count + 1;
+    enabled_count          = enabled_count + 1;
 
     $if ($mach.build.os == $mach.os.darwin) {
         # PORTABILITY_SUBSET IS NOT OPTIONAL WHERE IT IS OFFERED. A device
@@ -457,7 +457,7 @@ fun create_device(v: *Vk) err[Error] {
         # is a second caller this becomes a query against
         # vkEnumerateDeviceExtensionProperties and the $if goes away.
         enabled[enabled_count] = KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     # NO OPTIONAL FEATURES, AND THAT IS A CLAIM ABOUT THE SHADERS. A device is
@@ -563,18 +563,18 @@ test "vk: the packed API versions decode to the versions they name" {
     # A game's SPIR-V may need a version a driver only accepts when the instance
     # declared API 1.3 or later. A wrong constant here is accepted by instance
     # creation and rejected later by every vkCreateShaderModule.
-    if (API_VERSION_1_3 != 0x00403000)              { ret 1; }
-    if ((API_VERSION_1_3 >> 22) != 1)               { ret 2; }
-    if (((API_VERSION_1_3 >> 12) & 0x3FF) != 3)     { ret 3; }
-    if (API_VERSION_1_3 <= API_VERSION_1_0)         { ret 4; }
+    if (API_VERSION_1_3 != 0x00403000)          { ret 1; }
+    if ((API_VERSION_1_3 >> 22) != 1)           { ret 2; }
+    if (((API_VERSION_1_3 >> 12) & 0x3FF) != 3) { ret 3; }
+    if (API_VERSION_1_3 <= API_VERSION_1_0)     { ret 4; }
     ret 0;
 }
 
 test "vk: the packed API version is VK_API_VERSION_1_0" {
     # (1 << 22) | (0 << 12) | 0. A wrong value is accepted by the loader and
     # then silently caps or rejects features later.
-    if (API_VERSION_1_0 != 0x00400000)      { ret 1; }
-    if ((API_VERSION_1_0 >> 22) != 1)       { ret 1; }
+    if (API_VERSION_1_0 != 0x00400000)          { ret 1; }
+    if ((API_VERSION_1_0 >> 22) != 1)           { ret 1; }
     if (((API_VERSION_1_0 >> 12) & 0x3FF) != 0) { ret 1; }
     ret 0;
 }

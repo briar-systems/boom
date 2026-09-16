@@ -19,20 +19,20 @@
 # a game measuring its own frame times under an unnoticed vsync is measuring
 # the display's refresh rate and reading it as its own performance.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.error.err;
-use vk;
+use boom.graphics.error.DeviceError;
 use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
-use boom.graphics.error.DeviceError;
 use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.enumerated;
 use boom.graphics.vk.format_is_srgb;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.size.usize;
+use vk;
 
 # Most images a swapchain may hold.
 pub val MAX_IMAGES: usize = 8;
@@ -112,14 +112,14 @@ pub fun present_mode_supported(v: *Vk, mode: PresentMode) bool {
     if (count == 0) { ret false; }
 
     var modes: [8]i32;
-    var cap: u32 = MAX_PRESENT_MODES;
+    var cap:   u32 = MAX_PRESENT_MODES;
     if (count < cap) { cap = count; }
     if (!enumerated(vk.vkGetPhysicalDeviceSurfacePresentModesKHR(v.physical, v.surface, ?cap, ?modes[0]))) {
         ret false;
     }
 
     val want: i32 = present_mode_vk(mode);
-    var i: u32 = 0;
+    var i:    u32 = 0;
     for (i < cap) {
         if (modes[i] == want) { ret true; }
         i = i + 1;
@@ -200,9 +200,9 @@ fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
 # An unsupported mode is not refused here; it falls back, and `s.present` names
 # what was taken.
 pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
-                       present: PresentMode) err[Error] {
-    s.ready = false;
-    s.count = 0;
+    present: PresentMode) err[Error] {
+    s.ready  = false;
+    s.count  = 0;
     s.handle = nil;
     # Set before any early return, so a failed creation still reports a mode
     # the swapchain could be in.
@@ -210,7 +210,7 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
 
     if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
-    var caps: vk.SurfaceCapabilitiesKHR;
+    var caps:    vk.SurfaceCapabilitiesKHR;
     val queried: i32 = vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.physical, v.surface, ?caps);
     if (queried != vk.SUCCESS) {
         ret err[Error].err{vk_failed(VkCall.get_surface_capabilities{}, queried)};
@@ -235,31 +235,31 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
     # the driver for an image every frame. maxImageCount 0 means no limit.
     var want: u32 = caps.minImageCount + 1;
     if (caps.maxImageCount != 0 && want > caps.maxImageCount) { want = caps.maxImageCount; }
-    if (want::usize > MAX_IMAGES) { want = MAX_IMAGES::u32; }
+    if (want::usize > MAX_IMAGES)                             { want = MAX_IMAGES::u32; }
 
     var ci: vk.SwapchainCreateInfoKHR;
-    ci.sType            = vk.STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    ci.pNext            = nil;
-    ci.flags            = 0;
-    ci.surface          = v.surface;
-    ci.minImageCount    = want;
-    ci.imageFormat      = v.color_format;
-    ci.imageColorSpace  = v.color_space;
+    ci.sType              = vk.STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    ci.pNext              = nil;
+    ci.flags              = 0;
+    ci.surface            = v.surface;
+    ci.minImageCount      = want;
+    ci.imageFormat        = v.color_format;
+    ci.imageColorSpace    = v.color_space;
     ci.imageExtent.width  = w;
     ci.imageExtent.height = h;
-    ci.imageArrayLayers = 1;
-    ci.imageUsage       = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    ci.preTransform     = caps.currentTransform;
-    ci.compositeAlpha   = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
+    ci.imageArrayLayers   = 1;
+    ci.imageUsage         = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    ci.preTransform       = caps.currentTransform;
+    ci.compositeAlpha     = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
     # FIFO is the only present mode required to be supported, so every other one
     # is a query and a fallback rather than a request. Creating a swapchain with
     # a mode the surface did not report is invalid usage that some drivers
     # honour anyway, which is the shape of bug that only appears on someone
     # else's machine.
-    s.present           = pick_present_mode(v, present);
-    ci.presentMode      = present_mode_vk(s.present);
-    ci.clipped          = vk.TRUE;
-    ci.oldSwapchain     = nil;
+    s.present       = pick_present_mode(v, present);
+    ci.presentMode  = present_mode_vk(s.present);
+    ci.clipped      = vk.TRUE;
+    ci.oldSwapchain = nil;
 
     # When graphics and present are different families the images must be
     # shareable, and both family indices must be named. On the common case of
@@ -284,7 +284,7 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
         ret err[Error].err{vk_failed(VkCall.create_swapchain{}, created)};
     }
 
-    var got: u32 = 0;
+    var got:     u32 = 0;
     val counted: i32 = vk.vkGetSwapchainImagesKHR(v.device, s.handle, ?got, nil);
     if (!enumerated(counted)) {
         swapchain_dnit(s, v);
@@ -304,16 +304,16 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
     var i: u32 = 0;
     for (i < got) {
         var vci: vk.ImageViewCreateInfo;
-        vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        vci.pNext    = nil;
-        vci.flags    = 0;
-        vci.image    = s.images[i];
-        vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
-        vci.format   = v.color_format;
-        vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
-        vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
-        vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
-        vci.components.a = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.sType                           = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vci.pNext                           = nil;
+        vci.flags                           = 0;
+        vci.image                           = s.images[i];
+        vci.viewType                        = vk.IMAGE_VIEW_TYPE_2D;
+        vci.format                          = v.color_format;
+        vci.components.r                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.g                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.b                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+        vci.components.a                    = vk.COMPONENT_SWIZZLE_IDENTITY;
         vci.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
         vci.subresourceRange.baseMipLevel   = 0;
         vci.subresourceRange.levelCount     = 1;
@@ -327,7 +327,7 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
             ret err[Error].err{vk_failed(VkCall.create_image_view{}, viewed)};
         }
         s.count = s.count + 1;
-        i = i + 1;
+        i       = i + 1;
     }
 
     s.ready = true;
@@ -343,7 +343,7 @@ pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
     for (i < s.count) {
         vk.vkDestroyImageView(v.device, s.views[i], nil);
         s.views[i] = nil;
-        i = i + 1;
+        i          = i + 1;
     }
     if (s.handle != nil) {
         vk.vkDestroySwapchainKHR(v.device, s.handle, nil);
@@ -360,7 +360,7 @@ pub fun swapchain_dnit(s: *Swapchain, v: *Vk) {
 # reason there is none for the first. The device must be idle first: rebuilding
 # while a frame is in flight destroys images the GPU is still reading.
 pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32,
-                          present: PresentMode) err[Error] {
+    present: PresentMode) err[Error] {
     vk.vkDeviceWaitIdle(v.device);
     swapchain_dnit(s, v);
     ret swapchain_init(s, v, width, height, present);
@@ -376,10 +376,10 @@ test "swapchain: both sRGB surface formats are recognized" {
     # linear light and the surface is what encodes on write. Recognizing only
     # one of the two variants would silently pick a UNORM format on a driver
     # that offers the other, and every colour would come out dark.
-    if (!format_is_srgb(vk.FORMAT_B8G8R8A8_SRGB))  { ret 1; }
-    if (!format_is_srgb(vk.FORMAT_R8G8B8A8_SRGB))  { ret 2; }
-    if (format_is_srgb(vk.FORMAT_B8G8R8A8_UNORM))  { ret 3; }
-    if (format_is_srgb(vk.FORMAT_R8G8B8A8_UNORM))  { ret 4; }
+    if (!format_is_srgb(vk.FORMAT_B8G8R8A8_SRGB)) { ret 1; }
+    if (!format_is_srgb(vk.FORMAT_R8G8B8A8_SRGB)) { ret 2; }
+    if (format_is_srgb(vk.FORMAT_B8G8R8A8_UNORM)) { ret 3; }
+    if (format_is_srgb(vk.FORMAT_R8G8B8A8_UNORM)) { ret 4; }
     ret 0;
 }
 
@@ -397,8 +397,8 @@ test "swapchain: a surface with a fixed extent overrides the request" {
 
 test "swapchain: the sentinel extent clamps the request into range" {
     var caps: vk.SurfaceCapabilitiesKHR;
-    caps.currentExtent.width  = 0xFFFFFFFF;
-    caps.currentExtent.height = 0xFFFFFFFF;
+    caps.currentExtent.width   = 0xFFFFFFFF;
+    caps.currentExtent.height  = 0xFFFFFFFF;
     caps.minImageExtent.width  = 640;
     caps.minImageExtent.height = 480;
     caps.maxImageExtent.width  = 1280;
@@ -409,11 +409,13 @@ test "swapchain: the sentinel extent clamps the request into range" {
     clamp_extent(?caps, ?w, ?h);
     if (w != 1280 || h != 720) { ret 1; }
 
-    w = 100; h = 100;
+    w = 100;
+    h = 100;
     clamp_extent(?caps, ?w, ?h);
     if (w != 640 || h != 480) { ret 1; }
 
-    w = 800; h = 600;
+    w = 800;
+    h = 600;
     clamp_extent(?caps, ?w, ?h);
     if (w != 800 || h != 600) { ret 1; }
     ret 0;
@@ -434,8 +436,8 @@ test "swapchain: each present mode maps to the Vulkan constant it names" {
     # a mapping written as a cast turns vsync into the mode that tears. Nothing
     # catches that: the swapchain is created, it presents, and the only symptom
     # is an image the player did not ask to have torn.
-    if (present_mode_vk(PresentMode.vsync{})     != vk.PRESENT_MODE_FIFO_KHR)      { ret 1; }
-    if (present_mode_vk(PresentMode.mailbox{})   != vk.PRESENT_MODE_MAILBOX_KHR)   { ret 2; }
+    if (present_mode_vk(PresentMode.vsync{}) != vk.PRESENT_MODE_FIFO_KHR)          { ret 1; }
+    if (present_mode_vk(PresentMode.mailbox{}) != vk.PRESENT_MODE_MAILBOX_KHR)     { ret 2; }
     if (present_mode_vk(PresentMode.immediate{}) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 3; }
     ret 0;
 }

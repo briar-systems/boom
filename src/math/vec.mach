@@ -128,7 +128,7 @@ test "vec: length and normalize" {
     val v: Vec3 = vec3(3.0, 4.0, 0.0);
     if (vec3_length(v) != 5.0) { ret 1; }
     val n: Vec3 = vec3_normalize(v);
-    val d: f32 = vec3_length(n) - 1.0;
+    val d: f32  = vec3_length(n) - 1.0;
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
     ret 0;
 }

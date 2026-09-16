@@ -130,7 +130,6 @@ fwd boom.graphics.vertex.vertex_format_skinned;
 fwd boom.graphics.vertex.vertex_format_ui;
 fwd boom.graphics.vertex.vertex_format_is_skinned;
 
-
 fwd boom.graphics.texture.Texture;
 fwd boom.graphics.image.ColorSpace;
 fwd boom.graphics.texture.texture;

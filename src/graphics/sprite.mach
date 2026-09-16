@@ -14,8 +14,8 @@
 # slot the renderer takes for it.
 
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 
 # an axis-aligned rectangle: position and size
 #
@@ -81,7 +81,7 @@ test "sprite: rectangles overlap only when they share area" {
     if (rect_overlaps(rect(10.0, 0.0 - 20.0, 8.0, 8.0), view)) { ret 5; }
     if (rect_overlaps(rect(10.0, 200.0, 8.0, 8.0), view))      { ret 6; }
     # Exactly touching the left edge shares no pixel.
-    if (rect_overlaps(rect(0.0 - 8.0, 10.0, 8.0, 8.0), view))  { ret 7; }
+    if (rect_overlaps(rect(0.0 - 8.0, 10.0, 8.0, 8.0), view)) { ret 7; }
     # A rectangle larger than the view still overlaps it.
     if (!rect_overlaps(rect(0.0 - 1000.0, 0.0 - 1000.0, 2000.0, 2000.0), view)) { ret 8; }
     ret 0;

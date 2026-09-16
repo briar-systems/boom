@@ -10,29 +10,29 @@
 # state through the opaque ctx.user pointer (set with context_set_user)
 # rather than reaching for module globals.
 
-use boom.window.Window;
-use boom.window.window_open_mode;
-use boom.window.window_close;
-use boom.window.window_set_event_sink;
-use boom.window.WindowMode;
-use boom.window.WindowError;
-use boom.window.window_error_message;
 use boom.clock.Clock;
 use boom.clock.clock_new;
-use boom.timestep.Timestep;
-use boom.timestep.timestep_new;
 use boom.event.EventQueue;
 use boom.event.queue_new;
-use window: boom.window;
 use inp: boom.input;
+use boom.timestep.Timestep;
+use boom.timestep.timestep_new;
+use boom.window;
+use boom.window.Window;
+use boom.window.WindowError;
+use boom.window.WindowMode;
+use boom.window.window_close;
+use boom.window.window_error_message;
+use boom.window.window_open_mode;
+use boom.window.window_set_event_sink;
 use std.chrono.duration.Duration;
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.string.str;
-use std.types.result.res;
-use std.types.error.err;
 use io_error: std.io.error;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.string.str;
 
 # the parameters context_init brings the engine up with
 # ---
@@ -150,7 +150,7 @@ pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
     if (sel started.err) { ret err[ContextError].err{ContextError.clock{started.err}}; }
 
     ctx.events = queue_new();
-    ctx.input   = inp.input_new();
+    ctx.input  = inp.input_new();
     val opened: res[Window, WindowError] = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
     if (sel opened.err) { ret err[ContextError].err{ContextError.window{opened.err}}; }
     ctx.window = opened.ok;
@@ -227,17 +227,17 @@ pub fun context_shutdown(ctx: *Context) {
 }
 
 test "context: user pointer round-trips" {
-    var ctx: Context;
+    var ctx:   Context;
     var state: i64 = 42;
     if (context_user(?ctx) != nil) { ret 1; }
     context_set_user(?ctx, (?state)::ptr);
     if (context_user(?ctx) != (?state)::ptr) { ret 2; }
-    if (ctx.user != (?state)::ptr) { ret 3; }
+    if (ctx.user != (?state)::ptr)           { ret 3; }
     ret 0;
 }
 
 test "context: user pointer clears to nil" {
-    var ctx: Context;
+    var ctx:   Context;
     var state: i64 = 7;
     context_set_user(?ctx, (?state)::ptr);
     context_set_user(?ctx, nil);
@@ -249,7 +249,7 @@ test "context: failure stops the loop and records a status" {
     var ctx: Context;
     ctx.running = true;
     context_fail(?ctx, 7);
-    if (ctx.running) { ret 1; }
+    if (ctx.running)               { ret 1; }
     if (context_status(?ctx) != 7) { ret 2; }
     ret 0;
 }
@@ -277,11 +277,11 @@ test "context: timing configuration rejects invalid loops" {
     var cfg: Config = base;
     cfg.fixed_dt = 0;
     if (config_is_valid(cfg)) { ret 2; }
-    cfg.fixed_dt = 10;
+    cfg.fixed_dt  = 10;
     cfg.max_frame = 9;
     if (config_is_valid(cfg)) { ret 3; }
     cfg.max_frame = 20;
-    cfg.frame_dt = 0 - 1;
+    cfg.frame_dt  = 0 - 1;
     if (config_is_valid(cfg)) { ret 4; }
     ret 0;
 }

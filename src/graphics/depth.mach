@@ -1,8 +1,8 @@
 # the direction represented by increasing depth-buffer values
 
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 
 # ---
 # forward:  near maps to zero and far maps to one

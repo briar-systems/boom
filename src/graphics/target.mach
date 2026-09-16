@@ -19,44 +19,44 @@
 # the driver performs it as part of ending the pass, and it cannot be
 # forgotten at a call site.
 
-use std.types.bool.bool;
-use std.types.size.usize;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
-use vk;
+use boom.graphics.device.Device;
 use boom.graphics.error.Error;
-use boom.graphics.error.Stage;
-use boom.graphics.error.VkCall;
 use boom.graphics.error.ImageError;
+use boom.graphics.error.Stage;
 use boom.graphics.error.TargetError;
+use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.image.DEPTH_FORMAT;
+use boom.graphics.image.DepthAttachment;
+use boom.graphics.image.Image;
+use boom.graphics.image.ImageUsage;
+use boom.graphics.image.depth_attachment_dnit;
+use boom.graphics.image.depth_attachment_init;
+use boom.graphics.image.image_dnit;
+use boom.graphics.image.image_format_bytes;
+use boom.graphics.image.image_init;
+use boom.graphics.image.image_raw_bytes;
+use boom.graphics.image.image_read;
+use boom.graphics.image.image_transition;
+use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
+use boom.graphics.pass.PassCompatibility;
+use boom.graphics.pass.PassOptions;
+use boom.graphics.pass.pass_clearing;
+use boom.graphics.pass.pass_clearing_mrt;
+use boom.graphics.pass.pass_compatibility;
+use boom.graphics.pass.pass_create;
+use boom.graphics.pass.pass_loading_mrt;
+use boom.graphics.texture.Texture;
 use boom.graphics.vk.Vk;
 use boom.graphics.vk.vk_wait_idle;
-use boom.graphics.device.Device;
-use boom.graphics.texture.Texture;
-use boom.graphics.image.Image;
-use boom.graphics.image.image_init;
-use boom.graphics.image.ImageUsage;
-use boom.graphics.image.image_transition;
-use boom.graphics.image.image_read;
-use boom.graphics.image.image_format_bytes;
-use boom.graphics.image.image_raw_bytes;
-use boom.graphics.image.image_dnit;
-use boom.graphics.image.DEPTH_FORMAT;
-use boom.graphics.pass.PassOptions;
-use boom.graphics.pass.pass_create;
-use boom.graphics.pass.pass_clearing_mrt;
-use boom.graphics.pass.pass_loading_mrt;
-use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
-use boom.graphics.pass.pass_clearing;
-use boom.graphics.pass.PassCompatibility;
-use boom.graphics.pass.pass_compatibility;
-use boom.graphics.image.DepthAttachment;
-use boom.graphics.image.depth_attachment_init;
-use boom.graphics.image.depth_attachment_dnit;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
 
 # The storage format of one offscreen colour attachment.
 #
@@ -85,10 +85,13 @@ pub rec RenderTargetDesc {
 pub fun render_target_desc(format: RenderFormat, count: usize) RenderTargetDesc {
     var d: RenderTargetDesc;
     d.color_count = count;
-    if (d.color_count == 0) { d.color_count = 1; }
+    if (d.color_count == 0)                    { d.color_count = 1; }
     if (d.color_count > MAX_COLOR_ATTACHMENTS) { d.color_count = MAX_COLOR_ATTACHMENTS; }
     var i: usize = 0;
-    for (i < MAX_COLOR_ATTACHMENTS) { d.formats[i] = format; i = i + 1; }
+    for (i < MAX_COLOR_ATTACHMENTS) {
+        d.formats[i] = format;
+        i            = i + 1;
+    }
     ret d;
 }
 
@@ -97,7 +100,10 @@ pub fun render_target_desc_mrt(formats: *RenderFormat, count: usize) RenderTarge
     var d: RenderTargetDesc = render_target_desc(RenderFormat.surface{}, count);
     if (formats == nil) { ret d; }
     var i: usize = 0;
-    for (i < d.color_count) { d.formats[i] = formats[i]; i = i + 1; }
+    for (i < d.color_count) {
+        d.formats[i] = formats[i];
+        i            = i + 1;
+    }
     ret d;
 }
 
@@ -121,38 +127,37 @@ fun render_format_supported(d: *Device, format: i32) bool {
     var props: vk.FormatProperties;
     vk.vkGetPhysicalDeviceFormatProperties(d.vk.physical, format, ?props);
     val need: u32 = vk.FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-                    | vk.FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-                    | vk.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
-                    | vk.FORMAT_FEATURE_TRANSFER_DST_BIT
-                    | vk.FORMAT_FEATURE_TRANSFER_SRC_BIT;
+        | vk.FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+        | vk.FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+        | vk.FORMAT_FEATURE_TRANSFER_DST_BIT
+        | vk.FORMAT_FEATURE_TRANSFER_SRC_BIT;
     ret (props.optimalTilingFeatures & need) == need;
 }
 
-
 # an opaque handle to an offscreen render target
 # ---
-# colors:      the colour attachments, each sampleable as a Texture
-# formats:     the public storage format of each attachment
-# color_count: how many of colors this target writes
+# colors:        the colour attachments, each sampleable as a Texture
+# formats:       the public storage format of each attachment
+# color_count:   how many of colors this target writes
 # compatibility: the attachment signature pipelines are cached against
-# depth:       the depth attachment, shared with the frame loop's
-# pass:        the render pass drawing into this target uses
-# framebuffer: the framebuffer binding the two attachments
-# width:       target width in pixels
-# height:      target height in pixels
-# ready:       whether creation completed
+# depth:         the depth attachment, shared with the frame loop's
+# pass:          the render pass drawing into this target uses
+# framebuffer:   the framebuffer binding the two attachments
+# width:         target width in pixels
+# height:        target height in pixels
+# ready:         whether creation completed
 pub rec RenderTarget {
-    colors:      [4]Texture;
-    formats:     [4]RenderFormat;
-    color_count: usize;
+    colors:        [4]Texture;
+    formats:       [4]RenderFormat;
+    color_count:   usize;
     compatibility: PassCompatibility;
-    depth:       DepthAttachment;
-    pass:        vk.RenderPass;
-    pass_load:   vk.RenderPass;
-    framebuffer: vk.Framebuffer;
-    width:       i32;
-    height:      i32;
-    ready:       bool;
+    depth:         DepthAttachment;
+    pass:          vk.RenderPass;
+    pass_load:     vk.RenderPass;
+    framebuffer:   vk.Framebuffer;
+    width:         i32;
+    height:        i32;
+    ready:         bool;
 }
 
 # the render pass an offscreen target draws through
@@ -178,10 +183,13 @@ fun make_pass(t: *RenderTarget, v: *Vk) err[Error] {
     # means the driver performs it as part of ending the pass, and it cannot be
     # forgotten at a call site.
     var fmts: [4]i32;
-    var i: usize = 0;
-    for (i < t.color_count) { fmts[i] = t.colors[i].image.format; i = i + 1; }
+    var i:    usize = 0;
+    for (i < t.color_count) {
+        fmts[i] = t.colors[i].image.format;
+        i       = i + 1;
+    }
     val o: PassOptions = pass_clearing_mrt(?fmts[0], t.color_count,
-                                           vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     val cr: err[Error] = pass_create(v, ?o, ?t.pass);
     if (sel cr.err) { ret cr; }
 
@@ -189,8 +197,8 @@ fun make_pass(t: *RenderTarget, v: *Vk) err[Error] {
     # clearing pass leaves it, not COLOR_ATTACHMENT_OPTIMAL as the window's
     # resume pass uses. Naming the wrong layout preserves nothing.
     val l: PassOptions = pass_loading_mrt(?fmts[0], t.color_count,
-                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     ret pass_create(v, ?l, ?t.pass_load);
 }
 
@@ -242,14 +250,14 @@ pub fun render_target_mrt(d: *Device, width: i32, height: i32, count: usize) res
 # desc:   attachment count and formats; nil means one surface-format attachment
 # ret:    the render target, or a creation error
 pub fun render_target_create(d: *Device, width: i32, height: i32,
-                             desc: *RenderTargetDesc) res[RenderTarget, Error] {
+    desc: *RenderTargetDesc) res[RenderTarget, Error] {
     var t: RenderTarget;
     t.ready       = false;
     t.width       = width;
     t.height      = height;
     t.color_count = 1;
-    if (desc != nil) { t.color_count = desc.color_count; }
-    if (t.color_count == 0) { t.color_count = 1; }
+    if (desc != nil)                           { t.color_count = desc.color_count; }
+    if (t.color_count == 0)                    { t.color_count = 1; }
     if (t.color_count > MAX_COLOR_ATTACHMENTS) { t.color_count = MAX_COLOR_ATTACHMENTS; }
 
     if (!d.ready) {
@@ -260,7 +268,7 @@ pub fun render_target_create(d: *Device, width: i32, height: i32,
     }
 
     var vk_formats: [4]i32;
-    var ci: usize = 0;
+    var ci:         usize = 0;
     for (ci < t.color_count) {
         var public_format: RenderFormat = RenderFormat.surface{};
         if (desc != nil) { public_format = desc.formats[ci]; }
@@ -270,16 +278,16 @@ pub fun render_target_create(d: *Device, width: i32, height: i32,
             ret res[RenderTarget, Error].err{Error.target{TargetError.format_unsupported{}}};
         }
         val cr: err[Error] = image_init(?t.colors[ci].image, d.vk, width::u32, height::u32,
-                                        format, ImageUsage.target{});
+            format, ImageUsage.target{});
         if (sel cr.err) {
             render_target_delete(d, ?t);
             ret res[RenderTarget, Error].err{cr.err};
         }
-        t.formats[ci] = public_format;
-        vk_formats[ci] = format;
+        t.formats[ci]       = public_format;
+        vk_formats[ci]      = format;
         t.colors[ci].width  = width;
         t.colors[ci].height = height;
-        ci = ci + 1;
+        ci                  = ci + 1;
     }
     t.compatibility = pass_compatibility(?vk_formats[0], t.color_count);
 
@@ -292,8 +300,8 @@ pub fun render_target_create(d: *Device, width: i32, height: i32,
     var ti: usize = 0;
     for (ti < t.color_count) {
         val tir: err[Error] = image_transition(?t.colors[ti].image, d.vk, d.pool,
-                                               vk.IMAGE_LAYOUT_UNDEFINED,
-                                               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            vk.IMAGE_LAYOUT_UNDEFINED,
+            vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         if (sel tir.err) {
             render_target_delete(d, ?t);
             ret res[RenderTarget, Error].err{tir.err};
@@ -317,8 +325,11 @@ pub fun render_target_create(d: *Device, width: i32, height: i32,
     # whose views are in a different order than its render pass's attachments
     # binds the depth image as a colour target and renders nothing visible.
     var views: [5]vk.ImageView;
-    var vi: usize = 0;
-    for (vi < t.color_count) { views[vi] = t.colors[vi].image.view; vi = vi + 1; }
+    var vi:    usize = 0;
+    for (vi < t.color_count) {
+        views[vi] = t.colors[vi].image.view;
+        vi        = vi + 1;
+    }
     views[t.color_count] = t.depth.view;
 
     var fci: vk.FramebufferCreateInfo;
@@ -413,7 +424,7 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) e
         ret err[Error].err{Error.image{ImageError.not_created{}}};
     }
     val texel: opt[usize] = image_format_bytes(t.colors[0].image.format);
-    if (sel texel.none) { ret err[Error].err{Error.target{TargetError.readback_format{}}}; }
+    if (sel texel.none)  { ret err[Error].err{Error.target{TargetError.readback_format{}}}; }
     if (texel.some != 4) { ret err[Error].err{Error.target{TargetError.readback_format{}}}; }
     ret image_read(?t.colors[0].image, d.vk, d.pool, out, len);
 }
@@ -434,7 +445,7 @@ pub fun render_target_read(d: *Device, t: *RenderTarget, out: *u8, len: usize) e
 # len: size of out in bytes
 # ret: ok, or a readback error
 pub fun render_target_read_raw_at(d: *Device, t: *RenderTarget, i: usize,
-                                  out: *u8, len: usize) err[Error] {
+    out: *u8, len: usize) err[Error] {
     if (!t.ready) {
         ret err[Error].err{Error.image{ImageError.not_created{}}};
     }
@@ -451,7 +462,7 @@ pub fun render_target_read_raw_at(d: *Device, t: *RenderTarget, i: usize,
 # picture with red and blue swapped and no diagnostic.
 pub fun render_target_bgra(t: *RenderTarget) bool {
     ret t.colors[0].image.format == vk.FORMAT_B8G8R8A8_SRGB
-     || t.colors[0].image.format == vk.FORMAT_B8G8R8A8_UNORM;
+        || t.colors[0].image.format == vk.FORMAT_B8G8R8A8_UNORM;
 }
 
 # release the target's images, render pass, and framebuffer
@@ -461,12 +472,24 @@ pub fun render_target_bgra(t: *RenderTarget) bool {
 pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     val v: *Vk = d.vk;
     vk_wait_idle(v);
-    if (t.framebuffer != nil) { vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil); t.framebuffer = nil; }
-    if (t.pass != nil)        { vk.vkDestroyRenderPass(v.device, t.pass, nil); t.pass = nil; }
-    if (t.pass_load != nil)   { vk.vkDestroyRenderPass(v.device, t.pass_load, nil); t.pass_load = nil; }
+    if (t.framebuffer != nil) {
+        vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil);
+        t.framebuffer = nil;
+    }
+    if (t.pass != nil) {
+        vk.vkDestroyRenderPass(v.device, t.pass, nil);
+        t.pass = nil;
+    }
+    if (t.pass_load != nil) {
+        vk.vkDestroyRenderPass(v.device, t.pass_load, nil);
+        t.pass_load = nil;
+    }
     depth_attachment_dnit(?t.depth, v);
     var di: usize = 0;
-    for (di < MAX_COLOR_ATTACHMENTS) { image_dnit(?t.colors[di].image, v); di = di + 1; }
+    for (di < MAX_COLOR_ATTACHMENTS) {
+        image_dnit(?t.colors[di].image, v);
+        di = di + 1;
+    }
     t.ready = false;
 }
 
@@ -489,9 +512,9 @@ fun refused(r: err[Error]) bool {
 test "target: non-positive dimensions are refused before allocating" {
     var d: Device;
     d.ready = true;
-    if (!bad_dimensions(render_target(?d, 0, 16)))   { ret 1; }
-    if (!bad_dimensions(render_target(?d, 16, 0)))   { ret 2; }
-    if (!bad_dimensions(render_target(?d, -1, -1)))  { ret 3; }
+    if (!bad_dimensions(render_target(?d, 0, 16)))  { ret 1; }
+    if (!bad_dimensions(render_target(?d, 16, 0)))  { ret 2; }
+    if (!bad_dimensions(render_target(?d, -1, -1))) { ret 3; }
     ret 0;
 }
 
@@ -499,7 +522,7 @@ test "target: creation against an uninitialized context is refused" {
     var d: Device;
     d.ready = false;
     val r: res[RenderTarget, Error] = render_target(?d, 16, 16);
-    if (!sel r.err) { ret 1; }
+    if (!sel r.err)               { ret 1; }
     if (!sel r.err.uninitialized) { ret 2; }
     ret 0;
 }
@@ -510,10 +533,10 @@ test "target: descriptions preserve mixed attachment formats" {
     formats[1] = RenderFormat.rgba8_unorm{};
     formats[2] = RenderFormat.rgba16_float{};
     val d: RenderTargetDesc = render_target_desc_mrt(?formats[0], 3);
-    if (d.color_count != 3)                    { ret 1; }
-    if (!sel d.formats[0].rgba8_srgb)          { ret 2; }
-    if (!sel d.formats[1].rgba8_unorm)         { ret 3; }
-    if (!sel d.formats[2].rgba16_float)        { ret 4; }
+    if (d.color_count != 3)                     { ret 1; }
+    if (!sel d.formats[0].rgba8_srgb)           { ret 2; }
+    if (!sel d.formats[1].rgba8_unorm)          { ret 3; }
+    if (!sel d.formats[2].rgba16_float)         { ret 4; }
     if (render_format_bytes(d.formats[0]) != 4) { ret 5; }
     if (render_format_bytes(d.formats[2]) != 8) { ret 6; }
     ret 0;
@@ -532,7 +555,7 @@ test "target: teardown on a target that was never created is a no-op" {
         t.colors[zi].image.view   = nil;
         t.colors[zi].image.handle = nil;
         t.colors[zi].image.memory = nil;
-        zi = zi + 1;
+        zi                        = zi + 1;
     }
     t.ready = false;
 
@@ -571,14 +594,14 @@ test "target: an attachment index past the count returns the first" {
     # record and hand back a Texture built from adjacent fields, which samples
     # as garbage rather than failing.
     var t: RenderTarget;
-    t.color_count = 2;
+    t.color_count     = 2;
     t.colors[0].width = 11;
     t.colors[1].width = 22;
     t.colors[2].width = 33;
 
-    if (render_target_texture_at(?t, 0).width != 11) { ret 1; }
-    if (render_target_texture_at(?t, 1).width != 22) { ret 2; }
-    if (render_target_texture_at(?t, 2).width != 11) { ret 3; }
+    if (render_target_texture_at(?t, 0).width != 11)  { ret 1; }
+    if (render_target_texture_at(?t, 1).width != 22)  { ret 2; }
+    if (render_target_texture_at(?t, 2).width != 11)  { ret 3; }
     if (render_target_texture_at(?t, 99).width != 11) { ret 4; }
 
     # And the single-attachment accessor is the first one.
@@ -640,9 +663,9 @@ test "target: the packed read refuses a format it cannot pack" {
     d.ready = true;
 
     var t: RenderTarget;
-    t.ready       = true;
-    t.color_count = 1;
-    t.formats[0]  = RenderFormat.rgba16_float{};
+    t.ready                  = true;
+    t.color_count            = 1;
+    t.formats[0]             = RenderFormat.rgba16_float{};
     t.colors[0].image.format = vk.FORMAT_R16G16B16A16_SFLOAT;
     t.colors[0].image.width  = 2;
     t.colors[0].image.height = 2;
@@ -653,7 +676,7 @@ test "target: the packed read refuses a format it cannot pack" {
     # And the size the raw form needs comes from the target rather than from a
     # caller assuming four bytes: 2 * 2 * 8.
     val raw: opt[usize] = render_target_raw_bytes_at(?t, 0);
-    if (!sel raw.some) { ret 2; }
+    if (!sel raw.some)  { ret 2; }
     if (raw.some != 32) { ret 3; }
     ret 0;
 }

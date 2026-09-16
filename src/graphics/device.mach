@@ -12,16 +12,16 @@
 # asset loading independent of the frame loop, which also means a Device is
 # usable before the frame loop exists.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.error.err;
-use vk;
 use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use vk;
 
 # What a resource constructor needs.
 # ---
@@ -45,8 +45,8 @@ pub fun device_init(d: *Device, v: *Vk) err[Error] {
     }
 
     var ci: vk.CommandPoolCreateInfo;
-    ci.sType            = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    ci.pNext            = nil;
+    ci.sType = vk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    ci.pNext = nil;
     # Transient: every buffer from this pool is recorded once, submitted, and
     # freed. Saying so lets the driver use a cheaper allocator than the frame
     # pool's, which resets and reuses its buffers every frame.
@@ -78,9 +78,9 @@ test "device: an uninitialized device is refused rather than used" {
     var v: Vk;
     v.ready = false;
     val r: err[Error] = device_init(?d, ?v);
-    if (!sel r.err) { ret 1; }
+    if (!sel r.err)               { ret 1; }
     if (!sel r.err.uninitialized) { ret 2; }
-    if (d.ready) { ret 3; }
+    if (d.ready)                  { ret 3; }
     ret 0;
 }
 

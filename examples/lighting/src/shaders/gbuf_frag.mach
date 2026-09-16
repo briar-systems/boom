@@ -24,14 +24,20 @@
 use sh:  shader.math;
 use tex: shader.texture;
 
-#[sampler(0, 1)] var atlas: tex.Sampler2D;
+#[sampler(0, 1)]
+var atlas: tex.Sampler2D;
 
-#[input(0)] var in_uv: f32x2;
+#[input(0)]
+var in_uv: f32x2;
 
-#[output(0)] var out_albedo:   f32x4;
-#[output(1)] var out_packed:   f32x4;
-#[output(2)] var out_material: f32x4;
-#[output(3)] var out_emissive: f32x4;
+#[output(0)]
+var out_albedo: f32x4;
+#[output(1)]
+var out_packed: f32x4;
+#[output(2)]
+var out_material: f32x4;
+#[output(3)]
+var out_emissive: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {

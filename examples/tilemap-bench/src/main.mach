@@ -20,30 +20,30 @@
 # the thing being measured is what a game writes today: a loop over its own grid
 # calling pass_draw_sprite_uv, whose culling is a rectangle overlap per cell.
 
-use std.types.option.opt;
-use std.runtime;
-use std.print;
-use std.types.size.usize;
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.string.str;
-use std.types.result.res;
-use std.chrono.time.Time;
-use std.chrono.time.Clock;
-use std.chrono.time.monotonic;
-use std.chrono.time.time_sub;
+use gfx: boom.graphics;
+use boom.graphics.batch.SPRITE_FLOATS;
+use boom.graphics.batch.sprite_expand;
+use gm: boom.math;
 use std.chrono.duration.Duration;
 use std.chrono.duration.duration_usec;
-use boom.graphics.batch.sprite_expand;
-use boom.graphics.batch.SPRITE_FLOATS;
-use gfx: boom.graphics;
-use gm:  boom.math;
+use std.chrono.time.Clock;
+use std.chrono.time.Time;
+use std.chrono.time.monotonic;
+use std.chrono.time.time_sub;
+use std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
 
 # The consumer's facility: 128 by 128 cells of 32 units.
 val COLS: usize = 128;
 val ROWS: usize = 128;
-val TILE: f32 = 32.0;
+val TILE: f32   = 32.0;
 
 # Five frames, of which index zero is the reserved empty slot, so the sheet has
 # four real tiles.
@@ -51,8 +51,8 @@ val FRAME_COUNT: usize = 5;
 
 # A 720p window showing 512 world units vertically, which at 32-unit tiles is 16
 # rows and about 28 columns.
-val WINDOW_W: f32 = 1280.0;
-val WINDOW_H: f32 = 720.0;
+val WINDOW_W:    f32 = 1280.0;
+val WINDOW_H:    f32 = 720.0;
 val VIEW_HEIGHT: f32 = 512.0;
 
 # How many tiles the shared staging buffer holds.
@@ -73,16 +73,16 @@ val REPS: i64 = 2000;
 # with doorways and gaps looks like; a completely full field would flatter the
 # tilemap path by giving the naive path nothing to skip.
 fun fill(grid: *u16) usize {
-    var live: usize = 0;
-    var state: u32 = 12345;
-    var i: usize = 0;
+    var live:  usize = 0;
+    var state: u32   = 12345;
+    var i:     usize = 0;
     for (i < COLS * ROWS) {
         state = state * 1103515245 + 12345;
         val r: u32 = (state / 65536) % 7;
         if (r == 0) { grid[i] = 0; }
         or {
             grid[i] = (r % 4 + 1)::u16;
-            live = live + 1;
+            live    = live + 1;
         }
         i = i + 1;
     }
@@ -99,10 +99,10 @@ fun fill(grid: *u16) usize {
 # visited: set to how many cells the loop looked at
 # ret:     how many tiles were expanded
 fun naive_draw(grid: *u16, frames: *gfx.Rect, view: gfx.Rect, out: *f32,
-               visited: *usize) usize {
-    val tint: gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
-    var quads: usize = 0;
-    var seen: usize = 0;
+    visited: *usize) usize {
+    val tint:  gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
+    var quads: usize   = 0;
+    var seen:  usize   = 0;
 
     var row: usize = 0;
     for (row < ROWS) {
@@ -135,20 +135,20 @@ fun naive_draw(grid: *u16, frames: *gfx.Rect, view: gfx.Rect, out: *f32,
 # The chunk size and the cursor are the renderer's, so this measures the loop
 # that actually runs rather than an idealised one.
 fun tilemap_draw(layer: *gfx.TileLayer, sheet: *gfx.TileSheet, view: gfx.Rect,
-                 out: *f32, visited: *usize) usize {
-    val tint: gm.Vec4 = gm.vec4(1.0, 1.0, 1.0, 1.0);
+    out: *f32, visited: *usize) usize {
+    val tint: gm.Vec4      = gm.vec4(1.0, 1.0, 1.0, 1.0);
     var span: gfx.TileSpan = gfx.tilemap_span(layer, view);
     @visited = gfx.tilemap_span_cells(?span);
 
-    var quads: usize = 0;
-    var cur: gfx.TileCursor = gfx.tile_cursor(?span);
+    var quads: usize          = 0;
+    var cur:   gfx.TileCursor = gfx.tile_cursor(?span);
     for (!gfx.tilemap_done(?cur, ?span)) {
         val room: usize = MAX_QUADS - quads;
         var take: usize = gfx.TILEMAP_CHUNK;
         if (room < take) { take = room; }
-        if (take == 0) { ret quads; }
+        if (take == 0)   { ret quads; }
         quads = quads + gfx.tilemap_expand(layer, sheet, ?span, ?cur, tint,
-                                           ?out[quads * SPRITE_FLOATS], take);
+            ?out[quads * SPRITE_FLOATS], take);
     }
     ret quads;
 }
@@ -169,7 +169,7 @@ fun main(argc: i64, argv: **u8) i64 {
     var sheet: gfx.TileSheet = gfx.tile_sheet(opt[*gfx.Texture].none{}, ?frames[0], FRAME_COUNT);
 
     print.printlnf("grid            {} x {} cells of {} units, {} non-empty",
-                   COLS, ROWS, TILE, live);
+        COLS, ROWS, TILE, live);
     print.printlnf("window          {} x {}", WINDOW_W, WINDOW_H);
     print.printlnf("frames measured {} per path per case", REPS);
 
@@ -179,7 +179,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # flattering half of the range. Every camera is parked in the middle of the
     # field, which is the placement that favours the tilemap path least: near a
     # corner the naive loop still walks the whole grid while the span halves.
-    val mid: f32 = COLS::f32 * TILE * 0.5;
+    val mid:  f32          = COLS::f32 * TILE * 0.5;
     var play: gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), VIEW_HEIGHT);
     var wide: gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), VIEW_HEIGHT * 4.0);
     var all:  gfx.Camera2D = gfx.camera2d_height(gm.vec2(mid, mid), ROWS::f32 * TILE);
@@ -189,10 +189,10 @@ fun main(argc: i64, argv: **u8) i64 {
     var out: [786432]f32;
 
     var bad: bool = false;
-    if (!run_case("playing", ?grid[0], ?frames[0], ?layer, ?sheet, ?play, ?out[0])) { bad = true; }
-    if (!run_case("zoomed out 4x", ?grid[0], ?frames[0], ?layer, ?sheet, ?wide, ?out[0])) { bad = true; }
+    if (!run_case("playing", ?grid[0], ?frames[0], ?layer, ?sheet, ?play, ?out[0]))              { bad = true; }
+    if (!run_case("zoomed out 4x", ?grid[0], ?frames[0], ?layer, ?sheet, ?wide, ?out[0]))        { bad = true; }
     if (!run_case("whole field on screen", ?grid[0], ?frames[0], ?layer, ?sheet, ?all, ?out[0])) { bad = true; }
-    if (bad) { ret 1; }
+    if (bad)                                                                                     { ret 1; }
     ret 0;
 }
 
@@ -202,7 +202,7 @@ fun main(argc: i64, argv: **u8) i64 {
 #      timing meaningless rather than merely uninteresting, or when the clock
 #      could not be read
 fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
-             sheet: *gfx.TileSheet, camera: *gfx.Camera2D, out: *f32) bool {
+    sheet: *gfx.TileSheet, camera: *gfx.Camera2D, out: *f32) bool {
     val view: gfx.Rect = gfx.camera2d_visible(camera, WINDOW_W, WINDOW_H);
 
     var naive_cells: usize = 0;
@@ -225,12 +225,12 @@ fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
     }
 
     var sink: usize = 0;
-    val t0: Clock = monotonic();
+    val t0:   Clock = monotonic();
     if (sel t0.err) { ret clock_failed(); }
     var k: i64 = 0;
     for (k < REPS) {
         sink = sink + naive_draw(grid, frames, view, out, ?naive_cells);
-        k = k + 1;
+        k    = k + 1;
     }
     val naive_end: Clock = monotonic();
     if (sel naive_end.err) { ret clock_failed(); }
@@ -241,7 +241,7 @@ fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
     k = 0;
     for (k < REPS) {
         sink = sink + tilemap_draw(layer, sheet, view, out, ?tile_cells);
-        k = k + 1;
+        k    = k + 1;
     }
     val tile_end: Clock = monotonic();
     if (sel tile_end.err) { ret clock_failed(); }

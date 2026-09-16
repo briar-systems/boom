@@ -13,16 +13,16 @@
 # it is unit-tested with no device.
 
 use boom.math.mat.Mat4;
-use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_identity;
+use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_translation;
-use boom.math.vec.Vec3;
-use boom.math.vec.vec3;
 use boom.math.quat.Quat;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_matrix;
-use std.types.size.usize;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
 use std.types.option.opt;
+use std.types.size.usize;
 use std.types.string.str;
 
 # the most joints a skeleton and its skinning palette carry
@@ -70,9 +70,9 @@ pub rec Pose {
 pub fun skeleton_globals(sk: *Skeleton, locals: *Transform, out: *Mat4) {
     var i: usize = 0;
     for (i < sk.count) {
-        val j: usize = sk.order[i];
-        var local: Mat4 = transform_matrix(?locals[j]);
-        val p: opt[usize] = sk.parents[j];
+        val j:     usize      = sk.order[i];
+        var local: Mat4       = transform_matrix(?locals[j]);
+        val p:     opt[usize] = sk.parents[j];
         if (sel p.some) {
             out[j] = mat4_mul(?out[p.some], ?local);
         }
@@ -102,7 +102,7 @@ pub fun skeleton_pose(sk: *Skeleton, locals: *Transform, out: *Pose) {
     var k: usize = 0;
     for (k < sk.count) {
         out.matrices[k] = mat4_mul(?globals[k], ?sk.inverse_bind[k]);
-        k = k + 1;
+        k               = k + 1;
     }
 
     # THE TAIL IS FILLED, NOT LEFT ALONE. A skinned draw uploads the whole
@@ -116,7 +116,7 @@ pub fun skeleton_pose(sk: *Skeleton, locals: *Transform, out: *Pose) {
     # being destroyed.
     for (k < MAX_JOINTS) {
         out.matrices[k] = mat4_identity();
-        k = k + 1;
+        k               = k + 1;
     }
     out.count = sk.count;
 }
@@ -145,18 +145,18 @@ pub fun pose_matrices(pose: *Pose) *Mat4 {
 
 # build a two-joint chain skeleton for tests: root then a child of it
 fun fixture_chain(sk: *Skeleton) {
-    sk.count = 2;
+    sk.count      = 2;
     sk.parents[0] = opt[usize].none{};
     sk.parents[1] = opt[usize].some{0};
-    sk.order[0] = 0;
-    sk.order[1] = 1;
+    sk.order[0]   = 0;
+    sk.order[1]   = 1;
     var i: usize = 0;
     for (i < 2) {
         sk.rest[i].position = vec3(0.0, 0.0, 0.0);
         sk.rest[i].rotation = f32x4{0.0, 0.0, 0.0, 1.0};
         sk.rest[i].scale    = vec3(1.0, 1.0, 1.0);
         sk.inverse_bind[i]  = mat4_identity();
-        i = i + 1;
+        i                   = i + 1;
     }
 }
 
@@ -174,7 +174,7 @@ test "skeleton: composition propagates a parent transform to its child" {
 
     var pose: Pose;
     skeleton_pose(?sk, ?locals[0], ?pose);
-    if (pose.count != 2) { ret 1; }
+    if (pose.count != 2)                 { ret 1; }
     if (pose.matrices[0].m[3][0] != 2.0) { ret 2; }
     if (pose.matrices[1].m[3][0] != 3.0) { ret 3; }
     ret 0;
@@ -194,7 +194,7 @@ test "skeleton: the palette tail is identity, not whatever was on the stack" {
     var i: usize = 0;
     for (i < MAX_JOINTS) {
         pose.matrices[i] = mat4_translation(vec3(99.0, 99.0, 99.0));
-        i = i + 1;
+        i                = i + 1;
     }
 
     skeleton_rest_pose(?sk, ?pose);
@@ -202,7 +202,7 @@ test "skeleton: the palette tail is identity, not whatever was on the stack" {
 
     val last: *Mat4 = ?pose.matrices[MAX_JOINTS - 1];
     if (last.m[0][0] != 1.0 || last.m[1][1] != 1.0 || last.m[2][2] != 1.0 || last.m[3][3] != 1.0) { ret 2; }
-    if (last.m[3][0] != 0.0 || last.m[3][1] != 0.0 || last.m[3][2] != 0.0) { ret 3; }
+    if (last.m[3][0] != 0.0 || last.m[3][1] != 0.0 || last.m[3][2] != 0.0)                        { ret 3; }
 
     # The first joint past the real ones, which is the index an out-of-range
     # JOINTS_0 value most often lands on.
@@ -215,8 +215,8 @@ test "skeleton: the palette is exactly what the shader's storage block holds" {
     # boom.graphics.renderer uploads $size_of(Mat4) * MAX_JOINTS bytes in one
     # copy. A palette narrower than that reads past the Pose; wider, and the
     # last joints come from the next draw's palette.
-    if ($size_of(Mat4) != 64)                 { ret 1; }
-    if ($size_of(Mat4) * MAX_JOINTS != 8192)  { ret 2; }
+    if ($size_of(Mat4) != 64)                { ret 1; }
+    if ($size_of(Mat4) * MAX_JOINTS != 8192) { ret 2; }
     ret 0;
 }
 
@@ -235,26 +235,26 @@ test "skeleton: the inverse bind matrix folds into the skinning matrix" {
 test "skeleton: socket globals retain parent rotation and translation before inverse bind" {
     var sk: Skeleton;
     fixture_chain(?sk);
-    sk.parents[0] = opt[usize].some{1};
-    sk.parents[1] = opt[usize].none{};
-    sk.order[0] = 1;
-    sk.order[1] = 0;
+    sk.parents[0]       = opt[usize].some{1};
+    sk.parents[1]       = opt[usize].none{};
+    sk.order[0]         = 1;
+    sk.order[1]         = 0;
     sk.rest[1].position = vec3(2.0, 3.0, 0.0);
     sk.rest[1].rotation = f32x4{0.0, 0.0, 0.70710678, 0.70710678};
     sk.rest[0].position = vec3(1.0, 0.0, 0.0);
-    sk.inverse_bind[0] = mat4_translation(vec3(0.0 - 1.0, 0.0, 0.0));
+    sk.inverse_bind[0]  = mat4_translation(vec3(0.0 - 1.0, 0.0, 0.0));
     var globals: [3]Mat4;
     globals[2] = mat4_translation(vec3(99.0, 0.0, 0.0));
     skeleton_globals(?sk, ?sk.rest[0], ?globals[0]);
-    if (globals[0].m[3][0] < 1.999 || globals[0].m[3][0] > 2.001) { ret 1; }
-    if (globals[0].m[3][1] < 3.999 || globals[0].m[3][1] > 4.001) { ret 2; }
+    if (globals[0].m[3][0] < 1.999 || globals[0].m[3][0] > 2.001)       { ret 1; }
+    if (globals[0].m[3][1] < 3.999 || globals[0].m[3][1] > 4.001)       { ret 2; }
     if (globals[0].m[0][1] < 0.999 || globals[0].m[1][0] > 0.0 - 0.999) { ret 3; }
-    if (globals[2].m[3][0] != 99.0) { ret 4; }
+    if (globals[2].m[3][0] != 99.0)                                     { ret 4; }
     var pose: Pose;
     skeleton_pose(?sk, ?sk.rest[0], ?pose);
     if (pose.matrices[0].m[3][0] < 1.999 || pose.matrices[0].m[3][0] > 2.001) { ret 5; }
     if (pose.matrices[0].m[3][1] < 2.999 || pose.matrices[0].m[3][1] > 3.001) { ret 6; }
-    if (pose.matrices[0].m[0][1] != globals[0].m[0][1]) { ret 7; }
-    if (pose.count != 2 || pose.matrices[2].m[0][0] != 1.0) { ret 8; }
+    if (pose.matrices[0].m[0][1] != globals[0].m[0][1])                       { ret 7; }
+    if (pose.count != 2 || pose.matrices[2].m[0][0] != 1.0)                   { ret 8; }
     ret 0;
 }
