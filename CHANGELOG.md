@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to sockets without depending on exporter joint order.
 
 ### Changed
+- build: **Breaking.** Builds with std 3.2 and the family releases on it:
+  mach-glfw 0.5.0, mach-audio 0.6.0, mach-image 0.4.0, mach-font 0.4.0,
+  mach-phys 0.3.0, mach-vk 0.3.0, mach-gltf 0.4.0 and mach-shader 0.3.0. A
+  consumer that declares its own `std`, `image`, `audio` or `shader` moves those
+  pins to the same releases. With std 3.2, Windows binaries link `advapi32.dll`.
 - build: **Breaking.** Builds with Mach 5.0 and std 2.1. Dependencies are
   declared under their project ids (`std`, `glfw`, `audio`, `image`, `font`,
   `phys`, `vk`, `gltf`, `shader`) and pinned by the committed `dep/` gitlinks
