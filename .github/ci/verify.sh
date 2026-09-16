@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# the checks the unit suite cannot make: the embedded SPIR-V, the public API as
-# the examples call it, and one finite example driving Vulkan under xvfb
+# the checks the unit suite cannot make: the embedded SPIR-V, and one finite
+# example driving Vulkan under xvfb
 set -euo pipefail
 
 # a uniform block is a contract between two separately compiled programs and
@@ -19,17 +19,6 @@ fi
 for m in $expected; do
   spirv-val --target-env vulkan1.0 "out/spirv/release/spv/$m.spv"
   echo "$m.spv: valid"
-done
-
-# the examples are the only check on the shape of the public API. each resolves
-# boom by path, so its pull copies this branch rather than anything pushed, and
-# the shared fmt check covers the root project only.
-for e in examples/*/; do
-  echo "::group::$e"
-  "$MACH_COMPILER" fmt --check "$e"
-  (cd "$e" && "$MACH_COMPILER" dep pull . && "$MACH_COMPILER" build .)
-  echo "::endgroup::"
-  echo "$e: formatted and built"
 done
 
 # unit tests cover invalid borrowed bytes without touching Vulkan. this finite

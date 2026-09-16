@@ -1,8 +1,9 @@
 name: CI
 
 # the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
-# one linux leg on a pull request into dev and into main. the SPIR-V, example
-# and xvfb checks live in .github/ci/verify.sh. nothing runs on push.
+# one linux leg on a pull request into dev and into main. the examples are a
+# glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
+# nothing runs on push.
 
 on:
   pull_request:
@@ -31,6 +32,10 @@ jobs:
           "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
                   "wayland-protocols", "fonts-dejavu-core", "mesa-vulkan-drivers",
                   "vulkan-tools", "xvfb", "spirv-tools"]}]
+      # the examples are the only check on the shape of the public API: nothing
+      # inside boom calls it the way a game does. each resolves boom by path, so
+      # its pull copies this branch, and the glob covers a new example unedited.
+      subprojects: '[{"path": "examples/*", "build": true, "test": false}]'
 
   gate:
     if: always()
