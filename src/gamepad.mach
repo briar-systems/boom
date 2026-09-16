@@ -15,16 +15,16 @@
 # interpret, so binding a game to it produces a controller where fire is
 # whatever the manufacturer put third. Those are reported as absent.
 
+use inp: boom.input;
+use glfw.c;
+use glfw.glfw;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.option.opt;
-use std.types.error.err;
-use glfw.glfw;
-use glfw.c;
-use inp: boom.input;
 
 # Poll every pad slot into the input state
 #

@@ -42,33 +42,33 @@
 # files duplicated in a repository is two files to keep in step. Run it from this
 # directory so the relative paths resolve.
 
-use std.runtime;
-use std.print;
+use boom.app.App;
 use boom.context.Config;
 use boom.context.Context;
-use boom.context.context_init;
-use boom.context.context_set_user;
-use boom.context.context_user;
-use boom.context.context_shutdown;
-use boom.context.context_fail;
 use boom.context.ContextError;
 use boom.context.context_error_message;
-use boom.engine.run;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
 use boom.engine.EngineError;
 use boom.engine.engine_error_message;
-use boom.window.WindowMode;
-use boom.app.App;
-use input: boom.input;
+use boom.engine.run;
 use gfx: boom.graphics;
-use gm:  boom.math;
-use std.chrono.duration.SECOND;
+use boom.input;
+use gm: boom.math;
+use boom.window.WindowMode;
 use std.chrono.duration.MILLISECOND;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
+use std.chrono.duration.SECOND;
+use std.print;
+use std.runtime;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
@@ -93,7 +93,7 @@ rec Params {
     colour:    gm.Vec4;
     # x: how many lights the storage buffer holds. y: an entry to read straight
     # out of that buffer instead of shading, or a negative number to shade.
-    control:   gm.Vec4;
+    control: gm.Vec4;
 }
 
 # One light in the list the storage buffer carries.
@@ -121,20 +121,20 @@ val LIGHT_COUNT: usize = 32;
 val PROBE_ENTRY: usize = 41;
 
 # ---
-# renderer:  the window's renderer, which owns the device
-# mesh:      the cube geometry
-# texture:   the surface texture
-# material:  the texture binding and base colour both cubes draw with
-# shader:    the game's own program, used for the right-hand cube
-# camera:    the 3D viewpoint
-# left:      the built-in cube's placement
-# right:     the shaded cube's placement
-# params:    the block the game shader reads at binding 4
-# lights:    the light list the game shader reads at binding 8, LIGHT_COUNT of
-#            them; the array size is a literal because a record field's is, so
-#            the two have to be moved together
-# ready:     whether init succeeded
-# paused:    whether the spin is advancing
+# renderer: the window's renderer, which owns the device
+# mesh:     the cube geometry
+# texture:  the surface texture
+# material: the texture binding and base colour both cubes draw with
+# shader:   the game's own program, used for the right-hand cube
+# camera:   the 3D viewpoint
+# left:     the built-in cube's placement
+# right:    the shaded cube's placement
+# params:   the block the game shader reads at binding 4
+# lights:   the light list the game shader reads at binding 8, LIGHT_COUNT of
+#           them; the array size is a literal because a record field's is, so
+#           the two have to be moved together
+# ready:    whether init succeeded
+# paused:   whether the spin is advancing
 rec Game {
     renderer: gfx.Renderer;
     mesh:     gfx.Mesh;
@@ -157,15 +157,15 @@ rec Game {
     # --frames N draws N frames and quits, so the example can be checked without
     # someone watching it: the exit code says whether it managed to, and a run
     # under the validation layers says whether it did so legally.
-    budget:   usize;
-    gbuf:     gfx.RenderTarget;
-    gbuf_ok:  bool;
+    budget:  usize;
+    gbuf:    gfx.RenderTarget;
+    gbuf_ok: bool;
 
     # A 64x64 target used to prove a loading pass preserves what is already
     # drawn. Nothing about this is visible on screen; it exists because the
     # failure it checks for is invisible to any test without a GPU.
-    probe:    gfx.RenderTarget;
-    probe_ok: bool;
+    probe:     gfx.RenderTarget;
+    probe_ok:  bool;
     probe_lit: usize;
     # A tiny float target cleared above one and read back after the run.
     hdr_probe: gfx.RenderTarget;
@@ -180,7 +180,7 @@ rec Game {
     lit_probe: gfx.RenderTarget;
     lit_ok:    bool;
     lit_kept:  bool;
-    drawn:    usize;
+    drawn:     usize;
 }
 
 fun on_init(ctx: *Context) {
@@ -213,15 +213,18 @@ fun on_init(ctx: *Context) {
     formats[1] = gfx.RenderFormat.rgba8_unorm{};
     formats[2] = gfx.RenderFormat.rgba8_unorm{};
     formats[3] = gfx.RenderFormat.rgba16_float{};
-    val gdesc: gfx.RenderTargetDesc = gfx.render_target_desc_mrt(?formats[0], 4);
-    val gb: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 320, 180, ?gdesc);
-    if (sel gb.err) { init_failed(ctx, "mrt target error: {}", gb.err); ret; }
-    g.gbuf = gb.ok;
+    val gdesc: gfx.RenderTargetDesc             = gfx.render_target_desc_mrt(?formats[0], 4);
+    val gb:    res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 320, 180, ?gdesc);
+    if (sel gb.err) {
+        init_failed(ctx, "mrt target error: {}", gb.err);
+        ret;
+    }
+    g.gbuf    = gb.ok;
     g.gbuf_ok = true;
     val hdr_bytes: opt[usize] = gfx.render_target_raw_bytes_at(?g.gbuf, 3);
     if (sel hdr_bytes.some) {
         print.printlnf("mixed mrt target: {} attachments at 320x180; hdr readback is {} bytes",
-                       gfx.render_target_count(?g.gbuf), hdr_bytes.some);
+            gfx.render_target_count(?g.gbuf), hdr_bytes.some);
     }
     or {
         print.eprintln("the mrt target's float attachment has no raw readback layout");
@@ -232,29 +235,41 @@ fun on_init(ctx: *Context) {
     g.probe_ok  = false;
     g.probe_lit = 0;
     val pb: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, 64, 64);
-    if (sel pb.err) { init_failed(ctx, "probe target error: {}", pb.err); ret; }
-    g.probe = pb.ok;
+    if (sel pb.err) {
+        init_failed(ctx, "probe target error: {}", pb.err);
+        ret;
+    }
+    g.probe    = pb.ok;
     g.probe_ok = true;
 
-    g.hdr_ok = false;
+    g.hdr_ok   = false;
     g.hdr_kept = false;
-    val hdesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
-    val hp: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?hdesc);
-    if (sel hp.err) { init_failed(ctx, "hdr probe target error: {}", hp.err); ret; }
+    val hdesc: gfx.RenderTargetDesc             = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
+    val hp:    res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?hdesc);
+    if (sel hp.err) {
+        init_failed(ctx, "hdr probe target error: {}", hp.err);
+        ret;
+    }
     g.hdr_probe = hp.ok;
-    g.hdr_ok = true;
+    g.hdr_ok    = true;
 
     g.lit_ok   = false;
     g.lit_kept = false;
-    val ldesc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
-    val lp: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?ldesc);
-    if (sel lp.err) { init_failed(ctx, "light probe target error: {}", lp.err); ret; }
+    val ldesc: gfx.RenderTargetDesc             = gfx.render_target_desc(gfx.RenderFormat.rgba16_float{}, 1);
+    val lp:    res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(d, 2, 2, ?ldesc);
+    if (sel lp.err) {
+        init_failed(ctx, "light probe target error: {}", lp.err);
+        ret;
+    }
     g.lit_probe = lp.ok;
-    g.lit_ok = true;
+    g.lit_ok    = true;
 
     val loaded: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "../cube/assets/cube.glb");
-    if (sel loaded.err) { init_failed(ctx, "mesh load error: {}", loaded.err); ret; }
-    g.mesh = loaded.ok;
+    if (sel loaded.err) {
+        init_failed(ctx, "mesh load error: {}", loaded.err);
+        ret;
+    }
+    g.mesh    = loaded.ok;
     g.mesh_ok = true;
 
     # This example knows the checker is display colour and names that explicitly.
@@ -262,8 +277,11 @@ fun on_init(ctx: *Context) {
     # examples such as cube retain the shorter, source-compatible sRGB form.
     val tex: res[gfx.Texture, gfx.Error] = gfx.texture_load_as(
         d, "../cube/assets/checker.qoi", gfx.ColorSpace.srgb{});
-    if (sel tex.err) { init_failed(ctx, "texture load error: {}", tex.err); ret; }
-    g.texture = tex.ok;
+    if (sel tex.err) {
+        init_failed(ctx, "texture load error: {}", tex.err);
+        ret;
+    }
+    g.texture    = tex.ok;
     g.texture_ok = true;
 
     g.material = gfx.material();
@@ -278,9 +296,12 @@ fun on_init(ctx: *Context) {
     # built yet: the pipelines a shader needs depend on the render pass and the
     # vertex layout it is drawn with, and neither is known until a draw.
     val sr: err[gfx.Error] = gfx.shader(?g.shader,
-                                        ?GAME_VERT_SPV[0], $length_of(GAME_VERT_SPV),
-                                        ?GAME_FRAG_SPV[0], $length_of(GAME_FRAG_SPV));
-    if (sel sr.err) { init_failed(ctx, "shader error: {}", sr.err); ret; }
+        ?GAME_VERT_SPV[0], $length_of(GAME_VERT_SPV),
+        ?GAME_FRAG_SPV[0], $length_of(GAME_FRAG_SPV));
+    if (sel sr.err) {
+        init_failed(ctx, "shader error: {}", sr.err);
+        ret;
+    }
     g.shader_ok = true;
 
     g.params.direction = gm.vec4(0.4, 0.8, 0.45, 0.0);
@@ -294,7 +315,10 @@ fun on_init(ctx: *Context) {
     # and a driver may honour anyway. The starting capacity is already larger,
     # so this changes nothing today and keeps being true if either number moves.
     val reserved: err[gfx.Error] = gfx.renderer_storage_reserve(?g.renderer, 128 * $size_of(gm.Vec4));
-    if (sel reserved.err) { init_failed(ctx, "could not reserve the storage buffer: {}", reserved.err); ret; }
+    if (sel reserved.err) {
+        init_failed(ctx, "could not reserve the storage buffer: {}", reserved.err);
+        ret;
+    }
 
     # The list itself. Colours are fixed and positions are animated, so the
     # entry the probe reads back is stable across the run: a probe comparing
@@ -304,7 +328,7 @@ fun on_init(ctx: *Context) {
         val t: f32 = li::f32 / LIGHT_COUNT::f32;
         g.lights[li].place = gm.vec4(0.0, 0.0, 0.0, 2.2);
         g.lights[li].tint  = gm.vec4(0.35 + 0.65 * t, 0.55 * (1.0 - t), 0.9 - 0.4 * t, 1.0);
-        li = li + 1;
+        li                 = li + 1;
     }
 
     # One beacon with an exactly representable colour, so the probe compares
@@ -322,11 +346,11 @@ fun on_init(ctx: *Context) {
         100.0,
     );
 
-    g.left  = gm.transform_identity();
-    g.right = gm.transform_identity();
+    g.left           = gm.transform_identity();
+    g.right          = gm.transform_identity();
     g.left.position  = gm.vec3(0.0 - 1.4, 0.0, 0.0);
     g.right.position = gm.vec3(1.4, 0.0, 0.0);
-    g.ready = 1;
+    g.ready          = 1;
 }
 
 var spin: f32 = 0.0;
@@ -381,13 +405,13 @@ fun on_draw(ctx: *Context) {
         val a: f32 = spin + li::f32 * 0.196;
         val r: f32 = 1.9 + 0.35 * gm.sinf(a * 3.0);
         g.lights[li].place = gm.vec4(1.4 + r * gm.cosf(a),
-                                     r * gm.sinf(a),
-                                     0.9 * gm.cosf(a * 2.0),
-                                     2.2);
+            r * gm.sinf(a),
+            0.9 * gm.cosf(a * 2.0),
+            2.2);
         li = li + 1;
     }
     val wrote: err[gfx.Error] = gfx.renderer_storage_write(?g.renderer, (?g.lights[0]):~*u8,
-                                                           LIGHT_COUNT * $size_of(Light));
+        LIGHT_COUNT * $size_of(Light));
     if (sel wrote.err) {
         print.eprintlnf("the light list could not be written: {}", gfx.error_message(wrote.err));
     }
@@ -448,11 +472,10 @@ fun on_draw(ctx: *Context) {
         var pp: gfx.Pass = gfx.pass_begin(?g.renderer, ?pd);
         if (g.drawn == 0) {
             gfx.pass_draw_sprite(?pp, opt[*gfx.Texture].none{}, gfx.rect(0.0, 0.0, 32.0, 32.0),
-                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gm.vec4(1.0, 1.0, 1.0, 1.0));
         }
         gfx.pass_end(?pp);
     }
-
 
     if (g.hdr_ok && g.drawn == 0) {
         var hd: gfx.PassDesc = gfx.pass_overlay();
@@ -471,7 +494,7 @@ fun on_draw(ctx: *Context) {
         # noise that buries the rest of the output.
         if (g.drawn == 0) {
             gfx.pass_draw_sprite(?gp, opt[*gfx.Texture].none{}, gfx.rect(0.0, 0.0, 32.0, 32.0),
-                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gm.vec4(1.0, 1.0, 1.0, 1.0));
         }
         gfx.pass_end(?gp);
     }
@@ -480,7 +503,7 @@ fun on_draw(ctx: *Context) {
     if (g.budget != 0 && g.drawn >= g.budget) { ctx.running = false; }
 
     var desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
-    var p: gfx.Pass = gfx.pass_begin(?g.renderer, ?desc);
+    var p:    gfx.Pass     = gfx.pass_begin(?g.renderer, ?desc);
 
     # The engine's program.
     gfx.pass_draw_material(?p, ?g.mesh, ?g.material, ?g.left);
@@ -534,16 +557,16 @@ fun on_dnit(ctx: *Context) {
     # the frame count would mean the cache is not being hit and every frame is
     # building a pipeline.
     print.printlnf("drew {} frames; the shader built {} pipeline(s)",
-                   g.drawn, gfx.shader_pipelines(?g.shader));
+        g.drawn, gfx.shader_pipelines(?g.shader));
 
     # What the storage buffer cost. The capacity is what it grew to and keeps,
     # the used count is what this frame actually wrote, and a buffer count above
     # one means the payload outgrew the reservation while the game ran.
     print.printlnf("storage: {} of {} bytes used, {} buffer(s), {} refused",
-                   gfx.renderer_storage_used(?g.renderer),
-                   gfx.renderer_storage_capacity(?g.renderer),
-                   gfx.renderer_storage_buffers(?g.renderer),
-                   gfx.renderer_storage_refused(?g.renderer));
+        gfx.renderer_storage_used(?g.renderer),
+        gfx.renderer_storage_capacity(?g.renderer),
+        gfx.renderer_storage_buffers(?g.renderer),
+        gfx.renderer_storage_refused(?g.renderer));
 
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
@@ -555,7 +578,7 @@ fun on_dnit(ctx: *Context) {
         }
         or {
             var lit: usize = 0;
-            var i: usize = 0;
+            var i:   usize = 0;
             for (i < 4096) {
                 if (px[i * 4] > 128) { lit = lit + 1; }
                 i = i + 1;
@@ -571,10 +594,9 @@ fun on_dnit(ctx: *Context) {
         }
     }
 
-
     if (g.hdr_ok) {
         var raw: [32]u8;
-        val hr: err[gfx.Error] = gfx.render_target_read_raw_at(
+        val hr:  err[gfx.Error] = gfx.render_target_read_raw_at(
             d, ?g.hdr_probe, 0, ?raw[0], 32);
         if (sel hr.err) {
             print.eprintlnf("hdr probe read error: {}", gfx.error_message(hr.err));
@@ -597,25 +619,25 @@ fun on_dnit(ctx: *Context) {
     # at the wrong offset, or arrived with the wrong stride.
     if (g.lit_ok) {
         var lraw: [32]u8;
-        val lr: err[gfx.Error] = gfx.render_target_read_raw_at(
+        val lr:   err[gfx.Error] = gfx.render_target_read_raw_at(
             d, ?g.lit_probe, 0, ?lraw[0], 32);
         if (sel lr.err) {
             print.eprintlnf("light probe read error: {}", gfx.error_message(lr.err));
         }
         or {
             g.lit_kept = lraw[0] == 0x00 && lraw[1] == 0x38
-                      && lraw[2] == 0x00 && lraw[3] == 0x34
-                      && lraw[4] == 0x00 && lraw[5] == 0x3C
-                      && lraw[6] == 0x00 && lraw[7] == 0x3C;
+                && lraw[2] == 0x00 && lraw[3] == 0x34
+                && lraw[4] == 0x00 && lraw[5] == 0x3C
+                && lraw[6] == 0x00 && lraw[7] == 0x3C;
             if (g.lit_kept) {
                 print.printlnf("STORAGE PROBE OK: entry {} of the light list read back exactly",
-                               PROBE_ENTRY);
+                    PROBE_ENTRY);
             }
             or {
                 print.printlnf("STORAGE PROBE FAIL: entry {} read back as {} {} {} {} {} {} {} {}",
-                               PROBE_ENTRY,
-                               lraw[0], lraw[1], lraw[2], lraw[3],
-                               lraw[4], lraw[5], lraw[6], lraw[7]);
+                    PROBE_ENTRY,
+                    lraw[0], lraw[1], lraw[2], lraw[3],
+                    lraw[4], lraw[5], lraw[6], lraw[7]);
             }
         }
     }
@@ -652,9 +674,9 @@ fun parse_usize(s: str) usize {
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     var game: Game;
-    game.budget = 0;
-    game.drawn  = 0;
-    game.ready  = 0;
+    game.budget      = 0;
+    game.drawn       = 0;
+    game.ready       = 0;
     game.renderer_ok = false;
     game.mesh_ok     = false;
     game.texture_ok  = false;
@@ -667,7 +689,7 @@ fun main(argc: i64, argv: **u8) i64 {
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
             game.budget = parse_usize(argv[argi + 1]:~str);
-            argi = argi + 1;
+            argi        = argi + 1;
         }
         argi = argi + 1;
     }
@@ -714,7 +736,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # The probe reports through the exit code as well as the output. A check
     # that prints FAIL and exits 0 is a check nothing can act on.
     if (game.probe_ok && (game.probe_lit < 1000 || game.probe_lit > 1100)) { ret 1; }
-    if (game.hdr_ok && !game.hdr_kept) { ret 1; }
+    if (game.hdr_ok && !game.hdr_kept)                                     { ret 1; }
     # The storage buffer is the thing this example exists to demonstrate, so a
     # run in which it did not arrive must fail rather than print and exit 0.
     if (game.lit_ok && !game.lit_kept) { ret 1; }

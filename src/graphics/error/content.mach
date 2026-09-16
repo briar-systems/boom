@@ -3,17 +3,17 @@
 # the cases an image or a TrueType face can fail on before its pixels reach the
 # device. mach-image's and mach-font's own refusals ride as payloads.
 
-use std.types.string.str;
-use std.types.option.opt;
+use font.error.FontError;
 use image.codec.DecodeError;
 use image.format.Format;
-use font.error.FontError;
+use std.types.option.opt;
+use std.types.string.str;
 
 # why a texture could not be decoded
 # ---
-# dimensions:  a width or height that is not positive
-# format:      the bytes are not a format boom decodes; carries what was detected, if anything
-# decode:      the decoder refused the bytes
+# dimensions: a width or height that is not positive
+# format:     the bytes are not a format boom decodes; carries what was detected, if anything
+# decode:     the decoder refused the bytes
 pub tag TextureError: u8 {
     dimensions;
     format: opt[Format];

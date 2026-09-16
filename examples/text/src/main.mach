@@ -4,39 +4,39 @@
 # the returned Font owns both its glyph metrics and uploaded atlas rather than
 # retaining a pointer into the caller's byte buffer.
 
-use std.runtime;
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.string.str_equals;
-use std.types.result.res;
-use std.types.error.err;
-use std.types.option.opt;
-use std.chrono.duration.SECOND;
-use std.chrono.duration.MILLISECOND;
-use std.print;
-use allo: std.allocator;
-use page: std.allocator.page;
-use fs: std.filesystem;
-use vector: std.collections.vector;
 use boom.app.App;
 use boom.context.Config;
 use boom.context.Context;
-use boom.context.context_init;
-use boom.context.context_set_user;
-use boom.context.context_user;
-use boom.context.context_fail;
-use boom.context.context_shutdown;
 use boom.context.ContextError;
 use boom.context.context_error_message;
-use boom.engine.run;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
 use boom.engine.EngineError;
 use boom.engine.engine_error_message;
-use boom.window.WindowMode;
+use boom.engine.run;
 use gfx: boom.graphics;
-use gm: boom.math;
+use gm:  boom.math;
+use boom.window.WindowMode;
+use allo: std.allocator;
+use std.allocator.page;
+use std.chrono.duration.MILLISECOND;
+use std.chrono.duration.SECOND;
+use std.collections.vector;
+use fs: std.filesystem;
+use std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
 
 rec Check {
     a:           allo.Allocator;
@@ -52,8 +52,8 @@ var FONT_PATH: str = "";
 fun on_init(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
     c.renderer_ok = false;
-    c.font_ok = false;
-    c.drawn = 0;
+    c.font_ok     = false;
+    c.drawn       = 0;
     val made: err[allo.Error] = page.make(?c.a);
     if (sel made.err) {
         print.eprintln("could not make the page allocator");
@@ -75,8 +75,8 @@ fun on_init(ctx: *Context) {
         context_fail(ctx, 1);
         ret;
     }
-    var bytes: vector.Vector[u8] = br.ok;
-    val fr: res[gfx.Font, gfx.Error] = gfx.font_from_bytes(
+    var bytes: vector.Vector[u8]        = br.ok;
+    val fr:    res[gfx.Font, gfx.Error] = gfx.font_from_bytes(
         ?c.a, gfx.renderer_device(?c.renderer), bytes.data, bytes.len, 18.0);
 
     # The source lifetime ends here, before metrics are inspected or the atlas
@@ -87,7 +87,7 @@ fun on_init(ctx: *Context) {
         context_fail(ctx, 1);
         ret;
     }
-    c.font = fr.ok;
+    c.font    = fr.ok;
     c.font_ok = true;
     if (sel released.err) {
         print.eprintln("the encoded font bytes could not be released");
@@ -104,7 +104,10 @@ fun on_tick(ctx: *Context) {}
 
 fun on_draw(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
-    if (!c.font_ok) { context_fail(ctx, 1); ret; }
+    if (!c.font_ok) {
+        context_fail(ctx, 1);
+        ret;
+    }
 
     val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?c.renderer);
     if (sel br.err) {
@@ -118,7 +121,7 @@ fun on_draw(ctx: *Context) {
     desc.clear = opt[gm.Vec4].some{gm.vec4(0.02, 0.02, 0.03, 1.0)};
     var pass: gfx.Pass = gfx.pass_begin(?c.renderer, ?desc);
     gfx.text_draw(?pass, ?c.font, "borrowed bytes", 16.0, 16.0,
-                  gm.vec4(1.0, 1.0, 1.0, 1.0));
+        gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?pass);
 
     val er: err[gfx.Error] = gfx.renderer_end_frame(?c.renderer);
@@ -149,7 +152,7 @@ fun main(argc: i64, argv: **u8) i64 {
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--font") && argi + 1 < argc) {
             FONT_PATH = argv[argi + 1]:~str;
-            argi = argi + 1;
+            argi      = argi + 1;
         }
         argi = argi + 1;
     }
@@ -159,7 +162,7 @@ fun main(argc: i64, argv: **u8) i64 {
     }
 
     var check: Check;
-    var app: App;
+    var app:   App;
     app.f_init = on_init;
     app.f_tick = on_tick;
     app.f_draw = on_draw;

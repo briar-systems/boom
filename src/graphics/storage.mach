@@ -48,26 +48,26 @@
 # once, in the first frames, and never again; a game with forty lights pays for
 # forty lights, once.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
-use mem: std.memory;
-use vk;
-use boom.graphics.error.Error;
-use boom.graphics.error.Stage;
-use boom.graphics.error.Capacity;
-use boom.graphics.error.BufferError;
-use boom.graphics.vk.Vk;
 use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_unmap;
-use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.error.BufferError;
+use boom.graphics.error.Capacity;
+use boom.graphics.error.Error;
+use boom.graphics.error.Stage;
 use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.vk.Vk;
+use mem: std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
 
 # The binding number the frame's storage buffer occupies.
 #
@@ -114,7 +114,6 @@ pub val STORAGE_MAX_BYTES: usize = 134217728;
 # every buffer a frame can ever hold and sixteen leaves the array room if either
 # size moves. It exists so the array has a size, not as a limit anything meets.
 pub val MAX_STORAGE_BUFFERS: usize = 16;
-
 
 # One host-visible span a frame's payload lives in.
 # ---
@@ -188,7 +187,7 @@ pub fun storage_init(s: *FrameStorage, v: *Vk) err[Error] {
             s.bufs[f][b].live   = false;
             s.bufs[f][b].mapped = nil;
             s.bufs[f][b].size   = 0;
-            b = b + 1;
+            b                   = b + 1;
         }
         val grown: err[Error] = storage_grow(s, v, f, STORAGE_BYTES);
         if (sel grown.err) {
@@ -255,7 +254,7 @@ fun storage_grow(s: *FrameStorage, v: *Vk, frame: usize, need: usize) err[Error]
     s.bufs[frame][n].mapped = dst;
     s.bufs[frame][n].size   = size;
     s.bufs[frame][n].live   = true;
-    s.count[frame] = n + 1;
+    s.count[frame]          = n + 1;
     ret err[Error].ok{};
 }
 
@@ -276,7 +275,7 @@ fun storage_grow(s: *FrameStorage, v: *Vk, frame: usize, need: usize) err[Error]
 # same payload one frame later and would otherwise allocate then. Growing a
 # buffer the GPU is reading is safe because the one it replaces is retained.
 pub fun storage_reserve(s: *FrameStorage, v: *Vk, bytes: usize) err[Error] {
-    if (!s.ready) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
+    if (!s.ready)   { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
     if (bytes == 0) { ret err[Error].ok{}; }
 
     var f: usize = 0;
@@ -319,14 +318,14 @@ pub fun storage_begin_frame(s: *FrameStorage, frame: usize) {
 # src:    the bytes to copy
 # len:    how many
 pub fun storage_write(s: *FrameStorage, v: *Vk, frame: usize, offset: usize,
-                      src: *u8, len: usize) err[Error] {
+    src: *u8, len: usize) err[Error] {
     val wrote: err[Error] = write_storage(s, v, frame, offset, src, len);
     if (sel wrote.err) { s.refused = s.refused + 1; }
     ret wrote;
 }
 
 fun write_storage(s: *FrameStorage, v: *Vk, frame: usize, offset: usize,
-                  src: *u8, len: usize) err[Error] {
+    src: *u8, len: usize) err[Error] {
     if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) {
         ret err[Error].err{Error.uninitialized{Stage.frame{}}};
     }
@@ -357,7 +356,7 @@ fun write_storage(s: *FrameStorage, v: *Vk, frame: usize, offset: usize,
 # behaviour in Vulkan even where the shader never reads it.
 pub fun storage_buffer(s: *FrameStorage, frame: usize) vk.Buffer {
     if (!s.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret nil; }
-    if (s.count[frame] == 0) { ret nil; }
+    if (s.count[frame] == 0)                       { ret nil; }
     ret s.bufs[frame][s.count[frame] - 1].buf.handle;
 }
 
@@ -367,7 +366,7 @@ pub fun storage_buffer(s: *FrameStorage, frame: usize) vk.Buffer {
 # shader may declare. See storage_reserve.
 pub fun storage_capacity(s: *FrameStorage, frame: usize) usize {
     if (frame >= MAX_FRAMES_IN_FLIGHT) { ret 0; }
-    if (s.count[frame] == 0) { ret 0; }
+    if (s.count[frame] == 0)           { ret 0; }
     ret s.bufs[frame][s.count[frame] - 1].size;
 }
 
@@ -411,11 +410,11 @@ pub fun storage_dnit(s: *FrameStorage, v: *Vk) {
                 s.bufs[f][b].live = false;
             }
             s.bufs[f][b].size = 0;
-            b = b + 1;
+            b                 = b + 1;
         }
         s.count[f] = 0;
         s.used[f]  = 0;
-        f = f + 1;
+        f          = f + 1;
     }
     s.ready = false;
 }
@@ -431,13 +430,13 @@ test "storage: the schedule doubles until the need fits" {
     # A schedule that grew by a fixed step would allocate a buffer per frame for
     # a payload creeping up by one light, and reach MAX_STORAGE_BUFFERS in
     # sixteen frames.
-    if (!sized(storage_size_for(0, 0), STORAGE_BYTES))              { ret 1; }
+    if (!sized(storage_size_for(0, 0), STORAGE_BYTES)) { ret 1; }
     if (!sized(storage_size_for(STORAGE_BYTES, STORAGE_BYTES + 1),
-               STORAGE_BYTES * 2))                                  { ret 2; }
+        STORAGE_BYTES * 2)) { ret 2; }
     if (!sized(storage_size_for(STORAGE_BYTES, STORAGE_BYTES * 4),
-               STORAGE_BYTES * 4))                                  { ret 3; }
+        STORAGE_BYTES * 4)) { ret 3; }
     if (!sized(storage_size_for(STORAGE_BYTES, STORAGE_BYTES * 4 + 1),
-               STORAGE_BYTES * 8))                                  { ret 4; }
+        STORAGE_BYTES * 8)) { ret 4; }
     ret 0;
 }
 
@@ -455,7 +454,7 @@ test "storage: a schedule never returns less than the need" {
     var need: usize = 1;
     for (need < STORAGE_BYTES * 64) {
         val size: opt[usize] = storage_size_for(STORAGE_BYTES, need);
-        if (!sel size.some) { ret 1; }
+        if (!sel size.some)   { ret 1; }
         if (size.some < need) { ret 2; }
         need = need * 3;
     }
@@ -468,7 +467,7 @@ test "storage: growth never shrinks what a frame already has" {
     # into a buffer that cannot hold what the frame had already written.
     if (!sized(storage_size_for(STORAGE_BYTES * 8, 16), STORAGE_BYTES * 8)) { ret 1; }
     if (!sized(storage_size_for(STORAGE_BYTES * 8, STORAGE_BYTES * 8),
-               STORAGE_BYTES * 8))                                          { ret 2; }
+        STORAGE_BYTES * 8)) { ret 2; }
     ret 0;
 }
 
@@ -476,7 +475,7 @@ test "storage: a need past the ceiling is refused rather than clamped" {
     # Clamping would hand back a buffer holding part of the payload, and the
     # shader would read the rest as whatever the tail contains.
     val past: opt[usize] = storage_size_for(0, STORAGE_MAX_BYTES + 1);
-    if (!sel past.none) { ret 1; }
+    if (!sel past.none)                                                    { ret 1; }
     if (!sized(storage_size_for(0, STORAGE_MAX_BYTES), STORAGE_MAX_BYTES)) { ret 2; }
     ret 0;
 }
@@ -487,14 +486,14 @@ test "storage: the ceiling is reachable by doubling from the base" {
     # forbids. Counting the steps is the other half: every one of them is a
     # buffer the frame retains, so the array has to be able to hold them all or
     # a frame would run out of entries before it ran out of capacity.
-    var size: usize = STORAGE_BYTES;
+    var size:  usize = STORAGE_BYTES;
     var steps: usize = 1;
     for (size < STORAGE_MAX_BYTES) {
-        size = size * 2;
+        size  = size * 2;
         steps = steps + 1;
     }
-    if (size != STORAGE_MAX_BYTES)    { ret 1; }
-    if (steps > MAX_STORAGE_BUFFERS)  { ret 2; }
+    if (size != STORAGE_MAX_BYTES)   { ret 1; }
+    if (steps > MAX_STORAGE_BUFFERS) { ret 2; }
     ret 0;
 }
 
@@ -529,7 +528,7 @@ test "storage: a write is refused before the storage is created" {
     var bytes: [16]u8;
     if (!refused(storage_write(?s, ?v, 0, 0, ?bytes[0], 16))) { ret 1; }
     if (s.refused != 1)                                       { ret 2; }
-    if (storage_buffer(?s, 0) != nil)               { ret 3; }
+    if (storage_buffer(?s, 0) != nil)                         { ret 3; }
     ret 0;
 }
 
@@ -540,9 +539,9 @@ test "storage: a frame past the ring is refused rather than indexing off it" {
     s.refused = 0;
     var bytes: [16]u8;
     if (!refused(storage_write(?s, ?v, MAX_FRAMES_IN_FLIGHT, 0, ?bytes[0], 16))) { ret 1; }
-    if (storage_buffer(?s, MAX_FRAMES_IN_FLIGHT) != nil)               { ret 2; }
-    if (storage_capacity(?s, MAX_FRAMES_IN_FLIGHT) != 0)               { ret 3; }
-    if (storage_buffers(?s, MAX_FRAMES_IN_FLIGHT) != 0)                { ret 4; }
+    if (storage_buffer(?s, MAX_FRAMES_IN_FLIGHT) != nil)                         { ret 2; }
+    if (storage_capacity(?s, MAX_FRAMES_IN_FLIGHT) != 0)                         { ret 3; }
+    if (storage_buffers(?s, MAX_FRAMES_IN_FLIGHT) != 0)                          { ret 4; }
     ret 0;
 }
 
@@ -550,33 +549,39 @@ test "storage: a write that fits lands at its offset and moves the mark" {
     # No device, so the buffer is a stack array standing in for the mapping.
     # What is under test is the offset arithmetic: a write landing anywhere else
     # is a payload the shader indexes correctly and finds the wrong bytes in.
-    var s: FrameStorage;
-    var v: Vk;
+    var s:       FrameStorage;
+    var v:       Vk;
     var backing: [256]u8;
-    var i: usize = 0;
-    for (i < 256) { backing[i] = 0; i = i + 1; }
+    var i:       usize = 0;
+    for (i < 256) {
+        backing[i] = 0;
+        i          = i + 1;
+    }
 
-    s.ready     = true;
-    s.refused   = 0;
-    s.count[0]  = 1;
-    s.used[0]   = 0;
+    s.ready             = true;
+    s.refused           = 0;
+    s.count[0]          = 1;
+    s.used[0]           = 0;
     s.bufs[0][0].live   = true;
     s.bufs[0][0].mapped = ?backing[0];
     s.bufs[0][0].size   = 256;
 
     var src: [4]u8;
-    src[0] = 1; src[1] = 2; src[2] = 3; src[3] = 4;
+    src[0] = 1;
+    src[1] = 2;
+    src[2] = 3;
+    src[3] = 4;
     if (refused(storage_write(?s, ?v, 0, 64, ?src[0], 4))) { ret 1; }
-    if (backing[64] != 1 || backing[67] != 4)      { ret 2; }
+    if (backing[64] != 1 || backing[67] != 4)              { ret 2; }
     # Nothing before the offset is touched, so a header written earlier survives
     # an array written after it.
-    if (backing[63] != 0 || backing[68] != 0)      { ret 3; }
-    if (storage_used(?s, 0) != 68)                 { ret 4; }
+    if (backing[63] != 0 || backing[68] != 0) { ret 3; }
+    if (storage_used(?s, 0) != 68)            { ret 4; }
 
     # The mark is a high-water mark, so an earlier write does not lower it.
-    if (refused(storage_write(?s, ?v, 0, 0, ?src[0], 4)))  { ret 5; }
-    if (storage_used(?s, 0) != 68)                 { ret 6; }
-    if (s.refused != 0)                            { ret 7; }
+    if (refused(storage_write(?s, ?v, 0, 0, ?src[0], 4))) { ret 5; }
+    if (storage_used(?s, 0) != 68)                        { ret 6; }
+    if (s.refused != 0)                                   { ret 7; }
     ret 0;
 }
 
@@ -584,15 +589,15 @@ test "storage: a write past the capacity with no device is refused, not truncate
     # The ceiling case: growth is unavailable, so exhaustion has to be
     # reportable. Copying the prefix that fit would give the shader a list whose
     # last entries are whatever the tail held.
-    var s: FrameStorage;
-    var v: Vk;
+    var s:       FrameStorage;
+    var v:       Vk;
     var backing: [64]u8;
     v.ready = false;
 
-    s.ready    = true;
-    s.refused  = 0;
-    s.count[0] = 1;
-    s.used[0]  = 0;
+    s.ready             = true;
+    s.refused           = 0;
+    s.count[0]          = 1;
+    s.used[0]           = 0;
     s.bufs[0][0].live   = true;
     s.bufs[0][0].mapped = ?backing[0];
     s.bufs[0][0].size   = 64;
@@ -602,26 +607,26 @@ test "storage: a write past the capacity with no device is refused, not truncate
     if (s.refused != 1)                                     { ret 2; }
     if (storage_used(?s, 0) != 0)                           { ret 3; }
     # The byte one past the end of the range is still the last legal one.
-    if (refused(storage_write(?s, ?v, 0, 56, ?src[0], 8)))  { ret 4; }
+    if (refused(storage_write(?s, ?v, 0, 56, ?src[0], 8))) { ret 4; }
     ret 0;
 }
 
 test "storage: an offset that wraps the address space is refused" {
     # offset + len wrapping to a small number would pass the capacity check and
     # then copy through a pointer far outside the mapping.
-    var s: FrameStorage;
-    var v: Vk;
+    var s:       FrameStorage;
+    var v:       Vk;
     var backing: [64]u8;
-    s.ready    = true;
-    s.refused  = 0;
-    s.count[0] = 1;
+    s.ready             = true;
+    s.refused           = 0;
+    s.count[0]          = 1;
     s.bufs[0][0].live   = true;
     s.bufs[0][0].mapped = ?backing[0];
     s.bufs[0][0].size   = 64;
 
     var src: [8]u8;
     if (!refused(storage_write(?s, ?v, 0, 0xFFFFFFFFFFFFFFF8, ?src[0], 16))) { ret 1; }
-    if (s.refused != 1)                                            { ret 2; }
+    if (s.refused != 1)                                                      { ret 2; }
     ret 0;
 }
 
@@ -635,28 +640,39 @@ test "storage: each frame writes its own buffer" {
     var a: [64]u8;
     var b: [64]u8;
     var i: usize = 0;
-    for (i < 64) { a[i] = 0; b[i] = 0; i = i + 1; }
+    for (i < 64) {
+        a[i] = 0;
+        b[i] = 0;
+        i    = i + 1;
+    }
 
-    s.ready    = true;
-    s.refused  = 0;
-    s.count[0] = 1;
-    s.count[1] = 1;
-    s.used[0]  = 0;
-    s.used[1]  = 0;
-    s.bufs[0][0].live = true; s.bufs[0][0].mapped = ?a[0]; s.bufs[0][0].size = 64;
-    s.bufs[1][0].live = true; s.bufs[1][0].mapped = ?b[0]; s.bufs[1][0].size = 64;
+    s.ready             = true;
+    s.refused           = 0;
+    s.count[0]          = 1;
+    s.count[1]          = 1;
+    s.used[0]           = 0;
+    s.used[1]           = 0;
+    s.bufs[0][0].live   = true;
+    s.bufs[0][0].mapped = ?a[0];
+    s.bufs[0][0].size   = 64;
+    s.bufs[1][0].live   = true;
+    s.bufs[1][0].mapped = ?b[0];
+    s.bufs[1][0].size   = 64;
 
     var src: [4]u8;
-    src[0] = 9; src[1] = 9; src[2] = 9; src[3] = 9;
+    src[0] = 9;
+    src[1] = 9;
+    src[2] = 9;
+    src[3] = 9;
     if (refused(storage_write(?s, ?v, 0, 0, ?src[0], 4))) { ret 1; }
-    if (a[0] != 9) { ret 2; }
-    if (b[0] != 0) { ret 3; }
+    if (a[0] != 9)                                        { ret 2; }
+    if (b[0] != 0)                                        { ret 3; }
 
     # And the marks are per frame, so opening one does not rewind the other.
     storage_begin_frame(?s, 0);
-    if (storage_used(?s, 0) != 0) { ret 4; }
+    if (storage_used(?s, 0) != 0)                         { ret 4; }
     if (refused(storage_write(?s, ?v, 1, 0, ?src[0], 4))) { ret 5; }
-    if (storage_used(?s, 1) != 4) { ret 6; }
+    if (storage_used(?s, 1) != 4)                         { ret 6; }
     storage_begin_frame(?s, 0);
     if (storage_used(?s, 1) != 4) { ret 7; }
     ret 0;
@@ -666,13 +682,17 @@ test "storage: a frame is bound to the last buffer it created" {
     # The retained ones are still named by draws recorded before the growth, so
     # they stay in the array. Binding one of them for a later draw would hand
     # the shader the payload as it stood before it grew.
-    var s: FrameStorage;
+    var s:     FrameStorage;
     var older: [16]u8;
     var newer: [32]u8;
-    s.ready    = true;
-    s.count[0] = 2;
-    s.bufs[0][0].live = true; s.bufs[0][0].mapped = ?older[0]; s.bufs[0][0].size = 16;
-    s.bufs[0][1].live = true; s.bufs[0][1].mapped = ?newer[0]; s.bufs[0][1].size = 32;
+    s.ready             = true;
+    s.count[0]          = 2;
+    s.bufs[0][0].live   = true;
+    s.bufs[0][0].mapped = ?older[0];
+    s.bufs[0][0].size   = 16;
+    s.bufs[0][1].live   = true;
+    s.bufs[0][1].mapped = ?newer[0];
+    s.bufs[0][1].size   = 32;
 
     if (storage_capacity(?s, 0) != 32) { ret 1; }
     if (storage_buffers(?s, 0) != 2)   { ret 2; }
@@ -687,7 +707,10 @@ test "storage: teardown on storage that was never created is a no-op" {
     for (f < MAX_FRAMES_IN_FLIGHT) {
         s.count[f] = 0;
         var b: usize = 0;
-        for (b < MAX_STORAGE_BUFFERS) { s.bufs[f][b].live = false; b = b + 1; }
+        for (b < MAX_STORAGE_BUFFERS) {
+            s.bufs[f][b].live = false;
+            b                 = b + 1;
+        }
         f = f + 1;
     }
     s.ready = true;

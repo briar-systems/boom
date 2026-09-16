@@ -22,12 +22,12 @@ use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
 use std.types.string.str;
 use std.types.string.str_equals;
-use std.types.option.opt;
-use std.types.error.err;
 
 # the most texture bindings a material carries
 pub val MAX_TEXTURES: i32 = 4;
@@ -80,7 +80,7 @@ pub rec Material {
 # ret: the new material
 pub fun material() Material {
     var m: Material;
-    m.base_color = vec4(1.0, 1.0, 1.0, 1.0);
+    m.base_color    = vec4(1.0, 1.0, 1.0, 1.0);
     m.texture_count = 0;
     ret m;
 }
@@ -111,12 +111,12 @@ pub fun material_add_texture(m: *Material, name: str, texture: *Texture) err[Mat
 # Filtering belongs to a binding rather than an image: the same rendered target
 # may be inspected with nearest sampling and composited with linear sampling.
 pub fun material_add_texture_filtered(m: *Material, name: str, texture: *Texture,
-                                      filter: TextureFilter) err[MaterialError] {
+    filter: TextureFilter) err[MaterialError] {
     if (m.texture_count >= MAX_TEXTURES) {
         ret err[MaterialError].err{MaterialError.full{}};
     }
     m.textures[m.texture_count] = MaterialTexture{name: name, texture: texture, filter: filter};
-    m.texture_count = m.texture_count + 1;
+    m.texture_count             = m.texture_count + 1;
     ret err[MaterialError].ok{};
 }
 
@@ -176,22 +176,22 @@ fun names(found: opt[*Texture], expected: *Texture) bool {
 test "material: base color defaults to white" {
     var m: Material = material();
     if (m.base_color[0] != 1.0 || m.base_color[3] != 1.0) { ret 1; }
-    if (m.texture_count != 0) { ret 2; }
+    if (m.texture_count != 0)                             { ret 2; }
     ret 0;
 }
 
 test "material: texture bindings fill then reject overflow" {
     var t: Texture;
     var m: Material = material();
-    var i: i32 = 0;
+    var i: i32      = 0;
     for (i < MAX_TEXTURES) {
         if (!bound(material_add_texture(?m, "u_texture", ?t))) { ret 1; }
         i = i + 1;
     }
     if (m.texture_count != MAX_TEXTURES) { ret 2; }
     val over: err[MaterialError] = material_add_texture(?m, "u_texture", ?t);
-    if (!sel over.err) { ret 3; }
-    if (!sel over.err.full) { ret 4; }
+    if (!sel over.err)                   { ret 3; }
+    if (!sel over.err.full)              { ret 4; }
     if (m.texture_count != MAX_TEXTURES) { ret 5; }
     ret 0;
 }
@@ -200,10 +200,10 @@ test "material: texture bindings default to nearest and may request linear" {
     var a: Texture;
     var b: Texture;
     var m: Material = material();
-    if (!bound(material_add_texture(?m, "albedo", ?a))) { ret 1; }
+    if (!bound(material_add_texture(?m, "albedo", ?a)))                                 { ret 1; }
     if (!bound(material_add_texture_filtered(?m, "field", ?b, TextureFilter.linear{}))) { ret 2; }
-    if (!sel m.textures[0].filter.nearest) { ret 3; }
-    if (!sel m.textures[1].filter.linear)  { ret 4; }
+    if (!sel m.textures[0].filter.nearest)                                              { ret 3; }
+    if (!sel m.textures[1].filter.linear)                                               { ret 4; }
     ret 0;
 }
 
@@ -215,7 +215,7 @@ test "material: an untextured material names no texture" {
 
     var t: Texture;
     if (!bound(material_add_texture(?m, "base", ?t))) { ret 2; }
-    if (!names(material_texture(?m), ?t)) { ret 3; }
+    if (!names(material_texture(?m), ?t))             { ret 3; }
     ret 0;
 }
 
@@ -226,15 +226,15 @@ test "material: a named lookup finds the binding it names" {
     # surface lit from a direction that shifts with its colour.
     var albedo: Texture;
     var normal: Texture;
-    var m: Material = material();
+    var m:      Material = material();
     if (!bound(material_add_texture(?m, "albedo", ?albedo))) { ret 1; }
     if (!bound(material_add_texture(?m, "normal", ?normal))) { ret 2; }
 
     if (!names(material_texture_named(?m, "albedo"), ?albedo)) { ret 3; }
     if (!names(material_texture_named(?m, "normal"), ?normal)) { ret 4; }
     # A binding the material does not carry is absent, not slot zero.
-    if (!names(material_texture_named(?m, "emissive"), nil))   { ret 5; }
+    if (!names(material_texture_named(?m, "emissive"), nil)) { ret 5; }
     # And the unnamed accessor the built-in programs use is still the first.
-    if (!names(material_texture(?m), ?albedo))                 { ret 6; }
+    if (!names(material_texture(?m), ?albedo)) { ret 6; }
     ret 0;
 }

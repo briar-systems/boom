@@ -62,27 +62,27 @@
 # before blaming this: an ICD present in /usr/share/vulkan/icd.d and device nodes
 # in /dev do not mean vkEnumeratePhysicalDevices will succeed.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
-use std.runtime;
-use p: std.print;
-use img: image;
-use boom.window.Window;
-use boom.window.WindowError;
-use boom.window.window_open;
-use boom.window.window_error_message;
-use boom.window.window_should_close;
-use boom.window.window_poll;
-use boom.window.window_close;
-use boom.window.window_refresh_size;
 use gfx: boom.graphics;
 use gm:  boom.math;
+use boom.window.Window;
+use boom.window.WindowError;
+use boom.window.window_close;
+use boom.window.window_error_message;
+use boom.window.window_open;
+use boom.window.window_poll;
+use boom.window.window_refresh_size;
+use boom.window.window_should_close;
+use img: image;
+use p:   std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
 
 val WIDTH:  i32 = 640;
 val HEIGHT: i32 = 360;
@@ -181,45 +181,96 @@ fun build_cube(verts: *f32, indices: *u32) {
     var axes: [54]f32;
     #            nx        ny        nz        ux        uy        uz        vx        vy        vz
     # +Z: X cross Y = Z
-    axes[0]  = 0.0;  axes[1]  = 0.0;  axes[2]  = 1.0;
-    axes[3]  = 1.0;  axes[4]  = 0.0;  axes[5]  = 0.0;
-    axes[6]  = 0.0;  axes[7]  = 1.0;  axes[8]  = 0.0;
+    axes[0] = 0.0;
+    axes[1] = 0.0;
+    axes[2] = 1.0;
+    axes[3] = 1.0;
+    axes[4] = 0.0;
+    axes[5] = 0.0;
+    axes[6] = 0.0;
+    axes[7] = 1.0;
+    axes[8] = 0.0;
     # -Z: (-X) cross Y = -Z
-    axes[9]  = 0.0;  axes[10] = 0.0;  axes[11] = 0.0 - 1.0;
-    axes[12] = 0.0 - 1.0; axes[13] = 0.0; axes[14] = 0.0;
-    axes[15] = 0.0;  axes[16] = 1.0;  axes[17] = 0.0;
+    axes[9]  = 0.0;
+    axes[10] = 0.0;
+    axes[11] = 0.0 - 1.0;
+    axes[12] = 0.0 - 1.0;
+    axes[13] = 0.0;
+    axes[14] = 0.0;
+    axes[15] = 0.0;
+    axes[16] = 1.0;
+    axes[17] = 0.0;
     # +X: Y cross Z = X
-    axes[18] = 1.0;  axes[19] = 0.0;  axes[20] = 0.0;
-    axes[21] = 0.0;  axes[22] = 1.0;  axes[23] = 0.0;
-    axes[24] = 0.0;  axes[25] = 0.0;  axes[26] = 1.0;
+    axes[18] = 1.0;
+    axes[19] = 0.0;
+    axes[20] = 0.0;
+    axes[21] = 0.0;
+    axes[22] = 1.0;
+    axes[23] = 0.0;
+    axes[24] = 0.0;
+    axes[25] = 0.0;
+    axes[26] = 1.0;
     # -X: Z cross Y = -X
-    axes[27] = 0.0 - 1.0; axes[28] = 0.0; axes[29] = 0.0;
-    axes[30] = 0.0;  axes[31] = 0.0;  axes[32] = 1.0;
-    axes[33] = 0.0;  axes[34] = 1.0;  axes[35] = 0.0;
+    axes[27] = 0.0 - 1.0;
+    axes[28] = 0.0;
+    axes[29] = 0.0;
+    axes[30] = 0.0;
+    axes[31] = 0.0;
+    axes[32] = 1.0;
+    axes[33] = 0.0;
+    axes[34] = 1.0;
+    axes[35] = 0.0;
     # +Y: Z cross X = Y
-    axes[36] = 0.0;  axes[37] = 1.0;  axes[38] = 0.0;
-    axes[39] = 0.0;  axes[40] = 0.0;  axes[41] = 1.0;
-    axes[42] = 1.0;  axes[43] = 0.0;  axes[44] = 0.0;
+    axes[36] = 0.0;
+    axes[37] = 1.0;
+    axes[38] = 0.0;
+    axes[39] = 0.0;
+    axes[40] = 0.0;
+    axes[41] = 1.0;
+    axes[42] = 1.0;
+    axes[43] = 0.0;
+    axes[44] = 0.0;
     # -Y: X cross Z = -Y
-    axes[45] = 0.0;  axes[46] = 0.0 - 1.0; axes[47] = 0.0;
-    axes[48] = 1.0;  axes[49] = 0.0;  axes[50] = 0.0;
-    axes[51] = 0.0;  axes[52] = 0.0;  axes[53] = 1.0;
+    axes[45] = 0.0;
+    axes[46] = 0.0 - 1.0;
+    axes[47] = 0.0;
+    axes[48] = 1.0;
+    axes[49] = 0.0;
+    axes[50] = 0.0;
+    axes[51] = 0.0;
+    axes[52] = 0.0;
+    axes[53] = 1.0;
 
     var f: usize = 0;
     for (f < 6) {
-        val b: usize = f * 9;
-        val nx: f32 = axes[b];     val ny: f32 = axes[b + 1]; val nz: f32 = axes[b + 2];
-        val ux: f32 = axes[b + 3]; val uy: f32 = axes[b + 4]; val uz: f32 = axes[b + 5];
-        val vx: f32 = axes[b + 6]; val vy: f32 = axes[b + 7]; val vz: f32 = axes[b + 8];
+        val b:  usize = f * 9;
+        val nx: f32   = axes[b];
+        val ny: f32   = axes[b + 1];
+        val nz: f32   = axes[b + 2];
+        val ux: f32   = axes[b + 3];
+        val uy: f32   = axes[b + 4];
+        val uz: f32   = axes[b + 5];
+        val vx: f32   = axes[b + 6];
+        val vy: f32   = axes[b + 7];
+        val vz: f32   = axes[b + 8];
 
         var c: usize = 0;
         for (c < 4) {
             # Corner signs: (-1,-1), (1,-1), (1,1), (-1,1).
             var su: f32 = 0.0 - 1.0;
             var sv: f32 = 0.0 - 1.0;
-            if (c == 1) { su = 1.0;       sv = 0.0 - 1.0; }
-            if (c == 2) { su = 1.0;       sv = 1.0; }
-            if (c == 3) { su = 0.0 - 1.0; sv = 1.0; }
+            if (c == 1) {
+                su = 1.0;
+                sv = 0.0 - 1.0;
+            }
+            if (c == 2) {
+                su = 1.0;
+                sv = 1.0;
+            }
+            if (c == 3) {
+                su = 0.0 - 1.0;
+                sv = 1.0;
+            }
 
             val base: usize = (f * 4 + c) * 8;
             verts[base]     = (nx + su * ux + sv * vx) * 0.5;
@@ -230,10 +281,10 @@ fun build_cube(verts: *f32, indices: *u32) {
             verts[base + 5] = nz;
             verts[base + 6] = (su + 1.0) * 0.5;
             verts[base + 7] = (sv + 1.0) * 0.5;
-            c = c + 1;
+            c               = c + 1;
         }
 
-        val vi: u32 = (f * 4)::u32;
+        val vi: u32   = (f * 4)::u32;
         val ii: usize = f * 6;
         indices[ii]     = vi;
         indices[ii + 1] = vi + 1;
@@ -241,7 +292,7 @@ fun build_cube(verts: *f32, indices: *u32) {
         indices[ii + 3] = vi;
         indices[ii + 4] = vi + 2;
         indices[ii + 5] = vi + 3;
-        f = f + 1;
+        f               = f + 1;
     }
 }
 
@@ -259,7 +310,7 @@ fun build_checker(px: *u8) {
             px[i + 1] = v;
             px[i + 2] = v;
             px[i + 3] = 255;
-            x = x + 1;
+            x         = x + 1;
         }
         y = y + 1;
     }
@@ -315,9 +366,9 @@ fun build_skinned_cube(bytes: *u8, verts: *f32) {
     for (v < 24) {
         val src: usize = v * 8;
         val dst: usize = v * 56;
-        put_f32(bytes, dst,      verts[src]);
-        put_f32(bytes, dst + 4,  verts[src + 1]);
-        put_f32(bytes, dst + 8,  verts[src + 2]);
+        put_f32(bytes, dst, verts[src]);
+        put_f32(bytes, dst + 4, verts[src + 1]);
+        put_f32(bytes, dst + 8, verts[src + 2]);
         put_f32(bytes, dst + 12, verts[src + 3]);
         put_f32(bytes, dst + 16, verts[src + 4]);
         put_f32(bytes, dst + 20, verts[src + 5]);
@@ -356,14 +407,26 @@ fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
     var ys: [6]f32;
     var rs: [6]f32;
     # First triangle: top-left, top-right, bottom-right.
-    xs[0] = x;     ys[0] = y;     rs[0] = 0.30;
-    xs[1] = x + w; ys[1] = y;     rs[1] = 0.30;
-    xs[2] = x + w; ys[2] = y + h; rs[2] = 0.30;
+    xs[0] = x;
+    ys[0] = y;
+    rs[0] = 0.30;
+    xs[1] = x + w;
+    ys[1] = y;
+    rs[1] = 0.30;
+    xs[2] = x + w;
+    ys[2] = y + h;
+    rs[2] = 0.30;
     # Second: top-left, bottom-right, bottom-left. Shares the diagonal, so the
     # two tile the rectangle with no gap and no overlap.
-    xs[3] = x;     ys[3] = y;     rs[3] = 0.90;
-    xs[4] = x + w; ys[4] = y + h; rs[4] = 0.90;
-    xs[5] = x;     ys[5] = y + h; rs[5] = 0.90;
+    xs[3] = x;
+    ys[3] = y;
+    rs[3] = 0.90;
+    xs[4] = x + w;
+    ys[4] = y + h;
+    rs[4] = 0.90;
+    xs[5] = x;
+    ys[5] = y + h;
+    rs[5] = 0.90;
 
     var i: usize = 0;
     for (i < 6) {
@@ -376,7 +439,7 @@ fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
         v[b + 5] = 0.10;
         v[b + 6] = 0.10;
         v[b + 7] = 1.0;
-        i = i + 1;
+        i        = i + 1;
     }
 }
 
@@ -397,21 +460,21 @@ fun hull_area(xs: *f32, ys: *f32, n: usize) f32 {
     if (n < 3) { ret 0.0; }
 
     var start: usize = 0;
-    var i: usize = 1;
+    var i:     usize = 1;
     for (i < n) {
         if (xs[i] < xs[start]) { start = i; }
         i = i + 1;
     }
 
-    var hx: [8]f32;
-    var hy: [8]f32;
+    var hx:    [8]f32;
+    var hy:    [8]f32;
     var count: usize = 0;
-    var cur: usize = start;
+    var cur:   usize = start;
     var guard: usize = 0;
     for (guard < n) {
         hx[count] = xs[cur];
         hy[count] = ys[cur];
-        count = count + 1;
+        count     = count + 1;
 
         var next: usize = 0;
         if (cur == 0) { next = 1; }
@@ -420,22 +483,22 @@ fun hull_area(xs: *f32, ys: *f32, n: usize) f32 {
             # The cross product of (next - cur) and (k - cur). Positive means k
             # is to the left, so k becomes the better candidate.
             val cross: f32 = (xs[next] - xs[cur]) * (ys[k] - ys[cur])
-                           - (ys[next] - ys[cur]) * (xs[k] - xs[cur]);
+                - (ys[next] - ys[cur]) * (xs[k] - xs[cur]);
             if (cross > 0.0) { next = k; }
             k = k + 1;
         }
         cur = next;
         if (cur == start) { guard = n; }
-        or { guard = guard + 1; }
+        or                { guard = guard + 1; }
     }
 
-    var twice: f32 = 0.0;
-    var j: usize = 0;
+    var twice: f32   = 0.0;
+    var j:     usize = 0;
     for (j < count) {
         var nx: usize = j + 1;
         if (nx == count) { nx = 0; }
         twice = twice + (hx[j] * hy[nx] - hx[nx] * hy[j]);
-        j = j + 1;
+        j     = j + 1;
     }
     if (twice < 0.0) { twice = 0.0 - twice; }
     ret twice * 0.5;
@@ -476,8 +539,8 @@ fun main(argc: i64, argv: **u8) i64 {
     var verts:   [192]f32;
     var indices: [36]u32;
     build_cube(?verts[0], ?indices[0]);
-    var fmt: gfx.VertexFormat = gfx.vertex_format_standard();
-    val mr: res[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 24, ?fmt, ?indices[0], 36);
+    var fmt: gfx.VertexFormat         = gfx.vertex_format_standard();
+    val mr:  res[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 24, ?fmt, ?indices[0], 36);
     if (sel mr.err) {
         report("mesh", mr.err);
         ret 1;
@@ -493,11 +556,11 @@ fun main(argc: i64, argv: **u8) i64 {
     source.height     = 8;
     source.channels   = 4;
     source.colorspace = img.COLORSPACE_SRGB;
-    var encoded: [1024]u8;
+    var encoded:   [1024]u8;
     val encoded_r: res[usize, img.EncodeError] = img.qoi_encode(?source, ?encoded[0], 1024);
     if (sel encoded_r.err) {
         p.printlnf("FAIL texture: could not encode the in-memory checker: {}",
-                   img.encode_error_name(encoded_r.err));
+            img.encode_error_name(encoded_r.err));
         ret 1;
     }
     val encoded_len: usize = encoded_r.ok;
@@ -511,7 +574,7 @@ fun main(argc: i64, argv: **u8) i64 {
         report("texture", tr.err);
         ret 1;
     }
-    var tex: gfx.Texture = tr.ok;
+    var tex: gfx.Texture                 = tr.ok;
     val ltr: res[gfx.Texture, gfx.Error] = gfx.texture_from_bytes_as(
         d, ?encoded[0], encoded_len, gfx.ColorSpace.linear{});
     if (sel ltr.err) {
@@ -537,17 +600,17 @@ fun main(argc: i64, argv: **u8) i64 {
         gm.radians(60.0), WIDTH::f32 / HEIGHT::f32, 0.1, 100.0);
     var xf: gm.Transform = gm.transform_identity();
 
-    var spin:      f32 = 0.0;
+    var spin:      f32   = 0.0;
     var presented: usize = 0;
     var skipped:   usize = 0;
     var dropped:   usize = 0;
-    var n: usize = 0;
+    var n:         usize = 0;
     for (n < FRAMES) {
         window_poll();
         window_refresh_size(?w);
         if (window_should_close(?w)) { n = FRAMES; }
         or {
-            spin = spin + 0.02;
+            spin        = spin + 0.02;
             xf.rotation = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), spin);
 
             val began: opt[bool] = begin(?r);
@@ -567,12 +630,12 @@ fun main(argc: i64, argv: **u8) i64 {
                 gfx.pass_end(?sp);
 
                 var over: gfx.PassDesc = gfx.pass_overlay();
-                var op: gfx.Pass = gfx.pass_begin(?r, ?over);
+                var op:   gfx.Pass     = gfx.pass_begin(?r, ?over);
                 gfx.pass_draw_sprite(?op, opt[*gfx.Texture].some{gfx.render_target_texture(?target)},
-                                     gfx.rect(0.0, 0.0, WIDTH::f32, HEIGHT::f32),
-                                     gm.vec4(1.0, 1.0, 1.0, 1.0));
+                    gfx.rect(0.0, 0.0, WIDTH::f32, HEIGHT::f32),
+                    gm.vec4(1.0, 1.0, 1.0, 1.0));
                 gfx.pass_draw_sprite(?op, opt[*gfx.Texture].some{?tex}, gfx.rect(8.0, 8.0, 64.0, 64.0),
-                                     gm.vec4(1.0, 1.0, 1.0, 1.0));
+                    gm.vec4(1.0, 1.0, 1.0, 1.0));
                 gfx.pass_end(?op);
 
                 dropped = dropped + gfx.renderer_dropped(?r);
@@ -591,11 +654,11 @@ fun main(argc: i64, argv: **u8) i64 {
     # matter what it cost, so a frame time measured there is the display's
     # rather than the game's.
     p.printlnf("ok   present mode: {} requested, {} in use",
-               present_name(gfx.renderer_present_mode_requested(?r)),
-               present_name(gfx.renderer_present_mode(?r)));
+        present_name(gfx.renderer_present_mode_requested(?r)),
+        present_name(gfx.renderer_present_mode(?r)));
     p.printlnf("     this surface offers mailbox: {}, immediate: {}",
-               yesno(gfx.renderer_present_mode_supported(?r, gfx.PresentMode.mailbox{})),
-               yesno(gfx.renderer_present_mode_supported(?r, gfx.PresentMode.immediate{})));
+        yesno(gfx.renderer_present_mode_supported(?r, gfx.PresentMode.mailbox{})),
+        yesno(gfx.renderer_present_mode_supported(?r, gfx.PresentMode.immediate{})));
 
     # Changing it with the renderer running is the settings-menu case, and it is
     # the one worth exercising here: the swapchain and its framebuffers are
@@ -605,7 +668,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # rebuild left a renderer that still draws the right picture.
     if (fail("renderer_set_present_mode", gfx.renderer_set_present_mode(?r, gfx.PresentMode.immediate{}))) { ret 1; }
     p.printlnf("ok   present mode changed with the renderer live: {} in use",
-               present_name(gfx.renderer_present_mode(?r)));
+        present_name(gfx.renderer_present_mode(?r)));
 
     # ------------------------------------------------------- what was drawn
     #
@@ -630,7 +693,7 @@ fun main(argc: i64, argv: **u8) i64 {
 
     # Retry, because a frame is skipped when the swapchain is out of date and a
     # skipped frame renders nothing to read back.
-    var drew: bool = false;
+    var drew:  bool  = false;
     var tries: usize = 0;
     for (tries < 8 && !drew) {
         window_poll();
@@ -666,27 +729,27 @@ fun main(argc: i64, argv: **u8) i64 {
     var red: usize = 0;
     if (gfx.render_target_bgra(?check)) { red = 2; }
 
-    var covered:  usize = 0;
-    var min_x: i32 = CHECK_W;
-    var max_x: i32 = 0 - 1;
-    var min_y: i32 = CHECK_H;
-    var max_y: i32 = 0 - 1;
-    var lo: u8 = 255;
-    var hi: u8 = 0;
-    var py: i32 = 0;
+    var covered: usize = 0;
+    var min_x:   i32   = CHECK_W;
+    var max_x:   i32   = 0 - 1;
+    var min_y:   i32   = CHECK_H;
+    var max_y:   i32   = 0 - 1;
+    var lo:      u8    = 255;
+    var hi:      u8    = 0;
+    var py:      i32   = 0;
     for (py < CHECK_H) {
         var px_i: i32 = 0;
         for (px_i < CHECK_W) {
-            val o: usize = (py::usize * CHECK_W::usize + px_i::usize) * 4;
-            val rv: u8 = shot[o + red];
+            val o:  usize = (py::usize * CHECK_W::usize + px_i::usize) * 4;
+            val rv: u8    = shot[o + red];
             if (rv > COVERED_R) {
                 covered = covered + 1;
                 if (px_i < min_x) { min_x = px_i; }
                 if (px_i > max_x) { max_x = px_i; }
                 if (py < min_y)   { min_y = py; }
                 if (py > max_y)   { max_y = py; }
-                if (rv < lo) { lo = rv; }
-                if (rv > hi) { hi = rv; }
+                if (rv < lo)      { lo = rv; }
+                if (rv > hi)      { hi = rv; }
             }
             px_i = px_i + 1;
         }
@@ -702,16 +765,16 @@ fun main(argc: i64, argv: **u8) i64 {
     # Where the eight corners of the cube land, through the same camera the draw
     # used. The model transform is the identity, so the corners are the cube's
     # own, at plus and minus a half unit.
-    var view: gm.Mat4 = gfx.camera_view(?cam);
-    var proj: gm.Mat4 = gfx.camera_projection(?cam);
-    var vp:   gm.Mat4 = gm.mat4_mul(?proj, ?view);
-    var want_min_x: f32 = CHECK_W::f32;
-    var want_max_x: f32 = 0.0;
-    var want_min_y: f32 = CHECK_H::f32;
-    var want_max_y: f32 = 0.0;
-    var corner_x: [8]f32;
-    var corner_y: [8]f32;
-    var corner: usize = 0;
+    var view:       gm.Mat4 = gfx.camera_view(?cam);
+    var proj:       gm.Mat4 = gfx.camera_projection(?cam);
+    var vp:         gm.Mat4 = gm.mat4_mul(?proj, ?view);
+    var want_min_x: f32     = CHECK_W::f32;
+    var want_max_x: f32     = 0.0;
+    var want_min_y: f32     = CHECK_H::f32;
+    var want_max_y: f32     = 0.0;
+    var corner_x:   [8]f32;
+    var corner_y:   [8]f32;
+    var corner:     usize   = 0;
     for (corner < 8) {
         var cxv: f32 = 0.0 - 0.5;
         var cyv: f32 = 0.0 - 0.5;
@@ -734,35 +797,35 @@ fun main(argc: i64, argv: **u8) i64 {
     # A cube is convex, so the bounding box of its silhouette is the bounding box
     # of its projected corners. Two pixels of slack covers the difference between
     # a corner's exact position and the last pixel centre the rasterizer covers.
-    val SLACK: f32 = 2.0;
-    var off: bool = false;
+    val SLACK: f32  = 2.0;
+    var off:   bool = false;
     if (fabs(min_x::f32 - want_min_x) > SLACK) { off = true; }
     if (fabs(max_x::f32 - want_max_x) > SLACK) { off = true; }
     if (fabs(min_y::f32 - want_min_y) > SLACK) { off = true; }
     if (fabs(max_y::f32 - want_max_y) > SLACK) { off = true; }
     if (off) {
         p.printlnf("FAIL check: the cube covers x {}..{} y {}..{} in pixels",
-                   min_x, max_x, min_y, max_y);
+            min_x, max_x, min_y, max_y);
         p.printlnf("      projecting its corners through the same camera says x {}..{} y {}..{}",
-                   want_min_x::i32, want_max_x::i32, want_min_y::i32, want_max_y::i32);
+            want_min_x::i32, want_max_x::i32, want_min_y::i32, want_max_y::i32);
         p.println("      A silhouette in the wrong place is the projection, the Y flip,");
         p.println("      or the viewport; one mirrored in Y is the flip alone.");
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     p.printlnf("ok   {} pixels covered, silhouette within {} px of the projected corners",
-               covered, SLACK::i32);
+        covered, SLACK::i32);
 
     # The silhouette of a closed convex mesh is filled exactly once by its front
     # faces, so the covered count is the hull's area. Short of it means faces are
     # missing from inside an outline that still looks right, which is what a
     # reversed front-face winding does and what the bounds above cannot see: the
     # faces behind the culled ones are drawn instead and reach the same extremes.
-    val area: f32 = hull_area(?corner_x[0], ?corner_y[0], 8);
+    val area:  f32 = hull_area(?corner_x[0], ?corner_y[0], 8);
     val ratio: f32 = covered::f32 / area;
     if (ratio < 0.9 || ratio > 1.1) {
         p.printlnf("FAIL check: {} pixels covered against a projected hull of {}",
-                   covered, area::i32);
+            covered, area::i32);
         p.println("      Short of the hull means front faces were culled: the front-face");
         p.println("      winding, or a mesh whose faces are not consistently wound.");
         p.println("      Over it means something drew outside the silhouette.");
@@ -807,7 +870,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # the explicit linear image must deliver the authored 40 and 220 byte values
     # unchanged. Comparing rendered pixels reaches the image format and upload,
     # rather than merely checking which enum the loader intended to pass.
-    val space_desc: gfx.RenderTargetDesc = gfx.render_target_desc(gfx.RenderFormat.rgba8_unorm{}, 1);
+    val space_desc:   gfx.RenderTargetDesc             = gfx.render_target_desc(gfx.RenderFormat.rgba8_unorm{}, 1);
     val space_result: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_create(
         d, 16, 8, ?space_desc);
     if (sel space_result.err) {
@@ -816,8 +879,8 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     var space_target: gfx.RenderTarget = space_result.ok;
 
-    var space_drew: bool = false;
-    var space_try: usize = 0;
+    var space_drew: bool  = false;
+    var space_try:  usize = 0;
     for (space_try < 8 && !space_drew) {
         window_poll();
         val began: opt[bool] = begin(?r);
@@ -828,9 +891,9 @@ fun main(argc: i64, argv: **u8) i64 {
             sd.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
             var sp: gfx.Pass = gfx.pass_begin(?r, ?sd);
             gfx.pass_draw_sprite(?sp, opt[*gfx.Texture].some{?tex}, gfx.rect(0.0, 0.0, 8.0, 8.0),
-                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gm.vec4(1.0, 1.0, 1.0, 1.0));
             gfx.pass_draw_sprite(?sp, opt[*gfx.Texture].some{?linear_tex}, gfx.rect(8.0, 0.0, 8.0, 8.0),
-                                 gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gm.vec4(1.0, 1.0, 1.0, 1.0));
             gfx.pass_end(?sp);
             if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
             space_drew = true;
@@ -844,9 +907,9 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var space_pixels: [512]u8;
     if (fail("texture space readback",
-             gfx.render_target_read(d, ?space_target, ?space_pixels[0], 512))) { ret 1; }
-    var dark: usize = 0;
-    var light: usize = 0;
+        gfx.render_target_read(d, ?space_target, ?space_pixels[0], 512))) { ret 1; }
+    var dark:     usize = 0;
+    var light:    usize = 0;
     var colour_y: usize = 0;
     for (colour_y < 8) {
         var colour_x: usize = 0;
@@ -904,8 +967,8 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var order: usize = 0;
     for (order < 2) {
-        var painted: bool = false;
-        var att: usize = 0;
+        var painted: bool  = false;
+        var att:     usize = 0;
         for (att < 8 && !painted) {
             window_poll();
             val began: opt[bool] = begin(?r);
@@ -916,12 +979,12 @@ fun main(argc: i64, argv: **u8) i64 {
                 scene.clear  = opt[gm.Vec4].some{gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0)};
                 var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
                 if (order == 0) {
-                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat, ?far_xf);
                     gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
                 }
                 or {
                     gfx.pass_draw_material(?sp, ?mesh, ?near_mat, ?near_xf);
-                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat,  ?far_xf);
+                    gfx.pass_draw_material(?sp, ?mesh, ?far_mat, ?far_xf);
                 }
                 gfx.pass_end(?sp);
                 if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
@@ -938,12 +1001,12 @@ fun main(argc: i64, argv: **u8) i64 {
             ret 1;
         }
 
-        val mid: usize = ((CHECK_H::usize / 2) * CHECK_W::usize + CHECK_W::usize / 2) * 4;
-        val got_r: u8 = shot[mid + red];
-        val got_g: u8 = shot[mid + green];
+        val mid:   usize = ((CHECK_H::usize / 2) * CHECK_W::usize + CHECK_W::usize / 2) * 4;
+        val got_r: u8    = shot[mid + red];
+        val got_g: u8    = shot[mid + green];
         if (got_r <= got_g) {
             p.printlnf("FAIL depth: the centre is r {} g {} with draw order {}",
-                       got_r, got_g, order);
+                got_r, got_g, order);
             p.println("      The far cube won, so the depth test is inverted or disabled.");
             gfx.render_target_delete(d, ?check);
             ret 1;
@@ -963,19 +1026,19 @@ fun main(argc: i64, argv: **u8) i64 {
     val SKIN_SHIFT: f32 = 0.8;
 
     var sk: gfx.Skeleton;
-    sk.count      = 2;
-    sk.parents[0] = opt[usize].none{};
-    sk.parents[1] = opt[usize].some{0};
-    sk.order[0]   = 0;
-    sk.order[1]   = 1;
+    sk.count           = 2;
+    sk.parents[0]      = opt[usize].none{};
+    sk.parents[1]      = opt[usize].some{0};
+    sk.order[0]        = 0;
+    sk.order[1]        = 1;
     sk.rest[0]         = gm.transform_identity();
     sk.rest[1]         = gm.transform_identity();
     sk.inverse_bind[0] = gm.mat4_identity();
     sk.inverse_bind[1] = gm.mat4_identity();
 
     var locals: [2]gm.Transform;
-    locals[0] = gm.transform_identity();
-    locals[1] = gm.transform_identity();
+    locals[0]          = gm.transform_identity();
+    locals[1]          = gm.transform_identity();
     locals[1].position = gm.vec3(SKIN_SHIFT, 0.0, 0.0);
 
     var pose: gfx.Pose;
@@ -997,9 +1060,9 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     var smesh: gfx.Mesh = smr.ok;
 
-    var sxf: gm.Transform = gm.transform_identity();
-    var sdrew: bool = false;
-    var stry: usize = 0;
+    var sxf:   gm.Transform = gm.transform_identity();
+    var sdrew: bool         = false;
+    var stry:  usize        = 0;
     for (stry < 8 && !sdrew) {
         window_poll();
         val began: opt[bool] = begin(?r);
@@ -1024,10 +1087,10 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) { ret 1; }
 
-    var s_min_x: i32 = CHECK_W;
-    var s_max_x: i32 = 0 - 1;
+    var s_min_x:   i32   = CHECK_W;
+    var s_max_x:   i32   = 0 - 1;
     var s_covered: usize = 0;
-    var sy: i32 = 0;
+    var sy:        i32   = 0;
     for (sy < CHECK_H) {
         var sx_i: i32 = 0;
         for (sx_i < CHECK_W) {
@@ -1049,10 +1112,10 @@ fun main(argc: i64, argv: **u8) i64 {
     }
 
     # Half the joint translation, because the weights are half and half.
-    val half: f32 = SKIN_SHIFT * 0.5;
-    var s_want_min: f32 = CHECK_W::f32;
-    var s_want_max: f32 = 0.0;
-    var sc: usize = 0;
+    val half:       f32   = SKIN_SHIFT * 0.5;
+    var s_want_min: f32   = CHECK_W::f32;
+    var s_want_max: f32   = 0.0;
+    var sc:         usize = 0;
     for (sc < 8) {
         var cxv: f32 = 0.0 - 0.5;
         var cyv: f32 = 0.0 - 0.5;
@@ -1070,7 +1133,7 @@ fun main(argc: i64, argv: **u8) i64 {
 
     if (fabs(s_min_x::f32 - s_want_min) > SLACK || fabs(s_max_x::f32 - s_want_max) > SLACK) {
         p.printlnf("FAIL skinning: the skinned cube spans x {}..{}, expected {}..{}",
-                   s_min_x, s_max_x, s_want_min::i32, s_want_max::i32);
+            s_min_x, s_max_x, s_want_min::i32, s_want_max::i32);
         p.println("      Landing where an unskinned draw would means the palette never");
         p.println("      arrived; landing at the full joint translation means the weights");
         p.println("      were not applied; anywhere else means the joint index is wrong.");
@@ -1101,7 +1164,7 @@ fun main(argc: i64, argv: **u8) i64 {
     var ui: [48]f32;
     build_ui_quad(?ui[0], UI_X, UI_Y, UI_W, UI_H);
 
-    var uidrew: bool = false;
+    var uidrew: bool  = false;
     var uitry:  usize = 0;
     for (uitry < 8 && !uidrew) {
         window_poll();
@@ -1134,18 +1197,18 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     if (gfx.renderer_stream_dropped(?r) != 0) {
         p.printlnf("FAIL triangles: {} draws were refused by the vertex arena",
-                   gfx.renderer_stream_dropped(?r));
+            gfx.renderer_stream_dropped(?r));
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     if (fail("render_target_read", gfx.render_target_read(d, ?check, ?shot[0], CHECK_BYTES))) { ret 1; }
 
-    var u_min_x: i32 = CHECK_W;
-    var u_max_x: i32 = 0 - 1;
-    var u_min_y: i32 = CHECK_H;
-    var u_max_y: i32 = 0 - 1;
-    var u_cov: usize = 0;
-    var uy: i32 = 0;
+    var u_min_x: i32   = CHECK_W;
+    var u_max_x: i32   = 0 - 1;
+    var u_min_y: i32   = CHECK_H;
+    var u_max_y: i32   = 0 - 1;
+    var u_cov:   usize = 0;
+    var uy:      i32   = 0;
     for (uy < CHECK_H) {
         var ux: i32 = 0;
         for (ux < CHECK_W) {
@@ -1173,26 +1236,26 @@ fun main(argc: i64, argv: **u8) i64 {
     # wrong, or a first-vertex offset into the arena all place it somewhere else.
     if (u_min_x != UI_X::i32 || u_min_y != UI_Y::i32) {
         p.printlnf("FAIL triangles: the rectangle starts at {},{}; expected {},{}",
-                   u_min_x, u_min_y, UI_X::i32, UI_Y::i32);
+            u_min_x, u_min_y, UI_X::i32, UI_Y::i32);
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     if (u_max_x != (UI_X + UI_W)::i32 - 1 || u_max_y != (UI_Y + UI_H)::i32 - 1) {
         p.printlnf("FAIL triangles: the rectangle ends at {},{}; expected {},{}",
-                   u_max_x, u_max_y, (UI_X + UI_W)::i32 - 1, (UI_Y + UI_H)::i32 - 1);
+            u_max_x, u_max_y, (UI_X + UI_W)::i32 - 1, (UI_Y + UI_H)::i32 - 1);
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     if (u_cov != (UI_W * UI_H)::usize) {
         p.printlnf("FAIL triangles: {} pixels covered, expected exactly {}",
-                   u_cov, (UI_W * UI_H)::usize);
+            u_cov, (UI_W * UI_H)::usize);
         p.println("      Two triangles tile a rectangle exactly. Short of it means the");
         p.println("      second triangle's vertices are wrong or were never uploaded.");
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     p.printlnf("ok   a {}x{} draw list covers exactly {} pixels at {},{}",
-               UI_W::i32, UI_H::i32, u_cov, u_min_x, u_min_y);
+        UI_W::i32, UI_H::i32, u_cov, u_min_x, u_min_y);
 
     # The two triangles carry different vertex colours. One tint for the whole
     # draw, which is what the sprite path does, would make these equal, and the
@@ -1200,15 +1263,15 @@ fun main(argc: i64, argv: **u8) i64 {
     # size. This is the only check that can tell those apart.
     val lo_o: usize = ((UI_Y::usize + 2) * CHECK_W::usize + UI_X::usize + 2) * 4;
     val hi_o: usize = ((UI_Y::usize + UI_H::usize - 3) * CHECK_W::usize
-                       + UI_X::usize + UI_W::usize - 3) * 4;
+        + UI_X::usize + UI_W::usize - 3) * 4;
     if (shot[lo_o + red] == shot[hi_o + red]) {
         p.printlnf("FAIL triangles: both corners have red {}; the vertex colour was ignored",
-                   shot[lo_o + red]);
+            shot[lo_o + red]);
         gfx.render_target_delete(d, ?check);
         ret 1;
     }
     p.printlnf("ok   the vertex colour varies across the list: red {} against {}",
-               shot[lo_o + red], shot[hi_o + red]);
+        shot[lo_o + red], shot[hi_o + red]);
 
     gfx.render_target_delete(d, ?check);
 

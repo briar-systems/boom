@@ -33,33 +33,33 @@
 # from the same light, and still lit enough to fight in. Each check reaches the
 # exit code.
 
-use std.runtime;
-use std.print;
+use boom.app.App;
 use boom.context.Config;
 use boom.context.Context;
-use boom.context.context_init;
-use boom.context.context_set_user;
-use boom.context.context_user;
-use boom.context.context_shutdown;
-use boom.context.context_fail;
 use boom.context.ContextError;
 use boom.context.context_error_message;
-use boom.engine.run;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
 use boom.engine.EngineError;
 use boom.engine.engine_error_message;
-use boom.window.WindowMode;
-use boom.app.App;
-use input: boom.input;
+use boom.engine.run;
 use gfx: boom.graphics;
-use gm:  boom.math;
-use std.chrono.duration.SECOND;
+use boom.input;
+use gm: boom.math;
+use boom.window.WindowMode;
 use std.chrono.duration.MILLISECOND;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
+use std.chrono.duration.SECOND;
+use std.print;
+use std.runtime;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
@@ -136,10 +136,10 @@ rec BloomArgs {
 
 # One drawn quad: where it is, how big, and which atlas it wears.
 rec Piece {
-    x: f32;
-    y: f32;
-    w: f32;
-    h: f32;
+    x:     f32;
+    y:     f32;
+    w:     f32;
+    h:     f32;
     atlas: usize;
 }
 
@@ -153,49 +153,49 @@ var atlas_pixels: [4][65536]u8;
 var readback: [518400]u8;
 
 # ---
-# renderer:   the window's renderer, which owns the device
-# quad:       a unit quad in XY, drawn for every sprite and every full-target pass
-# gbuf:       albedo, packed normal and material, material, emissive
-# light:      the deferred lighting accumulation
-# scene:      the forward reference picture, which is what reaches the window
+# renderer: the window's renderer, which owns the device
+# quad:     a unit quad in XY, drawn for every sprite and every full-target pass
+# gbuf:     albedo, packed normal and material, material, emissive
+# light:    the deferred lighting accumulation
+# scene:    the forward reference picture, which is what reaches the window
 # bloom_a/b:  threshold and blur, at half the G-buffer
 # probe1/2/3: copies of G-buffer attachments 1, 2 and 3, so they can be read
 rec Game {
     renderer: gfx.Renderer;
     quad:     gfx.Mesh;
 
-    mats:     [4]gfx.Material;
-    texes:    [4]gfx.Texture;
+    mats:  [4]gfx.Material;
+    texes: [4]gfx.Texture;
 
-    gbuf:     gfx.RenderTarget;
-    light:    gfx.RenderTarget;
-    scene:    gfx.RenderTarget;
-    bloom_a:  gfx.RenderTarget;
-    bloom_b:  gfx.RenderTarget;
-    probe1:   gfx.RenderTarget;
-    probe2:   gfx.RenderTarget;
-    probe3:   gfx.RenderTarget;
+    gbuf:    gfx.RenderTarget;
+    light:   gfx.RenderTarget;
+    scene:   gfx.RenderTarget;
+    bloom_a: gfx.RenderTarget;
+    bloom_b: gfx.RenderTarget;
+    probe1:  gfx.RenderTarget;
+    probe2:  gfx.RenderTarget;
+    probe3:  gfx.RenderTarget;
 
-    sh_gbuf:  gfx.Shader;
-    sh_light: gfx.Shader;
-    sh_fwd:   gfx.Shader;
-    sh_copy:  gfx.Shader;
-    sh_add:   gfx.Shader;
-    sh_bloom: gfx.Shader;
-    sh_two:   gfx.Shader;
+    sh_gbuf:      gfx.Shader;
+    sh_light:     gfx.Shader;
+    sh_fwd:       gfx.Shader;
+    sh_copy:      gfx.Shader;
+    sh_add:       gfx.Shader;
+    sh_bloom:     gfx.Shader;
+    sh_two:       gfx.Shader;
     sh_gbuf_mesh: gfx.Shader;
 
-    pieces:   [9]Piece;
-    block:    Scene;
+    pieces: [9]Piece;
+    block:  Scene;
 
-    ready:    u8;
-    budget:   usize;
-    drawn:    usize;
+    ready:     u8;
+    budget:    usize;
+    drawn:     usize;
     probe_two: bool;
     unbatched: bool;
     sprites:   usize;
     two_built: usize;
-    failures: usize;
+    failures:  usize;
 }
 
 # --------------------------------------------------------------- atlas art
@@ -204,9 +204,9 @@ rec Game {
 # example has no binary assets to keep in step with anything.
 
 fun put(a: usize, qx: i32, qy: i32, x: i32, y: i32, r: f32, g: f32, b: f32, al: f32) {
-    val px: i32 = qx * QS + x;
-    val py: i32 = qy * QS + y;
-    val i: usize = ((py * AW + px) * 4)::usize;
+    val px: i32   = qx * QS + x;
+    val py: i32   = qy * QS + y;
+    val i:  usize = ((py * AW + px) * 4)::usize;
     atlas_pixels[a][i]     = clamp_byte(r);
     atlas_pixels[a][i + 1] = clamp_byte(g);
     atlas_pixels[a][i + 2] = clamp_byte(b);
@@ -247,7 +247,7 @@ fun build_floor(a: usize) {
             # Almost flat, with just enough tilt that a grazing light picks out
             # the aggregate rather than lighting the floor as a single plane.
             put_normal(a, x, y, (grain(x, y, 2) - 0.5) * 0.10,
-                                (grain(x, y, 3) - 0.5) * 0.10);
+                (grain(x, y, 3) - 0.5) * 0.10);
 
             put(a, 0, 1, x, y, 0.92, 0.0, 1.0, 1.0);
             put(a, 1, 1, x, y, 0.0, 0.0, 0.0, 1.0);
@@ -264,7 +264,7 @@ fun build_plate(a: usize) {
     for (y < QS) {
         var x: i32 = 0;
         for (x < QS) {
-            val n: f32 = grain(x, y, 11);
+            val n:    f32 = grain(x, y, 11);
             val base: f32 = 0.34 + n * 0.03;
             put(a, 0, 0, x, y, base, base * 1.02, base * 1.08, 1.0);
 
@@ -298,8 +298,8 @@ fun build_plate(a: usize) {
 
 # How far a texel within six of an edge tilts, and which way.
 fun edge_slope(v: i32, size: i32) f32 {
-    if (v < 6)            { ret 0.0 - (6 - v)::f32 * 0.12; }
-    if (v >= size - 6)    { ret (v - (size - 7))::f32 * 0.12; }
+    if (v < 6)         { ret 0.0 - (6 - v)::f32 * 0.12; }
+    if (v >= size - 6) { ret (v - (size - 7))::f32 * 0.12; }
     ret 0.0;
 }
 
@@ -319,13 +319,13 @@ fun build_wall(a: usize) {
     for (y < QS) {
         var x: i32 = 0;
         for (x < QS) {
-            val n: f32 = grain(x, y, 21);
+            val n:    f32 = grain(x, y, 21);
             val base: f32 = 0.20 + n * 0.03;
             put(a, 0, 0, x, y, base * 1.05, base, base * 0.92, 1.0);
 
             # Grooves every eight texels, as a sawtooth in the normal's X.
             val phase: i32 = x % 8;
-            var nx: f32 = 0.0;
+            var nx:    f32 = 0.0;
             if (phase == 0) { nx = 0.0 - 0.6; }
             if (phase == 7) { nx = 0.6; }
             put_normal(a, x, y, nx, (grain(x, y, 22) - 0.5) * 0.08);
@@ -361,7 +361,7 @@ fun build_lamp(a: usize) {
 # ------------------------------------------------------------------ startup
 
 fun make_target(g: *Game, d: *gfx.Device, out: *gfx.RenderTarget,
-                w: i32, h: i32, count: usize, name: str) bool {
+    w: i32, h: i32, count: usize, name: str) bool {
     val r: res[gfx.RenderTarget, gfx.Error] = gfx.render_target_mrt(d, w, h, count);
     if (sel r.err) {
         print.eprintlnf("{} target error: {}", name, gfx.error_message(r.err));
@@ -377,7 +377,7 @@ fun make_target(g: *Game, d: *gfx.Device, out: *gfx.RenderTarget,
 # and the batched 2D path have different vertex layouts and different uniform
 # blocks, so a stage written for one is not valid in the other.
 fun make_shader(out: *gfx.Shader, vert: *u8, vlen: usize,
-                frag: *u8, flen: usize, blend: gfx.BlendMode, name: str) bool {
+    frag: *u8, flen: usize, blend: gfx.BlendMode, name: str) bool {
     val r: err[gfx.Error] = gfx.shader(out, vert, vlen, frag, flen);
     if (sel r.err) {
         print.eprintlnf("{} shader error: {}", name, gfx.error_message(r.err));
@@ -403,8 +403,8 @@ fun piece(g: *Game, i: usize, x: f32, y: f32, w: f32, h: f32, atlas: usize) {
 
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
-    g.ready = 0;
-    g.failures = 0;
+    g.ready     = 0;
+    g.failures  = 0;
     g.two_built = 0;
 
     val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
@@ -414,31 +414,35 @@ fun on_init(ctx: *Context) {
     }
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
 
-    if (!make_target(g, d, ?g.gbuf,    GW, GH, 4, "gbuf"))    { ret; }
-    if (!make_target(g, d, ?g.light,   GW, GH, 1, "light"))   { ret; }
-    if (!make_target(g, d, ?g.scene,   GW, GH, 1, "scene"))   { ret; }
+    if (!make_target(g, d, ?g.gbuf, GW, GH, 4, "gbuf"))       { ret; }
+    if (!make_target(g, d, ?g.light, GW, GH, 1, "light"))     { ret; }
+    if (!make_target(g, d, ?g.scene, GW, GH, 1, "scene"))     { ret; }
     if (!make_target(g, d, ?g.bloom_a, BW, BH, 1, "bloom_a")) { ret; }
     if (!make_target(g, d, ?g.bloom_b, BW, BH, 1, "bloom_b")) { ret; }
-    if (!make_target(g, d, ?g.probe1,  GW, GH, 1, "probe1"))  { ret; }
-    if (!make_target(g, d, ?g.probe2,  GW, GH, 1, "probe2"))  { ret; }
-    if (!make_target(g, d, ?g.probe3,  GW, GH, 1, "probe3"))  { ret; }
+    if (!make_target(g, d, ?g.probe1, GW, GH, 1, "probe1"))   { ret; }
+    if (!make_target(g, d, ?g.probe2, GW, GH, 1, "probe2"))   { ret; }
+    if (!make_target(g, d, ?g.probe3, GW, GH, 1, "probe3"))   { ret; }
     print.printlnf("gbuf: {} attachments at {}x{}",
-                   gfx.render_target_count(?g.gbuf), GW, GH);
+        gfx.render_target_count(?g.gbuf), GW, GH);
 
     # A unit quad in XY with a +Z normal and UV equal to position, in boom's
     # standard vertex layout. Every draw in this example is this one mesh under
     # a different transform.
     var verts: [32]f32;
-    quad_vertex(?verts[0],  0.0, 0.0);
-    quad_vertex(?verts[8],  1.0, 0.0);
+    quad_vertex(?verts[0], 0.0, 0.0);
+    quad_vertex(?verts[8], 1.0, 0.0);
     quad_vertex(?verts[16], 1.0, 1.0);
     quad_vertex(?verts[24], 0.0, 1.0);
     var idx: [6]u32;
-    idx[0] = 0; idx[1] = 1; idx[2] = 2;
-    idx[3] = 0; idx[4] = 2; idx[5] = 3;
+    idx[0] = 0;
+    idx[1] = 1;
+    idx[2] = 2;
+    idx[3] = 0;
+    idx[4] = 2;
+    idx[5] = 3;
 
-    var fmt: gfx.VertexFormat = gfx.vertex_format_standard();
-    val mr: res[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
+    var fmt: gfx.VertexFormat         = gfx.vertex_format_standard();
+    val mr:  res[gfx.Mesh, gfx.Error] = gfx.mesh(d, (?verts[0])::ptr, 4, ?fmt, ?idx[0], 6);
     if (sel mr.err) {
         print.eprintlnf("quad mesh error: {}", gfx.error_message(mr.err));
         ret;
@@ -458,50 +462,50 @@ fun on_init(ctx: *Context) {
     var ti: usize = 0;
     for (ti < 4) {
         val tr: res[gfx.Texture, gfx.Error] = gfx.texture(d, ?atlas_pixels[ti][0],
-                                                          AW, AW, gfx.ColorSpace.linear{});
+            AW, AW, gfx.ColorSpace.linear{});
         if (sel tr.err) {
             print.eprintlnf("atlas texture error: {}", gfx.error_message(tr.err));
             ret;
         }
         g.texes[ti] = tr.ok;
-        g.mats[ti] = gfx.material();
+        g.mats[ti]  = gfx.material();
         if (!bind(?g.mats[ti], "u_atlas", ?g.texes[ti])) { ret; }
         ti = ti + 1;
     }
 
     val opaque: gfx.BlendMode = gfx.BlendMode.opaque{};
-    if (!make_shader(?g.sh_gbuf,  ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?GBUF_FRAG_SPV[0],  $length_of(GBUF_FRAG_SPV),  opaque, "gbuf"))  { ret; }
-    if (!make_shader(?g.sh_light, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), opaque, "light")) { ret; }
-    if (!make_shader(?g.sh_fwd,   ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?FWD_FRAG_SPV[0],   $length_of(FWD_FRAG_SPV),   opaque, "fwd"))   { ret; }
-    if (!make_shader(?g.sh_copy,  ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  opaque, "copy"))  { ret; }
-    if (!make_shader(?g.sh_add,   ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?COPY_FRAG_SPV[0],  $length_of(COPY_FRAG_SPV),  gfx.BlendMode.additive{}, "add")) { ret; }
-    if (!make_shader(?g.sh_bloom, ?QUAD_VERT_SPV[0],   $length_of(QUAD_VERT_SPV),   ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), opaque, "bloom")) { ret; }
+    if (!make_shader(?g.sh_gbuf, ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), opaque, "gbuf"))             { ret; }
+    if (!make_shader(?g.sh_light, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?LIGHT_FRAG_SPV[0], $length_of(LIGHT_FRAG_SPV), opaque, "light"))             { ret; }
+    if (!make_shader(?g.sh_fwd, ?SPRITE_VERT_SPV[0], $length_of(SPRITE_VERT_SPV), ?FWD_FRAG_SPV[0], $length_of(FWD_FRAG_SPV), opaque, "fwd"))                 { ret; }
+    if (!make_shader(?g.sh_copy, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?COPY_FRAG_SPV[0], $length_of(COPY_FRAG_SPV), opaque, "copy"))                 { ret; }
+    if (!make_shader(?g.sh_add, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?COPY_FRAG_SPV[0], $length_of(COPY_FRAG_SPV), gfx.BlendMode.additive{}, "add")) { ret; }
+    if (!make_shader(?g.sh_bloom, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?BLOOM_FRAG_SPV[0], $length_of(BLOOM_FRAG_SPV), opaque, "bloom"))             { ret; }
     if (g.unbatched) {
         # The same fragment stage against the mesh vertex layout, so the
         # comparison differs only in how the sprites reach the GPU.
         if (!make_shader(?g.sh_gbuf_mesh, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV),
-                         ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), opaque, "gbuf-mesh")) { ret; }
+            ?GBUF_FRAG_SPV[0], $length_of(GBUF_FRAG_SPV), opaque, "gbuf-mesh")) { ret; }
     }
     if (g.probe_two) {
         if (!make_shader(?g.sh_two, ?QUAD_VERT_SPV[0], $length_of(QUAD_VERT_SPV), ?TWO_FRAG_SPV[0], $length_of(TWO_FRAG_SPV), opaque, "two")) { ret; }
     }
 
     # The scene: a floor, three steel plates, two walls, a crate and a lamp.
-    piece(g, 0, 0.0,   0.0,   480.0, 270.0, 0);
-    piece(g, 1, 70.0,  80.0,  80.0,  80.0,  1);
-    piece(g, 2, 330.0, 40.0,  80.0,  80.0,  1);
-    piece(g, 3, 40.0,  190.0, 80.0,  80.0,  1);
-    piece(g, 4, 210.0, 40.0,  40.0,  160.0, 2);
-    piece(g, 5, 300.0, 190.0, 120.0, 30.0,  2);
-    piece(g, 6, 90.0,  165.0, 50.0,  30.0,  2);
-    piece(g, 7, 400.0, 20.0,  60.0,  36.0,  3);
-    piece(g, 8, 150.0, 230.0, 60.0,  36.0,  3);
+    piece(g, 0, 0.0, 0.0, 480.0, 270.0, 0);
+    piece(g, 1, 70.0, 80.0, 80.0, 80.0, 1);
+    piece(g, 2, 330.0, 40.0, 80.0, 80.0, 1);
+    piece(g, 3, 40.0, 190.0, 80.0, 80.0, 1);
+    piece(g, 4, 210.0, 40.0, 40.0, 160.0, 2);
+    piece(g, 5, 300.0, 190.0, 120.0, 30.0, 2);
+    piece(g, 6, 90.0, 165.0, 50.0, 30.0, 2);
+    piece(g, 7, 400.0, 20.0, 60.0, 36.0, 3);
+    piece(g, 8, 150.0, 230.0, 60.0, 36.0, 3);
 
     # The occluders, as the centre line of each wall piece. Three is what the
     # user block has room for beside two lights.
-    g.block.wall0 = gm.vec4(230.0, 40.0, 230.0, 200.0);
-    g.block.wall1 = gm.vec4(300.0, 205.0, 420.0, 205.0);
-    g.block.wall2 = gm.vec4(90.0, 180.0, 140.0, 180.0);
+    g.block.wall0  = gm.vec4(230.0, 40.0, 230.0, 200.0);
+    g.block.wall1  = gm.vec4(300.0, 205.0, 420.0, 205.0);
+    g.block.wall2  = gm.vec4(90.0, 180.0, 140.0, 180.0);
     g.block.counts = gm.vec4(3.0, SHADOW_REACH, 0.0, 0.0);
 
     # Ambient is enough to navigate by, and its fourth component is the floor a
@@ -518,28 +522,33 @@ fun on_init(ctx: *Context) {
 
 # One vertex of the unit quad: position, normal, uv.
 fun quad_vertex(out: *f32, x: f32, y: f32) {
-    out[0] = x;   out[1] = y;   out[2] = 0.0;
-    out[3] = 0.0; out[4] = 0.0; out[5] = 1.0;
-    out[6] = x;   out[7] = y;
+    out[0] = x;
+    out[1] = y;
+    out[2] = 0.0;
+    out[3] = 0.0;
+    out[4] = 0.0;
+    out[5] = 1.0;
+    out[6] = x;
+    out[7] = y;
 }
 
 # ------------------------------------------------------------------- update
 
-var clock: f32 = 0.0;
+var clock:  f32  = 0.0;
 var paused: bool = false;
 
 fun on_tick(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
-    if (g.ready == 0) { ret; }
+    if (g.ready == 0)                                   { ret; }
     if (input.key_pressed(?ctx.input, input.KEY_SPACE)) { paused = !paused; }
-    if (!paused) { clock = clock + 0.02; }
+    if (!paused)                                        { clock = clock + 0.02; }
 }
 
 # ---------------------------------------------------------------------- draw
 
 # Place the unit quad over a rectangle in world units.
 fun place(t: *gm.Transform, x: f32, y: f32, w: f32, h: f32) {
-    @t = gm.transform_identity();
+    @t         = gm.transform_identity();
     t.position = gm.vec3(x, y, 0.0);
     t.scale    = gm.vec3(w, h, 1.0);
 }
@@ -568,7 +577,7 @@ fun set_user(p: *gfx.Pass, data: *u8, len: usize, name: str) bool {
     val set: err[gfx.Error] = gfx.pass_set_user(p, data, len);
     if (sel set.err) {
         print.eprintlnf("the {} block does not fit a uniform slot: {}", name,
-                        gfx.error_message(set.err));
+            gfx.error_message(set.err));
         ret false;
     }
     ret true;
@@ -598,13 +607,13 @@ fun draw_scene_batched(p: *gfx.Pass, g: *Game) {
     # the comparison. The tiles overhang the target instead.
     val cols: i32 = (GW + TILE - 1) / TILE;
     val rows: i32 = (GH + TILE - 1) / TILE;
-    var ty: i32 = 0;
+    var ty:   i32 = 0;
     for (ty < rows) {
         var tx: i32 = 0;
         for (tx < cols) {
             gfx.pass_draw_sprite(p, opt[*gfx.Texture].none{},
-                                 gfx.rect((tx * TILE)::f32, (ty * TILE)::f32,
-                                          TILE::f32, TILE::f32), white);
+                gfx.rect((tx * TILE)::f32, (ty * TILE)::f32,
+                TILE::f32, TILE::f32), white);
             tx = tx + 1;
         }
         ty = ty + 1;
@@ -619,8 +628,8 @@ fun draw_scene_batched(p: *gfx.Pass, g: *Game) {
         for (i < PIECE_COUNT) {
             if (g.pieces[i].atlas == atlas) {
                 gfx.pass_draw_sprite(p, opt[*gfx.Texture].none{},
-                                     gfx.rect(g.pieces[i].x, g.pieces[i].y,
-                                              g.pieces[i].w, g.pieces[i].h), white);
+                    gfx.rect(g.pieces[i].x, g.pieces[i].y,
+                    g.pieces[i].w, g.pieces[i].h), white);
             }
             i = i + 1;
         }
@@ -635,7 +644,7 @@ fun draw_scene_batched(p: *gfx.Pass, g: *Game) {
 fun draw_scene_unbatched(p: *gfx.Pass, g: *Game) {
     val cols: i32 = (GW + TILE - 1) / TILE;
     val rows: i32 = (GH + TILE - 1) / TILE;
-    var ty: i32 = 0;
+    var ty:   i32 = 0;
     for (ty < rows) {
         var tx: i32 = 0;
         for (tx < cols) {
@@ -698,7 +707,7 @@ fun on_draw(ctx: *Context) {
     # The pieces are drawn grouped by material, because pass_set_material closes
     # the open run: unsorted, nine pieces of four materials would be nine runs.
     var gd: gfx.PassDesc = target_pass(?g.gbuf);
-    var gp: gfx.Pass = gfx.pass_begin(?g.renderer, ?gd);
+    var gp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?gd);
     if (g.unbatched) {
         draw_scene_unbatched(?gp, g);
     }
@@ -715,7 +724,7 @@ fun on_draw(ctx: *Context) {
     var lmat: gfx.Material = gfx.material();
     if (!bind(?lmat, "u_packed", gfx.render_target_texture_at(?g.gbuf, 1))) { context_fail(ctx, 1); }
     var ld: gfx.PassDesc = target_pass(?g.light);
-    var lp: gfx.Pass = gfx.pass_begin(?g.renderer, ?ld);
+    var lp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?ld);
     if (!set_user(?lp, (?g.block):~*u8, $size_of(Scene), "scene")) { context_fail(ctx, 1); }
     full_quad(?lp, g, GW::f32, GH::f32, ?lmat, ?g.sh_light);
     gfx.pass_end(?lp);
@@ -726,7 +735,7 @@ fun on_draw(ctx: *Context) {
     # binding 4, which is what makes it the measurement of whether pass_set_user
     # survives the batched path.
     var fd: gfx.PassDesc = target_pass(?g.scene);
-    var fp: gfx.Pass = gfx.pass_begin(?g.renderer, ?fd);
+    var fp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?fd);
     if (!set_user(?fp, (?g.block):~*u8, $size_of(Scene), "scene")) { context_fail(ctx, 1); }
     gfx.pass_set_shader(?fp, opt[*gfx.Shader].some{?g.sh_fwd});
     draw_scene_batched(?fp, g);
@@ -740,7 +749,7 @@ fun on_draw(ctx: *Context) {
     var smat: gfx.Material = gfx.material();
     if (!bind(?smat, "u_scene", gfx.render_target_texture(?g.scene))) { context_fail(ctx, 1); }
     var td: gfx.PassDesc = target_pass(?g.bloom_a);
-    var tp: gfx.Pass = gfx.pass_begin(?g.renderer, ?td);
+    var tp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?td);
     if (!set_user(?tp, (?ba):~*u8, $size_of(BloomArgs), "bloom")) { context_fail(ctx, 1); }
     full_quad(?tp, g, BW::f32, BH::f32, ?smat, ?g.sh_bloom);
     gfx.pass_end(?tp);
@@ -749,7 +758,7 @@ fun on_draw(ctx: *Context) {
     var amat: gfx.Material = gfx.material();
     if (!bind(?amat, "u_bloom", gfx.render_target_texture(?g.bloom_a))) { context_fail(ctx, 1); }
     var hd: gfx.PassDesc = target_pass(?g.bloom_b);
-    var hp: gfx.Pass = gfx.pass_begin(?g.renderer, ?hd);
+    var hp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?hd);
     if (!set_user(?hp, (?ba):~*u8, $size_of(BloomArgs), "bloom")) { context_fail(ctx, 1); }
     full_quad(?hp, g, BW::f32, BH::f32, ?amat, ?g.sh_bloom);
     gfx.pass_end(?hp);
@@ -758,7 +767,7 @@ fun on_draw(ctx: *Context) {
     var bmat: gfx.Material = gfx.material();
     if (!bind(?bmat, "u_bloom", gfx.render_target_texture(?g.bloom_b))) { context_fail(ctx, 1); }
     var vd: gfx.PassDesc = target_pass(?g.bloom_a);
-    var vp: gfx.Pass = gfx.pass_begin(?g.renderer, ?vd);
+    var vp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?vd);
     if (!set_user(?vp, (?ba):~*u8, $size_of(BloomArgs), "bloom")) { context_fail(ctx, 1); }
     full_quad(?vp, g, BW::f32, BH::f32, ?bmat, ?g.sh_bloom);
     gfx.pass_end(?vp);
@@ -783,10 +792,10 @@ fun on_draw(ctx: *Context) {
         # bound twice would look identical to the first of those and prove
         # nothing.
         var tmat: gfx.Material = gfx.material();
-        if (!bind(?tmat, "u_albedo", gfx.render_target_texture_at(?g.gbuf, 0))) { context_fail(ctx, 1); }
+        if (!bind(?tmat, "u_albedo", gfx.render_target_texture_at(?g.gbuf, 0)))   { context_fail(ctx, 1); }
         if (!bind(?tmat, "u_emissive", gfx.render_target_texture_at(?g.gbuf, 3))) { context_fail(ctx, 1); }
         var xd: gfx.PassDesc = target_pass(?g.probe1);
-        var xp: gfx.Pass = gfx.pass_begin(?g.renderer, ?xd);
+        var xp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?xd);
         full_quad(?xp, g, GW::f32, GH::f32, ?tmat, ?g.sh_two);
         gfx.pass_end(?xp);
         g.two_built = gfx.shader_pipelines(?g.sh_two);
@@ -795,10 +804,10 @@ fun on_draw(ctx: *Context) {
     # 5. PRESENT. Draw the scene, then add the bloom without attenuating what is
     # already underneath it.
     var wd: gfx.PassDesc = gfx.pass_overlay();
-    var wp: gfx.Pass = gfx.pass_begin(?g.renderer, ?wd);
+    var wp: gfx.Pass     = gfx.pass_begin(?g.renderer, ?wd);
     gfx.pass_draw_sprite(?wp, opt[*gfx.Texture].some{gfx.render_target_texture(?g.scene)},
-                         gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
-                         gm.vec4(1.0, 1.0, 1.0, 1.0));
+        gfx.rect(0.0, 0.0, (GW * 2)::f32, (GH * 2)::f32),
+        gm.vec4(1.0, 1.0, 1.0, 1.0));
     var bloom_mat: gfx.Material = gfx.material();
     if (!bind(?bloom_mat, "u_bloom", gfx.render_target_texture(?g.bloom_a))) { context_fail(ctx, 1); }
     full_quad(?wp, g, (GW * 2)::f32, (GH * 2)::f32, ?bloom_mat, ?g.sh_add);
@@ -822,7 +831,7 @@ fun copy_into(g: *Game, dst: *gfx.RenderTarget, src: *gfx.Texture) {
         ret;
     }
     var d: gfx.PassDesc = target_pass(dst);
-    var p: gfx.Pass = gfx.pass_begin(?g.renderer, ?d);
+    var p: gfx.Pass     = gfx.pass_begin(?g.renderer, ?d);
     full_quad(?p, g, dst.width::f32, dst.height::f32, ?m, ?g.sh_copy);
     gfx.pass_end(?p);
 }
@@ -835,13 +844,13 @@ fun copy_into(g: *Game, dst: *gfx.RenderTarget, src: *gfx.Texture) {
 # sample would make a threshold a coin toss between runs on different drivers.
 fun patch(w: i32, x: i32, y: i32, channel: usize) f32 {
     var sum: f32 = 0.0;
-    var j: i32 = 0 - 2;
+    var j:   i32 = 0 - 2;
     for (j <= 2) {
         var i: i32 = 0 - 2;
         for (i <= 2) {
             val o: usize = (((y + j) * w + (x + i)) * 4)::usize + channel;
             sum = sum + readback[o]::f32;
-            i = i + 1;
+            i   = i + 1;
         }
         j = j + 1;
     }
@@ -870,11 +879,11 @@ fun linear_of(v: u8) f32 {
 }
 
 fun region_stats(w: i32, x0: i32, y0: i32, x1: i32, y1: i32, channel: usize,
-                 out_mean: *f32, out_max: *f32, out_hot: *usize) {
-    var sum: f32 = 0.0;
-    var peak: f32 = 0.0;
-    var n: usize = 0;
-    var y: i32 = y0;
+    out_mean: *f32, out_max: *f32, out_hot: *usize) {
+    var sum:  f32   = 0.0;
+    var peak: f32   = 0.0;
+    var n:    usize = 0;
+    var y:    i32   = y0;
     for (y < y1) {
         var x: i32 = x0;
         for (x < x1) {
@@ -889,7 +898,7 @@ fun region_stats(w: i32, x0: i32, y0: i32, x1: i32, y1: i32, channel: usize,
     val mean: f32 = sum / n::f32;
 
     var hot: usize = 0;
-    var hy: i32 = y0;
+    var hy:  i32   = y0;
     for (hy < y1) {
         var hx: i32 = x0;
         for (hx < x1) {
@@ -908,8 +917,8 @@ fun region_stats(w: i32, x0: i32, y0: i32, x1: i32, y1: i32, channel: usize,
 # Read a target into the shared buffer, reporting a failure rather than
 # asserting on whatever the buffer held from the last one.
 fun read(g: *Game, d: *gfx.Device, t: *gfx.RenderTarget, name: str) bool {
-    val bytes: usize = (t.width * t.height * 4)::usize;
-    val r: err[gfx.Error] = gfx.render_target_read(d, t, ?readback[0], bytes);
+    val bytes: usize          = (t.width * t.height * 4)::usize;
+    val r:     err[gfx.Error] = gfx.render_target_read(d, t, ?readback[0], bytes);
     if (sel r.err) {
         print.eprintlnf("{} readback error: {}", name, gfx.error_message(r.err));
         g.failures = g.failures + 1;
@@ -924,17 +933,17 @@ fun read(g: *Game, d: *gfx.Device, t: *gfx.RenderTarget, name: str) bool {
 # example can check its own premise. See the block above the shadow assertions
 # for why that matters.
 fun seg_crosses(px: f32, py: f32, lx: f32, ly: f32,
-                ax: f32, ay: f32, bx: f32, by: f32) bool {
-    val rx: f32 = lx - px;
-    val ry: f32 = ly - py;
-    val sx: f32 = bx - ax;
-    val sy: f32 = by - ay;
+    ax: f32, ay: f32, bx: f32, by: f32) bool {
+    val rx:    f32 = lx - px;
+    val ry:    f32 = ly - py;
+    val sx:    f32 = bx - ax;
+    val sy:    f32 = by - ay;
     val denom: f32 = rx * sy - ry * sx;
     if (denom > 0.0 - 0.0001 && denom < 0.0001) { ret false; }
     val qx: f32 = ax - px;
     val qy: f32 = ay - py;
-    val t: f32 = (qx * sy - qy * sx) / denom;
-    val u: f32 = (qx * ry - qy * rx) / denom;
+    val t:  f32 = (qx * sy - qy * sx) / denom;
+    val u:  f32 = (qx * ry - qy * rx) / denom;
     ret t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0;
 }
 
@@ -945,7 +954,10 @@ fun dist2(ax: f32, ay: f32, bx: f32, by: f32) f32 {
 }
 
 fun check(g: *Game, ok: bool, name: str) {
-    if (ok) { print.printlnf("  OK   {}", name); ret; }
+    if (ok) {
+        print.printlnf("  OK   {}", name);
+        ret;
+    }
     print.printlnf("  FAIL {}", name);
     g.failures = g.failures + 1;
 }
@@ -954,28 +966,31 @@ fun on_dnit(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (g.ready == 0) { ret; }
 
-    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
-    val bgra: bool = gfx.render_target_bgra(?g.gbuf);
+    val d:    *gfx.Device = gfx.renderer_device(?g.renderer);
+    val bgra: bool        = gfx.render_target_bgra(?g.gbuf);
 
     # Channel indices into the readback, which follows the surface format
     # rather than RGBA. render_target_bgra is what says which.
     var cr: usize = 0;
     var cb: usize = 2;
-    if (bgra) { cr = 2; cb = 0; }
+    if (bgra) {
+        cr = 2;
+        cb = 0;
+    }
     val cg: usize = 1;
 
     val cols: i32 = (GW + TILE - 1) / TILE;
     val rows: i32 = (GH + TILE - 1) / TILE;
     g.sprites = (cols * rows)::usize + PIECE_COUNT - 1;
     print.printlnf("geometry pass: {} sprites, batched={}",
-                   g.sprites, !g.unbatched);
+        g.sprites, !g.unbatched);
     print.printlnf("drew {} frames, {} draws, {} dropped in the last frame",
-                   g.drawn, gfx.renderer_draws(?g.renderer),
-                   gfx.renderer_dropped(?g.renderer));
+        g.drawn, gfx.renderer_draws(?g.renderer),
+        gfx.renderer_dropped(?g.renderer));
     print.printlnf("pipelines: gbuf {} light {} fwd {} copy {} bloom {}",
-                   gfx.shader_pipelines(?g.sh_gbuf), gfx.shader_pipelines(?g.sh_light),
-                   gfx.shader_pipelines(?g.sh_fwd), gfx.shader_pipelines(?g.sh_copy),
-                   gfx.shader_pipelines(?g.sh_bloom));
+        gfx.shader_pipelines(?g.sh_gbuf), gfx.shader_pipelines(?g.sh_light),
+        gfx.shader_pipelines(?g.sh_fwd), gfx.shader_pipelines(?g.sh_copy),
+        gfx.shader_pipelines(?g.sh_bloom));
     if (g.probe_two) {
         print.printlnf("two-sampler probe: the shader built {} pipeline(s)", g.two_built);
         # A pipeline count is not the measurement. The old layout built one too,
@@ -991,9 +1006,9 @@ fun on_dnit(ctx: *Context) {
             val floor_v: f32 = patch(GW, 280, 120, cr);
             print.printlnf("  two samplers: lamp {} floor {}", lamp_v::i64, floor_v::i64);
             check(g, lamp_v > floor_v + 40.0,
-                  "the second sampler read the emissive attachment");
+                "the second sampler read the emissive attachment");
             check(g, floor_v < 200.0,
-                  "the second sampler did not read the white fallback");
+                "the second sampler did not read the white fallback");
         }
     }
     print.printlnf("readback channel order: bgra={}", bgra);
@@ -1036,13 +1051,13 @@ fun on_dnit(ctx: *Context) {
         # that a G-buffer is being stored through a transfer function it should
         # not be, and it costs precision in the upper half of every data
         # channel.
-        val nxv: f32 = patch(GW, 280, 120, cr);
-        val nyv: f32 = patch(GW, 280, 120, cg);
+        val nxv:   f32 = patch(GW, 280, 120, cr);
+        val nyv:   f32 = patch(GW, 280, 120, cg);
         val metal: f32 = patch(GW, 110, 120, 3);
         print.printlnf("  packed: floor normal x {} y {}, plate metallic {}",
-                       nxv::i64, nyv::i64, metal::i64);
+            nxv::i64, nyv::i64, metal::i64);
         check(g, nxv > 175.0 && nxv < 200.0 && nyv > 175.0 && nyv < 200.0,
-              "attachment 1 carries a flat normal, sRGB encoded");
+            "attachment 1 carries a flat normal, sRGB encoded");
         check(g, metal > 200.0, "attachment 1 carries metallic");
     }
 
@@ -1050,17 +1065,17 @@ fun on_dnit(ctx: *Context) {
         val plate_metal: f32 = patch(GW, 110, 120, cg);
         val floor_metal: f32 = patch(GW, 280, 120, cg);
         print.printlnf("  material: plate metallic {} floor metallic {}",
-                       plate_metal::i64, floor_metal::i64);
+            plate_metal::i64, floor_metal::i64);
         check(g, plate_metal > 200.0 && floor_metal < 40.0,
-              "attachment 2 carries the material sheet");
+            "attachment 2 carries the material sheet");
     }
 
     if (read(g, d, ?g.probe3, "probe3")) {
-        val lamp_e: f32 = patch(GW, 430, 40, cr);
+        val lamp_e:  f32 = patch(GW, 430, 40, cr);
         val floor_e: f32 = patch(GW, 280, 120, cr);
         print.printlnf("  emissive: lamp {} floor {}", lamp_e::i64, floor_e::i64);
         check(g, lamp_e > 150.0 && floor_e < 20.0,
-              "attachment 3 carries emissive");
+            "attachment 3 carries emissive");
     }
 
     # THE SHADOW ASSERTION'S OWN PREMISE, CHECKED BEFORE IT IS TRUSTED.
@@ -1077,28 +1092,28 @@ fun on_dnit(ctx: *Context) {
     val da: f32 = dist2(ax::f32, ay::f32, lx, ly);
     val db: f32 = dist2(bx::f32, by::f32, lx, ly);
     print.printlnf("  distances to the static light: {} and {}",
-                   gm.sqrtf(da)::i64, gm.sqrtf(db)::i64);
+        gm.sqrtf(da)::i64, gm.sqrtf(db)::i64);
     check(g, da > db * 0.94 && da < db * 1.06,
-          "both probe points are the same distance from the light");
+        "both probe points are the same distance from the light");
     check(g, seg_crosses(ax::f32, ay::f32, lx, ly,
-                         g.block.wall0[0], g.block.wall0[1],
-                         g.block.wall0[2], g.block.wall0[3]),
-          "a wall is between the light and the shadowed point");
+        g.block.wall0[0], g.block.wall0[1],
+        g.block.wall0[2], g.block.wall0[3]),
+        "a wall is between the light and the shadowed point");
     check(g, !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall0[0], g.block.wall0[1],
-                          g.block.wall0[2], g.block.wall0[3])
-          && !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall1[0], g.block.wall1[1],
-                          g.block.wall1[2], g.block.wall1[3])
-          && !seg_crosses(bx::f32, by::f32, lx, ly,
-                          g.block.wall2[0], g.block.wall2[1],
-                          g.block.wall2[2], g.block.wall2[3]),
-          "no wall is between the light and the open point");
+        g.block.wall0[0], g.block.wall0[1],
+        g.block.wall0[2], g.block.wall0[3])
+        && !seg_crosses(bx::f32, by::f32, lx, ly,
+        g.block.wall1[0], g.block.wall1[1],
+        g.block.wall1[2], g.block.wall1[3])
+        && !seg_crosses(bx::f32, by::f32, lx, ly,
+        g.block.wall2[0], g.block.wall2[1],
+        g.block.wall2[2], g.block.wall2[3]),
+        "no wall is between the light and the open point");
 
     print.println("lighting and shadow:");
     if (read(g, d, ?g.light, "light")) {
         val shadowed: f32 = patch(GW, ax, ay, cb);
-        val open: f32 = patch(GW, bx, by, cb);
+        val open:     f32 = patch(GW, bx, by, cb);
         print.printlnf("  light: shadowed {} open {}", shadowed::i64, open::i64);
         check(g, open > 20.0, "the static light reaches the open floor");
         check(g, shadowed < open * 0.75, "a wall darkens the light behind it");
@@ -1106,10 +1121,10 @@ fun on_dnit(ctx: *Context) {
 
     if (read(g, d, ?g.scene, "scene")) {
         val shadowed: f32 = patch(GW, ax, ay, cb);
-        val open: f32 = patch(GW, bx, by, cb);
-        val lamp: f32 = patch(GW, 430, 40, cr);
+        val open:     f32 = patch(GW, bx, by, cb);
+        val lamp:     f32 = patch(GW, 430, 40, cr);
         print.printlnf("  scene: shadowed {} open {} lamp {}",
-                       shadowed::i64, open::i64, lamp::i64);
+            shadowed::i64, open::i64, lamp::i64);
 
         # Both claims the design makes about a shadow, as one ratio. Darkening
         # is the upper bound and not occluding is the lower, and an absolute
@@ -1123,12 +1138,12 @@ fun on_dnit(ctx: *Context) {
         # in the green channel, which is where a blue-white light puts most of
         # its highlight. A surface with no working specular has a peak close to
         # its mean and no hot texels at all.
-        var mean: f32 = 0.0;
-        var peak: f32 = 0.0;
-        var hot: usize = 0;
+        var mean: f32   = 0.0;
+        var peak: f32   = 0.0;
+        var hot:  usize = 0;
         region_stats(GW, 70, 80, 150, 160, cg, ?mean, ?peak, ?hot);
         print.printlnf("  plate, linear per mille: mean {} peak {}, texels above 1.8x mean {}",
-                       (mean * 1000.0)::i64, (peak * 1000.0)::i64, hot);
+            (mean * 1000.0)::i64, (peak * 1000.0)::i64, hot);
         check(g, peak > mean * 2.0, "the plate carries a specular highlight");
         check(g, hot > 30, "the highlight covers enough texels to be seen");
     }
@@ -1141,11 +1156,11 @@ fun on_dnit(ctx: *Context) {
         # the bloom target, and the kernel reaches eight texels, so a sample
         # four rows past its edge is inside the spread and one at the far corner
         # is outside it.
-        val on: f32 = patch(BW, 215, 20, cr);
+        val on:     f32 = patch(BW, 215, 20, cr);
         val beside: f32 = patch(BW, 215, 32, cr);
-        val far: f32 = patch(BW, 120, 100, cr);
+        val far:    f32 = patch(BW, 120, 100, cr);
         print.printlnf("  bloom: on lamp {} four texels past it {} far {}",
-                       on::i64, beside::i64, far::i64);
+            on::i64, beside::i64, far::i64);
         check(g, on > 20.0, "the threshold kept the lamp");
         check(g, beside > 4.0, "the blur spread it past the lamp");
         check(g, far < beside, "the blur did not flood the frame");
@@ -1170,7 +1185,10 @@ fun on_dnit(ctx: *Context) {
     if (g.unbatched) { gfx.shader_delete(?g.sh_gbuf_mesh, d); }
 
     var di: usize = 0;
-    for (di < 4) { gfx.texture_delete(d, ?g.texes[di]); di = di + 1; }
+    for (di < 4) {
+        gfx.texture_delete(d, ?g.texes[di]);
+        di = di + 1;
+    }
     gfx.mesh_delete(d, ?g.quad);
     gfx.renderer_dnit(?g.renderer);
 }
@@ -1200,7 +1218,7 @@ fun main(argc: i64, argv: **u8) i64 {
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--frames") && argi + 1 < argc) {
             game.budget = parse_usize(argv[argi + 1]:~str);
-            argi = argi + 1;
+            argi        = argi + 1;
         }
         if (str_equals(argv[argi]:~str, "--unbatched")) {
             game.unbatched = true;

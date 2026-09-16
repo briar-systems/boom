@@ -24,13 +24,13 @@
 # in CI is the thing that says a module is well-formed.
 
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
-use std.types.size.usize;
+use std.types.bool.true;
 use std.types.option.opt;
+use std.types.size.usize;
 
 # The five-word header, then instructions. Both from the SPIR-V specification.
-pub val SPV_MAGIC:        u32 = 0x07230203;
+pub val SPV_MAGIC:        u32   = 0x07230203;
 pub val SPV_HEADER_WORDS: usize = 5;
 
 # The opcodes this reader decodes.
@@ -70,9 +70,9 @@ pub val CAP_SHADER: u32 = 1;
 # module rather than byte-swapped.
 pub fun spv_word(m: *u8, i: usize) u32 {
     ret m[i * 4]::u32
-      | (m[i * 4 + 1]::u32 << 8)
-      | (m[i * 4 + 2]::u32 << 16)
-      | (m[i * 4 + 3]::u32 << 24);
+        | (m[i * 4 + 1]::u32 << 8)
+        | (m[i * 4 + 2]::u32 << 16)
+        | (m[i * 4 + 3]::u32 << 24);
 }
 
 # Whether the bytes begin with the SPIR-V magic number and hold whole words.
@@ -114,14 +114,14 @@ pub fun spv_capabilities(m: *u8, len: usize) Capabilities {
     if (!spv_is_module(m, len)) { ret caps; }
 
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret caps; }
         if (spv_op(m, at) == OP_CAPABILITY && n >= 2) {
             val c: u32 = spv_word(m, at + 1);
             if (c < 64) { caps.low = caps.low | (1::u64 << c::u64); }
-            or { caps.high = true; }
+            or          { caps.high = true; }
         }
         at = at + n;
     }
@@ -138,7 +138,7 @@ pub fun spv_decoration_value(m: *u8, len: usize, target: u32, decoration: u32) o
     if (!spv_is_module(m, len)) { ret opt[u32].none{}; }
 
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[u32].none{}; }
@@ -157,7 +157,7 @@ pub fun spv_has_decoration(m: *u8, len: usize, target: u32, decoration: u32) boo
     if (!spv_is_module(m, len)) { ret false; }
 
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret false; }
@@ -180,15 +180,15 @@ pub fun spv_variable_at_binding(m: *u8, len: usize, set: u32, binding: u32) opt[
     if (!spv_is_module(m, len)) { ret opt[u32].none{}; }
 
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[u32].none{}; }
         if (spv_op(m, at) == OP_DECORATE && n >= 4
             && spv_word(m, at + 2) == DEC_BINDING
             && spv_word(m, at + 3) == binding) {
-            val id: u32 = spv_word(m, at + 1);
-            val s: opt[u32] = spv_decoration_value(m, len, id, DEC_DESCRIPTOR_SET);
+            val id: u32      = spv_word(m, at + 1);
+            val s:  opt[u32] = spv_decoration_value(m, len, id, DEC_DESCRIPTOR_SET);
             if (sel s.some && s.some == set) { ret opt[u32].some{id}; }
         }
         at = at + n;
@@ -211,7 +211,7 @@ pub fun spv_variable_class(m: *u8, len: usize, id: u32) opt[u32] {
     if (!spv_is_module(m, len)) { ret opt[u32].none{}; }
 
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[u32].none{}; }
@@ -233,9 +233,9 @@ pub fun spv_variable_class(m: *u8, len: usize, id: u32) opt[u32] {
 # and a read-write binding, so both answer yes.
 pub fun spv_is_storage_buffer(m: *u8, len: usize, id: u32) bool {
     val class: opt[u32] = spv_variable_class(m, len, id);
-    if (sel class.none) { ret false; }
+    if (sel class.none)                     { ret false; }
     if (class.some == CLASS_STORAGE_BUFFER) { ret true; }
-    if (class.some != CLASS_UNIFORM) { ret false; }
+    if (class.some != CLASS_UNIFORM)        { ret false; }
     val t: opt[u32] = spv_pointed_type(m, len, id);
     ret sel t.some && spv_has_decoration(m, len, t.some, DEC_BUFFER_BLOCK);
 }
@@ -261,8 +261,8 @@ pub fun spv_member_offsets(m: *u8, len: usize, struct_id: u32) opt[MemberOffsets
     if (!spv_is_module(m, len)) { ret opt[MemberOffsets].none{}; }
 
     var offsets: MemberOffsets = MemberOffsets{count: 0, last: 0};
-    val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    val words:   usize         = len / 4;
+    var at:      usize         = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[MemberOffsets].none{}; }
@@ -283,7 +283,7 @@ pub fun spv_member_offsets(m: *u8, len: usize, struct_id: u32) opt[MemberOffsets
 # The result type id of a variable id.
 fun spv_variable_type(m: *u8, len: usize, id: u32) opt[u32] {
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[u32].none{}; }
@@ -299,7 +299,7 @@ fun spv_variable_type(m: *u8, len: usize, id: u32) opt[u32] {
 # What a pointer type id points at.
 fun spv_pointee(m: *u8, len: usize, ptr: u32) opt[u32] {
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret opt[u32].none{}; }
@@ -348,9 +348,9 @@ pub fun spv_block_of_binding(m: *u8, len: usize, set: u32, binding: u32) opt[u32
 pub fun spv_max_array_stride(m: *u8, len: usize) u32 {
     if (!spv_is_module(m, len)) { ret 0; }
 
-    var best: u32 = 0;
+    var best:  u32   = 0;
     val words: usize = len / 4;
-    var at: usize = SPV_HEADER_WORDS;
+    var at:    usize = SPV_HEADER_WORDS;
     for (at < words) {
         val n: usize = spv_len(m, at);
         if (n == 0) { ret best; }
@@ -371,10 +371,16 @@ test "spirvread: a word is read little-endian" {
     # is what says the reader agrees with the format about byte order. Reading
     # big-endian would make every offset and binding in every check nonsense.
     var bytes: [8]u8;
-    bytes[0] = 0x03; bytes[1] = 0x02; bytes[2] = 0x23; bytes[3] = 0x07;
+    bytes[0] = 0x03;
+    bytes[1] = 0x02;
+    bytes[2] = 0x23;
+    bytes[3] = 0x07;
     if (spv_word(?bytes[0], 0) != SPV_MAGIC) { ret 1; }
 
-    bytes[4] = 0x78; bytes[5] = 0x56; bytes[6] = 0x34; bytes[7] = 0x12;
+    bytes[4] = 0x78;
+    bytes[5] = 0x56;
+    bytes[6] = 0x34;
+    bytes[7] = 0x12;
     if (spv_word(?bytes[0], 1) != 0x12345678) { ret 2; }
     ret 0;
 }
@@ -385,9 +391,12 @@ test "spirvread: an instruction's length comes from its high half-word" {
     # whatever it happens to land on.
     var bytes: [8]u8;
     # word count 3, opcode 17
-    bytes[0] = 17; bytes[1] = 0; bytes[2] = 3; bytes[3] = 0;
-    if (spv_op(?bytes[0], 0)  != 17) { ret 1; }
-    if (spv_len(?bytes[0], 0) != 3)  { ret 2; }
+    bytes[0] = 17;
+    bytes[1] = 0;
+    bytes[2] = 3;
+    bytes[3] = 0;
+    if (spv_op(?bytes[0], 0) != 17) { ret 1; }
+    if (spv_len(?bytes[0], 0) != 3) { ret 2; }
     ret 0;
 }
 
@@ -395,13 +404,19 @@ test "spirvread: bytes that are not a module are refused" {
     # Every reader below returns an empty answer for a non-module, so a check
     # that was handed rubbish would otherwise pass by finding nothing.
     var bytes: [32]u8;
-    bytes[0] = 0xFF; bytes[1] = 0xFF; bytes[2] = 0xFF; bytes[3] = 0xFF;
-    if (spv_is_module(?bytes[0], 32))  { ret 1; }
+    bytes[0] = 0xFF;
+    bytes[1] = 0xFF;
+    bytes[2] = 0xFF;
+    bytes[3] = 0xFF;
+    if (spv_is_module(?bytes[0], 32)) { ret 1; }
     # Whole words, right magic, but too short to hold a header.
-    bytes[0] = 0x03; bytes[1] = 0x02; bytes[2] = 0x23; bytes[3] = 0x07;
-    if (spv_is_module(?bytes[0], 16))  { ret 2; }
+    bytes[0] = 0x03;
+    bytes[1] = 0x02;
+    bytes[2] = 0x23;
+    bytes[3] = 0x07;
+    if (spv_is_module(?bytes[0], 16)) { ret 2; }
     # A byte count that is not a whole number of words.
-    if (spv_is_module(?bytes[0], 30))  { ret 3; }
-    if (spv_is_module(nil, 32))        { ret 4; }
+    if (spv_is_module(?bytes[0], 30)) { ret 3; }
+    if (spv_is_module(nil, 32))       { ret 4; }
     ret 0;
 }

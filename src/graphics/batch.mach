@@ -32,15 +32,15 @@
 # which coalesces the case games actually produce -- runs of sprites from one
 # sheet -- and never reorders anything.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use boom.graphics.texture.Texture;
-use std.types.option.opt;
 use boom.graphics.sprite.Rect;
+use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.option.opt;
+use std.types.size.usize;
 
 # How many vertices one sprite expands to: two triangles, not indexed.
 #
@@ -95,8 +95,8 @@ pub fun batch_reset(b: *Batch2D) {
 # has to be drawn now to keep submission order, since the new geometry must land
 # on top of it rather than beside it.
 pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture]) bool {
-    if (!b.open)              { ret false; }
-    if (b.count == 0)         { ret false; }
+    if (!b.open)      { ret false; }
+    if (b.count == 0) { ret false; }
     ret !same_texture(b.texture, texture);
 }
 
@@ -117,7 +117,7 @@ pub fun same_texture(a: opt[*Texture], b: opt[*Texture]) bool {
 pub fun batch_continues(b: *Batch2D, block: usize, first: u32) bool {
     if (!b.open || b.count == 0) { ret false; }
 
-    if (b.block != block)        { ret false; }
+    if (b.block != block) { ret false; }
     ret b.first + b.count == first;
 }
 
@@ -178,12 +178,15 @@ fun corner(out: *f32, i: usize, x: f32, y: f32, u: f32, v: f32, tint: Vec4) {
 
 test "batch: a sprite expands to two triangles covering the destination rect" {
     var out: [48]f32;
-    var i: usize = 0;
-    for (i < 48) { out[i] = -1.0; i = i + 1; }
+    var i:   usize = 0;
+    for (i < 48) {
+        out[i] = -1.0;
+        i      = i + 1;
+    }
 
     sprite_expand(Rect{x: 10.0, y: 20.0, w: 30.0, h: 40.0},
-                  Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
-                  vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
+        Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
+        vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
 
     # Derived from the rectangle, not read off the output: the corners are
     # (10,20) and (40,60), and every vertex must be one of the four.
@@ -202,7 +205,7 @@ test "batch: a sprite expands to two triangles covering the destination rect" {
 
     # Together they must cover the rectangle exactly: 30 * 40 = 1200.
     val total: f32 = abs_f(area2(?out[0], 0, 1, 2)) * 0.5
-                   + abs_f(area2(?out[0], 3, 4, 5)) * 0.5;
+        + abs_f(area2(?out[0], 3, 4, 5)) * 0.5;
     if (total != 1200.0) { ret 5; }
     ret 0;
 }
@@ -210,21 +213,21 @@ test "batch: a sprite expands to two triangles covering the destination rect" {
 test "batch: the uvs follow the source rect and match their corners" {
     var out: [48]f32;
     sprite_expand(Rect{x: 0.0, y: 0.0, w: 8.0, h: 8.0},
-                  Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.25},
-                  vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
+        Rect{x: 0.25, y: 0.5, w: 0.125, h: 0.25},
+        vec4(1.0, 1.0, 1.0, 1.0), ?out[0]);
 
     # A vertex on the left edge samples the source's left edge, and so on for
     # each side. This is what catches a transposed or offset uv, which renders
     # as a recognisable sprite from the wrong cell of the sheet.
     var v: usize = 0;
     for (v < SPRITE_VERTICES) {
-        val o: usize = v * VERTEX_FLOATS;
-        val left: bool = out[o + 0] == 0.0;
-        val top:  bool = out[o + 1] == 0.0;
-        var want_u: f32 = 0.375;
-        var want_v: f32 = 0.75;
-        if (left) { want_u = 0.25; }
-        if (top)  { want_v = 0.5; }
+        val o:      usize = v * VERTEX_FLOATS;
+        val left:   bool  = out[o + 0] == 0.0;
+        val top:    bool  = out[o + 1] == 0.0;
+        var want_u: f32   = 0.375;
+        var want_v: f32   = 0.75;
+        if (left)                 { want_u = 0.25; }
+        if (top)                  { want_v = 0.5; }
         if (out[o + 2] != want_u) { ret 1; }
         if (out[o + 3] != want_v) { ret 2; }
         v = v + 1;
@@ -238,8 +241,8 @@ test "batch: the tint reaches every vertex" {
     # instead of a flat tint.
     var out: [48]f32;
     sprite_expand(Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
-                  Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
-                  vec4(0.25, 0.5, 0.75, 0.5), ?out[0]);
+        Rect{x: 0.0, y: 0.0, w: 1.0, h: 1.0},
+        vec4(0.25, 0.5, 0.75, 0.5), ?out[0]);
     var v: usize = 0;
     for (v < SPRITE_VERTICES) {
         val o: usize = v * VERTEX_FLOATS;

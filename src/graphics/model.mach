@@ -17,55 +17,55 @@
 # animation samplers are rejected. multiple skins, matrix-form joints, and
 # morph-target (weights) channels are future work.
 
-use boom.graphics.mesh.Mesh;
-use boom.graphics.device.Device;
-use boom.graphics.mesh.MeshData;
-use boom.graphics.mesh.Floats;
-use boom.graphics.mesh.AccessorError;
-use boom.graphics.mesh.mesh;
-use boom.graphics.mesh.mesh_delete;
-use boom.graphics.mesh.extract_loaded;
-use boom.graphics.mesh.mesh_data_max_joint;
-use boom.graphics.mesh.read_floats;
-use boom.graphics.skeleton.Skeleton;
-use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.animation.Animation;
+use boom.graphics.animation.AnimationPlayer;
 use boom.graphics.animation.Channel;
 use boom.graphics.animation.ChannelPath;
 use boom.graphics.animation.Interp;
-use boom.graphics.animation.AnimationPlayer;
+use boom.graphics.animation.animation_duration;
 use boom.graphics.animation.animation_player;
 use boom.graphics.animation.animation_player_advance;
-use boom.graphics.animation.animation_duration;
+use boom.graphics.device.Device;
 use boom.graphics.error.Error;
 use boom.graphics.error.mesh.MeshError;
 use boom.graphics.error.mesh.ModelError;
-use vfs: boom.vfs;
-use boom.math.vec.Vec3;
-use boom.math.vec.vec3;
-use boom.math.quat.Quat;
+use boom.graphics.mesh.AccessorError;
+use boom.graphics.mesh.Floats;
+use boom.graphics.mesh.Mesh;
+use boom.graphics.mesh.MeshData;
+use boom.graphics.mesh.extract_loaded;
+use boom.graphics.mesh.mesh;
+use boom.graphics.mesh.mesh_data_max_joint;
+use boom.graphics.mesh.mesh_delete;
+use boom.graphics.mesh.read_floats;
+use boom.graphics.skeleton.MAX_JOINTS;
+use boom.graphics.skeleton.Skeleton;
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_ptr;
+use boom.math.quat.Quat;
 use boom.math.transform.Transform;
-use gp: gltf.parse;
-use gd: gltf.doc;
-use slice: std.collections.slice;
-use allo:  std.allocator;
-use page:  std.allocator.page;
-use arena: std.allocator.arena;
-use vec:     std.collections.vector;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec3;
+use boom.vfs;
+use gd:   gltf.doc;
+use gp:   gltf.parse;
+use allo: std.allocator;
+use std.allocator.arena;
+use std.allocator.page;
+use std.collections.slice;
+use vec:  std.collections.vector;
+use text: std.text.string;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
-use std.types.error.err;
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_len;
 use std.types.string.str_equals;
-use text:  std.text.string;
+use std.types.string.str_len;
 
 # an opaque handle to a skinned, animated model
 # ---
@@ -110,25 +110,25 @@ fun node_to_joint(skin: *gd.Skin, node: usize) opt[usize] {
 # ret: ok, or a cycle error
 fun build_order(sk: *Skeleton) err[Error] {
     var added: [128]u8;
-    var i: usize = 0;
+    var i:     usize = 0;
     for (i < sk.count) {
         added[i] = 0;
-        i = i + 1;
+        i        = i + 1;
     }
     var produced: usize = 0;
     for (produced < sk.count) {
-        var progress: u8 = 0;
-        var j: usize = 0;
+        var progress: u8    = 0;
+        var j:        usize = 0;
         for (j < sk.count) {
             if (added[j] == 0) {
-                val p: opt[usize] = sk.parents[j];
-                var ready: bool = true;
+                val p:     opt[usize] = sk.parents[j];
+                var ready: bool       = true;
                 if (sel p.some) { ready = added[p.some] != 0; }
                 if (ready) {
                     sk.order[produced] = j;
-                    added[j] = 1;
-                    produced = produced + 1;
-                    progress = 1;
+                    added[j]           = 1;
+                    produced           = produced + 1;
+                    progress           = 1;
                 }
             }
             j = j + 1;
@@ -142,8 +142,8 @@ fun build_order(sk: *Skeleton) err[Error] {
 
 # the node a skin joint names, refusing a reference past the document's nodes
 fun joint_node(d: *gd.Document, skin: *gd.Skin, j: usize) res[*gd.Node, Error] {
-    val node_i: usize = skin.joints.data[j];
-    val nr: opt[*gd.Node] = slice.get[gd.Node](d.nodes, node_i);
+    val node_i: usize         = skin.joints.data[j];
+    val nr:     opt[*gd.Node] = slice.get[gd.Node](d.nodes, node_i);
     if (sel nr.none) { ret res[*gd.Node, Error].err{Error.model{ModelError.joint_node{node_i}}}; }
     ret res[*gd.Node, Error].ok{nr.some};
 }
@@ -159,7 +159,7 @@ fun joint_node(d: *gd.Document, skin: *gd.Skin, j: usize) res[*gd.Node, Error] {
 # sk:     receives the built skeleton
 # ret:    ok, or an extract error
 fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) err[Error] {
-    val d: *gd.Document = ?loaded.document;
+    val d:  *gd.Document  = ?loaded.document;
     val sr: opt[*gd.Skin] = slice.get[gd.Skin](d.skins, 0);
     if (sel sr.none) {
         sk.count = 0;
@@ -186,7 +186,7 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) err[Er
         sk.rest[j].scale    = vec3(node.scale[0], node.scale[1], node.scale[2]);
         sk.parents[j]       = opt[usize].none{};
         sk.inverse_bind[j]  = mat4_identity();
-        j = j + 1;
+        j                   = j + 1;
     }
 
     var pn: usize = 0;
@@ -194,7 +194,7 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) err[Er
         val pj: opt[usize] = node_to_joint(skin, pn);
         if (sel pj.some) {
             val pnode: *gd.Node = ?d.nodes.data[pn];
-            var ci: usize = 0;
+            var ci:    usize    = 0;
             for (ci < pnode.children.size) {
                 val cj: opt[usize] = node_to_joint(skin, pnode.children.data[ci]);
                 if (sel cj.some) { sk.parents[cj.some] = opt[usize].some{pj.some}; }
@@ -212,14 +212,14 @@ fun build_skeleton(loaded: *gp.Loaded, a: *allo.Allocator, sk: *Skeleton) err[Er
         if (sel rr.err) { ret err[Error].err{accessor_failed(rr.err)}; }
         val ibm: Floats = rr.ok;
         if (ibm.comps != 16) { ret err[Error].err{Error.model{ModelError.inverse_bind_type{}}}; }
-        if (ibm.count < n) { ret err[Error].err{Error.model{ModelError.inverse_bind_count{ibm.count}}}; }
+        if (ibm.count < n)   { ret err[Error].err{Error.model{ModelError.inverse_bind_count{ibm.count}}}; }
         var k: usize = 0;
         for (k < n) {
-            val matrix: *f32 = mat4_ptr(?sk.inverse_bind[k]);
-            var m: usize = 0;
+            val matrix: *f32  = mat4_ptr(?sk.inverse_bind[k]);
+            var m:      usize = 0;
             for (m < 16) {
                 matrix[m] = ibm.data[k * 16 + m];
-                m = m + 1;
+                m         = m + 1;
             }
             k = k + 1;
         }
@@ -239,7 +239,7 @@ fun dup_name(v: str, pa: *allo.Allocator) res[str, Error] {
 }
 
 fun build_joint_names(loaded: *gp.Loaded, skin: *gd.Skin,
-                       pa: *allo.Allocator, names: *opt[str]) err[Error] {
+    pa: *allo.Allocator, names: *opt[str]) err[Error] {
     if (skin.joints.size > MAX_JOINTS) {
         ret err[Error].err{Error.model{ModelError.joints{skin.joints.size}}};
     }
@@ -293,18 +293,18 @@ fun channel_target(skin: *gd.Skin, gch: *gd.AnimationChannel) opt[Channel] {
 # pa:     the persistent allocator for keyframe arrays and channels
 # ret:    the built clip, or a read/unsupported error
 fun build_clip(loaded: *gp.Loaded, skin: *gd.Skin, anim: *gd.Animation, pa: *allo.Allocator) res[Animation, Error] {
-    val d: *gd.Document = ?loaded.document;
-    val total: usize = anim.channels.size;
+    val d:     *gd.Document = ?loaded.document;
+    val total: usize        = anim.channels.size;
 
     val car: res[*Channel, allo.Error] = allo.allocate[Channel](pa, total);
     if (sel car.err) { ret res[Animation, Error].err{Error.alloc{car.err}}; }
     val channels: *Channel = car.ok;
 
     var used: usize = 0;
-    var ci: usize = 0;
+    var ci:   usize = 0;
     for (ci < total) {
-        val gch: *gd.AnimationChannel = ?anim.channels.data[ci];
-        val target: opt[Channel] = channel_target(skin, gch);
+        val gch:    *gd.AnimationChannel = ?anim.channels.data[ci];
+        val target: opt[Channel]         = channel_target(skin, gch);
         if (sel target.some) {
             val sr: opt[*gd.AnimationSampler] = slice.get[gd.AnimationSampler](anim.samplers, gch.sampler);
             if (sel sr.none) {
@@ -325,12 +325,12 @@ fun build_clip(loaded: *gp.Loaded, skin: *gd.Skin, anim: *gd.Animation, pa: *all
 
             channels[used] = target.some;
             if (sel samp.interpolation.step) { channels[used].interp = Interp.step{}; }
-            or { channels[used].interp = Interp.linear{}; }
+            or                               { channels[used].interp = Interp.linear{}; }
             channels[used].times  = tr.ok.data;
             channels[used].values = vr.ok.data;
             channels[used].count  = tr.ok.count;
             channels[used].stride = vr.ok.comps;
-            used = used + 1;
+            used                  = used + 1;
         }
         ci = ci + 1;
     }
@@ -361,8 +361,8 @@ rec Clips {
 # pa:     the persistent allocator for clips and keyframe arrays
 # ret:    the clips, or a read/unsupported error
 fun build_animations(loaded: *gp.Loaded, skin: *gd.Skin, pa: *allo.Allocator) res[Clips, Error] {
-    val d: *gd.Document = ?loaded.document;
-    val na: usize = d.animations.size;
+    val d:  *gd.Document = ?loaded.document;
+    val na: usize        = d.animations.size;
     if (na == 0) { ret res[Clips, Error].ok{Clips{clips: nil, count: 0}}; }
 
     val car: res[*Animation, allo.Error] = allo.allocate[Animation](pa, na);
@@ -374,7 +374,7 @@ fun build_animations(loaded: *gp.Loaded, skin: *gd.Skin, pa: *allo.Allocator) re
         val br: res[Animation, Error] = build_clip(loaded, skin, ?d.animations.data[ai], pa);
         if (sel br.err) { ret res[Clips, Error].err{br.err}; }
         clips[ai] = br.ok;
-        ai = ai + 1;
+        ai        = ai + 1;
     }
     ret res[Clips, Error].ok{Clips{clips: clips, count: na}};
 }
@@ -397,7 +397,7 @@ fun abandon(d: *Device, model: *Model, parse: *arena.Arena, persistent: bool) {
 # ret:  the built Model, or a parse/extract/upload error
 pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     var tpa: allo.Allocator;
-    val pm: err[allo.Error] = page.make(?tpa);
+    val pm:  err[allo.Error] = page.make(?tpa);
     if (sel pm.err) { ret res[Model, Error].err{Error.alloc{pm.err}}; }
     var tar: arena.Arena;
     val tie: err[allo.Error] = arena.init(?tar, ?tpa, 65536);
@@ -424,8 +424,8 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     var md: MeshData = er.ok;
 
     var model: Model;
-    val mr: res[Mesh, Error] = mesh(d, md.vertices::ptr, md.vertex_count, ?md.format,
-                                    md.indices, md.index_count);
+    val mr:    res[Mesh, Error] = mesh(d, md.vertices::ptr, md.vertex_count, ?md.format,
+        md.indices, md.index_count);
     if (sel mr.err) {
         arena.dnit(?tar);
         ret res[Model, Error].err{mr.err};
@@ -466,7 +466,7 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     if (model.skeleton.count > 0) {
         val sr: opt[*gd.Skin] = slice.get[gd.Skin](loaded.document.skins, 0);
         if (sel sr.some) {
-            val skin: *gd.Skin = sr.some;
+            val skin:  *gd.Skin   = sr.some;
             val names: err[Error] =
                 build_joint_names(?loaded, skin, ?paa, ?model.joint_names[0]);
             if (sel names.err) {
@@ -510,8 +510,8 @@ pub fun model_load(d: *Device, path: str) res[Model, Error] {
     if (sel br.err) { ret res[Model, Error].err{Error.load{br.err}}; }
     var buf: vec.Vector[u8] = br.ok;
 
-    val made: res[Model, Error] = model_from_glb(d, buf.data, buf.len);
-    val released: err[allo.Error] = vec.dnit[u8](?buf);
+    val made:     res[Model, Error] = model_from_glb(d, buf.data, buf.len);
+    val released: err[allo.Error]   = vec.dnit[u8](?buf);
     if (sel made.err) { ret made; }
     if (sel released.err) {
         var built: Model = made.ok;
@@ -560,7 +560,7 @@ pub fun model_joint(model: *Model, name: str) res[usize, Error] {
     }
     var matches: usize = 0;
     var found:   usize = 0;
-    var j: usize = 0;
+    var j:       usize = 0;
     for (j < model.skeleton.count) {
         val joint: opt[str] = model.joint_names[j];
         if (sel joint.some && str_equals(joint.some, name)) {
@@ -568,7 +568,7 @@ pub fun model_joint(model: *Model, name: str) res[usize, Error] {
                 ret res[usize, Error].err{Error.model{ModelError.joint_ambiguous{}}};
             }
             matches = 1;
-            found = j;
+            found   = j;
         }
         j = j + 1;
     }
@@ -595,7 +595,7 @@ pub fun model_delete(d: *Device, m: *Model) err[allo.Error] {
     var j: usize = 0;
     for (j < MAX_JOINTS) {
         m.joint_names[j] = opt[str].none{};
-        j = j + 1;
+        j                = j + 1;
     }
     m.skeleton.count = 0;
     ret released;
@@ -627,7 +627,7 @@ fun put_identity_mat4(bin: *u8, off: usize) {
         put_f32(bin, off + i * 4, 0.0);
         i = i + 1;
     }
-    put_f32(bin, off + 0,  1.0);
+    put_f32(bin, off + 0, 1.0);
     put_f32(bin, off + 20, 1.0);
     put_f32(bin, off + 40, 1.0);
     put_f32(bin, off + 60, 1.0);
@@ -635,29 +635,49 @@ fun put_identity_mat4(bin: *u8, off: usize) {
 
 # assemble a minimal skinned, animated .glb: two joints and a rotation clip
 fun fixture_animated_glb(out: *u8) usize {
-    val json: str = "{\"asset\":{\"version\":\"2.0\"},\"scenes\":[{\"nodes\":[0,1]}],\"nodes\":[{\"mesh\":0,\"skin\":0},{\"children\":[2],\"rotation\":[0,0,0,1]},{\"translation\":[1,0,0]}],\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3,\"mode\":4}]}],\"skins\":[{\"joints\":[1,2],\"inverseBindMatrices\":4}],\"animations\":[{\"name\":\"spin\",\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"rotation\"}}],\"samplers\":[{\"input\":5,\"output\":6,\"interpolation\":\"LINEAR\"}]}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},{\"bufferView\":5,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":6,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":48},{\"buffer\":0,\"byteOffset\":84,\"byteLength\":128},{\"buffer\":0,\"byteOffset\":212,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":220,\"byteLength\":32},{\"buffer\":0,\"byteOffset\":252,\"byteLength\":24},{\"buffer\":0,\"byteOffset\":276,\"byteLength\":6}],\"buffers\":[{\"byteLength\":282}]}";
+    val json: str   = "{\"asset\":{\"version\":\"2.0\"},\"scenes\":[{\"nodes\":[0,1]}],\"nodes\":[{\"mesh\":0,\"skin\":0},{\"children\":[2],\"rotation\":[0,0,0,1]},{\"translation\":[1,0,0]}],\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3,\"mode\":4}]}],\"skins\":[{\"joints\":[1,2],\"inverseBindMatrices\":4}],\"animations\":[{\"name\":\"spin\",\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"rotation\"}}],\"samplers\":[{\"input\":5,\"output\":6,\"interpolation\":\"LINEAR\"}]}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},{\"bufferView\":5,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":1,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":6,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"},{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\"},{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":48},{\"buffer\":0,\"byteOffset\":84,\"byteLength\":128},{\"buffer\":0,\"byteOffset\":212,\"byteLength\":8},{\"buffer\":0,\"byteOffset\":220,\"byteLength\":32},{\"buffer\":0,\"byteOffset\":252,\"byteLength\":24},{\"buffer\":0,\"byteOffset\":276,\"byteLength\":6}],\"buffers\":[{\"byteLength\":282}]}";
     val jlen: usize = str_len(json);
 
     var bin: [284]u8;
-    var z: usize = 0;
-    for (z < 284) { bin[z] = 0; z = z + 1; }
+    var z:   usize = 0;
+    for (z < 284) {
+        bin[z] = 0;
+        z      = z + 1;
+    }
 
     # POSITION
-    put_f32(?bin[0], 0,  0.0); put_f32(?bin[0], 4,  0.0); put_f32(?bin[0], 8,  0.0);
-    put_f32(?bin[0], 12, 1.0); put_f32(?bin[0], 16, 0.0); put_f32(?bin[0], 20, 0.0);
-    put_f32(?bin[0], 24, 0.0); put_f32(?bin[0], 28, 1.0); put_f32(?bin[0], 32, 0.0);
+    put_f32(?bin[0], 0, 0.0);
+    put_f32(?bin[0], 4, 0.0);
+    put_f32(?bin[0], 8, 0.0);
+    put_f32(?bin[0], 12, 1.0);
+    put_f32(?bin[0], 16, 0.0);
+    put_f32(?bin[0], 20, 0.0);
+    put_f32(?bin[0], 24, 0.0);
+    put_f32(?bin[0], 28, 1.0);
+    put_f32(?bin[0], 32, 0.0);
     # WEIGHTS_0, fully weighted to joint 0
-    put_f32(?bin[0], 36, 1.0); put_f32(?bin[0], 60, 1.0); put_f32(?bin[0], 72, 1.0);
+    put_f32(?bin[0], 36, 1.0);
+    put_f32(?bin[0], 60, 1.0);
+    put_f32(?bin[0], 72, 1.0);
     # inverse bind matrices: two identities
     put_identity_mat4(?bin[0], 84);
     put_identity_mat4(?bin[0], 148);
     # animation input times
-    put_f32(?bin[0], 212, 0.0); put_f32(?bin[0], 216, 1.0);
+    put_f32(?bin[0], 212, 0.0);
+    put_f32(?bin[0], 216, 1.0);
     # animation rotation outputs: identity then 90 degrees about z
-    put_f32(?bin[0], 220, 0.0); put_f32(?bin[0], 224, 0.0); put_f32(?bin[0], 228, 0.0);        put_f32(?bin[0], 232, 1.0);
-    put_f32(?bin[0], 236, 0.0); put_f32(?bin[0], 240, 0.0); put_f32(?bin[0], 244, 0.70710678); put_f32(?bin[0], 248, 0.70710678);
+    put_f32(?bin[0], 220, 0.0);
+    put_f32(?bin[0], 224, 0.0);
+    put_f32(?bin[0], 228, 0.0);
+    put_f32(?bin[0], 232, 1.0);
+    put_f32(?bin[0], 236, 0.0);
+    put_f32(?bin[0], 240, 0.0);
+    put_f32(?bin[0], 244, 0.70710678);
+    put_f32(?bin[0], 248, 0.70710678);
     # JOINTS_0 stays zero; indices
-    put_u16(?bin[0], 276, 0); put_u16(?bin[0], 278, 1); put_u16(?bin[0], 280, 2);
+    put_u16(?bin[0], 276, 0);
+    put_u16(?bin[0], 278, 1);
+    put_u16(?bin[0], 280, 2);
     val blen: usize = 282;
 
     val jpad:   usize = (4 - (jlen % 4)) % 4;
@@ -673,15 +693,24 @@ fun fixture_animated_glb(out: *u8) usize {
     put_u32(out, 12, jchunk::u32);
     put_u32(out, 16, 0x4E4F534A);
     var i: usize = 0;
-    for (i < jlen) { out[20 + i] = json[i]; i = i + 1; }
+    for (i < jlen) {
+        out[20 + i] = json[i];
+        i           = i + 1;
+    }
     var jp: usize = 0;
-    for (jp < jpad) { out[20 + jlen + jp] = ' '; jp = jp + 1; }
+    for (jp < jpad) {
+        out[20 + jlen + jp] = ' ';
+        jp                  = jp + 1;
+    }
 
     val boff: usize = 20 + jchunk;
     put_u32(out, boff, bchunk::u32);
     put_u32(out, boff + 4, 0x004E4942);
     i = 0;
-    for (i < bchunk) { out[boff + 8 + i] = bin[i]; i = i + 1; }
+    for (i < bchunk) {
+        out[boff + 8 + i] = bin[i];
+        i                 = i + 1;
+    }
 
     ret total;
 }
@@ -693,56 +722,107 @@ fun ok_alloc(r: err[allo.Error]) bool {
 
 # whether a graphics operation was refused with a given model case
 fun refused_joint_lookup(r: res[usize, Error], ambiguous: bool) bool {
-    if (!sel r.err) { ret false; }
+    if (!sel r.err)       { ret false; }
     if (!sel r.err.model) { ret false; }
-    if (ambiguous) { ret sel r.err.model.joint_ambiguous; }
+    if (ambiguous)        { ret sel r.err.model.joint_ambiguous; }
     ret sel r.err.model.no_joint;
 }
 
 test "model: skeleton and animation extract from a skinned, animated glb" {
     var glb: [2048]u8;
-    val n: usize = fixture_animated_glb(?glb[0]);
+    val n:   usize = fixture_animated_glb(?glb[0]);
 
     var pa: allo.Allocator;
     if (!ok_alloc(page.make(?pa))) { ret 90; }
     var ar: arena.Arena;
     if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
     var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) { arena.dnit(?ar); ret 92; }
+    if (!ok_alloc(arena.make(?aa, ?ar))) {
+        arena.dnit(?ar);
+        ret 92;
+    }
 
     val lr: res[gp.Loaded, gp.LoadError] = gp.load_glb(?glb[0], n, ?aa);
-    if (sel lr.err) { arena.dnit(?ar); ret 1; }
+    if (sel lr.err) {
+        arena.dnit(?ar);
+        ret 1;
+    }
     var loaded: gp.Loaded = lr.ok;
 
-    var sk: Skeleton;
+    var sk:  Skeleton;
     val skr: err[Error] = build_skeleton(?loaded, ?aa, ?sk);
-    if (sel skr.err) { arena.dnit(?ar); ret 2; }
-    if (sk.count != 2) { arena.dnit(?ar); ret 3; }
-    if (!sel sk.parents[0].none) { arena.dnit(?ar); ret 4; }
+    if (sel skr.err) {
+        arena.dnit(?ar);
+        ret 2;
+    }
+    if (sk.count != 2) {
+        arena.dnit(?ar);
+        ret 3;
+    }
+    if (!sel sk.parents[0].none) {
+        arena.dnit(?ar);
+        ret 4;
+    }
     val parent: opt[usize] = sk.parents[1];
-    if (!sel parent.some) { arena.dnit(?ar); ret 5; }
-    if (parent.some != 0) { arena.dnit(?ar); ret 5; }
-    if (sk.order[0] != 0 || sk.order[1] != 1) { arena.dnit(?ar); ret 6; }
-    if (sk.rest[1].position[0] != 1.0) { arena.dnit(?ar); ret 7; }
+    if (!sel parent.some) {
+        arena.dnit(?ar);
+        ret 5;
+    }
+    if (parent.some != 0) {
+        arena.dnit(?ar);
+        ret 5;
+    }
+    if (sk.order[0] != 0 || sk.order[1] != 1) {
+        arena.dnit(?ar);
+        ret 6;
+    }
+    if (sk.rest[1].position[0] != 1.0) {
+        arena.dnit(?ar);
+        ret 7;
+    }
 
     val srr: opt[*gd.Skin] = slice.get[gd.Skin](loaded.document.skins, 0);
-    if (sel srr.none) { arena.dnit(?ar); ret 8; }
+    if (sel srr.none) {
+        arena.dnit(?ar);
+        ret 8;
+    }
     val skin: *gd.Skin = srr.some;
 
     val anr: res[Clips, Error] = build_animations(?loaded, skin, ?aa);
-    if (sel anr.err) { arena.dnit(?ar); ret 9; }
+    if (sel anr.err) {
+        arena.dnit(?ar);
+        ret 9;
+    }
     val clips: *Animation = anr.ok.clips;
-    if (anr.ok.count != 1) { arena.dnit(?ar); ret 10; }
-    if (!str_equals(clips[0].name, "spin")) { arena.dnit(?ar); ret 11; }
-    if (clips[0].count != 1) { arena.dnit(?ar); ret 12; }
-    if (clips[0].duration - 1.0 > 0.001 || clips[0].duration - 1.0 < 0.0 - 0.001) { arena.dnit(?ar); ret 13; }
+    if (anr.ok.count != 1) {
+        arena.dnit(?ar);
+        ret 10;
+    }
+    if (!str_equals(clips[0].name, "spin")) {
+        arena.dnit(?ar);
+        ret 11;
+    }
+    if (clips[0].count != 1) {
+        arena.dnit(?ar);
+        ret 12;
+    }
+    if (clips[0].duration - 1.0 > 0.001 || clips[0].duration - 1.0 < 0.0 - 0.001) {
+        arena.dnit(?ar);
+        ret 13;
+    }
 
     var pl: AnimationPlayer = animation_player(?sk, opt[*Animation].some{?clips[0]});
     pl.looping = 0;
     animation_player_advance(?pl, 1.0);
     # joint 0 turned 90 degrees about z: skinning column 0 becomes (0, 1, 0)
-    if (pl.pose.matrices[0].m[0][1] < 0.99) { arena.dnit(?ar); ret 14; }
-    if (pl.pose.matrices[0].m[0][0] > 0.01 || pl.pose.matrices[0].m[0][0] < 0.0 - 0.01) { arena.dnit(?ar); ret 15; }
+    if (pl.pose.matrices[0].m[0][1] < 0.99) {
+        arena.dnit(?ar);
+        ret 14;
+    }
+    if (pl.pose.matrices[0].m[0][0] > 0.01 || pl.pose.matrices[0].m[0][0] < 0.0 - 0.01) {
+        arena.dnit(?ar);
+        ret 15;
+    }
 
     if (!ok_alloc(arena.dnit(?ar))) { ret 99; }
     ret 0;
@@ -758,21 +838,21 @@ tag FixtureError: u8 {
 
 fun fixture_named_model() res[Model, FixtureError] {
     var glb: [2048]u8;
-    val n: usize = fixture_animated_glb(?glb[0]);
-    var pa: allo.Allocator;
-    val pm: err[allo.Error] = page.make(?pa);
+    val n:   usize           = fixture_animated_glb(?glb[0]);
+    var pa:  allo.Allocator;
+    val pm:  err[allo.Error] = page.make(?pa);
     if (sel pm.err) { ret res[Model, FixtureError].err{FixtureError.alloc{pm.err}}; }
     var parse_arena: arena.Arena;
-    val pie: err[allo.Error] = arena.init(?parse_arena, ?pa, 65536);
+    val pie:         err[allo.Error] = arena.init(?parse_arena, ?pa, 65536);
     if (sel pie.err) { ret res[Model, FixtureError].err{FixtureError.alloc{pie.err}}; }
     fin { arena.dnit(?parse_arena); }
     var parse_a: allo.Allocator;
-    val pam: err[allo.Error] = arena.make(?parse_a, ?parse_arena);
+    val pam:     err[allo.Error] = arena.make(?parse_a, ?parse_arena);
     if (sel pam.err) { ret res[Model, FixtureError].err{FixtureError.alloc{pam.err}}; }
     val parsed: res[gp.Loaded, gp.LoadError] = gp.load_glb(?glb[0], n, ?parse_a);
     if (sel parsed.err) { ret res[Model, FixtureError].err{FixtureError.gltf{parsed.err}}; }
-    var loaded: gp.Loaded = parsed.ok;
-    val waist: res[str, allo.Error] = text.str_dup(?parse_a, "waist");
+    var loaded: gp.Loaded            = parsed.ok;
+    val waist:  res[str, allo.Error] = text.str_dup(?parse_a, "waist");
     if (sel waist.err) { ret res[Model, FixtureError].err{FixtureError.alloc{waist.err}}; }
     val socket: res[str, allo.Error] = text.str_dup(?parse_a, "muzzle");
     if (sel socket.err) { ret res[Model, FixtureError].err{FixtureError.alloc{socket.err}}; }
@@ -782,19 +862,21 @@ fun fixture_named_model() res[Model, FixtureError] {
     skin.joints.data[0] = 2;
     skin.joints.data[1] = 1;
     var model: Model;
-    val mie: err[allo.Error] = arena.init(?model.arena, ?pa, 4096);
+    val mie:   err[allo.Error] = arena.init(?model.arena, ?pa, 4096);
     if (sel mie.err) { ret res[Model, FixtureError].err{FixtureError.alloc{mie.err}}; }
     var kept: bool = false;
-    fin { if (!kept) { arena.dnit(?model.arena); } }
+    fin {
+        if (!kept) { arena.dnit(?model.arena); }
+    }
     var persistent: allo.Allocator;
-    val mam: err[allo.Error] = arena.make(?persistent, ?model.arena);
+    val mam:        err[allo.Error] = arena.make(?persistent, ?model.arena);
     if (sel mam.err) { ret res[Model, FixtureError].err{FixtureError.alloc{mam.err}}; }
     val built: err[Error] = build_skeleton(?loaded, ?parse_a, ?model.skeleton);
     if (sel built.err) { ret res[Model, FixtureError].err{FixtureError.build{built.err}}; }
     val copied: err[Error] =
         build_joint_names(?loaded, skin, ?persistent, ?model.joint_names[0]);
     if (sel copied.err) { ret res[Model, FixtureError].err{FixtureError.build{copied.err}}; }
-    val first: opt[str] = model.joint_names[0];
+    val first:  opt[str] = model.joint_names[0];
     val second: opt[str] = model.joint_names[1];
     if (!sel first.some || !sel second.some) {
         ret res[Model, FixtureError].err{FixtureError.borrowed{}};
@@ -807,7 +889,7 @@ fun fixture_named_model() res[Model, FixtureError] {
     }
     loaded.document.nodes.data[1].name[0] = 'x';
     loaded.document.nodes.data[2].name[0] = 'x';
-    kept = true;
+    kept                                  = true;
     ret res[Model, FixtureError].ok{model};
 }
 
@@ -816,14 +898,14 @@ test "model: named joints follow skin ordering and own names beyond parsing and 
     if (sel built.err) { ret 1; }
     var model: Model = built.ok;
     fin { arena.dnit(?model.arena); }
-    val waist: res[usize, Error] = model_joint(?model, "waist");
+    val waist:  res[usize, Error] = model_joint(?model, "waist");
     val muzzle: res[usize, Error] = model_joint(?model, "muzzle");
-    if (!sel waist.ok) { ret 2; }
+    if (!sel waist.ok)  { ret 2; }
     if (!sel muzzle.ok) { ret 2; }
-    if (waist.ok != 1) { ret 3; }
+    if (waist.ok != 1)  { ret 3; }
     if (muzzle.ok != 0) { ret 3; }
     val parent: opt[usize] = model.skeleton.parents[0];
-    if (!sel parent.some) { ret 4; }
+    if (!sel parent.some)                                 { ret 4; }
     if (parent.some != 1 || model.skeleton.order[0] != 1) { ret 4; }
     ret 0;
 }
@@ -834,10 +916,10 @@ test "model: named joint lookup distinguishes missing and ambiguous names" {
     model.joint_names[0] = opt[str].some{"waist"};
     model.joint_names[2] = opt[str].some{"waist"};
     if (!refused_joint_lookup(model_joint(?model, "muzzle"), false)) { ret 1; }
-    if (!refused_joint_lookup(model_joint(?model, "waist"), true)) { ret 2; }
+    if (!refused_joint_lookup(model_joint(?model, "waist"), true))   { ret 2; }
     val unnamed: res[usize, Error] = model_joint(?model, nil);
-    if (!sel unnamed.err) { ret 3; }
-    if (!sel unnamed.err.model) { ret 4; }
+    if (!sel unnamed.err)                        { ret 3; }
+    if (!sel unnamed.err.model)                  { ret 4; }
     if (!sel unnamed.err.model.joint_name_empty) { ret 5; }
     val empty: res[usize, Error] = model_joint(?model, "");
     if (!sel empty.err) { ret 6; }
@@ -857,7 +939,7 @@ test "model: optional unnamed joints remain legal and cannot match an empty quer
     model.joint_names[0] = opt[str].some{"previous"};
     val names: err[Error] =
         build_joint_names(?loaded, ?skin, nil, ?model.joint_names[0]);
-    if (sel names.err) { ret 1; }
+    if (sel names.err)                                                    { ret 1; }
     if (!sel model.joint_names[0].none || !sel model.joint_names[1].none) { ret 2; }
     val empty: res[usize, Error] = model_joint(?model, "");
     if (!sel empty.err) { ret 3; }
@@ -866,18 +948,18 @@ test "model: optional unnamed joints remain legal and cannot match an empty quer
 
 test "model: joint names reject invalid skin node references before allocation" {
     var joints: [1]usize = [1]usize{99};
-    var skin: gd.Skin;
+    var skin:   gd.Skin;
     skin.joints = slice.make[usize](?joints[0], 1);
-    var loaded: gp.Loaded;
-    var names: [128]opt[str];
+    var loaded:  gp.Loaded;
+    var names:   [128]opt[str];
     val missing: err[Error] = build_joint_names(?loaded, ?skin, nil, ?names[0]);
-    if (!sel missing.err) { ret 1; }
-    if (!sel missing.err.model) { ret 2; }
+    if (!sel missing.err)                  { ret 1; }
+    if (!sel missing.err.model)            { ret 2; }
     if (!sel missing.err.model.joint_node) { ret 3; }
     skin.joints.size = 129;
     val oversized: err[Error] = build_joint_names(?loaded, ?skin, nil, ?names[0]);
-    if (!sel oversized.err) { ret 4; }
-    if (!sel oversized.err.model) { ret 5; }
+    if (!sel oversized.err)              { ret 4; }
+    if (!sel oversized.err.model)        { ret 5; }
     if (!sel oversized.err.model.joints) { ret 6; }
     ret 0;
 }

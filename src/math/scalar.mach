@@ -51,10 +51,10 @@ pub fun sqrt64(x: f64) f64 {
         ret 0.0;
     }
     var guess: f64 = x;
-    var i: i64 = 0;
+    var i:     i64 = 0;
     for (i < 40) {
         guess = 0.5 * (guess + x / guess);
-        i = i + 1;
+        i     = i + 1;
     }
     ret guess;
 }
@@ -128,7 +128,7 @@ pub fun tan64(x: f64) f64 {
 pub fun acos64(x: f64) f64 {
     var c: f64 = x;
     if (c < 0.0 - 1.0) { c = 0.0 - 1.0; }
-    if (c > 1.0) { c = 1.0; }
+    if (c > 1.0)       { c = 1.0; }
     var a: f64 = c;
     if (a < 0.0) { a = 0.0 - a; }
     var p: f64 = 0.0 - 0.0187293;
@@ -195,31 +195,31 @@ fun close(a: f64, b: f64, eps: f64) bool {
 }
 
 test "scalar: sqrt of a perfect square" {
-    if (!close(sqrt64(16.0), 4.0, 0.00001)) { ret 1; }
+    if (!close(sqrt64(16.0), 4.0, 0.00001))       { ret 1; }
     if (!close(sqrt64(2.0), 1.41421356, 0.00001)) { ret 2; }
-    if (sqrt64(0.0) != 0.0) { ret 3; }
-    if (sqrt64(0.0 - 4.0) != 0.0) { ret 4; }
+    if (sqrt64(0.0) != 0.0)                       { ret 3; }
+    if (sqrt64(0.0 - 4.0) != 0.0)                 { ret 4; }
     ret 0;
 }
 
 test "scalar: sine at cardinal angles" {
-    if (!close(sin64(0.0), 0.0, 0.00001)) { ret 1; }
-    if (!close(sin64(HALF_PI), 1.0, 0.00001)) { ret 2; }
-    if (!close(sin64(PI), 0.0, 0.00001)) { ret 3; }
+    if (!close(sin64(0.0), 0.0, 0.00001))                 { ret 1; }
+    if (!close(sin64(HALF_PI), 1.0, 0.00001))             { ret 2; }
+    if (!close(sin64(PI), 0.0, 0.00001))                  { ret 3; }
     if (!close(sin64(0.0 - HALF_PI), 0.0 - 1.0, 0.00001)) { ret 4; }
     ret 0;
 }
 
 test "scalar: cosine at cardinal angles" {
-    if (!close(cos64(0.0), 1.0, 0.00001)) { ret 1; }
-    if (!close(cos64(HALF_PI), 0.0, 0.00001)) { ret 2; }
+    if (!close(cos64(0.0), 1.0, 0.00001))      { ret 1; }
+    if (!close(cos64(HALF_PI), 0.0, 0.00001))  { ret 2; }
     if (!close(cos64(PI), 0.0 - 1.0, 0.00001)) { ret 3; }
     ret 0;
 }
 
 test "scalar: sine survives range reduction" {
     if (!close(sin64(TWO_PI + HALF_PI), 1.0, 0.00001)) { ret 1; }
-    if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001)) { ret 2; }
+    if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001))     { ret 2; }
     ret 0;
 }
 
@@ -236,15 +236,15 @@ test "scalar: radians converts degrees" {
 }
 
 test "scalar: arccosine at cardinal values" {
-    if (!close(acos64(1.0), 0.0, 0.0001)) { ret 1; }
-    if (!close(acos64(0.0), HALF_PI, 0.0001)) { ret 2; }
+    if (!close(acos64(1.0), 0.0, 0.0001))      { ret 1; }
+    if (!close(acos64(0.0), HALF_PI, 0.0001))  { ret 2; }
     if (!close(acos64(0.0 - 1.0), PI, 0.0001)) { ret 3; }
     if (!close(acos64(0.5), PI / 3.0, 0.0005)) { ret 4; }
     ret 0;
 }
 
 test "scalar: arccosine clamps out-of-range input" {
-    if (!close(acos64(1.5), 0.0, 0.0001)) { ret 1; }
+    if (!close(acos64(1.5), 0.0, 0.0001))      { ret 1; }
     if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 2; }
     ret 0;
 }
@@ -303,7 +303,7 @@ test "scalar: cosine leads sine by a quarter turn" {
     for (i <= 200) {
         val x: f64 = (0.0 - 12.0) + i::f64 * 0.125;
         var d: f64 = cos64(x) - sin64(x + HALF_PI);
-        if (d < 0.0) { d = 0.0 - d; }
+        if (d < 0.0)     { d = 0.0 - d; }
         if (d > 0.00001) { ret 1; }
         i = i + 1;
     }

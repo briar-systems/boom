@@ -21,25 +21,25 @@
 # addressing whatever now occupies the slot. That is the bug this design exists
 # to prevent, and it is the reason a bare index is not enough.
 
+use allo: std.allocator;
+use std.allocator.page;
+use text: std.text.string;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
-use allo: std.allocator;
-use page: std.allocator.page;
-use text: std.text.string;
 
-use boom.graphics.error.Error;
-use boom.graphics.error.Capacity;
-use boom.graphics.texture.Texture;
-use boom.graphics.texture.texture_load;
 use boom.graphics.device.Device;
+use boom.graphics.error.Capacity;
+use boom.graphics.error.Error;
+use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture_delete;
+use boom.graphics.texture.texture_load;
 
 # How many resources of one kind a store holds
 pub val CAPACITY: usize = 256;
@@ -59,11 +59,11 @@ pub rec Handle {
 
 # One occupied or free slot in the texture table
 # ---
-# path:     the key this resource was loaded from, owned by the store
-# texture:  the loaded resource, valid only while live
-# gen:      current generation, incremented on release
-# live:     whether the slot holds a resource
-# refs:     how many times this path has been requested and not released
+# path:    the key this resource was loaded from, owned by the store
+# texture: the loaded resource, valid only while live
+# gen:     current generation, incremented on release
+# live:    whether the slot holds a resource
+# refs:    how many times this path has been requested and not released
 rec TextureSlot {
     path:    str;
     texture: Texture;
@@ -91,7 +91,7 @@ pub rec Assets {
 # The allocator must outlive the store: it owns the interned path keys.
 pub fun assets_new(a: *allo.Allocator) Assets {
     var s: Assets;
-    s.a = a;
+    s.a         = a;
     s.tex_count = 0;
     var i: usize = 0;
     for (i < CAPACITY) {
@@ -99,7 +99,7 @@ pub fun assets_new(a: *allo.Allocator) Assets {
         s.textures[i].gen  = 1;
         s.textures[i].live = false;
         s.textures[i].refs = 0;
-        i = i + 1;
+        i                  = i + 1;
     }
     ret s;
 }
@@ -141,7 +141,7 @@ fun handle_of(s: *Assets, i: usize) Handle {
 
 # The live slot a handle names, none when it is stale or out of range
 fun slot_of(s: *Assets, h: Handle) opt[usize] {
-    if (h.slot >= s.tex_count) { ret opt[usize].none{}; }
+    if (h.slot >= s.tex_count)                                       { ret opt[usize].none{}; }
     if (!s.textures[h.slot].live || s.textures[h.slot].gen != h.gen) { ret opt[usize].none{}; }
     ret opt[usize].some{h.slot};
 }
@@ -250,7 +250,7 @@ fun adopt_texture(s: *Assets, path: str, t: Texture) res[Handle, Error] {
     }
     val claimed: opt[usize] = claim_texture(s);
     if (!sel claimed.some) { ret res[Handle, Error].err{Error.full{Capacity.assets{}}}; }
-    val i: usize = claimed.some;
+    val i:  usize                = claimed.some;
     val kr: res[str, allo.Error] = text.str_dup(s.a, path);
     if (sel kr.err) { ret res[Handle, Error].err{Error.alloc{kr.err}}; }
     s.textures[i].path    = kr.ok;
@@ -292,17 +292,17 @@ fun released(s: *Assets, h: Handle) bool {
 }
 
 test "assets: a zeroed handle never resolves" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
-    var s: Assets = assets_new(?a);
-    val zero: Handle = Handle{slot: 0, gen: 0};
-    val got: opt[*Texture] = assets_texture_get(?s, zero);
+    var s:    Assets        = assets_new(?a);
+    val zero: Handle        = Handle{slot: 0, gen: 0};
+    val got:  opt[*Texture] = assets_texture_get(?s, zero);
     if (!sel got.none)              { ret 2; }
     if (assets_live_count(?s) != 0) { ret 3; }
 
     # still inert once slot zero is occupied, since generations start at one
-    var t: Texture;
+    var t:     Texture;
     val first: res[Handle, Error] = adopt_texture(?s, "art/first.qoi", t);
     if (!sel first.ok) { ret 4; }
     val again: opt[*Texture] = assets_texture_get(?s, zero);
@@ -311,7 +311,7 @@ test "assets: a zeroed handle never resolves" {
 }
 
 test "assets: the same path yields one resource and one slot" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
     var s: Assets = assets_new(?a);
@@ -329,7 +329,7 @@ test "assets: the same path yields one resource and one slot" {
 }
 
 test "assets: distinct paths get distinct slots" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
     var s: Assets = assets_new(?a);
@@ -343,7 +343,7 @@ test "assets: distinct paths get distinct slots" {
 }
 
 test "assets: a shared resource survives one holder releasing" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
     var s: Assets = assets_new(?a);
@@ -354,7 +354,7 @@ test "assets: a shared resource survives one holder releasing" {
 
     # The first holder lets go; the second still has it. without refcounting
     # this frees the texture out from under a live user.
-    if (released(?s, h1))           { ret 1; }
+    if (released(?s, h1)) { ret 1; }
     val still: opt[*Texture] = assets_texture_get(?s, h2);
     if (!sel still.some)            { ret 1; }
     if (assets_live_count(?s) != 1) { ret 1; }
@@ -365,7 +365,7 @@ test "assets: a shared resource survives one holder releasing" {
 }
 
 test "assets: a stale handle does not resolve to the slot's new occupant" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
     var s: Assets = assets_new(?a);
@@ -389,7 +389,7 @@ test "assets: a stale handle does not resolve to the slot's new occupant" {
 }
 
 test "assets: releasing a stale handle is refused, not double-counted" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
     var s: Assets = assets_new(?a);
@@ -398,17 +398,17 @@ test "assets: releasing a stale handle is refused, not double-counted" {
     val h: Handle = adopted(adopt_texture(?s, "x.qoi", t));
     if (!released(?s, h)) { ret 1; }
     # A second release of the same handle must not decrement anything
-    if (released(?s, h))  { ret 1; }
+    if (released(?s, h)) { ret 1; }
     ret 0;
 }
 
 test "assets: a handle from beyond the table is rejected" {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
-    var s: Assets = assets_new(?a);
+    var s:   Assets        = assets_new(?a);
     val far: opt[*Texture] = assets_texture_get(?s, Handle{slot: 9999, gen: 1});
-    if (!sel far.none) { ret 1; }
+    if (!sel far.none)                            { ret 1; }
     if (released(?s, Handle{slot: 9999, gen: 1})) { ret 1; }
     ret 0;
 }

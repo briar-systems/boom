@@ -30,23 +30,23 @@
 # A machine with no device reports that and exits non-zero, which is the correct
 # outcome and not a pass.
 
+use snd: boom.audio;
+use gm:  boom.math;
+use boom.vfs;
+use allo: std.allocator;
+use std.allocator.page;
+use std.chrono.duration.MILLISECOND;
+use fs: std.filesystem;
+use p:  std.print;
+use std.system.os;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.res;
-use std.types.option.opt;
-use std.types.error.err;
-use std.chrono.duration.MILLISECOND;
-use allo: std.allocator;
-use page: std.allocator.page;
-use fs:   std.filesystem;
-use os:   std.system.os;
-use p:    std.print;
-use snd:  boom.audio;
-use vfs:  boom.vfs;
-use gm:   boom.math;
 
 # The device format. Stereo at 48 kHz, which is what a desktop device usually
 # runs at and what makes both generated clips a mismatch.
@@ -84,7 +84,7 @@ fun put_tag(b: *u8, off: usize, s: str) {
     var i: usize = 0;
     for (i < 4) {
         b[off + i] = s[i];
-        i = i + 1;
+        i          = i + 1;
     }
 }
 
@@ -102,13 +102,13 @@ fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
     put_u32(bytes, 4, (36 + data)::u32);
     put_tag(bytes, 8, "WAVE");
     put_tag(bytes, 12, "fmt ");
-    put_u32(bytes, 16, 16);                                 # PCM header size
-    put_u16(bytes, 20, 1);                                  # format: PCM
+    put_u32(bytes, 16, 16); # PCM header size
+    put_u16(bytes, 20, 1); # format: PCM
     put_u16(bytes, 22, chans);
     put_u32(bytes, 24, rate);
-    put_u32(bytes, 28, rate * chans::u32 * 2);              # bytes per second
-    put_u16(bytes, 32, (chans * 2)::u16);                   # bytes per frame
-    put_u16(bytes, 34, 16);                                 # bits per sample
+    put_u32(bytes, 28, rate * chans::u32 * 2); # bytes per second
+    put_u16(bytes, 32, (chans * 2)::u16); # bytes per frame
+    put_u16(bytes, 34, 16); # bits per sample
     put_tag(bytes, 36, "data");
     put_u32(bytes, 40, data::u32);
 
@@ -116,7 +116,7 @@ fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
     for (f < frames) {
         val phase: f32 = 6.2831853 * freq * (f::f32 / rate::f32);
         # A quarter of full scale, so mixing two voices cannot clip.
-        val v: i32 = (gm.sinf(phase) * 8000.0)::i32;
+        val v: i32   = (gm.sinf(phase) * 8000.0)::i32;
         var c: usize = 0;
         for (c < ch) {
             put_u16(bytes, 44 + (f * ch + c) * 2, (v & 0xFFFF)::u16);
@@ -129,14 +129,14 @@ fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
 
 # Write a generated clip to disk under the given path.
 fun emit(path: str, bytes: *u8, rate: u32, chans: u16, freq: f32) bool {
-    val len: usize = build_wav(bytes, rate, chans, freq, CLIP_MS);
-    val e: err[fs.FsError] = fs.write_bytes(path, bytes, len, 0o644);
+    val len: usize           = build_wav(bytes, rate, chans, freq, CLIP_MS);
+    val e:   err[fs.FsError] = fs.write_bytes(path, bytes, len, 0o644);
     ret sel e.ok;
 }
 
 # Report a failed step and say which one.
 fun failed(step: str, r: err[snd.AudioError]) bool {
-    if (sel r.ok) { ret false; }
+    if (sel r.ok)  { ret false; }
     if (sel r.err) { p.printlnf("FAIL {}: {}", step, snd.audio_error_message(r.err)); }
     ret true;
 }
@@ -202,7 +202,7 @@ fun plays_to_completion(s: *snd.Audio, vpath: str, label: str) bool {
 
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
-    var a: allo.Allocator;
+    var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) {
         p.println("FAIL: could not make the page allocator");
@@ -229,7 +229,7 @@ fun main(argc: i64, argv: **u8) i64 {
     vfs.res_root = ".";
     p.println("ok   generated a mono 44.1 kHz clip and a stereo 48 kHz clip");
 
-    var s: snd.Audio;
+    var s:  snd.Audio;
     val ir: err[snd.AudioError] = snd.audio_init(?s, ?a, RATE, CHANS);
     if (failed("audio_init", ir)) {
         p.println("      No sound device, or none this backend can open. That is a");
@@ -257,7 +257,7 @@ fun main(argc: i64, argv: **u8) i64 {
         snd.audio_dnit(?s);
         ret 1;
     }
-    var c1: snd.Sound = l1.ok;
+    var c1: snd.Sound                      = l1.ok;
     val l2: res[snd.Sound, snd.AudioError] = snd.sound_load(?s, "res://stereo48.wav");
     if (sel l2.err) {
         p.println("FAIL: could not reload the stereo clip for the overlap check");
@@ -276,7 +276,7 @@ fun main(argc: i64, argv: **u8) i64 {
     wait_ms((CLIP_MS * 3)::i64);
     if (snd.audio_voice_count(?s) != 0) {
         p.printlnf("FAIL overlap: {} voices are still held after both clips ended",
-                   snd.audio_voice_count(?s));
+            snd.audio_voice_count(?s));
         snd.audio_dnit(?s);
         ret 1;
     }
@@ -290,7 +290,7 @@ fun main(argc: i64, argv: **u8) i64 {
         snd.audio_dnit(?s);
         ret 1;
     }
-    var c3: snd.Sound = l3.ok;
+    var c3:     snd.Sound        = l3.ok;
     val looped: opt[snd.VoiceId] = snd.audio_play(?s, ?c3, 0.4, true);
     if (!sel looped.some) {
         p.println("FAIL loop: the looping clip was not given a voice");

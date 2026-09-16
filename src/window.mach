@@ -12,28 +12,28 @@
 # key by its platform code would be importing the windowing library through
 # the back door, which is what this engine otherwise avoids everywhere.
 
-use glfw.glfw;
-use glfw.c.Vidmode;
-use boom.event.EventQueue;
-use boom.event.Event;
-use boom.event.KeyEvent;
-use boom.event.KeyAction;
 use boom.event.ButtonEvent;
+use boom.event.Event;
+use boom.event.EventQueue;
+use boom.event.KeyAction;
+use boom.event.KeyEvent;
 use boom.event.MoveEvent;
-use boom.event.ScrollEvent;
-use boom.event.ResizeEvent;
 use boom.event.QueueError;
-use boom.event.queue_push;
+use boom.event.ResizeEvent;
+use boom.event.ScrollEvent;
 use boom.event.queue_new;
 use boom.event.queue_pop;
+use boom.event.queue_push;
 use inp: boom.input;
+use glfw.c.Vidmode;
+use glfw.glfw;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
-use std.types.string.str;
+use std.types.bool.true;
+use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
-use std.types.error.err;
+use std.types.string.str;
 
 # how a window is presented
 # ---
@@ -53,7 +53,7 @@ pub tag WindowMode: u8 {
 # create:     the platform refused to create the window
 # closed:     the window is not open
 pub tag WindowError: u8 {
-    init:   glfw.Error;
+    init: glfw.Error;
     no_monitor;
     create: glfw.Error;
     closed;
@@ -85,25 +85,25 @@ pub rec WindowBounds {
 
 # a platform window
 # ---
-# handle: the underlying GLFW window, none once closed or when never opened
-# width:  current framebuffer width in pixels
-# height: current framebuffer height in pixels
-# mode: semantic presentation mode, including platform-specific borderless
-# monitor: output retained when the platform cannot report window placement
-# windowed: ordinary client bounds retained across fullscreen transitions
+# handle:             the underlying GLFW window, none once closed or when never opened
+# width:              current framebuffer width in pixels
+# height:             current framebuffer height in pixels
+# mode:               semantic presentation mode, including platform-specific borderless
+# monitor:            output retained when the platform cannot report window placement
+# windowed:           ordinary client bounds retained across fullscreen transitions
 # windowed_maximized: whether ordinary mode restores through the compositor
-# min_width:  client limit applied when restoring windowed mode
-# min_height: client limit applied when restoring windowed mode
+# min_width:          client limit applied when restoring windowed mode
+# min_height:         client limit applied when restoring windowed mode
 pub rec Window {
-    handle: opt[glfw.Window];
-    width:  i32;
-    height: i32;
-    mode:   WindowMode;
-    monitor: opt[glfw.Monitor];
-    windowed: WindowBounds;
+    handle:             opt[glfw.Window];
+    width:              i32;
+    height:             i32;
+    mode:               WindowMode;
+    monitor:            opt[glfw.Monitor];
+    windowed:           WindowBounds;
     windowed_maximized: bool;
-    min_width:  i32;
-    min_height: i32;
+    min_width:          i32;
+    min_height:         i32;
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -117,7 +117,7 @@ fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
 # context_stop.
 fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
     if (s == nil) { ret; }
-    val k: inp.Key = map_key(key);
+    val k:   inp.Key        = map_key(key);
     val act: opt[KeyAction] = map_key_action(action);
     if (!sel act.some) { ret; }
     # GLFW REPEAT is neither a press nor a release: the key never came up, so
@@ -144,11 +144,11 @@ fun deliver_button(s: *Sink, button: i32, action: i32, mods: i32) {
 }
 
 fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
-    val w: glfw.Window = glfw.window_from_handle(handle);
-    var ww: i32 = 0;
-    var wh: i32 = 0;
-    var fw: i32 = 0;
-    var fh: i32 = 0;
+    val w:  glfw.Window = glfw.window_from_handle(handle);
+    var ww: i32         = 0;
+    var wh: i32         = 0;
+    var fw: i32         = 0;
+    var fh: i32         = 0;
     glfw.get_window_size(w, ?ww, ?wh);
     glfw.get_framebuffer_size(w, ?fw, ?fh);
     deliver_cursor(sink_of(w), x, y, ww, wh, fw, fh);
@@ -195,26 +195,26 @@ fun cursor_scale(window: i32, framebuffer: i32) f64 {
 }
 
 fun cursor_pixels(x: f64, y: f64,
-                  ww: i32, wh: i32, fw: i32, fh: i32,
-                  out_x: *f64, out_y: *f64) {
+    ww: i32, wh: i32, fw: i32, fh: i32,
+    out_x: *f64, out_y: *f64) {
     @out_x = x * cursor_scale(ww, fw);
     @out_y = y * cursor_scale(wh, fh);
 }
 
 fun rebase_cursor(s: *Sink, x: f64, y: f64,
-                  ww: i32, wh: i32, fw: i32, fh: i32) {
+    ww: i32, wh: i32, fw: i32, fh: i32) {
     if (s == nil) { ret; }
     var px: f64 = 0.0;
     var py: f64 = 0.0;
     cursor_pixels(x, y, ww, wh, fw, fh, ?px, ?py);
     inp.input_mouse_rebase(s.input, px, py);
-    s.cursor_x = x;
-    s.cursor_y = y;
+    s.cursor_x     = x;
+    s.cursor_y     = y;
     s.cursor_known = true;
 }
 
 fun deliver_cursor(s: *Sink, x: f64, y: f64,
-                   ww: i32, wh: i32, fw: i32, fh: i32) {
+    ww: i32, wh: i32, fw: i32, fh: i32) {
     if (s == nil) { ret; }
     val sx: f64 = cursor_scale(ww, fw);
     val sy: f64 = cursor_scale(wh, fh);
@@ -227,8 +227,8 @@ fun deliver_cursor(s: *Sink, x: f64, y: f64,
         dy = (y - s.cursor_y) * sy;
     }
     inp.input_mouse_event_with_delta(s.input, px, py, dx, dy);
-    s.cursor_x = x;
-    s.cursor_y = y;
+    s.cursor_x     = x;
+    s.cursor_y     = y;
     s.cursor_known = true;
     offer(s.queue, Event.mouse_move{MoveEvent{x: px, y: py}});
 }
@@ -238,25 +238,25 @@ fun deliver_cursor(s: *Sink, x: f64, y: f64,
 # an unrecognized code becomes KEY_UNKNOWN, which every query reports false
 # for, so an unmapped key is inert rather than aliasing onto a real one.
 fun map_key(k: i32) inp.Key {
-    if (k >= glfw.KEY_A && k <= glfw.KEY_Z) { ret (inp.KEY_A + (k - glfw.KEY_A))::inp.Key; }
-    if (k >= glfw.KEY_0 && k <= glfw.KEY_9) { ret (inp.KEY_0 + (k - glfw.KEY_0))::inp.Key; }
+    if (k >= glfw.KEY_A && k <= glfw.KEY_Z)    { ret (inp.KEY_A + (k - glfw.KEY_A))::inp.Key; }
+    if (k >= glfw.KEY_0 && k <= glfw.KEY_9)    { ret (inp.KEY_0 + (k - glfw.KEY_0))::inp.Key; }
     if (k >= glfw.KEY_F1 && k <= glfw.KEY_F12) { ret (inp.KEY_F1 + (k - glfw.KEY_F1))::inp.Key; }
-    if (k == glfw.KEY_SPACE)         { ret inp.KEY_SPACE; }
-    if (k == glfw.KEY_ESCAPE)        { ret inp.KEY_ESCAPE; }
-    if (k == glfw.KEY_ENTER)         { ret inp.KEY_ENTER; }
-    if (k == glfw.KEY_TAB)           { ret inp.KEY_TAB; }
-    if (k == glfw.KEY_BACKSPACE)     { ret inp.KEY_BACKSPACE; }
-    if (k == glfw.KEY_DELETE)        { ret inp.KEY_DELETE; }
-    if (k == glfw.KEY_LEFT)          { ret inp.KEY_LEFT; }
-    if (k == glfw.KEY_RIGHT)         { ret inp.KEY_RIGHT; }
-    if (k == glfw.KEY_UP)            { ret inp.KEY_UP; }
-    if (k == glfw.KEY_DOWN)          { ret inp.KEY_DOWN; }
-    if (k == glfw.KEY_LEFT_SHIFT)    { ret inp.KEY_LEFT_SHIFT; }
-    if (k == glfw.KEY_LEFT_CONTROL)  { ret inp.KEY_LEFT_CTRL; }
-    if (k == glfw.KEY_LEFT_ALT)      { ret inp.KEY_LEFT_ALT; }
-    if (k == glfw.KEY_RIGHT_SHIFT)   { ret inp.KEY_RIGHT_SHIFT; }
-    if (k == glfw.KEY_RIGHT_CONTROL) { ret inp.KEY_RIGHT_CTRL; }
-    if (k == glfw.KEY_RIGHT_ALT)     { ret inp.KEY_RIGHT_ALT; }
+    if (k == glfw.KEY_SPACE)                   { ret inp.KEY_SPACE; }
+    if (k == glfw.KEY_ESCAPE)                  { ret inp.KEY_ESCAPE; }
+    if (k == glfw.KEY_ENTER)                   { ret inp.KEY_ENTER; }
+    if (k == glfw.KEY_TAB)                     { ret inp.KEY_TAB; }
+    if (k == glfw.KEY_BACKSPACE)               { ret inp.KEY_BACKSPACE; }
+    if (k == glfw.KEY_DELETE)                  { ret inp.KEY_DELETE; }
+    if (k == glfw.KEY_LEFT)                    { ret inp.KEY_LEFT; }
+    if (k == glfw.KEY_RIGHT)                   { ret inp.KEY_RIGHT; }
+    if (k == glfw.KEY_UP)                      { ret inp.KEY_UP; }
+    if (k == glfw.KEY_DOWN)                    { ret inp.KEY_DOWN; }
+    if (k == glfw.KEY_LEFT_SHIFT)              { ret inp.KEY_LEFT_SHIFT; }
+    if (k == glfw.KEY_LEFT_CONTROL)            { ret inp.KEY_LEFT_CTRL; }
+    if (k == glfw.KEY_LEFT_ALT)                { ret inp.KEY_LEFT_ALT; }
+    if (k == glfw.KEY_RIGHT_SHIFT)             { ret inp.KEY_RIGHT_SHIFT; }
+    if (k == glfw.KEY_RIGHT_CONTROL)           { ret inp.KEY_RIGHT_CTRL; }
+    if (k == glfw.KEY_RIGHT_ALT)               { ret inp.KEY_RIGHT_ALT; }
     ret inp.KEY_UNKNOWN;
 }
 
@@ -302,32 +302,32 @@ pub fun window_open(width: i32, height: i32, title: str) res[Window, WindowError
 
 # open a window in one explicit presentation mode
 # ---
-# width:        ordinary windowed client width in screen coordinates
-# height:       ordinary windowed client height in screen coordinates
-# title:        window title, UTF-8
-# mode:         initial windowed, borderless, or fullscreen policy
-# ret:          opened Window sized in framebuffer pixels, or why it could not open
+# width:  ordinary windowed client width in screen coordinates
+# height: ordinary windowed client height in screen coordinates
+# title:  window title, UTF-8
+# mode:   initial windowed, borderless, or fullscreen policy
+# ret:    opened Window sized in framebuffer pixels, or why it could not open
 pub fun window_open_mode(width: i32, height: i32, title: str,
-                         mode: WindowMode) res[Window, WindowError] {
+    mode: WindowMode) res[Window, WindowError] {
     val started: err[glfw.Error] = glfw.init();
     if (sel started.err) {
         ret res[Window, WindowError].err{WindowError.init{started.err}};
     }
 
-    val monitor: opt[glfw.Monitor] = glfw.get_primary_monitor();
-    var open_width: i32 = width;
-    var open_height: i32 = height;
-    var attached: opt[glfw.Monitor] = opt[glfw.Monitor].none{};
-    var mx: i32 = 0;
-    var my: i32 = 0;
-    var video: opt[*Vidmode] = opt[*Vidmode].none{};
+    val monitor:     opt[glfw.Monitor] = glfw.get_primary_monitor();
+    var open_width:  i32               = width;
+    var open_height: i32               = height;
+    var attached:    opt[glfw.Monitor] = opt[glfw.Monitor].none{};
+    var mx:          i32               = 0;
+    var my:          i32               = 0;
+    var video:       opt[*Vidmode]     = opt[*Vidmode].none{};
     if (sel monitor.some) { video = glfw.get_video_mode(monitor.some); }
     if (!sel mode.windowed) {
         if (!sel video.some) {
             glfw.terminate();
             ret res[Window, WindowError].err{WindowError.no_monitor{}};
         }
-        open_width = video.some.width;
+        open_width  = video.some.width;
         open_height = video.some.height;
         if (sel monitor.some) { glfw.get_monitor_pos(monitor.some, ?mx, ?my); }
     }
@@ -385,9 +385,10 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
     ret res[Window, WindowError].ok{Window{
-        handle: opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
-        monitor: monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width: 1, min_height: 1}};
+        handle:    opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
+        monitor:   monitor, windowed: restore, windowed_maximized: restore_maximized,
+        min_width: 1, min_height: 1
+    }};
 }
 
 # the current semantic window mode
@@ -431,7 +432,7 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) err[WindowError] {
 
     val found: opt[glfw.Monitor] = monitor_for_window(w, handle);
     if (!sel found.some) { ret err[WindowError].err{WindowError.no_monitor{}}; }
-    val monitor: glfw.Monitor = found.some;
+    val monitor:    glfw.Monitor  = found.some;
     val mode_video: opt[*Vidmode] = glfw.get_video_mode(monitor);
     if (!sel mode_video.some) { ret err[WindowError].err{WindowError.no_monitor{}}; }
     val video: *Vidmode = mode_video.some;
@@ -476,7 +477,7 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) err[WindowError] {
         glfw.set_window_attrib(handle, glfw.RESIZABLE, glfw.FALSE);
     }
 
-    w.mode = mode;
+    w.mode    = mode;
     w.monitor = opt[glfw.Monitor].some{monitor};
     window_refresh_size(w);
     ret err[WindowError].ok{};
@@ -504,10 +505,10 @@ fun same_mode(a: WindowMode, b: WindowMode) bool {
 pub fun window_refresh_size(w: *Window) {
     if (!sel w.handle.some) { ret; }
     val handle: glfw.Window = w.handle.some;
-    var ww: i32 = 0;
-    var wh: i32 = 0;
-    var fw: i32 = 0;
-    var fh: i32 = 0;
+    var ww:     i32         = 0;
+    var wh:     i32         = 0;
+    var fw:     i32         = 0;
+    var fh:     i32         = 0;
     glfw.get_window_size(handle, ?ww, ?wh);
     glfw.get_framebuffer_size(handle, ?fw, ?fh);
     w.width  = fw;
@@ -536,9 +537,9 @@ pub fun window_is_valid(w: *Window) bool {
 # width:  minimum client width in screen coordinates
 # height: minimum client height in screen coordinates
 pub fun window_set_min_size(w: *Window, width: i32, height: i32) {
-    if (!sel w.handle.some) { ret; }
+    if (!sel w.handle.some)        { ret; }
     if (width <= 0 || height <= 0) { ret; }
-    w.min_width = width;
+    w.min_width  = width;
     w.min_height = height;
     glfw.set_window_size_limits(w.handle.some, width, height, glfw.DONT_CARE, glfw.DONT_CARE);
 }
@@ -549,7 +550,7 @@ pub fun window_set_min_size(w: *Window, width: i32, height: i32) {
 pub fun window_set_cursor_captured(w: *Window, captured: bool) bool {
     if (!sel w.handle.some) { ret false; }
     val handle: glfw.Window = w.handle.some;
-    var mode: i32 = glfw.CURSOR_NORMAL;
+    var mode:   i32         = glfw.CURSOR_NORMAL;
     if (captured) { mode = glfw.CURSOR_DISABLED; }
     glfw.set_input_mode(handle, glfw.CURSOR, mode);
     if (glfw.raw_mouse_motion_supported()) {
@@ -581,8 +582,8 @@ pub fun window_cursor_captured(w: *Window) bool {
 # cursor_y:     last raw window-coordinate y used to form a movement delta
 # cursor_known: whether cursor_x/y have been initialized
 pub rec Sink {
-    queue: *EventQueue;
-    input: *inp.Input;
+    queue:        *EventQueue;
+    input:        *inp.Input;
     cursor_x:     f64;
     cursor_y:     f64;
     cursor_known: bool;
@@ -596,12 +597,12 @@ pub rec Sink {
 pub fun window_set_event_sink(w: *Window, s: *Sink) {
     if (!sel w.handle.some) { ret; }
     val handle: glfw.Window = w.handle.some;
-    var ww: i32 = 0;
-    var wh: i32 = 0;
-    var fw: i32 = 0;
-    var fh: i32 = 0;
-    var x: f64 = 0.0;
-    var y: f64 = 0.0;
+    var ww:     i32         = 0;
+    var wh:     i32         = 0;
+    var fw:     i32         = 0;
+    var fh:     i32         = 0;
+    var x:      f64         = 0.0;
+    var y:      f64         = 0.0;
     glfw.get_window_size(handle, ?ww, ?wh);
     glfw.get_framebuffer_size(handle, ?fw, ?fh);
     glfw.get_cursor_pos(handle, ?x, ?y);
@@ -633,7 +634,7 @@ pub fun window_close(w: *Window) {
         glfw.terminate();
     }
     w.handle = opt[glfw.Window].none{};
-    w.width = 0;
+    w.width  = 0;
     w.height = 0;
 }
 
@@ -644,17 +645,17 @@ fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds
     var h: i32 = height;
     glfw.get_monitor_workarea(monitor, ?x, ?y, ?w, ?h);
     ret clamp_bounds(WindowBounds{
-        x: x + (w - width) / 2,
-        y: y + (h - height) / 2,
-        width: width,
+        x:      x + (w - width) / 2,
+        y:      y + (h - height) / 2,
+        width:  width,
         height: height,
     }, WindowBounds{x: x, y: y, width: w, height: h},
-       WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
+        WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
 }
 
 fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
-                 monitor: glfw.Monitor, min_width: i32,
-                 min_height: i32) WindowBounds {
+    monitor: glfw.Monitor, min_width: i32,
+    min_height: i32) WindowBounds {
     var area: WindowBounds;
     glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
     var frame: WindowBounds;
@@ -669,9 +670,9 @@ fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
 }
 
 fun windowed_should_maximize(bounds: WindowBounds,
-                             monitor: opt[glfw.Monitor]) bool {
+    monitor: opt[glfw.Monitor]) bool {
     if (!platform_wayland()) { ret false; }
-    if (!sel monitor.some) { ret false; }
+    if (!sel monitor.some)   { ret false; }
     var area: WindowBounds;
     glfw.get_monitor_workarea(monitor.some, ?area.x, ?area.y, ?area.width, ?area.height);
     ret bounds_reach_area(bounds, area);
@@ -686,14 +687,14 @@ fun platform_wayland() bool {
 }
 
 fun clamp_bounds(bounds: WindowBounds, area: WindowBounds, frame: WindowBounds,
-                 min_width: i32, min_height: i32) WindowBounds {
-    var out: WindowBounds = bounds;
-    val available_width: i32 = max_value(1, area.width - frame.x - frame.width);
-    val available_height: i32 = max_value(1, area.height - frame.y - frame.height);
-    out.width = clamp_value(out.width, min_value(min_width, available_width), available_width);
+    min_width: i32, min_height: i32) WindowBounds {
+    var out:              WindowBounds = bounds;
+    val available_width:  i32          = max_value(1, area.width - frame.x - frame.width);
+    val available_height: i32          = max_value(1, area.height - frame.y - frame.height);
+    out.width  = clamp_value(out.width, min_value(min_width, available_width), available_width);
     out.height = clamp_value(out.height, min_value(min_height, available_height), available_height);
     val left: i32 = area.x + frame.x;
-    val top: i32 = area.y + frame.y;
+    val top:  i32 = area.y + frame.y;
     out.x = clamp_value(out.x, left, area.x + area.width - frame.width - out.width);
     out.y = clamp_value(out.y, top, area.y + area.height - frame.height - out.height);
     ret out;
@@ -717,21 +718,21 @@ fun monitor_for_window(w: *Window, handle: glfw.Window) opt[glfw.Monitor] {
         glfw.get_window_size(handle, ?ww, ?wh);
     }
 
-    var count: i32 = 0;
-    val handles: *ptr = glfw.get_monitors(?count);
-    var best: opt[glfw.Monitor] = glfw.get_primary_monitor();
-    var best_area: i64 = 0;
-    var i: i32 = 0;
+    var count:     i32               = 0;
+    val handles:   *ptr              = glfw.get_monitors(?count);
+    var best:      opt[glfw.Monitor] = glfw.get_primary_monitor();
+    var best_area: i64               = 0;
+    var i:         i32               = 0;
     for (handles != nil && i < count) {
         val current: glfw.Monitor = glfw.monitor_from_handle(handles[i]);
-        var x: i32 = 0;
-        var y: i32 = 0;
-        var width: i32 = 0;
-        var height: i32 = 0;
+        var x:       i32          = 0;
+        var y:       i32          = 0;
+        var width:   i32          = 0;
+        var height:  i32          = 0;
         glfw.get_monitor_workarea(current, ?x, ?y, ?width, ?height);
         val overlap: i64 = overlap_area(wx, wy, ww, wh, x, y, width, height);
         if (overlap > best_area) {
-            best = opt[glfw.Monitor].some{current};
+            best      = opt[glfw.Monitor].some{current};
             best_area = overlap;
         }
         i = i + 1;
@@ -744,9 +745,9 @@ fun prefer_retained_monitor(wayland: bool, mode: WindowMode) bool {
 }
 
 fun monitor_connected(monitor: glfw.Monitor) bool {
-    var count: i32 = 0;
+    var count:   i32  = 0;
     val handles: *ptr = glfw.get_monitors(?count);
-    var i: i32 = 0;
+    var i:       i32  = 0;
     for (handles != nil && i < count) {
         if (handles[i] == monitor.handle) { ret true; }
         i = i + 1;
@@ -755,10 +756,10 @@ fun monitor_connected(monitor: glfw.Monitor) bool {
 }
 
 fun overlap_area(ax: i32, ay: i32, aw: i32, ah: i32,
-                 bx: i32, by: i32, bw: i32, bh: i32) i64 {
-    val left: i32 = max_value(ax, bx);
-    val top: i32 = max_value(ay, by);
-    val right: i32 = min_value(ax + aw, bx + bw);
+    bx: i32, by: i32, bw: i32, bh: i32) i64 {
+    val left:   i32 = max_value(ax, bx);
+    val top:    i32 = max_value(ay, by);
+    val right:  i32 = min_value(ax + aw, bx + bw);
     val bottom: i32 = min_value(ay + ah, by + bh);
     if (right <= left || bottom <= top) { ret 0; }
     ret (right - left)::i64 * (bottom - top)::i64;
@@ -770,46 +771,53 @@ fun clamp_value(value: i32, minimum: i32, maximum: i32) i32 {
     ret value;
 }
 
-fun min_value(a: i32, b: i32) i32 { if (a < b) { ret a; } ret b; }
-fun max_value(a: i32, b: i32) i32 { if (a > b) { ret a; } ret b; }
+fun min_value(a: i32, b: i32) i32 {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+fun max_value(a: i32, b: i32) i32 {
+    if (a > b) { ret a; }
+    ret b;
+}
 
 test "window: Escape is delivered as application input" {
-    var q: EventQueue = queue_new();
-    var input: inp.Input = inp.input_new();
-    var sink: Sink = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
 
     deliver_key(?sink, glfw.KEY_ESCAPE, glfw.PRESS, 0);
     inp.input_begin_tick(?input);
     if (!inp.key_pressed(?input, inp.KEY_ESCAPE)) { ret 1; }
-    if (!inp.key_down(?input, inp.KEY_ESCAPE)) { ret 2; }
+    if (!inp.key_down(?input, inp.KEY_ESCAPE))    { ret 2; }
 
     val e: opt[Event] = queue_pop(?q);
-    if (!sel e.some) { ret 3; }
-    if (!sel e.some.key) { ret 4; }
+    if (!sel e.some)                      { ret 3; }
+    if (!sel e.some.key)                  { ret 4; }
     if (e.some.key.key != inp.KEY_ESCAPE) { ret 5; }
-    if (!sel e.some.key.action.press) { ret 6; }
+    if (!sel e.some.key.action.press)     { ret 6; }
     ret 0;
 }
 
 test "window: autorepeat is queued without an input edge" {
-    var q: EventQueue = queue_new();
-    var input: inp.Input = inp.input_new();
-    var sink: Sink = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
 
     deliver_key(?sink, glfw.KEY_A, glfw.REPEAT, 0);
     inp.input_begin_tick(?input);
     if (inp.key_pressed(?input, inp.KEY_A)) { ret 1; }
     val e: opt[Event] = queue_pop(?q);
-    if (!sel e.some) { ret 2; }
-    if (!sel e.some.key) { ret 3; }
+    if (!sel e.some)                   { ret 2; }
+    if (!sel e.some.key)               { ret 3; }
     if (!sel e.some.key.action.repeat) { ret 4; }
     ret 0;
 }
 
 test "window: an unnamed mouse button is not delivered" {
-    var q: EventQueue = queue_new();
-    var input: inp.Input = inp.input_new();
-    var sink: Sink = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
 
     deliver_button(?sink, 7, glfw.PRESS, 0);
     val none: opt[Event] = queue_pop(?q);
@@ -817,21 +825,21 @@ test "window: an unnamed mouse button is not delivered" {
 
     deliver_button(?sink, glfw.MOUSE_BUTTON_RIGHT, glfw.PRESS, 0);
     val e: opt[Event] = queue_pop(?q);
-    if (!sel e.some) { ret 2; }
-    if (!sel e.some.mouse_button) { ret 3; }
+    if (!sel e.some)                                    { ret 2; }
+    if (!sel e.some.mouse_button)                       { ret 3; }
     if (e.some.mouse_button.button != inp.BUTTON_RIGHT) { ret 4; }
-    if (!e.some.mouse_button.down) { ret 5; }
+    if (!e.some.mouse_button.down)                      { ret 5; }
     ret 0;
 }
 
 test "window: framebuffer changes are delivered in pixels" {
-    var q: EventQueue = queue_new();
-    var input: inp.Input = inp.input_new();
-    var sink: Sink = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
     deliver_resize(?sink, 1920, 1052);
     val e: opt[Event] = queue_pop(?q);
-    if (!sel e.some) { ret 1; }
-    if (!sel e.some.resize) { ret 2; }
+    if (!sel e.some)                                                 { ret 1; }
+    if (!sel e.some.resize)                                          { ret 2; }
     if (e.some.resize.width != 1920 || e.some.resize.height != 1052) { ret 3; }
     ret 0;
 }
@@ -842,15 +850,15 @@ test "window: decorated client bounds stay inside the work area" {
         WindowBounds{x: 0, y: 0, width: 1920, height: 1080},
         WindowBounds{x: 0, y: 28, width: 0, height: 4},
         640, 360);
-    if (fitted.x != 0 || fitted.y != 28) { ret 1; }
+    if (fitted.x != 0 || fitted.y != 28)               { ret 1; }
     if (fitted.width != 1920 || fitted.height != 1048) { ret 2; }
     ret 0;
 }
 
 test "window: monitor overlap selects only visible pixels" {
-    if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000) { ret 1; }
+    if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000)     { ret 1; }
     if (overlap_area(1800, 100, 400, 400, 1920, 0, 1920, 1080) != 112000) { ret 2; }
-    if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0) { ret 3; }
+    if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0)            { ret 3; }
     ret 0;
 }
 
@@ -866,16 +874,16 @@ test "window: client bounds reaching a work area require compositor fitting" {
 }
 
 test "window: wayland keeps its explicit monitor without global positions" {
-    if (!prefer_retained_monitor(true, WindowMode.windowed{})) { ret 1; }
+    if (!prefer_retained_monitor(true, WindowMode.windowed{}))    { ret 1; }
     if (!prefer_retained_monitor(false, WindowMode.borderless{})) { ret 2; }
-    if (prefer_retained_monitor(false, WindowMode.windowed{})) { ret 3; }
+    if (prefer_retained_monitor(false, WindowMode.windowed{}))    { ret 3; }
     ret 0;
 }
 
 test "window: modes compare by case" {
     if (!same_mode(WindowMode.fullscreen{}, WindowMode.fullscreen{})) { ret 1; }
-    if (same_mode(WindowMode.windowed{}, WindowMode.borderless{})) { ret 2; }
-    if (same_mode(WindowMode.borderless{}, WindowMode.fullscreen{})) { ret 3; }
+    if (same_mode(WindowMode.windowed{}, WindowMode.borderless{}))    { ret 2; }
+    if (same_mode(WindowMode.borderless{}, WindowMode.fullscreen{}))  { ret 3; }
     ret 0;
 }
 
@@ -894,39 +902,39 @@ test "window: cursor coordinates follow framebuffer scale" {
 }
 
 test "window: content-scale changes do not become cursor motion" {
-    var q: EventQueue = queue_new();
-    var input: inp.Input = inp.input_new();
-    var sink: Sink;
-    sink.queue = ?q;
-    sink.input = ?input;
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink;
+    sink.queue        = ?q;
+    sink.input        = ?input;
     sink.cursor_known = false;
 
     rebase_cursor(?sink, 100.0, 50.0, 800, 600, 800, 600);
     rebase_cursor(?sink, 100.0, 50.0, 800, 600, 1600, 1200);
     inp.input_begin_tick(?input);
     if (input.mouse_x != 200.0 || input.mouse_y != 100.0) { ret 1; }
-    if (input.mouse_dx != 0.0 || input.mouse_dy != 0.0) { ret 2; }
+    if (input.mouse_dx != 0.0 || input.mouse_dy != 0.0)   { ret 2; }
 
     deliver_cursor(?sink, 101.0, 52.0, 800, 600, 1600, 1200);
     inp.input_begin_tick(?input);
 
     if (input.mouse_x != 202.0 || input.mouse_y != 104.0) { ret 3; }
-    if (input.mouse_dx != 2.0 || input.mouse_dy != 4.0) { ret 4; }
+    if (input.mouse_dx != 2.0 || input.mouse_dy != 4.0)   { ret 4; }
     val e: opt[Event] = queue_pop(?q);
-    if (!sel e.some) { ret 5; }
-    if (!sel e.some.mouse_move) { ret 6; }
+    if (!sel e.some)                                                  { ret 5; }
+    if (!sel e.some.mouse_move)                                       { ret 6; }
     if (e.some.mouse_move.x != 202.0 || e.some.mouse_move.y != 104.0) { ret 7; }
     ret 0;
 }
 
 test "window: a window that was never opened is closed" {
     var w: Window;
-    if (window_is_valid(?w)) { ret 1; }
+    if (window_is_valid(?w))                  { ret 1; }
     if (window_set_cursor_captured(?w, true)) { ret 2; }
-    if (window_cursor_captured(?w)) { ret 3; }
-    if (!window_should_close(?w)) { ret 4; }
+    if (window_cursor_captured(?w))           { ret 3; }
+    if (!window_should_close(?w))             { ret 4; }
     val changed: err[WindowError] = window_set_mode(?w, WindowMode.fullscreen{});
-    if (!sel changed.err) { ret 5; }
+    if (!sel changed.err)        { ret 5; }
     if (!sel changed.err.closed) { ret 6; }
     val h: opt[glfw.Window] = window_handle(?w);
     if (sel h.some) { ret 7; }

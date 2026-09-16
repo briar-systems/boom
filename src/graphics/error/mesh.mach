@@ -4,12 +4,12 @@
 # parse, geometry boom cannot conform to its vertex layouts, and a skeleton or
 # clip whose references do not close. mach-gltf's own refusals ride as payloads.
 
-use std.types.string.str;
-use std.types.size.usize;
-use gltf.parse.LoadError;
 use gltf.accessor.PlanError;
 use gltf.accessor.ReadError;
 use gltf.doc.ComponentType;
+use gltf.parse.LoadError;
+use std.types.size.usize;
+use std.types.string.str;
 
 # a vertex attribute boom reads from a glTF primitive
 pub tag Attribute: u8 {
@@ -39,9 +39,9 @@ pub tag Attribute: u8 {
 pub tag MeshError: u8 {
     empty;
     zero_stride;
-    gltf:            LoadError;
-    plan:            PlanError;
-    read:            ReadError;
+    gltf: LoadError;
+    plan: PlanError;
+    read: ReadError;
     no_buffer;
     no_mesh;
     no_primitive;
@@ -73,17 +73,17 @@ pub tag MeshError: u8 {
 # no_joint:           no joint has the requested name
 pub tag ModelError: u8 {
     skeleton_cycle;
-    joints:             usize;
-    joint_node:         usize;
-    joint_matrix:       usize;
-    plan:               PlanError;
-    read:               ReadError;
+    joints:       usize;
+    joint_node:   usize;
+    joint_matrix: usize;
+    plan:         PlanError;
+    read:         ReadError;
     inverse_bind_type;
     inverse_bind_count: usize;
     sampler_index:      usize;
     cubic_spline;
     keyframe_count;
-    vertex_joint:       usize;
+    vertex_joint: usize;
     no_clip;
     joint_name_empty;
     joint_ambiguous;

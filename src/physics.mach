@@ -17,19 +17,19 @@
 # Boom and mach-phys share the native f32x4 representation, so values cross the
 # private subsystem boundary without conversion.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.string.str;
-use std.types.option.opt;
-use std.types.result.res;
-use std.types.error.err;
-use phys: phys.world;
-use pbody: phys.body;
+use boom.math.transform.Transform;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
-use boom.math.transform.Transform;
+use pbody: phys.body;
+use phys:  phys.world;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
 
 # A body's identity within the physics world.
 #
@@ -97,7 +97,10 @@ pub fun physics_new(gravity: Vec3) Physics {
     p.world = phys.world_new(gravity);
     p.count = 0;
     var i: usize = 0;
-    for (i < MAX_BODIES) { p.tracked[i].used = false; i = i + 1; }
+    for (i < MAX_BODIES) {
+        p.tracked[i].used = false;
+        i                 = i + 1;
+    }
     ret p;
 }
 
@@ -175,7 +178,7 @@ pub fun physics_set_restitution(p: *Physics, id: BodyId, e: f32) err[PhysicsErro
 # the tracked slot behind a live engine id
 fun live_slot(p: *Physics, id: BodyId) opt[usize] {
     val i: usize = id::usize;
-    if (i >= p.count) { ret opt[usize].none{}; }
+    if (i >= p.count)       { ret opt[usize].none{}; }
     if (!p.tracked[i].used) { ret opt[usize].none{}; }
     ret opt[usize].some{i};
 }
@@ -237,7 +240,7 @@ pub fun physics_contact_count(p: *Physics) usize {
 pub fun physics_contact(p: *Physics, index: usize) opt[Contact] {
     if (index >= p.world.contact_count) { ret opt[Contact].none{}; }
     val c: *phys.Contact = ?p.world.contacts[index];
-    val a: opt[BodyId] = engine_id(p, c.a);
+    val a: opt[BodyId]   = engine_id(p, c.a);
     if (!sel a.some) { ret opt[Contact].none{}; }
     val b: opt[BodyId] = engine_id(p, c.b);
     if (!sel b.some) { ret opt[Contact].none{}; }
@@ -255,7 +258,7 @@ fun added(r: res[BodyId, PhysicsError]) BodyId {
 }
 
 test "physics: a stepped body writes back to its transform" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var p: Physics   = physics_new(vec3(0.0, -10.0, 0.0));
     var t: Transform = transform_identity();
 
     val r: res[BodyId, PhysicsError] = physics_add(?p, ?t, vec3(0.0, 100.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
@@ -270,17 +273,17 @@ test "physics: a stepped body writes back to its transform" {
 }
 
 test "physics: a body with no transform is simulated without crashing" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
-    val id: BodyId = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
+    var p:  Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    val id: BodyId  = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
     physics_step(?p, 0.1);
     val v: opt[Vec3] = physics_velocity(?p, id);
-    if (!sel v.some) { ret 1; }
+    if (!sel v.some)      { ret 1; }
     if (v.some[1] >= 0.0) { ret 2; }
     ret 0;
 }
 
 test "physics: a collision is queried with both body ids" {
-    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var p:  Physics   = physics_new(vec3(0.0, 0.0, 0.0));
     var ta: Transform = transform_identity();
     var tb: Transform = transform_identity();
 
@@ -294,8 +297,8 @@ test "physics: a collision is queried with both body ids" {
     if (!sel c.some) { ret 2; }
     # The ids must be the engine's, not the underlying world's, or a game
     # cannot match them against what physics_add returned.
-    if (c.some.a != a) { ret 3; }
-    if (c.some.b != b) { ret 4; }
+    if (c.some.a != a)       { ret 3; }
+    if (c.some.b != b)       { ret 4; }
     if (c.some.depth <= 0.0) { ret 5; }
     ret 0;
 }
@@ -310,20 +313,20 @@ test "physics: separated bodies produce no contact" {
 }
 
 test "physics: an out of range contact query is absent" {
-    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var p: Physics      = physics_new(vec3(0.0, 0.0, 0.0));
     val c: opt[Contact] = physics_contact(?p, 0);
     if (sel c.some) { ret 1; }
     ret 0;
 }
 
 test "physics: velocity round-trips and removal stops the body" {
-    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
-    val id: BodyId = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
+    var p:  Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    val id: BodyId  = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
 
     val set: err[PhysicsError] = physics_set_velocity(?p, id, vec3(3.0, 0.0, 0.0));
     if (!sel set.ok) { ret 1; }
     val v: opt[Vec3] = physics_velocity(?p, id);
-    if (!sel v.some) { ret 2; }
+    if (!sel v.some)      { ret 2; }
     if (v.some[0] != 3.0) { ret 3; }
 
     if (!physics_remove(?p, id)) { ret 4; }
@@ -331,21 +334,21 @@ test "physics: velocity round-trips and removal stops the body" {
     val gone: opt[Vec3] = physics_velocity(?p, id);
     if (sel gone.some) { ret 6; }
     val refused: err[PhysicsError] = physics_set_restitution(?p, id, 0.5);
-    if (!sel refused.err) { ret 7; }
+    if (!sel refused.err)         { ret 7; }
     if (!sel refused.err.no_body) { ret 8; }
     ret 0;
 }
 
 test "physics: a full world refuses another body" {
     var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
-    var i: usize = 0;
+    var i: usize   = 0;
     for (i < MAX_BODIES) {
         val r: res[BodyId, PhysicsError] = physics_add(?p, nil, vec3(i::f32 * 10.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
         if (!sel r.ok) { ret 1; }
         i = i + 1;
     }
     val over: res[BodyId, PhysicsError] = physics_add(?p, nil, vec3(0.0, 50.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
-    if (!sel over.err) { ret 2; }
+    if (!sel over.err)      { ret 2; }
     if (!sel over.err.full) { ret 3; }
     # a freed slot is reused
     if (!physics_remove(?p, 7)) { ret 4; }
@@ -356,7 +359,7 @@ test "physics: a full world refuses another body" {
 }
 
 test "physics: a static body is not moved by gravity" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var p: Physics   = physics_new(vec3(0.0, -10.0, 0.0));
     var t: Transform = transform_identity();
     added(physics_add(?p, ?t, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.0));
     physics_step(?p, 0.1);

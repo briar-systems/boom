@@ -23,30 +23,30 @@
 # culling test has to err in: a missing draw is a hole in the picture and an
 # extra draw is a few microseconds.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use boom.math.vec.Vec3;
-use boom.math.vec.vec3;
-use boom.math.vec.Vec4;
-use boom.math.vec.vec4;
-use boom.math.mat.Mat4;
-use boom.math.scalar.sqrtf;
-use boom.math.aabb.Aabb;
-use boom.math.aabb.aabb_is_empty;
-use boom.math.aabb.aabb_center;
-use boom.math.aabb.aabb_extent;
-use boom.math.aabb.aabb_empty;
-use boom.math.aabb.aabb_add;
-use boom.math.mat.mat4_mul;
-use boom.math.mat.mat4_project_point;
-use boom.math.mat.mat4_perspective_reversed_infinite;
 use boom.graphics.camera.Camera;
-use boom.graphics.camera.camera_perspective;
 use boom.graphics.camera.camera_orthographic;
-use boom.graphics.camera.camera_view;
+use boom.graphics.camera.camera_perspective;
 use boom.graphics.camera.camera_projection;
+use boom.graphics.camera.camera_view;
+use boom.math.aabb.Aabb;
+use boom.math.aabb.aabb_add;
+use boom.math.aabb.aabb_center;
+use boom.math.aabb.aabb_empty;
+use boom.math.aabb.aabb_extent;
+use boom.math.aabb.aabb_is_empty;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_perspective_reversed_infinite;
+use boom.math.mat.mat4_project_point;
+use boom.math.scalar.sqrtf;
+use boom.math.vec.Vec3;
+use boom.math.vec.Vec4;
+use boom.math.vec.vec3;
+use boom.math.vec.vec4;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 
 # The six bounding planes, each as (nx, ny, nz, d) with the normal pointing
 # inward, so a point is inside when nx*x + ny*y + nz*z + d >= 0.
@@ -62,8 +62,8 @@ pub rec Frustum {
 pub fun frustum_from_matrix(m: *Mat4) Frustum {
     var f: Frustum;
     # column-major: m.m[column][row]
-    val r0: Vec4 = vec4(m.m[0][0], m.m[1][0], m.m[2][0],  m.m[3][0]);
-    val r1: Vec4 = vec4(m.m[0][1], m.m[1][1], m.m[2][1],  m.m[3][1]);
+    val r0: Vec4 = vec4(m.m[0][0], m.m[1][0], m.m[2][0], m.m[3][0]);
+    val r1: Vec4 = vec4(m.m[0][1], m.m[1][1], m.m[2][1], m.m[3][1]);
     val r2: Vec4 = vec4(m.m[0][2], m.m[1][2], m.m[2][2], m.m[3][2]);
     val r3: Vec4 = vec4(m.m[0][3], m.m[1][3], m.m[2][3], m.m[3][3]);
 
@@ -138,8 +138,13 @@ fun normalize_plane(p: Vec4) Vec4 {
     ret vec4(p[0] / n, p[1] / n, p[2] / n, p[3] / n);
 }
 
-fun add4(a: Vec4, b: Vec4) Vec4 { ret vec4(a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]); }
-fun sub4(a: Vec4, b: Vec4) Vec4 { ret vec4(a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]); }
+fun add4(a: Vec4, b: Vec4) Vec4 {
+    ret vec4(a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]);
+}
+
+fun sub4(a: Vec4, b: Vec4) Vec4 {
+    ret vec4(a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]);
+}
 
 fun absf(x: f32) f32 {
     if (x < 0.0) { ret 0.0 - x; }
@@ -156,9 +161,9 @@ fun absf(x: f32) f32 {
 # square aspect, near 1 far 100.
 fun test_frustum() Frustum {
     var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-                                       1.5707963, 1.0, 1.0, 100.0);
-    var v: Mat4 = camera_view(?c);
-    var p: Mat4 = camera_projection(?c);
+        1.5707963, 1.0, 1.0, 100.0);
+    var v:  Mat4 = camera_view(?c);
+    var p:  Mat4 = camera_projection(?c);
     var vp: Mat4 = mat4_mul(?p, ?v);
     ret frustum_from_matrix(?vp);
 }
@@ -172,7 +177,7 @@ fun box_at(x: f32, y: f32, z: f32, r: f32) Aabb {
 
 test "frustum: a box at the point the camera looks at is visible" {
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(0.0, 0.0, 0.0, 1.0);
+    var b: Aabb    = box_at(0.0, 0.0, 0.0, 1.0);
     if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
@@ -182,7 +187,7 @@ test "frustum: a box behind the camera is rejected" {
     # projects back onto the screen mirrored, so failing to reject it draws
     # things that are not there.
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(0.0, 0.0, 20.0, 1.0);
+    var b: Aabb    = box_at(0.0, 0.0, 20.0, 1.0);
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
@@ -191,13 +196,13 @@ test "frustum: a box beyond the far plane is rejected" {
     # The camera sits at z = 10 with a far plane 100 away, so anything past
     # z = -90 is outside it.
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
+    var b: Aabb    = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
 
 test "frustum: reversed infinite perspective clips near and has no far limit" {
-    var p: Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
+    var p: Mat4    = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
     var f: Frustum = frustum_from_matrix(?p);
 
     if (f.planes[4][0] != 0.0 || f.planes[4][1] != 0.0
@@ -215,7 +220,7 @@ test "frustum: a box off to the side is rejected" {
     # At 90 degrees vertical the half-extent at the origin equals the distance,
     # which is 10, so a small box at x = 100 is far outside.
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(100.0, 0.0, 0.0, 1.0);
+    var b: Aabb    = box_at(100.0, 0.0, 0.0, 1.0);
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
     var a: Aabb = box_at(0.0, 100.0, 0.0, 1.0);
     if (frustum_contains_aabb(?f, ?a)) { ret 2; }
@@ -240,7 +245,7 @@ test "frustum: a huge box containing the camera is kept" {
     # Its centre is outside several planes at once while the box itself fills
     # the view. A test that rejected on the centre alone would cull the ground.
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(0.0, 0.0, 0.0, 1000.0);
+    var b: Aabb    = box_at(0.0, 0.0, 0.0, 1000.0);
     if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
@@ -249,7 +254,7 @@ test "frustum: an empty box is not visible" {
     # A mesh with no geometry has nothing to draw, and the sentinel corners an
     # empty box carries would otherwise be tested as real coordinates.
     var f: Frustum = test_frustum();
-    var b: Aabb = aabb_empty();
+    var b: Aabb    = aabb_empty();
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
@@ -261,11 +266,11 @@ test "frustum: the planes agree with the projection they came from" {
     # nothing reports it. Swept over a grid rather than spot-checked, since a
     # single wrong plane is correct everywhere except on one side.
     var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-                                       1.5707963, 1.0, 1.0, 100.0);
-    var v: Mat4 = camera_view(?c);
-    var p: Mat4 = camera_projection(?c);
-    var vp: Mat4 = mat4_mul(?p, ?v);
-    var f: Frustum = frustum_from_matrix(?vp);
+        1.5707963, 1.0, 1.0, 100.0);
+    var v:  Mat4    = camera_view(?c);
+    var p:  Mat4    = camera_projection(?c);
+    var vp: Mat4    = mat4_mul(?p, ?v);
+    var f:  Frustum = frustum_from_matrix(?vp);
 
     var i: i32 = 0;
     for (i <= 12) {
@@ -273,13 +278,13 @@ test "frustum: the planes agree with the projection they came from" {
         for (j <= 12) {
             var k: i32 = 0;
             for (k <= 12) {
-                val x: f32 = (0.0 - 30.0) + i::f32 * 5.0;
-                val y: f32 = (0.0 - 30.0) + j::f32 * 5.0;
-                val z: f32 = 20.0 - k::f32 * 10.0;
+                val x:  f32  = (0.0 - 30.0) + i::f32 * 5.0;
+                val y:  f32  = (0.0 - 30.0) + j::f32 * 5.0;
+                val z:  f32  = 20.0 - k::f32 * 10.0;
                 val pt: Vec3 = vec3(x, y, z);
 
                 val inside: bool = frustum_contains_point(?f, pt);
-                val cl: Vec3 = mat4_project_point(?vp, pt);
+                val cl:     Vec3 = mat4_project_point(?vp, pt);
                 # Clip after the divide: x and y in [-1, 1], z in [0, 1].
                 # Points on the eye plane divide by zero and are skipped.
                 val w: f32 = vp.m[0][3] * x + vp.m[1][3] * y + vp.m[2][3] * z + vp.m[3][3];
@@ -288,7 +293,7 @@ test "frustum: the planes agree with the projection they came from" {
                     if (cl[0] < 0.0 - 1.0 || cl[0] > 1.0) { vis = false; }
                     if (cl[1] < 0.0 - 1.0 || cl[1] > 1.0) { vis = false; }
                     if (cl[2] < 0.0 || cl[2] > 1.0)       { vis = false; }
-                    if (vis != inside) { ret 1; }
+                    if (vis != inside)                    { ret 1; }
                 }
                 k = k + 1;
             }
@@ -304,11 +309,11 @@ test "frustum: an orthographic projection culls the same way" {
     # than fanning. A frustum built only against perspective would have the
     # side planes right by accident and the near plane wrong.
     var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-                                        20.0, 1.0, 0.0 - 50.0, 50.0);
-    var v: Mat4 = camera_view(?c);
-    var p: Mat4 = camera_projection(?c);
-    var vp: Mat4 = mat4_mul(?p, ?v);
-    var f: Frustum = frustum_from_matrix(?vp);
+        20.0, 1.0, 0.0 - 50.0, 50.0);
+    var v:  Mat4    = camera_view(?c);
+    var p:  Mat4    = camera_projection(?c);
+    var vp: Mat4    = mat4_mul(?p, ?v);
+    var f:  Frustum = frustum_from_matrix(?vp);
 
     # A 20-unit-tall view is 10 either side of the axis at every depth.
     var inside: Aabb = box_at(0.0, 0.0, 0.0, 1.0);
@@ -332,7 +337,7 @@ test "frustum: the near plane is Vulkan's, not OpenGL's" {
     # the band is world z in (9, 10). A box at z = 9.5 is in front of the eye
     # and nearer than the near plane, so it must be rejected.
     var f: Frustum = test_frustum();
-    var b: Aabb = box_at(0.0, 0.0, 9.5, 0.1);
+    var b: Aabb    = box_at(0.0, 0.0, 9.5, 0.1);
     if (frustum_contains_aabb(?f, ?b)) { ret 1; }
 
     # And one just beyond the near plane is kept, so the plane is in the right
@@ -349,12 +354,12 @@ test "frustum: every plane normal is unit length" {
     # caller reading `planes` and treating the value as a distance, which is the
     # only reason the field is worth exposing. This is what holds that property.
     var f: Frustum = test_frustum();
-    var i: usize = 0;
+    var i: usize   = 0;
     for (i < 6) {
         val p: Vec4 = f.planes[i];
-        val n: f32 = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
-        var d: f32 = n - 1.0;
-        if (d < 0.0) { d = 0.0 - d; }
+        val n: f32  = sqrtf(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        var d: f32  = n - 1.0;
+        if (d < 0.0)    { d = 0.0 - d; }
         if (d > 0.0001) { ret 1; }
         i = i + 1;
     }

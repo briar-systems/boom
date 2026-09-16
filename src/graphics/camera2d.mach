@@ -22,42 +22,42 @@
 # coordinates are addressed everywhere else in the engine. A camera that
 # silently flipped it would put every existing 2D draw upside down.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use boom.math.vec.Vec2;
-use boom.math.vec.vec2;
-use boom.math.vec.Vec3;
-use boom.math.vec.vec3;
-use boom.math.mat.Mat4;
-use boom.math.mat.mat4_mul;
-use boom.math.mat.mat4_identity;
-use boom.math.mat.mat4_translation;
-use boom.math.mat.mat4_orthographic;
-use boom.math.mat.mat4_from_quat;
-use boom.math.mat.mat4_project_point;
-use boom.math.quat.Quat;
-use boom.math.quat.quat_from_axis_angle;
-use boom.math.scalar.sinf;
-use boom.math.scalar.cosf;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
+use boom.math.mat.Mat4;
+use boom.math.mat.mat4_from_quat;
+use boom.math.mat.mat4_identity;
+use boom.math.mat.mat4_mul;
+use boom.math.mat.mat4_orthographic;
+use boom.math.mat.mat4_project_point;
+use boom.math.mat.mat4_translation;
+use boom.math.quat.Quat;
+use boom.math.quat.quat_from_axis_angle;
+use boom.math.scalar.cosf;
+use boom.math.scalar.sinf;
+use boom.math.vec.Vec2;
+use boom.math.vec.Vec3;
+use boom.math.vec.vec2;
+use boom.math.vec.vec3;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 
 # A view of a 2D world.
 # ---
-# center:   the world point the middle of the target shows
-# zoom:     world units to target pixels. Above one magnifies, below one shows
-#           more of the world. Must be positive; zero or negative would collapse
-#           or mirror the projection, so it is treated as one.
-# rotation: roll about the view axis, in radians, clockwise on screen. Present
-#           because a game camera that can never rotate cannot do screen shake
-#           or a banking turn without every call site rotating its own geometry,
-#           which is the problem this type exists to remove.
+# center:      the world point the middle of the target shows
+# zoom:        world units to target pixels. Above one magnifies, below one shows
+#              more of the world. Must be positive; zero or negative would collapse
+#              or mirror the projection, so it is treated as one.
+# rotation:    roll about the view axis, in radians, clockwise on screen. Present
+#              because a game camera that can never rotate cannot do screen shake
+#              or a banking turn without every call site rotating its own geometry,
+#              which is the problem this type exists to remove.
 # view_height: world units the viewport shows vertically. When positive this
-#           replaces `zoom`: the vertical extent is held fixed and the
-#           horizontal extent follows the viewport's aspect, so a wider window
-#           shows more world rather than the same world larger. Zero means the
-#           camera is driven by `zoom` instead.
+#              replaces `zoom`: the vertical extent is held fixed and the
+#              horizontal extent follows the viewport's aspect, so a wider window
+#              shows more world rather than the same world larger. Zero means the
+#              camera is driven by `zoom` instead.
 pub rec Camera2D {
     center:      Vec2;
     zoom:        f32;
@@ -99,7 +99,7 @@ pub fun camera2d_height(center: Vec2, view_height: f32) Camera2D {
 # constructor rather than left implicit so a game can ask for it by name.
 pub fun camera2d_identity(width: f32, height: f32) Camera2D {
     ret Camera2D{center: vec2(width * 0.5, height * 0.5), zoom: 1.0,
-                 rotation: 0.0, view_height: 0.0};
+        rotation: 0.0, view_height: 0.0};
 }
 
 # The zoom a camera will actually be used with.
@@ -145,7 +145,7 @@ pub fun camera2d_scale(c: *Camera2D, width: f32, height: f32) f32 {
 # height: target height in pixels
 pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
     val z:  f32 = camera2d_scale(c, width, height);
-    val hw: f32 = width  * 0.5 / z;
+    val hw: f32 = width * 0.5 / z;
     val hh: f32 = height * 0.5 / z;
 
     # bottom above top, which is what keeps y increasing downward.
@@ -155,14 +155,13 @@ pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
     if (c.rotation != 0.0) {
         # Negated because rotating the camera clockwise turns the world
         # counter-clockwise beneath it.
-        val q: Quat = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.0 - c.rotation);
+        val q:   Quat = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.0 - c.rotation);
         var rot: Mat4 = mat4_from_quat(q);
         view = mat4_mul(?rot, ?view);
     }
 
     ret mat4_mul(?proj, ?view);
 }
-
 
 # Where a point on the target lands in the world.
 #
@@ -185,14 +184,14 @@ pub fun camera2d_matrix(c: *Camera2D, width: f32, height: f32) Mat4 {
 pub fun camera2d_screen_to_world(c: *Camera2D, screen: Vec2, width: f32, height: f32) Vec2 {
     val z: f32 = camera2d_scale(c, width, height);
     # Undo the projection: back to view space, where the camera centre is 0.
-    val vx: f32 = (screen[0] - width  * 0.5) / z;
+    val vx: f32 = (screen[0] - width * 0.5) / z;
     val vy: f32 = (screen[1] - height * 0.5) / z;
     # Undo the roll. The forward transform rolls by -rotation, so this rolls by
     # +rotation.
     val s: f32 = sinf(c.rotation);
     val k: f32 = cosf(c.rotation);
     ret vec2(c.center[0] + vx * k - vy * s,
-             c.center[1] + vx * s + vy * k);
+        c.center[1] + vx * s + vy * k);
 }
 
 # Where a world point lands on the target, in pixels.
@@ -200,12 +199,12 @@ pub fun camera2d_screen_to_world(c: *Camera2D, screen: Vec2, width: f32, height:
 # The exact inverse of camera2d_screen_to_world, for placing a label over a
 # world object or deciding whether something is on screen at all.
 pub fun camera2d_world_to_screen(c: *Camera2D, world: Vec2, width: f32, height: f32) Vec2 {
-    val z: f32 = camera2d_scale(c, width, height);
+    val z:  f32 = camera2d_scale(c, width, height);
     val dx: f32 = world[0] - c.center[0];
     val dy: f32 = world[1] - c.center[1];
     # Roll by -rotation, matching the forward transform.
-    val s: f32 = sinf(0.0 - c.rotation);
-    val k: f32 = cosf(0.0 - c.rotation);
+    val s:  f32 = sinf(0.0 - c.rotation);
+    val k:  f32 = cosf(0.0 - c.rotation);
     val vx: f32 = dx * k - dy * s;
     val vy: f32 = dx * s + dy * k;
     ret vec2(vx * z + width * 0.5, vy * z + height * 0.5);
@@ -240,8 +239,15 @@ pub fun camera2d_visible(c: *Camera2D, width: f32, height: f32) Rect {
     ret rect(x0, y0, x1 - x0, y1 - y0);
 }
 
-fun minf(a: f32, b: f32) f32 { if (a < b) { ret a; } ret b; }
-fun maxf(a: f32, b: f32) f32 { if (a > b) { ret a; } ret b; }
+fun minf(a: f32, b: f32) f32 {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+fun maxf(a: f32, b: f32) f32 {
+    if (a > b) { ret a; }
+    ret b;
+}
 
 # --------------------------------------------------------------------- tests
 #
@@ -250,8 +256,8 @@ fun maxf(a: f32, b: f32) f32 { if (a > b) { ret a; } ret b; }
 
 test "camera2d: the centre of the view lands at the middle of the screen" {
     var c: Camera2D = camera2d(vec2(100.0, 50.0), 1.0);
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
-    val p: Vec3 = apply(?m, 100.0, 50.0);
+    var m: Mat4     = camera2d_matrix(?c, 320.0, 180.0);
+    val p: Vec3     = apply(?m, 100.0, 50.0);
     if (!near(p[0], 0.0)) { ret 1; }
     if (!near(p[1], 0.0)) { ret 2; }
     ret 0;
@@ -261,7 +267,7 @@ test "camera2d: at zoom one the view is exactly the target rectangle" {
     # The identity camera has to reproduce what the fixed pixel-space pass did,
     # or adopting it moves every existing 2D draw.
     var c: Camera2D = camera2d_identity(320.0, 180.0);
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
+    var m: Mat4     = camera2d_matrix(?c, 320.0, 180.0);
 
     # Top left of the target maps to the top left of clip space, which with
     # y down is (-1, -1).
@@ -279,10 +285,10 @@ test "camera2d: y increases downward" {
     # The whole engine addresses sprite sheets and windows with y down. A
     # projection that flipped it would turn every existing 2D draw upside down
     # while still looking like a plausible camera.
-    var c: Camera2D = camera2d_identity(320.0, 180.0);
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
-    val top:    Vec3 = apply(?m, 160.0, 0.0);
-    val bottom: Vec3 = apply(?m, 160.0, 180.0);
+    var c:      Camera2D = camera2d_identity(320.0, 180.0);
+    var m:      Mat4     = camera2d_matrix(?c, 320.0, 180.0);
+    val top:    Vec3     = apply(?m, 160.0, 0.0);
+    val bottom: Vec3     = apply(?m, 160.0, 180.0);
     if (!(top[1] < bottom[1])) { ret 1; }
     ret 0;
 }
@@ -292,17 +298,17 @@ test "camera2d: zoom scales sizes, not only positions" {
     # scales a sprite's position but not its extent looks correct at zoom one
     # and wrong everywhere else, so the check is on a distance, not a point.
     var c: Camera2D = camera2d(vec2(160.0, 90.0), 2.0);
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
+    var m: Mat4     = camera2d_matrix(?c, 320.0, 180.0);
 
-    val a: Vec3 = apply(?m, 160.0, 90.0);
-    val b: Vec3 = apply(?m, 176.0, 90.0);
-    val at_2x: f32 = b[0] - a[0];
+    val a:     Vec3 = apply(?m, 160.0, 90.0);
+    val b:     Vec3 = apply(?m, 176.0, 90.0);
+    val at_2x: f32  = b[0] - a[0];
 
-    var c1: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
-    var m1: Mat4 = camera2d_matrix(?c1, 320.0, 180.0);
-    val a1: Vec3 = apply(?m1, 160.0, 90.0);
-    val b1: Vec3 = apply(?m1, 176.0, 90.0);
-    val at_1x: f32 = b1[0] - a1[0];
+    var c1:    Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
+    var m1:    Mat4     = camera2d_matrix(?c1, 320.0, 180.0);
+    val a1:    Vec3     = apply(?m1, 160.0, 90.0);
+    val b1:    Vec3     = apply(?m1, 176.0, 90.0);
+    val at_1x: f32      = b1[0] - a1[0];
 
     # Twice the zoom, twice the extent on screen for the same world span.
     if (!near(at_2x, at_1x * 2.0)) { ret 1; }
@@ -312,12 +318,12 @@ test "camera2d: zoom scales sizes, not only positions" {
 test "camera2d: panning moves the world the other way" {
     # A camera that moved the world with it rather than against it would track
     # backwards, which reads as inverted controls rather than as a broken matrix.
-    var a: Camera2D = camera2d(vec2(100.0, 90.0), 1.0);
-    var b: Camera2D = camera2d(vec2(120.0, 90.0), 1.0);
-    var ma: Mat4 = camera2d_matrix(?a, 320.0, 180.0);
-    var mb: Mat4 = camera2d_matrix(?b, 320.0, 180.0);
-    val pa: Vec3 = apply(?ma, 100.0, 90.0);
-    val pb: Vec3 = apply(?mb, 100.0, 90.0);
+    var a:  Camera2D = camera2d(vec2(100.0, 90.0), 1.0);
+    var b:  Camera2D = camera2d(vec2(120.0, 90.0), 1.0);
+    var ma: Mat4     = camera2d_matrix(?a, 320.0, 180.0);
+    var mb: Mat4     = camera2d_matrix(?b, 320.0, 180.0);
+    val pa: Vec3     = apply(?ma, 100.0, 90.0);
+    val pb: Vec3     = apply(?mb, 100.0, 90.0);
     if (!(pb[0] < pa[0])) { ret 1; }
     ret 0;
 }
@@ -342,8 +348,8 @@ test "camera2d: a rotation turns the world about the camera centre" {
 
     # In clip space 40 world units up is 40 / (180 / 2) of the half-height.
     val right: Vec3 = apply(?m, 200.0, 90.0);
-    if (!near(right[0], 0.0))                     { ret 3; }
-    if (!near(right[1], 0.0 - (40.0 / 90.0)))     { ret 4; }
+    if (!near(right[0], 0.0))                 { ret 3; }
+    if (!near(right[1], 0.0 - (40.0 / 90.0))) { ret 4; }
     ret 0;
 }
 
@@ -401,7 +407,7 @@ test "camera2d: screen to world agrees with the matrix" {
     c.rotation = 0.4;
     val w: Vec2 = camera2d_screen_to_world(?c, vec2(40.0, 150.0), 320.0, 180.0);
 
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
+    var m:    Mat4 = camera2d_matrix(?c, 320.0, 180.0);
     val clip: Vec3 = apply(?m, w[0], w[1]);
     # Clip back to target pixels, y down in both.
     val sx: f32 = (clip[0] + 1.0) * 0.5 * 320.0;
@@ -414,8 +420,8 @@ test "camera2d: screen to world agrees with the matrix" {
 test "camera2d: the visible rectangle grows as the camera zooms out" {
     # A tile field bounded by the target size instead of this is right only at
     # zoom 1, and zooming out leaves the edges of the world empty.
-    var c: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
-    val at1: Rect = camera2d_visible(?c, 320.0, 180.0);
+    var c:   Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
+    val at1: Rect     = camera2d_visible(?c, 320.0, 180.0);
     if (!near(at1.w, 320.0)) { ret 1; }
     if (!near(at1.h, 180.0)) { ret 2; }
     if (!near(at1.x, 0.0))   { ret 3; }
@@ -451,10 +457,10 @@ fun near_eps(a: f32, b: f32, eps: f32) bool {
 test "camera2d: a height-locked camera shows the same world height at any size" {
     # The property that makes it fair across monitors: two windows of different
     # shapes must show the same distance up and down.
-    var c: Camera2D = camera2d_height(vec2(0.0, 0.0), 180.0);
-    val wide:  Rect = camera2d_visible(?c, 1920.0, 1080.0);
-    val tall:  Rect = camera2d_visible(?c, 600.0, 1000.0);
-    val small: Rect = camera2d_visible(?c, 320.0, 180.0);
+    var c:     Camera2D = camera2d_height(vec2(0.0, 0.0), 180.0);
+    val wide:  Rect     = camera2d_visible(?c, 1920.0, 1080.0);
+    val tall:  Rect     = camera2d_visible(?c, 600.0, 1000.0);
+    val small: Rect     = camera2d_visible(?c, 320.0, 180.0);
     if (!near_eps(wide.h, 180.0, 0.01))  { ret 1; }
     if (!near_eps(tall.h, 180.0, 0.01))  { ret 2; }
     if (!near_eps(small.h, 180.0, 0.01)) { ret 3; }
@@ -465,9 +471,9 @@ test "camera2d: a height-locked camera widens with the window" {
     # The other half: a wider window gains peripheral view rather than
     # magnifying. A fixed-zoom camera would instead show more in both
     # directions, so the vertical check above would fail for it.
-    var c: Camera2D = camera2d_height(vec2(0.0, 0.0), 180.0);
-    val square: Rect = camera2d_visible(?c, 180.0, 180.0);
-    val wide:   Rect = camera2d_visible(?c, 360.0, 180.0);
+    var c:      Camera2D = camera2d_height(vec2(0.0, 0.0), 180.0);
+    val square: Rect     = camera2d_visible(?c, 180.0, 180.0);
+    val wide:   Rect     = camera2d_visible(?c, 360.0, 180.0);
     if (!near_eps(square.w, 180.0, 0.01)) { ret 1; }
     if (!near_eps(wide.w, 360.0, 0.01))   { ret 2; }
     # And the world stays square: twice the viewport width is twice the world
@@ -502,8 +508,8 @@ test "camera2d: picking follows the height lock" {
     if (!near_eps(w[0], 0.0, 0.01))  { ret 2; }
 
     # Round trip through the matrix, at a different aspect.
-    var m: Mat4 = camera2d_matrix(?c, 600.0, 1000.0);
-    val p: Vec2 = camera2d_screen_to_world(?c, vec2(100.0, 250.0), 600.0, 1000.0);
+    var m:    Mat4 = camera2d_matrix(?c, 600.0, 1000.0);
+    val p:    Vec2 = camera2d_screen_to_world(?c, vec2(100.0, 250.0), 600.0, 1000.0);
     val clip: Vec3 = apply(?m, p[0], p[1]);
     if (!near_eps((clip[0] + 1.0) * 0.5 * 600.0, 100.0, 0.05))  { ret 3; }
     if (!near_eps((clip[1] + 1.0) * 0.5 * 1000.0, 250.0, 0.05)) { ret 4; }
@@ -514,7 +520,7 @@ test "camera2d: a zero view height falls back to zoom" {
     # Zero is how a camera says it is not height-locked, and it is also what an
     # uninitialised one holds. Dividing by it would collapse the projection.
     var c: Camera2D = camera2d(vec2(0.0, 0.0), 2.0);
-    if (c.view_height != 0.0) { ret 1; }
+    if (c.view_height != 0.0)                    { ret 1; }
     if (camera2d_scale(?c, 320.0, 180.0) != 2.0) { ret 2; }
     ret 0;
 }
