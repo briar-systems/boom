@@ -15,8 +15,8 @@
 use std.chrono.duration.Duration;
 use std.chrono.duration.SECOND;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 
 # fixed-update accumulator state
 # ---
@@ -53,7 +53,7 @@ pub fun timestep_new(fixed: Duration, max_frame: Duration) Timestep {
 pub fun timestep_add(ts: *Timestep, frame: Duration) {
     var f: Duration = frame;
     if (f > ts.max_frame) { f = ts.max_frame; }
-    if (f < 0) { f = 0; }
+    if (f < 0)            { f = 0; }
     ts.accumulator = ts.accumulator + f;
 }
 
@@ -87,7 +87,7 @@ pub fun timestep_alpha(ts: *Timestep) f64 {
 
 test "timestep: new accumulator starts empty" {
     val ts: Timestep = timestep_new(16000000, 250000000);
-    if (ts.accumulator != 0) { ret 1; }
+    if (ts.accumulator != 0)  { ret 1; }
     if (ts.fixed != 16000000) { ret 2; }
     ret 0;
 }
@@ -95,7 +95,7 @@ test "timestep: new accumulator starts empty" {
 test "timestep: sub-step frame drains no steps" {
     var ts: Timestep = timestep_new(16000000, 250000000);
     timestep_add(?ts, 10000000);
-    if (timestep_step(?ts)) { ret 1; }
+    if (timestep_step(?ts))         { ret 1; }
     if (ts.accumulator != 10000000) { ret 2; }
     ret 0;
 }
@@ -104,7 +104,7 @@ test "timestep: exactly one step drains once" {
     var ts: Timestep = timestep_new(16000000, 250000000);
     timestep_add(?ts, 16000000);
     if (!timestep_step(?ts)) { ret 1; }
-    if (timestep_step(?ts)) { ret 2; }
+    if (timestep_step(?ts))  { ret 2; }
     if (ts.accumulator != 0) { ret 3; }
     ret 0;
 }
@@ -114,7 +114,7 @@ test "timestep: backlog drains multiple steps and keeps remainder" {
     timestep_add(?ts, 35000000);
     var steps: i64 = 0;
     for (timestep_step(?ts)) { steps = steps + 1; }
-    if (steps != 3) { ret 1; }
+    if (steps != 3)                { ret 1; }
     if (ts.accumulator != 5000000) { ret 2; }
     ret 0;
 }

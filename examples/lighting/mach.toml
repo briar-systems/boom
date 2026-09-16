@@ -5,6 +5,7 @@ src = "src"
 out = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
+default = true
 isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
@@ -19,70 +20,112 @@ isa = "x86_64"
 os  = "darwin"
 abi = "sysv64"
 
+# the prototype's own shaders, built as spirv artifacts the example embeds.
+# one vertex stage serves every fragment stage: every pass here draws quads
+# through boom's fixed transform block, and boom.graphics.shader takes the two
+# modules separately, so the same compiled vertex module is handed to each
+# Shader the example builds.
+[target.spirv]
+isa = "spirv"
+os  = "freestanding"
+abi = "spirv"
+env = "vulkan1.0"
+
 [profile.debug]
+default = true
 opt = 0
 debug = true
 simd = "scalarize"
+vectorize = false
+float_reassoc = false
 
 [profile.release]
 opt = 2
 debug = false
 simd = "scalarize"
+vectorize = false
+float_reassoc = false
 
 [artifact.lighting]
+default = true
 kind = "bin"
 entry = "main.mach"
-out = "bin/lighting"
-targets = ["*"]
+out = "bin/lighting{artifact.suffix}"
+targets = ["linux-x86_64", "windows", "darwin"]
 link = []
-need = ["build-shaders"]
+need = ["artifact.shader-*"]
 
-# The prototype's shaders, compiled to SPIR-V and embedded into the binary.
-# Same arrangement as examples/shader: the artifact declares `need` because an
-# `#[embed]` is not an edge in the build graph (mach#2887), and the modules are
-# named rather than globbed so a shader that has been deleted cannot survive in
-# the build directory and be embedded again.
-[step.build-shaders]
-cmd = "cd shaders && mach dep pull && mach build . --target spirv --profile release && cd .. && mkdir -p res/spv && for m in quad_vert sprite_vert gbuf_frag light_frag fwd_frag copy_frag bloom_frag two_frag; do cp shaders/out/obj/lightshaders/$m.spv res/spv/$m.spv; done"
-in  = ["shaders/src/*.mach", "shaders/mach.toml"]
-out = ["res/spv/quad_vert.spv", "res/spv/sprite_vert.spv", "res/spv/gbuf_frag.spv", "res/spv/light_frag.spv", "res/spv/fwd_frag.spv", "res/spv/copy_frag.spv", "res/spv/bloom_frag.spv", "res/spv/two_frag.spv"]
+[artifact.shader-quad_vert]
+kind = "bin"
+entry = "shaders/quad_vert.mach"
+out = "spv/quad_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
 need = []
 
-# A path dep rather than a branch pin, so the example is a real consumer of the
-# boom being changed rather than of the boom already pushed.
+[artifact.shader-sprite_vert]
+kind = "bin"
+entry = "shaders/sprite_vert.mach"
+out = "spv/sprite_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-gbuf_frag]
+kind = "bin"
+entry = "shaders/gbuf_frag.mach"
+out = "spv/gbuf_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-light_frag]
+kind = "bin"
+entry = "shaders/light_frag.mach"
+out = "spv/light_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-fwd_frag]
+kind = "bin"
+entry = "shaders/fwd_frag.mach"
+out = "spv/fwd_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-copy_frag]
+kind = "bin"
+entry = "shaders/copy_frag.mach"
+out = "spv/copy_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-bloom_frag]
+kind = "bin"
+entry = "shaders/bloom_frag.mach"
+out = "spv/bloom_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.shader-two_frag]
+kind = "bin"
+entry = "shaders/two_frag.mach"
+out = "spv/two_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
 [dep.boom]
 path = "../.."
 
-[dep.mach-std]
+[dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "branch/main"
+ref = "tag/v3.2.0"
 
-[dep.mach-glfw]
-git = "https://github.com/briar-systems/mach-glfw"
-ref = "branch/main"
-
-[dep.mach-image]
-git = "https://github.com/briar-systems/mach-image"
-ref = "branch/main"
-
-[dep.mach-gltf]
-git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/main"
-
-# boom links these transitively, but a consumer must still name every dep it
-# shares with a path dependency and match its ref exactly.
-[dep.mach-audio]
-git = "https://github.com/briar-systems/mach-audio"
-ref = "branch/main"
-
-[dep.mach-font]
-git = "https://github.com/briar-systems/mach-font"
-ref = "branch/dev"
-
-[dep.mach-phys]
-git = "https://github.com/briar-systems/mach-phys"
-ref = "branch/main"
-
-[dep.mach-vk]
-git = "https://github.com/briar-systems/mach-vk"
-ref = "branch/main"
+[dep.shader]
+git = "https://github.com/briar-systems/mach-shader"
+ref = "tag/v0.3.0"

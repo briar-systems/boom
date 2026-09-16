@@ -1,13 +1,13 @@
 # 4x4 matrix operations for the shared math layer
 
+use boom.math.quat.Quat;
 use boom.math.scalar.tanf;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
-use boom.math.vec.vec3_sub;
-use boom.math.vec.vec3_dot;
 use boom.math.vec.vec3_cross;
+use boom.math.vec.vec3_dot;
 use boom.math.vec.vec3_normalize;
-use boom.math.quat.Quat;
+use boom.math.vec.vec3_sub;
 
 # a 4x4 matrix stored as four SIMD columns in std140 order
 # ---
@@ -34,13 +34,13 @@ pub fun mat4_identity() Mat4 {
 # b:   right matrix
 # ret: the product a * b
 pub fun mat4_mul(a: *Mat4, b: *Mat4) Mat4 {
-    var r: Mat4;
+    var r:   Mat4;
     var col: i64 = 0;
     for (col < 4) {
         r.m[col] = a.m[0] * splat4(b.m[col][0])
-                 + a.m[1] * splat4(b.m[col][1])
-                 + a.m[2] * splat4(b.m[col][2])
-                 + a.m[3] * splat4(b.m[col][3]);
+            + a.m[1] * splat4(b.m[col][1])
+            + a.m[2] * splat4(b.m[col][2])
+            + a.m[3] * splat4(b.m[col][3]);
         col = col + 1;
     }
     ret r;
@@ -133,7 +133,7 @@ pub fun mat4_perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
 
 # a right-handed infinite reversed-z perspective projection
 pub fun mat4_perspective_reversed_infinite(fovy: f32, aspect: f32,
-                                           near: f32) Mat4 {
+    near: f32) Mat4 {
     val f: f32 = 1.0 / tanf(fovy * 0.5);
     var r: Mat4;
     r.m[0][0] = f / aspect;
@@ -229,9 +229,9 @@ pub fun mat4_ptr(m: *Mat4) *f32 {
 # ret: m * (p, 1)
 pub fun mat4_transform_point(m: *Mat4, p: Vec3) Vec3 {
     val r: f32x4 = m.m[0] * splat4(p[0])
-                   + m.m[1] * splat4(p[1])
-                   + m.m[2] * splat4(p[2])
-                   + m.m[3];
+        + m.m[1] * splat4(p[1])
+        + m.m[2] * splat4(p[2])
+        + m.m[3];
     ret vec3(r[0], r[1], r[2]);
 }
 
@@ -253,9 +253,9 @@ pub fun mat4_transform_point(m: *Mat4, p: Vec3) Vec3 {
 # ret: m * (p, 1), divided by w
 pub fun mat4_project_point(m: *Mat4, p: Vec3) Vec3 {
     val r: f32x4 = m.m[0] * splat4(p[0])
-                   + m.m[1] * splat4(p[1])
-                   + m.m[2] * splat4(p[2])
-                   + m.m[3];
+        + m.m[1] * splat4(p[1])
+        + m.m[2] * splat4(p[2])
+        + m.m[3];
     if (r[3] == 0.0) { ret vec3(r[0], r[1], r[2]); }
     ret vec3(r[0] / r[3], r[1] / r[3], r[2] / r[3]);
 }
@@ -272,8 +272,8 @@ pub fun mat4_project_point(m: *Mat4, p: Vec3) Vec3 {
 # ret: the upper-left 3x3 of m applied to v
 pub fun mat4_transform_dir(m: *Mat4, v: Vec3) Vec3 {
     val r: f32x4 = m.m[0] * splat4(v[0])
-                   + m.m[1] * splat4(v[1])
-                   + m.m[2] * splat4(v[2]);
+        + m.m[1] * splat4(v[1])
+        + m.m[2] * splat4(v[2]);
     ret vec3(r[0], r[1], r[2]);
 }
 
@@ -291,8 +291,8 @@ test "mat: columns preserve the std140 matrix layout" {
 
 test "mat: identity is the multiplicative unit" {
     var id: Mat4 = mat4_identity();
-    var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
-    var r: Mat4 = mat4_mul(?id, ?t);
+    var t:  Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
+    var r:  Mat4 = mat4_mul(?id, ?t);
     if (r.m[3][0] != 1.0 || r.m[3][1] != 2.0 || r.m[3][2] != 3.0) { ret 1; }
     ret 0;
 }
@@ -316,9 +316,9 @@ test "mat: perspective maps the clip planes to the Vulkan depth range" {
     # form everything from the near plane to the midpoint of the frustum lands
     # at a negative z and is clipped away, which looks like the near half of
     # every scene being invisible rather than like a wrong matrix.
-    val near: f32 = 0.1;
-    val far:  f32 = 100.0;
-    var p: Mat4 = mat4_perspective(1.5707963, 1.0, near, far);
+    val near: f32  = 0.1;
+    val far:  f32  = 100.0;
+    var p:    Mat4 = mat4_perspective(1.5707963, 1.0, near, far);
     if (p.m[2][3] != 0.0 - 1.0) { ret 1; }
     if (p.m[3][3] != 0.0)       { ret 2; }
 
@@ -337,8 +337,8 @@ test "mat: perspective maps the clip planes to the Vulkan depth range" {
 }
 
 test "mat: infinite reversed perspective maps near to one and distance to zero" {
-    val near: f32 = 0.1;
-    var p: Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, near);
+    val near: f32  = 0.1;
+    var p:    Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, near);
     if (p.m[2][3] != 0.0 - 1.0) { ret 1; }
     if (p.m[3][3] != 0.0)       { ret 2; }
 
@@ -346,22 +346,22 @@ test "mat: infinite reversed perspective maps near to one and distance to zero" 
     if (zn - 1.0 > 0.0001 || zn - 1.0 < 0.0 - 0.0001) { ret 3; }
 
     val distant: f32 = 1000000.0;
-    val zd: f32 = (p.m[2][2] * (0.0 - distant) + p.m[3][2]) / distant;
+    val zd:      f32 = (p.m[2][2] * (0.0 - distant) + p.m[3][2]) / distant;
     if (zd > 0.000001 || zd <= 0.0) { ret 4; }
-    if (p.m[1][1] >= 0.0) { ret 5; }
+    if (p.m[1][1] >= 0.0)           { ret 5; }
     ret 0;
 }
 
 test "mat: orthographic maps a pixel box to the Vulkan clip cube" {
     # The projection a 2D pass builds: origin at the top left, y growing down
     # the window, depth in [-1, 1] eye space mapping to [0, 1] clip space.
-    val w: f32 = 800.0;
-    val h: f32 = 600.0;
+    val w: f32  = 800.0;
+    val h: f32  = 600.0;
     var p: Mat4 = mat4_orthographic(0.0, w, h, 0.0, 0.0 - 1.0, 1.0);
     if (p.m[3][3] != 1.0) { ret 1; }
 
     val x0: f32 = p.m[0][0] * 0.0 + p.m[3][0];
-    val x1: f32 = p.m[0][0] * w   + p.m[3][0];
+    val x1: f32 = p.m[0][0] * w + p.m[3][0];
     if (x0 + 1.0 > 0.0001 || x0 + 1.0 < 0.0 - 0.0001) { ret 2; }
     if (x1 - 1.0 > 0.0001 || x1 - 1.0 < 0.0 - 0.0001) { ret 3; }
 
@@ -369,7 +369,7 @@ test "mat: orthographic maps a pixel box to the Vulkan clip cube" {
     # form puts it at +1, so every sprite ends up mirrored about the midline
     # and a full-window blit still looks plausible.
     val y0: f32 = p.m[1][1] * 0.0 + p.m[3][1];
-    val y1: f32 = p.m[1][1] * h   + p.m[3][1];
+    val y1: f32 = p.m[1][1] * h + p.m[3][1];
     if (y0 + 1.0 > 0.0001 || y0 + 1.0 < 0.0 - 0.0001) { ret 4; }
     if (y1 - 1.0 > 0.0001 || y1 - 1.0 < 0.0 - 0.0001) { ret 5; }
 
@@ -409,16 +409,16 @@ test "mat: transform agrees with composing the matrices" {
     # the check that catches a transposed convention. building T*S and
     # transforming once must equal scaling then translating, and it does
     # not if the elements are read row-major.
-    var s: Mat4 = mat4_scale(vec3(2.0, 3.0, 4.0));
-    var t: Mat4 = mat4_translation(vec3(5.0, 6.0, 7.0));
+    var s:  Mat4 = mat4_scale(vec3(2.0, 3.0, 4.0));
+    var t:  Mat4 = mat4_translation(vec3(5.0, 6.0, 7.0));
     var ts: Mat4 = mat4_mul(?t, ?s);
 
-    val v: Vec3 = vec3(1.0, 1.0, 1.0);
-    val once: Vec3 = mat4_transform_point(?ts, v);
+    val v:     Vec3 = vec3(1.0, 1.0, 1.0);
+    val once:  Vec3 = mat4_transform_point(?ts, v);
     val twice: Vec3 = mat4_transform_point(?t, mat4_transform_point(?s, v));
 
     if (once[0] != twice[0] || once[1] != twice[1] || once[2] != twice[2]) { ret 1; }
-    if (once[0] != 7.0 || once[1] != 9.0 || once[2] != 11.0) { ret 2; }
+    if (once[0] != 7.0 || once[1] != 9.0 || once[2] != 11.0)               { ret 2; }
     ret 0;
 }
 
@@ -426,7 +426,7 @@ test "mat: a rotation moves a point off its axis" {
     # a transform that only ever reproduced its input would pass the
     # translation tests above by doing nothing, so this asserts an
     # actual rotation: 90 degrees about z sends +x to +y.
-    val h: f32 = 0.70710678;
+    val h: f32  = 0.70710678;
     var r: Mat4 = mat4_from_quat(f32x4{0.0, 0.0, h, h});
     val p: Vec3 = mat4_transform_point(?r, vec3(1.0, 0.0, 0.0));
     if (p[0] > 0.001 || p[0] < -0.001) { ret 1; }
@@ -445,7 +445,7 @@ test "mat: projecting a point divides through by w" {
 
     # Twice the distance, half the screen offset.
     var d: f32 = near[0] - far[0] * 2.0;
-    if (d < 0.0) { d = 0.0 - d; }
+    if (d < 0.0)    { d = 0.0 - d; }
     if (d > 0.0001) { ret 1; }
 
     # And the undivided form does not foreshorten at all, which is what makes

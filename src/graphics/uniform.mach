@@ -18,14 +18,14 @@
 # hand. Keeping every member 16 bytes wide makes the layout its own declaration:
 # offset is index times 16, with no rule to remember and nothing to compute.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
+use boom.graphics.sprite.Rect;
 use boom.math.mat.Mat4;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
-use boom.graphics.sprite.Rect;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
 
 # The mesh vertex stage's uniform block, matching src/shaders/mesh_vert.mach.
 # ---
@@ -107,7 +107,7 @@ test "uniform: the screen block is exactly one matrix" {
     # grew here without the shader growing to match would leave the stage
     # reading a projection out of the wrong bytes, which draws the whole UI
     # somewhere unrelated rather than failing.
-    if ($size_of(ScreenUniforms) != 64) { ret 1; }
+    if ($size_of(ScreenUniforms) != 64)             { ret 1; }
     if ($size_of(ScreenUniforms) != $size_of(Mat4)) { ret 2; }
     ret 0;
 }

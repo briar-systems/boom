@@ -34,19 +34,29 @@ rec Palette {
     columns: [512]f32x4;
 }
 
-#[uniform(0, 0)] var matrices: Matrices;
-#[storage(0, 3)] var palette:  Palette;
+#[uniform(0, 0)]
+var matrices: Matrices;
+#[storage(0, 3)]
+var palette: Palette;
 
-#[input(0)] var in_position: f32x3;
-#[input(1)] var in_normal:   f32x3;
-#[input(2)] var in_uv:       f32x2;
-#[input(5)] var in_joints:   u32x4;
-#[input(6)] var in_weights:  f32x4;
+#[input(0)]
+var in_position: f32x3;
+#[input(1)]
+var in_normal: f32x3;
+#[input(2)]
+var in_uv: f32x2;
+#[input(5)]
+var in_joints: u32x4;
+#[input(6)]
+var in_weights: f32x4;
 
-#[output(0)] var out_normal: f32x3;
-#[output(1)] var out_uv:     f32x2;
+#[output(0)]
+var out_normal: f32x3;
+#[output(1)]
+var out_uv: f32x2;
 
-#[builtin("position")] var position: f32x4;
+#[builtin("position")]
+var position: f32x4;
 
 # Transform a point by a 4x4 matrix given as its four columns.
 #
@@ -55,17 +65,12 @@ rec Palette {
 # because a SPIR-V shader cannot call a function defined in another module
 # (mach#2823).
 fun mul_point(c0: f32x4, c1: f32x4, c2: f32x4, c3: f32x4, p: f32x4) f32x4 {
-    ret c0 * f32x4{p[0], p[0], p[0], p[0]}
-      + c1 * f32x4{p[1], p[1], p[1], p[1]}
-      + c2 * f32x4{p[2], p[2], p[2], p[2]}
-      + c3 * f32x4{p[3], p[3], p[3], p[3]};
+    ret c0 * f32x4{p[0], p[0], p[0], p[0]} + c1 * f32x4{p[1], p[1], p[1], p[1]} + c2 * f32x4{p[2], p[2], p[2], p[2]} + c3 * f32x4{p[3], p[3], p[3], p[3]};
 }
 
 # Transform a direction by the upper-left 3x3 of a 4x4 matrix.
 fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
-    val r: f32x4 = c0 * f32x4{v[0], v[0], v[0], v[0]}
-                 + c1 * f32x4{v[1], v[1], v[1], v[1]}
-                 + c2 * f32x4{v[2], v[2], v[2], v[2]};
+    val r: f32x4 = c0 * f32x4{v[0], v[0], v[0], v[0]} + c1 * f32x4{v[1], v[1], v[1], v[1]} + c2 * f32x4{v[2], v[2], v[2], v[2]};
     ret f32x3{r[0], r[1], r[2]};
 }
 
@@ -89,33 +94,30 @@ fun vert_main() {
 
     val skinned: f32x4 =
         mul_point(palette.columns[j0], palette.columns[j0 + 1],
-                  palette.columns[j0 + 2], palette.columns[j0 + 3], p) * w0
-      + mul_point(palette.columns[j1], palette.columns[j1 + 1],
-                  palette.columns[j1 + 2], palette.columns[j1 + 3], p) * w1
-      + mul_point(palette.columns[j2], palette.columns[j2 + 1],
-                  palette.columns[j2 + 2], palette.columns[j2 + 3], p) * w2
-      + mul_point(palette.columns[j3], palette.columns[j3 + 1],
-                  palette.columns[j3 + 2], palette.columns[j3 + 3], p) * w3;
+        palette.columns[j0 + 2], palette.columns[j0 + 3], p) * w0
+        + mul_point(palette.columns[j1], palette.columns[j1 + 1],
+        palette.columns[j1 + 2], palette.columns[j1 + 3], p) * w1
+        + mul_point(palette.columns[j2], palette.columns[j2 + 1],
+        palette.columns[j2 + 2], palette.columns[j2 + 3], p) * w2
+        + mul_point(palette.columns[j3], palette.columns[j3 + 1],
+        palette.columns[j3 + 2], palette.columns[j3 + 3], p) * w3;
 
     val world: f32x4 = mul_point(matrices.model_0, matrices.model_1,
-                                 matrices.model_2, matrices.model_3, skinned);
+        matrices.model_2, matrices.model_3, skinned);
 
     position = mul_point(matrices.view_proj_0, matrices.view_proj_1,
-                         matrices.view_proj_2, matrices.view_proj_3, world);
+        matrices.view_proj_2, matrices.view_proj_3, world);
 
     # The normal is skinned by the same weights, then rotated by the model.
     # Only the rotational part of each joint applies, for the same reason
     # mul_dir drops the translation column in the unskinned stage.
     val n: f32x3 =
         mul_dir(palette.columns[j0], palette.columns[j0 + 1],
-                palette.columns[j0 + 2], in_normal) * f32x3{in_weights[0], in_weights[0], in_weights[0]}
-      + mul_dir(palette.columns[j1], palette.columns[j1 + 1],
-                palette.columns[j1 + 2], in_normal) * f32x3{in_weights[1], in_weights[1], in_weights[1]}
-      + mul_dir(palette.columns[j2], palette.columns[j2 + 1],
-                palette.columns[j2 + 2], in_normal) * f32x3{in_weights[2], in_weights[2], in_weights[2]}
-      + mul_dir(palette.columns[j3], palette.columns[j3 + 1],
-                palette.columns[j3 + 2], in_normal) * f32x3{in_weights[3], in_weights[3], in_weights[3]};
+        palette.columns[j0 + 2], in_normal) * f32x3{in_weights[0], in_weights[0], in_weights[0]} + mul_dir(palette.columns[j1], palette.columns[j1 + 1],
+        palette.columns[j1 + 2], in_normal) * f32x3{in_weights[1], in_weights[1], in_weights[1]} + mul_dir(palette.columns[j2], palette.columns[j2 + 1],
+        palette.columns[j2 + 2], in_normal) * f32x3{in_weights[2], in_weights[2], in_weights[2]} + mul_dir(palette.columns[j3], palette.columns[j3 + 1],
+        palette.columns[j3 + 2], in_normal) * f32x3{in_weights[3], in_weights[3], in_weights[3]};
 
     out_normal = mul_dir(matrices.model_0, matrices.model_1, matrices.model_2, n);
-    out_uv = in_uv;
+    out_uv     = in_uv;
 }

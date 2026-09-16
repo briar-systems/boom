@@ -1,26 +1,33 @@
 # the direction represented by increasing depth-buffer values
 
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 
-pub def DepthConvention: u8;
+# ---
+# forward:  near maps to zero and far maps to one
+# reversed: near maps to one and distance approaches zero
+pub tag DepthConvention: u8 {
+    forward;
+    reversed;
+}
 
-# near maps to zero and far maps to one
-pub val DEPTH_FORWARD: DepthConvention = 0;
-
-# near maps to one and distance approaches zero
-pub val DEPTH_REVERSED: DepthConvention = 1;
-
-pub fun depth_convention_valid(depth: DepthConvention) bool {
-    ret depth == DEPTH_FORWARD || depth == DEPTH_REVERSED;
+# whether two conventions are the same one
+pub fun depth_convention_same(a: DepthConvention, b: DepthConvention) bool {
+    if (sel a.reversed) { ret sel b.reversed; }
+    ret sel b.forward;
 }
 
 test "depth: the zero value preserves forward depth" {
     var depth: DepthConvention;
-    if (depth != DEPTH_FORWARD) { ret 1; }
-    if (!depth_convention_valid(depth)) { ret 2; }
-    if (!depth_convention_valid(DEPTH_REVERSED)) { ret 3; }
-    if (depth_convention_valid(2)) { ret 4; }
+    if (!sel depth.forward) { ret 1; }
+    ret 0;
+}
+
+test "depth: conventions compare by case" {
+    if (!depth_convention_same(DepthConvention.forward{}, DepthConvention.forward{}))   { ret 1; }
+    if (!depth_convention_same(DepthConvention.reversed{}, DepthConvention.reversed{})) { ret 2; }
+    if (depth_convention_same(DepthConvention.forward{}, DepthConvention.reversed{}))   { ret 3; }
+    if (depth_convention_same(DepthConvention.reversed{}, DepthConvention.forward{}))   { ret 4; }
     ret 0;
 }

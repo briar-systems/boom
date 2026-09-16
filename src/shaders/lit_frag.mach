@@ -24,13 +24,18 @@ rec Base {
     colour: f32x4;
 }
 
-#[sampler(0, 1)] var albedo: tex.Sampler2D;
-#[uniform(0, 2)] var base:   Base;
+#[sampler(0, 1)]
+var albedo: tex.Sampler2D;
+#[uniform(0, 2)]
+var base: Base;
 
-#[input(0)] var in_normal: f32x3;
-#[input(1)] var in_uv:     f32x2;
+#[input(0)]
+var in_normal: f32x3;
+#[input(1)]
+var in_uv: f32x2;
 
-#[output(0)] var out_colour: f32x4;
+#[output(0)]
+var out_colour: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {

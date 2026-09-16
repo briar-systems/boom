@@ -1,107 +1,48 @@
 name: CI
 
+# the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
+# one linux leg on a pull request into dev and into main. the examples are a
+# glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
+# nothing runs on push.
+
 on:
   pull_request:
-    branches: [dev, main]
+  workflow_dispatch:
+    inputs:
+      heavy:
+        description: heavy work to run on this ref
+        type: choice
+        default: none
+        options: [none, all]
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test Suite
+  lib:
+    uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
+    with:
+      heavy: ${{ inputs.heavy }}
+      # the windows and darwin targets need a C cross toolchain for glfw
+      all-targets: false
+      # mach-glfw builds GLFW from source with the host cc, the text example
+      # needs a font, and the examples drive lavapipe under xvfb
+      legs: >-
+        [{"name": "x86_64-linux", "runs-on": "ubuntu-latest",
+          "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
+                  "wayland-protocols", "fonts-dejavu-core", "mesa-vulkan-drivers",
+                  "vulkan-tools", "xvfb", "spirv-tools"]}]
+      # the examples are the only check on the shape of the public API: nothing
+      # inside boom calls it the way a game does. each resolves boom by path, so
+      # its pull copies this branch, and the glob covers a new example unedited.
+      subprojects: '[{"path": "examples/*", "build": true, "test": false}]'
+
+  gate:
+    if: always()
+    needs: [lib]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch released mach
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/machdl
-          gh release download -R briar-systems/mach \
-            -p 'mach-*-x86_64-linux.tar.gz' -D /tmp/machdl --clobber
-          tar -xzf /tmp/machdl/mach-*-x86_64-linux.tar.gz -C /tmp/machdl
-          install -m 0755 /tmp/machdl/mach /usr/local/bin/mach
-          mach info
-
-      # mach-glfw's [os.linux].libs cascades "glfw" into every boom link,
-      # mach-glfw vendors GLFW 3.4 and builds it from source, so the X11,
-      # Wayland, and xkbcommon development headers must be present. The stock
-      # libglfw3-dev also satisfies the link input for the system fallback.
-      - name: Install GLFW build dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y libglfw3-dev xorg-dev libwayland-bin \
-            libwayland-dev libxkbcommon-dev wayland-protocols \
-            fonts-dejavu-core mesa-vulkan-drivers vulkan-tools xvfb
-
-      - name: Install spirv-tools
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y spirv-tools
-
-      - name: Sync dependencies
-        run: mach dep pull
-
-      - name: Build
-        run: mach build .
-
-      # A uniform block is a contract between two separately compiled programs
-      # and nothing at runtime checks it. A member at the wrong offset makes the
-      # shader read whatever bytes are there, with no diagnostic anywhere.
-      # A glob over an empty directory makes the loop body run zero times and
-      # the step pass, which is exactly the state a failed shader build leaves.
-      # The expected set is derived from the root manifest, not written down
-      # here. A count restated in this file would go stale with the next shader.
-      - name: Validate the emitted SPIR-V
-        run: |
-          set -euo pipefail
-          expected=$(grep -oP '^out\s*=\s*"spv/\K[^"]+\.spv' mach.toml | sort)
-          actual=$(ls res/spv | sort)
-          if [ "$expected" != "$actual" ]; then
-            echo "res/spv does not match the shader artifacts mach.toml declares"
-            diff <(echo "$expected") <(echo "$actual") || true
-            exit 1
-          fi
-          for f in res/spv/*.spv; do spirv-val "$f"; done
-
-          # The committed modules must be what this source produces. They are
-          # checked in because a consumer pulling boom over git needs them and an
-          # #[embed] is not a build-graph edge (mach#2887), and the cost of
-          # committing generated files is exactly this: a shader edited without a
-          # rebuild would ship the old module, with the source and the binary
-          # disagreeing and nothing saying so.
-          if ! git diff --quiet -- res/spv; then
-            echo "res/spv does not match a fresh build of src/shaders"
-            git diff --stat -- res/spv
-            echo "run 'mach build .' and commit the result"
-            exit 1
-          fi
-
-      - name: Test
-        run: mach test .
-
-      # The examples are the only check on the shape of the public API: nothing
-      # inside boom calls renderer_init or pass_draw_material the way a game
-      # does. They resolve boom by path, so this builds them against the branch
-      # rather than against what is already pushed.
-      - name: Build the examples
-        run: |
-          set -euo pipefail
-          for e in examples/*/; do
-            echo "::group::$e"
-            (cd "$e" && mach dep pull . && mach build .)
-            echo "::endgroup::"
-          done
-
-      # Unit tests cover invalid borrowed bytes without touching Vulkan. This
-      # finite example exercises the successful upload, releases its encoded
-      # source before drawing, then samples and deletes the returned atlas.
-      - name: Check borrowed font bytes
-        run: |
-          timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
-            ./examples/text/out/linux-x86_64/debug/bin/text \
-            --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+      - uses: briar-systems/.github/.github/actions/gate@main
+        with:
+          needs: ${{ toJSON(needs) }}

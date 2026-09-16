@@ -32,31 +32,33 @@
 # boom.graphics.storage. This layer takes its handle at bind time and writes the
 # descriptor, which is the entire extent of the coupling.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use mem: std.memory;
-use vk;
-use boom.graphics.error.Error;
-use boom.graphics.error.error;
-use boom.graphics.vk.Vk;
-use boom.graphics.pipeline.sampler_binding;
-use boom.graphics.storage.FRAME_STORAGE_BINDING;
 use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_unmap;
-use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.error.Capacity;
+use boom.graphics.error.Error;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
 use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.pipeline.sampler_binding;
+use boom.graphics.storage.FRAME_STORAGE_BINDING;
 use boom.graphics.uniform.MeshUniforms;
-use boom.graphics.uniform.SkinnedUniforms;
 use boom.graphics.uniform.ScreenUniforms;
+use boom.graphics.uniform.SkinnedUniforms;
 use boom.graphics.uniform.TintUniforms;
+use boom.graphics.vk.Vk;
+use mem: std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
 
 # The most draws one frame may issue.
 #
@@ -81,9 +83,6 @@ pub val MAX_SLOT_BLOCKS: usize = 16;
 # A block cannot be resized once draws point into its ring, so growth adds a
 # block rather than enlarging one, the same shape the palette rings already use.
 pub val MAX_SLOTS: usize = 512;
-
-# What descriptors_take answers when it cannot supply one.
-pub val NO_SLOT: usize = 0xFFFFFFFFFFFFFFFF;
 
 # Combined image samplers a draw binds, which is a Material's MAX_TEXTURES.
 #
@@ -265,14 +264,14 @@ pub fun palette_block(slot: usize) usize {
 # Blocks are identical rather than doubling. A slot is a fixed 768 bytes and a
 # frame needing more of them needs them one at a time, so there is nothing for a
 # growth curve to amortise.
-fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) bool {
+fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) err[Error] {
     # Checked here rather than only in descriptors_init, because this now runs
     # mid-frame from descriptors_take and a caller with no device would reach
     # vkCreateDescriptorPool with a null handle.
-    if (v == nil || !v.ready) { ret false; }
-    if (d.bcount >= MAX_SLOT_BLOCKS) { ret false; }
-    val bi: usize = d.bcount;
-    var b: *SlotBlock = ?d.blocks[bi];
+    if (v == nil || !v.ready)        { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
+    if (d.bcount >= MAX_SLOT_BLOCKS) { ret err[Error].err{Error.full{Capacity.descriptor_sets{}}}; }
+    val bi: usize      = d.bcount;
+    var b:  *SlotBlock = ?d.blocks[bi];
     b.pool = nil;
 
     # EVERY HANDLE NILLED BEFORE ANYTHING IS CREATED, so a failure part way
@@ -284,7 +283,7 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
         b.rings[z].memory = nil;
         b.rings[z].mapped = nil;
         b.mapped[z]       = nil;
-        z = z + 1;
+        z                 = z + 1;
     }
 
     val total: u32 = (SLOTS_PER_BLOCK * MAX_FRAMES_IN_FLIGHT)::u32;
@@ -316,20 +315,25 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
     ci.poolSizeCount = 3;
     ci.pPoolSizes    = ?sizes[0];
 
-    if (vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?b.pool) != vk.SUCCESS) {
+    val pooled: i32 = vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?b.pool);
+    if (pooled != vk.SUCCESS) {
+        b.pool = nil;
         slot_block_destroy(b, v);
-        ret false;
+        ret err[Error].err{vk_failed(VkCall.create_descriptor_pool{}, pooled)};
     }
 
     # Allocated in batches rather than one call: vkAllocateDescriptorSets takes
     # an array of layouts as long as the set count, and 1024 of them is a large
     # stack array for no benefit.
     var layouts: [64]vk.DescriptorSetLayout;
-    var i: usize = 0;
-    for (i < 64) { layouts[i] = layout; i = i + 1; }
+    var i:       usize = 0;
+    for (i < 64) {
+        layouts[i] = layout;
+        i          = i + 1;
+    }
 
     val count: usize = SLOTS_PER_BLOCK * MAX_FRAMES_IN_FLIGHT;
-    var done: usize = 0;
+    var done:  usize = 0;
     for (done < count) {
         var batch: usize = 64;
         if (count - done < batch) { batch = count - done; }
@@ -340,33 +344,35 @@ fun slot_block_create(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) b
         ai.descriptorPool     = b.pool;
         ai.descriptorSetCount = batch::u32;
         ai.pSetLayouts        = ?layouts[0];
-        if (vk.vkAllocateDescriptorSets(v.device, ?ai, ?b.sets[done]) != vk.SUCCESS) {
+        val allocated: i32 = vk.vkAllocateDescriptorSets(v.device, ?ai, ?b.sets[done]);
+        if (allocated != vk.SUCCESS) {
             slot_block_destroy(b, v);
-            ret false;
+            ret err[Error].err{vk_failed(VkCall.allocate_descriptor_sets{}, allocated)};
         }
         done = done + batch;
     }
 
     var f: usize = 0;
     for (f < MAX_FRAMES_IN_FLIGHT) {
-        val rr: Result[bool, Error] = buffer_init(?b.rings[f], v,
+        val rr: err[Error] = buffer_init(?b.rings[f], v,
             (SLOTS_PER_BLOCK * SLOT_BYTES)::u64,
             vk.BUFFER_USAGE_UNIFORM_BUFFER_BIT,
             vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (is_err[bool, Error](rr)) {
+        if (sel rr.err) {
             slot_block_destroy(b, v);
-            ret false;
+            ret rr;
         }
-        b.mapped[f] = buffer_map(?b.rings[f], v);
-        if (b.mapped[f] == nil) {
+        val mapped: res[ptr, Error] = buffer_map(?b.rings[f], v);
+        if (sel mapped.err) {
             slot_block_destroy(b, v);
-            ret false;
+            ret err[Error].err{mapped.err};
         }
-        f = f + 1;
+        b.mapped[f] = mapped.ok;
+        f           = f + 1;
     }
 
     d.bcount = d.bcount + 1;
-    ret true;
+    ret err[Error].ok{};
 }
 
 # Destroy whatever part of a block was built.
@@ -395,30 +401,28 @@ fun slot_block_destroy(b: *SlotBlock, v: *Vk) {
 }
 
 # Create the first block and the per-frame palette rings.
-pub fun descriptors_init(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) Result[bool, Error] {
+pub fun descriptors_init(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout) err[Error] {
     d.bcount = 0;
     d.used   = 0;
     d.pused  = 0;
     d.layout = layout;
     d.ready  = false;
 
-    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+    if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
-    if (!slot_block_create(d, v, layout)) {
-        ret err[bool, Error](error("could not create the first descriptor block"));
-    }
+    val first: err[Error] = slot_block_create(d, v, layout);
+    if (sel first.err) { ret first; }
 
     var f: usize = 0;
     for (f < MAX_FRAMES_IN_FLIGHT) {
         var b2: usize = 0;
         for (b2 < MAX_PALETTE_BLOCKS) {
             d.pmap[f][b2] = nil;
-            b2 = b2 + 1;
+            b2            = b2 + 1;
         }
         d.pcount[f] = 0;
-        if (!palette_block_create(d, v, f)) {
-            ret err[bool, Error](error("could not create a palette ring"));
-        }
+        val ring: err[Error] = palette_block_create(d, v, f);
+        if (sel ring.err) { ret ring; }
         f = f + 1;
     }
 
@@ -441,7 +445,7 @@ pub fun descriptors_init(d: *Descriptors, v: *Vk, layout: vk.DescriptorSetLayout
         s = s + 1;
     }
 
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Reset the slot counter at the start of a frame.
@@ -453,83 +457,86 @@ pub fun descriptors_begin_frame(d: *Descriptors) {
     d.pused = 0;
 }
 
-# Take the next free slot, or MAX_SLOTS when the frame is full.
 # Take the next slot, adding a block when the current ones are full.
 #
 # A block cannot be resized: draws already recorded this frame point into its
 # ring and hold its descriptor sets, so enlarging it would move the memory under
 # them. Adding one leaves every recorded draw alone.
 #
-# Returns NO_SLOT only when the block ceiling is reached or the allocation
-# fails, which the caller counts as a dropped draw. Growth happens inside a
-# frame, which is the only time it can: the frame that needs the slots is the
-# frame that discovers it needs them.
-pub fun descriptors_take(d: *Descriptors, v: *Vk) usize {
-    if (!d.ready) { ret NO_SLOT; }
+# None only when the block ceiling is reached or the growth fails, which the
+# caller counts as a dropped draw. Growth happens inside a frame, which is the
+# only time it can: the frame that needs the slots is the frame that discovers
+# it needs them.
+pub fun descriptors_take(d: *Descriptors, v: *Vk) opt[usize] {
+    if (!d.ready) { ret opt[usize].none{}; }
     if (d.used >= d.bcount * SLOTS_PER_BLOCK) {
-        if (!slot_block_create(d, v, d.layout)) { ret NO_SLOT; }
+        val grown: err[Error] = slot_block_create(d, v, d.layout);
+        if (sel grown.err) { ret opt[usize].none{}; }
     }
     val s: usize = d.used;
     d.used = d.used + 1;
-    ret s;
+    ret opt[usize].some{s};
 }
 
 # How many slots have been handed out this frame, and how many exist.
-pub fun descriptors_used(d: *Descriptors) usize   { ret d.used; }
-pub fun descriptors_blocks(d: *Descriptors) usize { ret d.bcount; }
+pub fun descriptors_used(d: *Descriptors) usize {
+    ret d.used;
+}
+
+pub fun descriptors_blocks(d: *Descriptors) usize {
+    ret d.bcount;
+}
 
 # Add one block to a frame's palette ring.
 #
 # Blocks are the same size rather than doubling, unlike the vertex arena: a
 # palette is a fixed 8 KB and a frame needing more of them needs them one
 # character at a time, so a block of 32 is already a coarse enough step.
-fun palette_block_create(d: *Descriptors, v: *Vk, frame: usize) bool {
+fun palette_block_create(d: *Descriptors, v: *Vk, frame: usize) err[Error] {
     val n: usize = d.pcount[frame];
-    if (n >= MAX_PALETTE_BLOCKS) { ret false; }
+    if (n >= MAX_PALETTE_BLOCKS) { ret err[Error].err{Error.full{Capacity.palettes{}}}; }
 
-    val pr: Result[bool, Error] = buffer_init(?d.pals[frame][n], v,
+    val pr: err[Error] = buffer_init(?d.pals[frame][n], v,
         (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64,
         vk.BUFFER_USAGE_STORAGE_BUFFER_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    # Torn down rather than abandoned, as the map failure below already is:
-    # buffer_init reports failure as readily after the buffer object exists as
-    # before it, and d.pcount is not advanced, so nothing later would destroy it.
-    if (is_err[bool, Error](pr)) {
-        buffer_dnit(?d.pals[frame][n], v);
-        ret false;
-    }
+    if (sel pr.err) { ret pr; }
 
-    val m: ptr = buffer_map(?d.pals[frame][n], v);
-    if (m == nil) {
+    val m: res[ptr, Error] = buffer_map(?d.pals[frame][n], v);
+    if (sel m.err) {
         buffer_dnit(?d.pals[frame][n], v);
-        ret false;
+        ret err[Error].err{m.err};
     }
-    d.pmap[frame][n] = m;
+    d.pmap[frame][n] = m.ok;
     d.pcount[frame]  = n + 1;
-    ret true;
+    ret err[Error].ok{};
 }
 
 # Take the next free palette slot, growing the ring if this frame has run out.
-pub fun descriptors_take_palette(d: *Descriptors, v: *Vk, frame: usize) usize {
-    if (!d.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret MAX_PALETTES; }
-    if (d.pused >= MAX_PALETTES) { ret MAX_PALETTES; }
+#
+# None when the ring is at its ceiling or cannot grow, which the caller counts
+# as a dropped draw.
+pub fun descriptors_take_palette(d: *Descriptors, v: *Vk, frame: usize) opt[usize] {
+    if (!d.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret opt[usize].none{}; }
+    if (d.pused >= MAX_PALETTES)                   { ret opt[usize].none{}; }
 
     # Every frame's ring has to be able to hold this slot, not just the one
     # being recorded: the slot index is taken once and used again next frame
     # from the other ring, and a block that exists in one and not the other
     # would bind a buffer that was never created.
     val need: usize = palette_block(d.pused) + 1;
-    var f: usize = 0;
+    var f:    usize = 0;
     for (f < MAX_FRAMES_IN_FLIGHT) {
         for (d.pcount[f] < need) {
-            if (!palette_block_create(d, v, f)) { ret MAX_PALETTES; }
+            val grown: err[Error] = palette_block_create(d, v, f);
+            if (sel grown.err) { ret opt[usize].none{}; }
         }
         f = f + 1;
     }
 
     val s: usize = d.pused;
     d.pused = d.pused + 1;
-    ret s;
+    ret opt[usize].some{s};
 }
 
 # How many palette blocks a frame has grown to, for reporting.
@@ -545,7 +552,7 @@ pub fun descriptors_palette_blocks(d: *Descriptors, frame: usize) usize {
 # that has not been recorded yet, so the damage appears nowhere near its cause.
 pub fun descriptors_write_palette(d: *Descriptors, frame: usize, slot: usize, src: *u8, len: usize) bool {
     if (!d.ready || slot >= MAX_PALETTES || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (len > PALETTE_BYTES) { ret false; }
+    if (len > PALETTE_BYTES)                                               { ret false; }
     val b: usize = palette_block(slot);
     if (b >= d.pcount[frame] || d.pmap[frame][b] == nil) { ret false; }
     val base: *u8 = d.pmap[frame][b]:~*u8;
@@ -559,9 +566,9 @@ pub fun descriptors_write_palette(d: *Descriptors, frame: usize, slot: usize, sr
 # would pay a descriptor write for a binding they never read. The two compose:
 # a skinned draw calls both.
 pub fun descriptors_bind_palette(d: *Descriptors, v: *Vk, frame: usize, slot: usize,
-                                 palette: usize) bool {
+    palette: usize) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (palette >= MAX_PALETTES) { ret false; }
+    if (palette >= MAX_PALETTES)                                                         { ret false; }
 
     val pb: usize = palette_block(palette);
     if (pb >= d.pcount[frame]) { ret false; }
@@ -594,7 +601,7 @@ pub fun descriptors_bind_palette(d: *Descriptors, v: *Vk, frame: usize, slot: us
 # recorded yet and is invisible at the call site that caused it.
 pub fun descriptors_write_slot(d: *Descriptors, frame: usize, slot: usize, src: *u8, len: usize) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (len > SLOT_BYTES) { ret false; }
+    if (len > SLOT_BYTES)                                                                { ret false; }
     val base: *u8 = d.blocks[slot_block(slot)].mapped[frame]:~*u8;
     mem.copy[u8](?base[slot_in_block(slot) * SLOT_BYTES], src, len);
     ret true;
@@ -606,9 +613,9 @@ pub fun descriptors_write_slot(d: *Descriptors, frame: usize, slot: usize, src: 
 # start and the tint after it, so the fragment stage's binding reads from the
 # same slot at an offset rather than needing a slot of its own.
 pub fun descriptors_write_slot_at(d: *Descriptors, frame: usize, slot: usize, offset: usize,
-                                  src: *u8, len: usize) bool {
+    src: *u8, len: usize) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (offset + len > SLOT_BYTES) { ret false; }
+    if (offset + len > SLOT_BYTES)                                                       { ret false; }
     val base: *u8 = d.blocks[slot_block(slot)].mapped[frame]:~*u8;
     mem.copy[u8](?base[slot_in_block(slot) * SLOT_BYTES + offset], src, len);
     ret true;
@@ -641,12 +648,12 @@ pub fun descriptors_write_slot_at(d: *Descriptors, frame: usize, slot: usize, of
 # storage_size: its capacity, which becomes the descriptor's range and so the
 #               largest storage block a shader may declare
 pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize,
-                              size: u64, views: *vk.ImageView, samplers: *vk.Sampler,
-                              tint_offset: u64, tint_size: u64,
-                              storage: vk.Buffer, storage_size: u64) bool {
+    size: u64, views: *vk.ImageView, samplers: *vk.Sampler,
+    tint_offset: u64, tint_size: u64,
+    storage: vk.Buffer, storage_size: u64) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
-    if (views == nil || samplers == nil) { ret false; }
-    if (storage == nil || storage_size == 0) { ret false; }
+    if (views == nil || samplers == nil)                                                 { ret false; }
+    if (storage == nil || storage_size == 0)                                             { ret false; }
     # Every sampler binding is written every draw, so a shader sampling a slot
     # the material never filled reads a defined texture rather than whatever the
     # last draw left in the set. The caller supplies the fallback; the renderer
@@ -657,9 +664,9 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
         ti2 = ti2 + 1;
     }
     if (tint_size > 0 && (tint_offset % UNIFORM_ALIGN::u64) != 0) { ret false; }
-    val blk:  usize = slot_block(slot);
+    val blk:  usize            = slot_block(slot);
     val set:  vk.DescriptorSet = d.blocks[blk].sets[set_index(slot, frame)];
-    val base: u64 = slot_offset(slot);
+    val base: u64              = slot_offset(slot);
 
     var bi: vk.DescriptorBufferInfo;
     bi.buffer = d.blocks[blk].rings[frame].handle;
@@ -677,7 +684,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
         ii[ij].sampler     = samplers[ij];
         ii[ij].imageView   = views[ij];
         ii[ij].imageLayout = vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        ij = ij + 1;
+        ij                 = ij + 1;
     }
 
     # The game's own block, always bound. A shader that does not declare
@@ -702,7 +709,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     # One write for binding 0, one per sampler, the game's block, the frame's
     # storage, and the tint when there is one.
     var writes: [8]vk.WriteDescriptorSet;
-    var n: u32 = 0;
+    var n:      u32 = 0;
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[n].pNext            = nil;
@@ -714,7 +721,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].pImageInfo       = nil;
     writes[n].pBufferInfo      = ?bi;
     writes[n].pTexelBufferView = nil;
-    n = n + 1;
+    n                          = n + 1;
 
     var si: usize = 0;
     for (si < MAX_SAMPLERS) {
@@ -728,8 +735,8 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
         writes[n].pImageInfo       = ?ii[si];
         writes[n].pBufferInfo      = nil;
         writes[n].pTexelBufferView = nil;
-        n = n + 1;
-        si = si + 1;
+        n                          = n + 1;
+        si                         = si + 1;
     }
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -742,7 +749,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].pImageInfo       = nil;
     writes[n].pBufferInfo      = ?ui;
     writes[n].pTexelBufferView = nil;
-    n = n + 1;
+    n                          = n + 1;
 
     writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[n].pNext            = nil;
@@ -754,7 +761,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
     writes[n].pImageInfo       = nil;
     writes[n].pBufferInfo      = ?fi;
     writes[n].pTexelBufferView = nil;
-    n = n + 1;
+    n                          = n + 1;
 
     if (tint_size > 0) {
         writes[n].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -767,7 +774,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
         writes[n].pImageInfo       = nil;
         writes[n].pBufferInfo      = ?ti;
         writes[n].pTexelBufferView = nil;
-        n = n + 1;
+        n                          = n + 1;
     }
 
     vk.vkUpdateDescriptorSets(v.device, n, ?writes[0], 0, nil);
@@ -776,7 +783,7 @@ pub fun descriptors_bind_slot(d: *Descriptors, v: *Vk, frame: usize, slot: usize
 
 # Bind a slot's set for the current frame before a draw.
 pub fun descriptors_bind(d: *Descriptors, cmd: vk.CommandBuffer, layout: vk.PipelineLayout,
-                         frame: usize, slot: usize) bool {
+    frame: usize, slot: usize) bool {
     if (!d.ready || slot >= d.bcount * SLOTS_PER_BLOCK || frame >= MAX_FRAMES_IN_FLIGHT) { ret false; }
     var set: vk.DescriptorSet = d.blocks[slot_block(slot)].sets[set_index(slot, frame)];
     vk.vkCmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, ?set, 0, nil);
@@ -796,7 +803,7 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
         for (bi2 < d.bcount) {
             buffer_dnit(?d.blocks[bi2].rings[f], v);
             d.blocks[bi2].mapped[f] = nil;
-            bi2 = bi2 + 1;
+            bi2                     = bi2 + 1;
         }
         var pb: usize = 0;
         for (pb < d.pcount[f]) {
@@ -808,18 +815,18 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
             pb = pb + 1;
         }
         d.pcount[f] = 0;
-        f = f + 1;
+        f           = f + 1;
     }
     var bi3: usize = 0;
     for (bi3 < d.bcount) {
         vk.vkDestroyDescriptorPool(v.device, d.blocks[bi3].pool, nil);
         d.blocks[bi3].pool = nil;
-        bi3 = bi3 + 1;
+        bi3                = bi3 + 1;
     }
     d.bcount = 0;
-    d.used  = 0;
-    d.pused = 0;
-    d.ready = false;
+    d.used   = 0;
+    d.pused  = 0;
+    d.ready  = false;
 }
 
 # --------------------------------------------------------------------- tests
@@ -831,8 +838,11 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
 
 test "descriptor: each slot and frame gets a distinct set" {
     var seen: [1024]bool;
-    var i: usize = 0;
-    for (i < 1024) { seen[i] = false; i = i + 1; }
+    var i:    usize = 0;
+    for (i < 1024) {
+        seen[i] = false;
+        i       = i + 1;
+    }
 
     var s: usize = 0;
     for (s < MAX_SLOTS) {
@@ -842,7 +852,7 @@ test "descriptor: each slot and frame gets a distinct set" {
             if (n >= 1024) { ret 1; }
             if (seen[n])   { ret 2; }
             seen[n] = true;
-            f = f + 1;
+            f       = f + 1;
         }
         s = s + 1;
     }
@@ -866,7 +876,7 @@ test "descriptor: slot offsets do not overlap and are 256-aligned" {
     # 256 is the largest minUniformBufferOffsetAlignment any implementation
     # reports. An offset that is not a multiple of it is rejected on the
     # hardware that asks for it and accepted everywhere else.
-    if (slot_offset(0) != 0)          { ret 1; }
+    if (slot_offset(0) != 0)               { ret 1; }
     if (slot_offset(1) != SLOT_BYTES::u64) { ret 2; }
     var i: usize = 0;
     for (i < MAX_SLOTS) {
@@ -900,7 +910,7 @@ test "descriptor: both uniform ranges in a slot are correctly aligned" {
     if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0) { ret 2; }
     if (COLOUR_OFFSET == 0)                   { ret 3; }
     # The colour must not run past the end of its slot.
-    if (COLOUR_OFFSET + 16 > SLOT_BYTES)      { ret 4; }
+    if (COLOUR_OFFSET + 16 > SLOT_BYTES) { ret 4; }
     ret 0;
 }
 
@@ -911,7 +921,7 @@ test "descriptor: the game's own block is aligned and fits inside a slot" {
     # someone else's machine.
     if ((USER_OFFSET % UNIFORM_ALIGN) != 0) { ret 1; }
     # It must not overlap the colour block below it.
-    if (USER_OFFSET < COLOUR_OFFSET + 16)   { ret 2; }
+    if (USER_OFFSET < COLOUR_OFFSET + 16) { ret 2; }
     # And a full-size block must not run past the end of the slot, or a game
     # writing USER_BYTES would be refused at the draw rather than here.
     if (USER_OFFSET + USER_BYTES > SLOT_BYTES) { ret 3; }
@@ -933,41 +943,46 @@ test "descriptor: slots run out rather than wrapping onto live draws" {
     # 0 would silently give a later draw the same uniform range as the first.
     var d: Descriptors;
     var v: Vk;
-    v.ready = false;
+    v.ready  = false;
     d.ready  = true;
     d.used   = 0;
     d.bcount = 1;
 
     var i: usize = 0;
     for (i < SLOTS_PER_BLOCK) {
-        if (descriptors_take(?d, ?v) != i) { ret 1; }
+        if (!took(descriptors_take(?d, ?v), i)) { ret 1; }
         i = i + 1;
     }
-    if (descriptors_take(?d, ?v) != NO_SLOT) { ret 2; }
+    val full: opt[usize] = descriptors_take(?d, ?v);
+    if (!sel full.none) { ret 2; }
 
     descriptors_begin_frame(?d);
-    if (descriptors_take(?d, ?v) != 0) { ret 3; }
+    if (!took(descriptors_take(?d, ?v), 0)) { ret 3; }
     ret 0;
+}
+
+fun took(slot: opt[usize], expected: usize) bool {
+    ret sel slot.some && slot.some == expected;
 }
 
 test "descriptor: a slot maps to its own block and offset" {
     # The arithmetic that sends a write into the right ring. A mistake here puts
     # one block's draw into another block's memory, which is invisible at the
     # call site and looks like a corrupted uniform much later.
-    if (slot_block(0) != 0)                     { ret 1; }
-    if (slot_block(SLOTS_PER_BLOCK - 1) != 0)   { ret 2; }
-    if (slot_block(SLOTS_PER_BLOCK) != 1)       { ret 3; }
+    if (slot_block(0) != 0)                       { ret 1; }
+    if (slot_block(SLOTS_PER_BLOCK - 1) != 0)     { ret 2; }
+    if (slot_block(SLOTS_PER_BLOCK) != 1)         { ret 3; }
     if (slot_block(SLOTS_PER_BLOCK * 3 + 7) != 3) { ret 4; }
 
-    if (slot_in_block(SLOTS_PER_BLOCK) != 0)      { ret 5; }
-    if (slot_in_block(SLOTS_PER_BLOCK + 7) != 7)  { ret 6; }
+    if (slot_in_block(SLOTS_PER_BLOCK) != 0)     { ret 5; }
+    if (slot_in_block(SLOTS_PER_BLOCK + 7) != 7) { ret 6; }
 
     # Every block's ring starts at zero, so an offset is block-relative and the
     # last slot of a block still fits inside it.
-    if (slot_offset(SLOTS_PER_BLOCK) != 0)        { ret 7; }
+    if (slot_offset(SLOTS_PER_BLOCK) != 0)                   { ret 7; }
     if (slot_offset(SLOTS_PER_BLOCK + 1) != SLOT_BYTES::u64) { ret 8; }
     if (slot_offset(SLOTS_PER_BLOCK - 1) + SLOT_BYTES::u64
-        != (SLOTS_PER_BLOCK * SLOT_BYTES)::u64)   { ret 9; }
+        != (SLOTS_PER_BLOCK * SLOT_BYTES)::u64) { ret 9; }
 
     # Two slots in different blocks share a set index, which is correct because
     # they index different blocks' set arrays.
@@ -1029,8 +1044,12 @@ test "descriptor: a set is not bound without a frame storage buffer" {
     v.ready  = false;
     var views:    [4]vk.ImageView;
     var samplers: [4]vk.Sampler;
-    var i: usize = 0;
-    for (i < MAX_SAMPLERS) { views[i] = nil; samplers[i] = nil; i = i + 1; }
+    var i:        usize = 0;
+    for (i < MAX_SAMPLERS) {
+        views[i]    = nil;
+        samplers[i] = nil;
+        i           = i + 1;
+    }
     # A zero range is refused for the same reason: Vulkan forbids it, and it is
     # what an uninitialized capacity looks like.
     if (descriptors_bind_slot(?d, ?v, 0, 0, 64, ?views[0], ?samplers[0], 0, 0, nil, 4096)) { ret 1; }
@@ -1045,13 +1064,15 @@ test "descriptor: an uninitialized pool refuses everything" {
     var v: Vk;
     v.ready = false;
     var bytes: [8]u8;
-    if (descriptors_take(?d, ?v) != NO_SLOT)                     { ret 1; }
-    if (descriptors_write_slot(?d, 0, 0, ?bytes[0], 8))          { ret 2; }
-    if (descriptors_bind(?d, nil, nil, 0, 0))                    { ret 3; }
+    val slot:  opt[usize] = descriptors_take(?d, ?v);
+    if (!sel slot.none)                                                  { ret 1; }
+    if (descriptors_write_slot(?d, 0, 0, ?bytes[0], 8))                  { ret 2; }
+    if (descriptors_bind(?d, nil, nil, 0, 0))                            { ret 3; }
     if (descriptors_bind_slot(?d, ?v, 0, 0, 64, nil, nil, 0, 0, nil, 0)) { ret 4; }
-    if (descriptors_take_palette(?d, ?v, 0) != MAX_PALETTES)     { ret 5; }
-    if (descriptors_write_palette(?d, 0, 0, ?bytes[0], 8))       { ret 6; }
-    if (descriptors_bind_palette(?d, ?v, 0, 0, 0))               { ret 7; }
+    val palette: opt[usize] = descriptors_take_palette(?d, ?v, 0);
+    if (!sel palette.none)                                 { ret 5; }
+    if (descriptors_write_palette(?d, 0, 0, ?bytes[0], 8)) { ret 6; }
+    if (descriptors_bind_palette(?d, ?v, 0, 0, 0))         { ret 7; }
     descriptors_dnit(?d, ?v);
     ret 0;
 }
@@ -1071,21 +1092,21 @@ test "descriptor: a palette slot names a block and an offset within it" {
     #
     # 8192 is a multiple of every minStorageBufferOffsetAlignment a device
     # reports, so no offset here needs a device query to be legal.
-    if (palette_block(0) != 0)                      { ret 1; }
-    if (palette_offset(0) != 0)                     { ret 2; }
-    if (palette_offset(1) != PALETTE_BYTES::u64)    { ret 3; }
+    if (palette_block(0) != 0)                   { ret 1; }
+    if (palette_offset(0) != 0)                  { ret 2; }
+    if (palette_offset(1) != PALETTE_BYTES::u64) { ret 3; }
 
     if (palette_block(PALETTES_PER_BLOCK - 1) != 0) { ret 4; }
     # The first slot of the second block wraps the offset back to zero, which is
     # the point of splitting: each block is a buffer of its own.
-    if (palette_block(PALETTES_PER_BLOCK) != 1)     { ret 5; }
-    if (palette_offset(PALETTES_PER_BLOCK) != 0)    { ret 6; }
+    if (palette_block(PALETTES_PER_BLOCK) != 1)  { ret 5; }
+    if (palette_offset(PALETTES_PER_BLOCK) != 0) { ret 6; }
 
     # And no slot ever addresses past the end of the block holding it.
     var i: usize = 0;
     for (i < MAX_PALETTES) {
         if (palette_offset(i) + PALETTE_BYTES::u64 > (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64) { ret 7; }
-        if (palette_block(i) >= MAX_PALETTE_BLOCKS) { ret 8; }
+        if (palette_block(i) >= MAX_PALETTE_BLOCKS)                                             { ret 8; }
         i = i + 1;
     }
     ret 0;
@@ -1101,18 +1122,19 @@ test "descriptor: palette slots are handed out in order and reset each frame" {
     var f: usize = 0;
     for (f < MAX_FRAMES_IN_FLIGHT) {
         d.pcount[f] = MAX_PALETTE_BLOCKS;
-        f = f + 1;
+        f           = f + 1;
     }
 
     var i: usize = 0;
     for (i < MAX_PALETTES) {
-        if (descriptors_take_palette(?d, ?v, 0) != i) { ret 1; }
+        if (!took(descriptors_take_palette(?d, ?v, 0), i)) { ret 1; }
         i = i + 1;
     }
     # Full, and reported as full rather than wrapping onto a live palette.
-    if (descriptors_take_palette(?d, ?v, 0) != MAX_PALETTES) { ret 2; }
+    val full: opt[usize] = descriptors_take_palette(?d, ?v, 0);
+    if (!sel full.none) { ret 2; }
     descriptors_begin_frame(?d);
-    if (descriptors_take_palette(?d, ?v, 0) != 0) { ret 3; }
+    if (!took(descriptors_take_palette(?d, ?v, 0), 0)) { ret 3; }
     ret 0;
 }
 
@@ -1120,7 +1142,7 @@ test "descriptor: the palette ring holds more than one block of skinned draws" {
     # The defect this replaces: the ring was a flat 32, so the thirty-third
     # skinned draw in a frame was refused. Refusal is in submission order, so a
     # crowd lost whichever characters were submitted last, and said nothing.
-    if (MAX_PALETTES <= PALETTES_PER_BLOCK) { ret 1; }
+    if (MAX_PALETTES <= PALETTES_PER_BLOCK)                      { ret 1; }
     if (MAX_PALETTES != PALETTES_PER_BLOCK * MAX_PALETTE_BLOCKS) { ret 2; }
     ret 0;
 }

@@ -4,11 +4,11 @@
 # quaternions, and matrix columns use native SIMD values; graphics, physics,
 # and audio therefore exchange the same representations without adapters.
 
-use boom.math.scalar;
-use boom.math.vec;
 use boom.math.mat;
 use boom.math.quat;
+use boom.math.scalar;
 use boom.math.transform;
+use boom.math.vec;
 
 fwd scalar.PI;
 fwd scalar.HALF_PI;

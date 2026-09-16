@@ -17,21 +17,46 @@
 # Boom and mach-phys share the native f32x4 representation, so values cross the
 # private subsystem boundary without conversion.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use phys: phys.world;
-use pbody: phys.body;
+use boom.math.transform.Transform;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
-use boom.math.transform.Transform;
+use pbody: phys.body;
+use phys:  phys.world;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
 
 # A body's identity within the physics world.
+#
+# An id names a slot. It stays valid until physics_remove, after which the slot
+# may be given to a later body.
 pub def BodyId: usize;
 
-# The id that no body has.
-pub val NO_BODY: BodyId = 0;
+# How many bodies one Physics tracks.
+pub val MAX_BODIES: usize = 256;
+
+# why a physics operation was refused
+# ---
+# full:    the world already holds MAX_BODIES bodies
+# no_body: the id names no live body
+pub tag PhysicsError: u8 {
+    full;
+    no_body: BodyId;
+}
+
+# a one-line description of a physics failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun physics_error_message(e: PhysicsError) str {
+    if (sel e.full) { ret "the physics world is full"; }
+    ret "no live body has that id";
+}
 
 # One collision found by the most recent physics step.
 # ---
@@ -72,7 +97,10 @@ pub fun physics_new(gravity: Vec3) Physics {
     p.world = phys.world_new(gravity);
     p.count = 0;
     var i: usize = 0;
-    for (i < 256) { p.tracked[i].used = false; i = i + 1; }
+    for (i < MAX_BODIES) {
+        p.tracked[i].used = false;
+        i                 = i + 1;
+    }
     ret p;
 }
 
@@ -84,82 +112,94 @@ pub fun physics_new(gravity: Vec3) Physics {
 # t:    Transform to drive; may be nil for a body nothing draws.
 # half: Half-extents of the body's AABB.
 # mass: Mass in kilograms; zero or less makes the body static.
-pub fun physics_add(p: *Physics, t: *Transform, position: Vec3, half: Vec3, mass: f32) BodyId {
+# ret:  the new body's id, or full when no slot is free
+pub fun physics_add(p: *Physics, t: *Transform, position: Vec3, half: Vec3, mass: f32) res[BodyId, PhysicsError] {
+    # the first free slot, or the next unused one past the high-water mark
+    var s: usize = 0;
+    for (s < p.count && p.tracked[s].used) { s = s + 1; }
+    if (s >= MAX_BODIES) { ret res[BodyId, PhysicsError].err{PhysicsError.full{}}; }
+
     var b: pbody.Body;
     if (mass > 0.0) { b = pbody.body_dynamic(position, half, mass); }
     or              { b = pbody.body_static(position, half); }
 
+    # the world's own table is the same size as this one, so a refusal there is
+    # the same exhaustion reported from the other side
     val id: phys.BodyId = phys.world_add(?p.world, b);
-    if (id == phys.NO_BODY) { ret NO_BODY; }
+    if (id == phys.NO_BODY) { ret res[BodyId, PhysicsError].err{PhysicsError.full{}}; }
 
-    var i: usize = 0;
-    for (i < p.count) {
-        if (!p.tracked[i].used) {
-            p.tracked[i].id        = id;
-            p.tracked[i].transform = t;
-            p.tracked[i].used      = true;
-            ret (i + 1)::BodyId;
-        }
-        i = i + 1;
-    }
-    if (p.count >= 256) { ret NO_BODY; }
-    val s: usize = p.count;
     p.tracked[s].id        = id;
     p.tracked[s].transform = t;
     p.tracked[s].used      = true;
-    p.count = p.count + 1;
-    ret (s + 1)::BodyId;
+    if (s == p.count) { p.count = p.count + 1; }
+    ret res[BodyId, PhysicsError].ok{s::BodyId};
 }
 
 # Remove a body and stop driving its transform.
+# ---
+# ret: true when a live body was removed, false when the id named none
 pub fun physics_remove(p: *Physics, id: BodyId) bool {
-    if (id == NO_BODY || id::usize > p.count) { ret false; }
-    val i: usize = id::usize - 1;
-    if (!p.tracked[i].used) { ret false; }
-    phys.world_remove(?p.world, p.tracked[i].id);
-    p.tracked[i].used = false;
+    val slot: opt[usize] = live_slot(p, id);
+    if (!sel slot.some) { ret false; }
+    phys.world_remove(?p.world, p.tracked[slot.some].id);
+    p.tracked[slot.some].used = false;
     ret true;
 }
 
 # Set a body's velocity.
-pub fun physics_set_velocity(p: *Physics, id: BodyId, v: Vec3) bool {
+# ---
+# ret: ok, or no_body when the id names no live body
+pub fun physics_set_velocity(p: *Physics, id: BodyId, v: Vec3) err[PhysicsError] {
     val b: *pbody.Body = body_of(p, id);
-    if (b == nil) { ret false; }
+    if (b == nil) { ret err[PhysicsError].err{PhysicsError.no_body{id}}; }
     b.velocity = v;
-    ret true;
+    ret err[PhysicsError].ok{};
 }
 
 # Read a body's velocity.
-pub fun physics_velocity(p: *Physics, id: BodyId) Vec3 {
+# ---
+# ret: the velocity, or none when the id names no live body
+pub fun physics_velocity(p: *Physics, id: BodyId) opt[Vec3] {
     val b: *pbody.Body = body_of(p, id);
-    if (b == nil) { ret vec3(0.0, 0.0, 0.0); }
-    ret b.velocity;
+    if (b == nil) { ret opt[Vec3].none{}; }
+    ret opt[Vec3].some{b.velocity};
 }
 
 # Set a body's restitution, from 0 fully damped to 1 fully elastic.
-pub fun physics_set_restitution(p: *Physics, id: BodyId, e: f32) bool {
+# ---
+# ret: ok, or no_body when the id names no live body
+pub fun physics_set_restitution(p: *Physics, id: BodyId, e: f32) err[PhysicsError] {
     val b: *pbody.Body = body_of(p, id);
-    if (b == nil) { ret false; }
+    if (b == nil) { ret err[PhysicsError].err{PhysicsError.no_body{id}}; }
     b.restitution = e;
-    ret true;
+    ret err[PhysicsError].ok{};
+}
+
+# the tracked slot behind a live engine id
+fun live_slot(p: *Physics, id: BodyId) opt[usize] {
+    val i: usize = id::usize;
+    if (i >= p.count)       { ret opt[usize].none{}; }
+    if (!p.tracked[i].used) { ret opt[usize].none{}; }
+    ret opt[usize].some{i};
 }
 
 # The underlying body behind an engine id, or nil.
+#
+# nil here is the underlying world's own spelling of absence.
 fun body_of(p: *Physics, id: BodyId) *pbody.Body {
-    if (id == NO_BODY || id::usize > p.count) { ret nil; }
-    val i: usize = id::usize - 1;
-    if (!p.tracked[i].used) { ret nil; }
-    ret phys.world_body(?p.world, p.tracked[i].id);
+    val slot: opt[usize] = live_slot(p, id);
+    if (!sel slot.some) { ret nil; }
+    ret phys.world_body(?p.world, p.tracked[slot.some].id);
 }
 
-# The engine id for an underlying world id, or NO_BODY.
-fun engine_id(p: *Physics, wid: phys.BodyId) BodyId {
+# The engine id for an underlying world id.
+fun engine_id(p: *Physics, wid: phys.BodyId) opt[BodyId] {
     var i: usize = 0;
     for (i < p.count) {
-        if (p.tracked[i].used && p.tracked[i].id == wid) { ret (i + 1)::BodyId; }
+        if (p.tracked[i].used && p.tracked[i].id == wid) { ret opt[BodyId].some{i::BodyId}; }
         i = i + 1;
     }
-    ret NO_BODY;
+    ret opt[BodyId].none{};
 }
 
 # Advance the simulation and write tracked transforms.
@@ -192,111 +232,140 @@ pub fun physics_contact_count(p: *Physics) usize {
 # Read one collision from the most recent step.
 #
 # The returned ids are those produced by physics_add, and the normal uses
-# boom's math type. Returns false for an invalid index or output pointer.
+# boom's math type.
 # ---
 # p:     physics world to query
 # index: contact index in [0, physics_contact_count)
-# out:   receives the contact
-# ret:   true when a contact was written
-pub fun physics_contact(p: *Physics, index: usize, out: *Contact) bool {
-    if (out == nil || index >= p.world.contact_count) { ret false; }
+# ret:   the contact, or none for an index past the count
+pub fun physics_contact(p: *Physics, index: usize) opt[Contact] {
+    if (index >= p.world.contact_count) { ret opt[Contact].none{}; }
     val c: *phys.Contact = ?p.world.contacts[index];
-    val a: BodyId = engine_id(p, c.a);
-    val b: BodyId = engine_id(p, c.b);
-    if (a == NO_BODY || b == NO_BODY) { ret false; }
-    out.a      = a;
-    out.b      = b;
-    out.normal = c.normal;
-    out.depth  = c.depth;
-    ret true;
+    val a: opt[BodyId]   = engine_id(p, c.a);
+    if (!sel a.some) { ret opt[Contact].none{}; }
+    val b: opt[BodyId] = engine_id(p, c.b);
+    if (!sel b.some) { ret opt[Contact].none{}; }
+    ret opt[Contact].some{Contact{a: a.some, b: b.some, normal: c.normal, depth: c.depth}};
 }
 
 # --------------------------------------------------------------------- tests
 
 use boom.math.transform.transform_identity;
 
+# the id from an add that must succeed, or a slot no body has
+fun added(r: res[BodyId, PhysicsError]) BodyId {
+    if (sel r.ok) { ret r.ok; }
+    ret MAX_BODIES::BodyId;
+}
+
 test "physics: a stepped body writes back to its transform" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var p: Physics   = physics_new(vec3(0.0, -10.0, 0.0));
     var t: Transform = transform_identity();
 
-    val id: BodyId = physics_add(?p, ?t, vec3(0.0, 100.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
-    if (id == NO_BODY) { ret 1; }
+    val r: res[BodyId, PhysicsError] = physics_add(?p, ?t, vec3(0.0, 100.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    if (!sel r.ok) { ret 1; }
 
     physics_step(?p, 0.1);
     # The renderer reads this transform, so it must hold the body's position,
     # not merely differ from the starting value. Semi-implicit Euler under
     # -10 m/s^2 for 0.1s puts the body at 99.9.
-    if (t.position[1] < 99.89 || t.position[1] > 99.91) { ret 1; }
+    if (t.position[1] < 99.89 || t.position[1] > 99.91) { ret 2; }
     ret 0;
 }
 
 test "physics: a body with no transform is simulated without crashing" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
-    val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    var p:  Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    val id: BodyId  = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
     physics_step(?p, 0.1);
-    if (physics_velocity(?p, id)[1] >= 0.0) { ret 1; }
+    val v: opt[Vec3] = physics_velocity(?p, id);
+    if (!sel v.some)      { ret 1; }
+    if (v.some[1] >= 0.0) { ret 2; }
     ret 0;
 }
 
 test "physics: a collision is queried with both body ids" {
-    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    var p:  Physics   = physics_new(vec3(0.0, 0.0, 0.0));
     var ta: Transform = transform_identity();
     var tb: Transform = transform_identity();
 
-    val a: BodyId = physics_add(?p, ?ta, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
-    val b: BodyId = physics_add(?p, ?tb, vec3(1.5, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    val a: BodyId = added(physics_add(?p, ?ta, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
+    val b: BodyId = added(physics_add(?p, ?tb, vec3(1.5, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
 
     physics_step(?p, 0.016);
     if (physics_contact_count(?p) != 1) { ret 1; }
 
-    var c: Contact;
-    if (!physics_contact(?p, 0, ?c)) { ret 1; }
+    val c: opt[Contact] = physics_contact(?p, 0);
+    if (!sel c.some) { ret 2; }
     # The ids must be the engine's, not the underlying world's, or a game
     # cannot match them against what physics_add returned.
-    if (c.a != a) { ret 1; }
-    if (c.b != b) { ret 1; }
-    if (c.depth <= 0.0) { ret 1; }
+    if (c.some.a != a)       { ret 3; }
+    if (c.some.b != b)       { ret 4; }
+    if (c.some.depth <= 0.0) { ret 5; }
     ret 0;
 }
 
 test "physics: separated bodies produce no contact" {
     var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
-    physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
-    physics_add(?p, nil, vec3(50.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
+    added(physics_add(?p, nil, vec3(50.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
     physics_step(?p, 0.016);
     if (physics_contact_count(?p) != 0) { ret 1; }
     ret 0;
 }
 
-test "physics: invalid contact queries are refused" {
-    var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
-    var c: Contact;
-    if (physics_contact(?p, 0, ?c)) { ret 1; }
-    if (physics_contact(?p, 0, nil)) { ret 2; }
+test "physics: an out of range contact query is absent" {
+    var p: Physics      = physics_new(vec3(0.0, 0.0, 0.0));
+    val c: opt[Contact] = physics_contact(?p, 0);
+    if (sel c.some) { ret 1; }
     ret 0;
 }
 
 test "physics: velocity round-trips and removal stops the body" {
+    var p:  Physics = physics_new(vec3(0.0, 0.0, 0.0));
+    val id: BodyId  = added(physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0));
+
+    val set: err[PhysicsError] = physics_set_velocity(?p, id, vec3(3.0, 0.0, 0.0));
+    if (!sel set.ok) { ret 1; }
+    val v: opt[Vec3] = physics_velocity(?p, id);
+    if (!sel v.some)      { ret 2; }
+    if (v.some[0] != 3.0) { ret 3; }
+
+    if (!physics_remove(?p, id)) { ret 4; }
+    if (physics_remove(?p, id))  { ret 5; }
+    val gone: opt[Vec3] = physics_velocity(?p, id);
+    if (sel gone.some) { ret 6; }
+    val refused: err[PhysicsError] = physics_set_restitution(?p, id, 0.5);
+    if (!sel refused.err)         { ret 7; }
+    if (!sel refused.err.no_body) { ret 8; }
+    ret 0;
+}
+
+test "physics: a full world refuses another body" {
     var p: Physics = physics_new(vec3(0.0, 0.0, 0.0));
-    val id: BodyId = physics_add(?p, nil, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
-
-    if (!physics_set_velocity(?p, id, vec3(3.0, 0.0, 0.0))) { ret 1; }
-    if (physics_velocity(?p, id)[0] != 3.0)                  { ret 1; }
-
-    if (!physics_remove(?p, id))    { ret 1; }
-    if (physics_remove(?p, id))     { ret 1; }
-    if (physics_velocity(?p, id)[0] != 0.0) { ret 1; }
+    var i: usize   = 0;
+    for (i < MAX_BODIES) {
+        val r: res[BodyId, PhysicsError] = physics_add(?p, nil, vec3(i::f32 * 10.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+        if (!sel r.ok) { ret 1; }
+        i = i + 1;
+    }
+    val over: res[BodyId, PhysicsError] = physics_add(?p, nil, vec3(0.0, 50.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    if (!sel over.err)      { ret 2; }
+    if (!sel over.err.full) { ret 3; }
+    # a freed slot is reused
+    if (!physics_remove(?p, 7)) { ret 4; }
+    val again: res[BodyId, PhysicsError] = physics_add(?p, nil, vec3(0.0, 50.0, 0.0), vec3(1.0, 1.0, 1.0), 1.0);
+    if (!sel again.ok) { ret 5; }
+    if (again.ok != 7) { ret 6; }
     ret 0;
 }
 
 test "physics: a static body is not moved by gravity" {
-    var p: Physics = physics_new(vec3(0.0, -10.0, 0.0));
+    var p: Physics   = physics_new(vec3(0.0, -10.0, 0.0));
     var t: Transform = transform_identity();
-    physics_add(?p, ?t, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.0);
+    added(physics_add(?p, ?t, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0), 0.0));
     physics_step(?p, 0.1);
     # A static body must not move, and the transform must still have been
     # written rather than left untouched by coincidence.
     if (t.position[1] != 0.0) { ret 1; }
-    if (t.position[0] != 0.0) { ret 1; }
+    if (t.position[0] != 0.0) { ret 2; }
     ret 0;
 }

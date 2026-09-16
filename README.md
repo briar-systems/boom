@@ -29,6 +29,8 @@ returning the context's final process status.
 ```mach
 use std.runtime;
 use std.chrono.duration.SECOND;
+use std.types.result.res;
+use std.types.error.err;
 use boom;
 
 fun tick(ctx: *boom.context.Context) { }              # fixed-rate update
@@ -44,10 +46,10 @@ fun main(argc: i64, argv: **u8) i64 {
         fixed_dt:  SECOND / 60,      # 60 Hz update
         max_frame: SECOND / 4,       # spiral-of-death clamp
         frame_dt:  0,                # wall clock; pin for deterministic probes
+        mode:      boom.window.WindowMode.windowed{},
     };
-    if (!boom.context.context_init(?ctx, cfg)) {
-        ret 1;
-    }
+    val started: err[boom.context.ContextError] = boom.context.context_init(?ctx, cfg);
+    if (sel started.err) { ret 1; }
 
     var app: boom.app.App = boom.app.App{
         f_init:     nil::fun(*boom.context.Context),
@@ -55,10 +57,11 @@ fun main(argc: i64, argv: **u8) i64 {
         f_draw:     draw,
         f_dnit: nil::fun(*boom.context.Context),
     };
-    val status: i64 = boom.engine.run(?ctx, ?app);
+    val ran: res[i64, boom.engine.EngineError] = boom.engine.run(?ctx, ?app);
 
     boom.context.context_shutdown(?ctx);
-    ret status;
+    if (sel ran.err) { ret 1; }
+    ret ran.ok;
 }
 ```
 
@@ -92,8 +95,8 @@ context the way GL did, so `texture_load`, `mesh_load`, `model_load`, and
 
 **Decoded textures name their colour space.** `texture_load` and
 `texture_from_bytes` retain their sRGB default for display colour. Their
-`texture_load_as` and `texture_from_bytes_as` forms take `COLOR_SRGB` or
-`COLOR_LINEAR`; the latter stores normal, roughness, metallic, occlusion and
+`texture_load_as` and `texture_from_bytes_as` forms take `ColorSpace.srgb{}` or
+`ColorSpace.linear{}`; the latter stores normal, roughness, metallic, occlusion and
 mask maps in RGBA8 UNORM so sampling preserves their authored channel values.
 
 **Embedded resources do not need a filesystem round trip.**
@@ -113,8 +116,10 @@ a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
 keeps them, keyed by that choice, the mesh's vertex layout, and the target's
 attachment formats, because Vulkan bakes both vertex input and render-pass
 compatibility into the pipeline. The shaders themselves live in
-`src/shaders/` as Mach source, are compiled by artifacts in the root project,
-and are embedded from `res/spv/`.
+`src/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
+environment by the `shader-*` artifacts the library requires, then embedded
+from what those artifacts produce. A consumer builds them too, because a
+library artifact's requirements travel with the dependency.
 
 **Every draw takes a uniform slot.** A Vulkan draw reads a buffer range that
 must already hold its values when the command buffer executes, so each draw
@@ -179,8 +184,9 @@ RGBA16 independently for each attachment. Materials sample nearest by default;
 `material_add_texture_filtered` selects linear filtering for bindings such as a
 scaled scene, continuous data field, or bloom buffer. Before a custom `Shader`'s
 first draw, pass its `PipelineDesc` to `shader_set_state`; `blend` can replace the
-attachment (`BLEND_OPAQUE`), compose with source alpha (`BLEND_SOURCE_ALPHA`),
-or sum overlapping contributions (`BLEND_ADDITIVE`). Additive mode sums alpha
+attachment (`BlendMode.opaque{}`), compose with source alpha
+(`BlendMode.source_alpha{}`), or sum overlapping contributions
+(`BlendMode.additive{}`). Additive mode sums alpha
 as well as RGB, and the selected mode applies to every attachment in the pass.
 
 **Reading a target back is a stall, and that is the point.** `render_target_read`
@@ -198,15 +204,15 @@ when the current one's draws are the point. `renderer_wait_idle` performs the
 same drain on its own, for tooling that reads several targets in a row or times
 work that would otherwise still be in flight.
 
-`renderer_begin_frame` reports through an out parameter whether a frame was
-actually opened. A `false` there is a swapchain that went out of date and was
-rebuilt, which every window resize causes; the correct response is to skip the
-frame, not to treat it as an error.
+`renderer_begin_frame` returns `res[bool, Error]`, and the `bool` says whether a
+frame was actually opened. A `false` there is a swapchain that went out of date
+and was rebuilt, which every window resize causes, or a minimized window; the
+correct response is to skip the frame, not to treat it as an error.
 
 **The present mode is the game's, and it can change while the game runs.**
-`renderer_init` presents with `PRESENT_VSYNC`. `renderer_init_with_present`
-asks instead for `PRESENT_MAILBOX` (uncapped, no tearing, frames overtaken
-before they are shown are discarded) or `PRESENT_IMMEDIATE` (uncapped, tears,
+`renderer_init` presents with `PresentMode.vsync{}`. `renderer_init_with_present`
+asks instead for `PresentMode.mailbox{}` (uncapped, no tearing, frames overtaken
+before they are shown are discarded) or `PresentMode.immediate{}` (uncapped, tears,
 and the mode to profile under, since vsync reports every frame as the display
 interval regardless of what it cost). `renderer_set_present_mode` is what a
 settings screen calls: it rebuilds the swapchain, and every texture, mesh,
@@ -215,45 +221,56 @@ implementation is required to support, so the other two are requests.
 `renderer_present_mode_supported` answers ahead of the attempt,
 `renderer_present_mode` reports the mode actually in use after a fallback, and
 `renderer_present_mode_requested` reports the one asked for, which is the one to
-save: writing back the mode in use would replace a player's `PRESENT_MAILBOX`
+save: writing back the mode in use would replace a player's `PresentMode.mailbox{}`
 with the vsync one machine fell back to.
 
-Operations that can fail return `Result[T, Error]`, where `Error`
-(`boom.graphics.error`) carries its message inline in a fixed buffer, so a
-failure needs neither a heap allocation nor a global.
+Operations that can fail return `res[T, Error]` or `err[Error]`, where `Error`
+(`boom.graphics.error`) is one closed tag. Its cases name the layer that refused
+and carry what that layer knew: `vulkan` holds the entry point and the
+`VkResult`, `full` names the exhausted table, `load` wraps the path or read
+failure, and `mesh`, `model`, `texture` and `text` carry the loaders' own cases
+with mach-gltf, mach-image and mach-font refusals inside them. A failure is
+matched with `sel`, and `error_message` renders one line for a log or a dialog.
+Absence is `opt`: an optional render target, clear colour, texture or shader is
+`none` rather than `nil`.
 
 ```mach
+use std.print;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.error.err;
 use gfx: boom.graphics;
 use gm:  boom.math;
 
 # resources are created against the renderer's device
 val d: *gfx.Device = gfx.renderer_device(?renderer);
 
-# a mesh, display colour and data map from files, and a material
-val cube: gfx.Mesh    = unwrap_ok[gfx.Mesh, gfx.Error](gfx.mesh_load(d, "cube.glb"));
-val skin: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](gfx.texture_load(d, "skin.qoi"));
-val norm: gfx.Texture = unwrap_ok[gfx.Texture, gfx.Error](
-    gfx.texture_load_as(d, "normal.qoi", gfx.COLOR_LINEAR));
-var mat:  gfx.Material = gfx.material();
-gfx.material_add_texture(?mat, "u_texture0", ?skin);
-gfx.material_add_texture(?mat, "u_normal", ?norm);
+# a mesh and a texture from files, and a material
+val cube: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "res://cube.glb");
+if (sel cube.err) { print.eprintln(gfx.error_message(cube.err)); ret; }
+val skin: res[gfx.Texture, gfx.Error] = gfx.texture_load(d, "res://skin.qoi");
+if (sel skin.err) { print.eprintln(gfx.error_message(skin.err)); ret; }
+var mat: gfx.Material = gfx.material();
+val added: err[gfx.MaterialError] = gfx.material_add_texture(?mat, "u_texture0", ?skin.ok);
+if (sel added.err) { ret; }
 
 # in f_draw: a 3D scene pass, then a 2D overlay pass
-var opened: bool = false;
-gfx.renderer_begin_frame(?renderer, ?opened);
-if (!opened) { ret; }   # the swapchain was rebuilt; skip this frame
+val began: res[bool, gfx.Error] = gfx.renderer_begin_frame(?renderer);
+if (sel began.err) { print.eprintln(gfx.error_message(began.err)); ret; }
+if (!began.ok) { ret; }   # the swapchain was rebuilt; skip this frame
 
 var scene: gfx.PassDesc = gfx.pass_scene(?camera);
 var p3:    gfx.Pass = gfx.pass_begin(?renderer, ?scene);
-gfx.pass_draw_material(?p3, ?cube, ?mat, ?transform);
+gfx.pass_draw_material(?p3, ?cube.ok, ?mat, ?transform);
 gfx.pass_end(?p3);
 
 var hud: gfx.PassDesc = gfx.pass_overlay();
 var p2:  gfx.Pass = gfx.pass_begin(?renderer, ?hud);
-gfx.pass_draw_sprite(?p2, ?skin, gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
+gfx.pass_draw_sprite(?p2, opt[*gfx.Texture].some{?skin.ok},
+                     gfx.rect(16.0, 16.0, 96.0, 96.0), gm.vec4(1.0, 1.0, 1.0, 1.0));
 gfx.pass_end(?p2);
 
-gfx.renderer_end_frame(?renderer);   # submits and presents
+val ended: err[gfx.Error] = gfx.renderer_end_frame(?renderer);   # submits and presents
 ```
 
 `examples/cube` is a complete, runnable consumer that proves passes compose: a
@@ -290,8 +307,12 @@ each frame you advance the player by the elapsed time and draw it, and
 use gfx: boom.graphics;
 
 # load once: mesh, skeleton, and named clips, mach-gltf hidden
-val model:  gfx.Model = unwrap_ok[gfx.Model, gfx.Error](gfx.model_load("char.glb"));
-var player: gfx.AnimationPlayer = unwrap_ok[gfx.AnimationPlayer, gfx.Error](gfx.model_player(?model, "walk"));
+val loaded: res[gfx.Model, gfx.Error] = gfx.model_load(d, "res://char.glb");
+if (sel loaded.err) { ret; }
+var model: gfx.Model = loaded.ok;
+val walk: res[gfx.AnimationPlayer, gfx.Error] = gfx.model_player(?model, "walk");
+if (sel walk.err) { ret; }   # no clip with that name is model.no_clip
+var player: gfx.AnimationPlayer = walk.ok;
 
 # in f_tick: advance the clock by the elapsed seconds
 gfx.animation_player_advance(?player, dt);
@@ -331,53 +352,40 @@ morph-target channels are future work.
 
 ## Consuming boom
 
-boom builds on several ecosystem libraries whose module ids surface through its
-modules: the window layer uses `glfw`, and `boom.graphics` uses `vk`, `image`
-(texture decoding), and `gltf` (mesh loading). Because Mach's resolver does not
-propagate a dependency's module ids through the transitive graph, **a project
-that depends on boom must also declare `mach-glfw`, `mach-vk`, `mach-image`,
-and `mach-gltf` in its own `mach.toml`**, even though its source names none of
-them. Without them the build fails to resolve boom's modules:
-
-```
-error: use path 'glfw.glfw' does not name a module
-```
-
-`mach dep pull` materialises the packages transitively, but the flat resolver
-only registers dep ids that the consuming project declares directly, so the
-stanzas are required. Pin them to the **same refs boom uses**; the resolver has
-no version override, so a mismatched ref is a hard conflict:
+boom builds on several ecosystem libraries: `std`, `glfw`, `vk`, `audio`,
+`image`, `font`, `gltf`, `phys` and `shader`. A consumer declares only boom, and
+anything else its own source imports directly, under the project id:
 
 ```toml
-[deps.boom]
+[dep.boom]
 git = "https://github.com/briar-systems/boom"
 ref = "branch/dev"
-
-[deps.mach-glfw]
-git = "https://github.com/briar-systems/mach-glfw"
-ref = "branch/main"
-
-[deps.mach-vk]
-git = "https://github.com/briar-systems/mach-vk"
-ref = "branch/main"
-
-[deps.mach-image]
-git = "https://github.com/briar-systems/mach-image"
-ref = "branch/main"
-
-[deps.mach-gltf]
-git = "https://github.com/briar-systems/mach-gltf"
-ref = "branch/main"
 ```
 
-This is a manifest requirement only; your source still imports just `use boom;`.
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref branch/dev`
+writes that stanza and realizes boom's whole closure one level deep under the
+consumer's `dep/`, pinned by gitlinks. A project the consumer also imports
+directly, such as `std`, is declared at the selector boom uses, since one
+identity resolves to one commit per build.
+
+boom's library artifact is the default, so `use boom;` binds `boom.lib.boom`,
+and a subsystem is reached directly as `use gfx: boom.graphics;`.
 
 ## Building
 
 ```sh
-mach dep pull
+mach dep pull .
 mach build .
 mach test .
+```
+
+The built-in shaders are the `shader-*` artifacts on the `spirv` target, which
+`mach build .` produces before the library that embeds them. To build or
+validate them on their own:
+
+```sh
+mach build . --target spirv --profile release
+spirv-val --target-env vulkan1.0 out/spirv/release/spv/ui_frag.spv
 ```
 
 Building a game that links against boom's window layer needs GLFW available to

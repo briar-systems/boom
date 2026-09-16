@@ -1,0 +1,129 @@
+# the mesh and model load failures
+#
+# the cases a glTF asset can fail on: a container or document that does not
+# parse, geometry boom cannot conform to its vertex layouts, and a skeleton or
+# clip whose references do not close. mach-gltf's own refusals ride as payloads.
+
+use gltf.accessor.PlanError;
+use gltf.accessor.ReadError;
+use gltf.doc.ComponentType;
+use gltf.parse.LoadError;
+use std.types.size.usize;
+use std.types.string.str;
+
+# a vertex attribute boom reads from a glTF primitive
+pub tag Attribute: u8 {
+    position;
+    normal;
+    texcoord;
+    joints;
+    weights;
+}
+
+# why mesh geometry could not be loaded or uploaded
+# ---
+# empty:           a mesh with no vertices or no indices
+# zero_stride:     a vertex format whose stride is zero
+# gltf:            the .glb container or document did not parse, for a mesh or a model
+# plan:            an accessor does not describe a readable span
+# read:            an accessor could not be copied out
+# no_buffer:       the .glb carries no binary buffer
+# no_mesh:         the document has no meshes
+# no_primitive:    the first mesh has no primitives
+# no_position:     the primitive has no POSITION attribute
+# non_indexed:     the primitive has no index accessor
+# index_component: the index accessor's component type is not an unsigned integer
+# shape:           an attribute has the wrong component count for its role
+# count:           an attribute's element count differs from POSITION's
+# joint_component: JOINTS_0 is not unsigned byte or short
+pub tag MeshError: u8 {
+    empty;
+    zero_stride;
+    gltf: LoadError;
+    plan: PlanError;
+    read: ReadError;
+    no_buffer;
+    no_mesh;
+    no_primitive;
+    no_position;
+    non_indexed;
+    index_component: ComponentType;
+    shape:           Attribute;
+    count:           Attribute;
+    joint_component: ComponentType;
+}
+
+# why a model's skeleton or animations could not be loaded
+# ---
+# skeleton_cycle:     the joint hierarchy has a cycle
+# joints:             a skin has more joints than MAX_JOINTS; carries its count
+# joint_node:         a skin joint references a node the document lacks; carries the node index
+# joint_matrix:       a joint node uses a matrix transform; carries the node index
+# plan:               an inverse bind or keyframe accessor does not describe a readable span
+# read:               an inverse bind or keyframe accessor could not be read
+# inverse_bind_type:  the inverse bind matrices accessor is not MAT4
+# inverse_bind_count: fewer inverse bind matrices than joints; carries the count present
+# sampler_index:      an animation channel names a sampler the animation lacks; carries the index
+# cubic_spline:       a sampler uses cubic spline interpolation
+# keyframe_count:     a sampler's input and output counts disagree
+# vertex_joint:       a vertex references a joint the skin does not have; carries the highest index
+# no_clip:            no animation clip has the requested name
+# joint_name_empty:   a joint lookup named nothing
+# joint_ambiguous:    more than one joint has the requested name
+# no_joint:           no joint has the requested name
+pub tag ModelError: u8 {
+    skeleton_cycle;
+    joints:       usize;
+    joint_node:   usize;
+    joint_matrix: usize;
+    plan:         PlanError;
+    read:         ReadError;
+    inverse_bind_type;
+    inverse_bind_count: usize;
+    sampler_index:      usize;
+    cubic_spline;
+    keyframe_count;
+    vertex_joint: usize;
+    no_clip;
+    joint_name_empty;
+    joint_ambiguous;
+    no_joint;
+}
+
+# a one-line description of a mesh failure
+pub fun mesh_error_message(e: MeshError) str {
+    if (sel e.empty)           { ret "a mesh needs at least one vertex and one index"; }
+    if (sel e.zero_stride)     { ret "the vertex format has a zero stride"; }
+    if (sel e.gltf)            { ret "the glb did not parse"; }
+    if (sel e.plan)            { ret "a glTF accessor does not describe a readable span"; }
+    if (sel e.read)            { ret "a glTF accessor could not be read"; }
+    if (sel e.no_buffer)       { ret "glb has no binary buffer"; }
+    if (sel e.no_mesh)         { ret "glb has no meshes"; }
+    if (sel e.no_primitive)    { ret "glb mesh has no primitives"; }
+    if (sel e.no_position)     { ret "glb primitive has no POSITION attribute"; }
+    if (sel e.non_indexed)     { ret "glb primitive is non-indexed, which is not supported"; }
+    if (sel e.index_component) { ret "unsupported index component type"; }
+    if (sel e.shape)           { ret "a vertex attribute has the wrong component count"; }
+    if (sel e.count)           { ret "attribute element count does not match POSITION"; }
+    ret "JOINTS_0 component type must be unsigned byte or short";
+}
+
+# a one-line description of a model failure
+pub fun model_error_message(e: ModelError) str {
+    if (sel e.skeleton_cycle)     { ret "skeleton hierarchy has a cycle"; }
+    if (sel e.joints)             { ret "skin has more joints than MAX_JOINTS"; }
+    if (sel e.joint_node)         { ret "skin joint references a missing node"; }
+    if (sel e.joint_matrix)       { ret "joint node uses a matrix transform, which is not yet supported"; }
+    if (sel e.plan)               { ret "a glTF accessor does not describe a readable span"; }
+    if (sel e.read)               { ret "a glTF accessor could not be read"; }
+    if (sel e.inverse_bind_type)  { ret "inverse bind matrices accessor is not MAT4"; }
+    if (sel e.inverse_bind_count) { ret "fewer inverse bind matrices than joints"; }
+    if (sel e.sampler_index)      { ret "animation sampler index out of range"; }
+    if (sel e.cubic_spline)       { ret "cubic spline animation is not yet supported"; }
+    if (sel e.keyframe_count)     { ret "animation keyframe count mismatch"; }
+    if (sel e.vertex_joint)       { ret "a vertex references a joint the skin does not have"; }
+    if (sel e.no_clip)            { ret "no animation clip with that name"; }
+    if (sel e.joint_name_empty)   { ret "joint name must not be empty"; }
+    if (sel e.joint_ambiguous)    { ret "joint name is ambiguous"; }
+    ret "no joint with that name";
+}

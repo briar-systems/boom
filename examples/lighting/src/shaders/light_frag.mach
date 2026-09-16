@@ -48,12 +48,16 @@ rec Scene {
     counts:  f32x4;
 }
 
-#[sampler(0, 1)] var packed: tex.Sampler2D;
-#[uniform(0, 4)] var scene:  Scene;
+#[sampler(0, 1)]
+var packed: tex.Sampler2D;
+#[uniform(0, 4)]
+var scene: Scene;
 
-#[input(0)] var in_uv: f32x2;
+#[input(0)]
+var in_uv: f32x2;
 
-#[output(0)] var out_light: f32x4;
+#[output(0)]
+var out_light: f32x4;
 
 # Whether the segment ab blocks the straight line from p to l, and by how much.
 #
@@ -61,28 +65,28 @@ rec Scene {
 # flow: a parallel pair produces a garbage t and u that the parallel test then
 # multiplies away, which is cheaper and shorter than guarding the divide.
 fun seg_block(px: f32, py: f32, lx: f32, ly: f32,
-              ax: f32, ay: f32, bx: f32, by: f32, short: f32) f32 {
+    ax: f32, ay: f32, bx: f32, by: f32, short: f32) f32 {
     val rx: f32 = lx - px;
     val ry: f32 = ly - py;
     val sx: f32 = bx - ax;
     val sy: f32 = by - ay;
 
     val denom: f32 = rx * sy - ry * sx;
-    val ok: f32 = sh.step(0.0001, sh.abs(denom));
-    val safe: f32 = denom + (1.0 - ok);
+    val ok:    f32 = sh.step(0.0001, sh.abs(denom));
+    val safe:  f32 = denom + (1.0 - ok);
 
     val qx: f32 = ax - px;
     val qy: f32 = ay - py;
-    val t: f32 = (qx * sy - qy * sx) / safe;
-    val u: f32 = (qx * ry - qy * rx) / safe;
+    val t:  f32 = (qx * sy - qy * sx) / safe;
+    val u:  f32 = (qx * ry - qy * rx) / safe;
 
     val inside: f32 = sh.step(0.0, t) * sh.step(t, 1.0)
-                    * sh.step(0.0, u) * sh.step(u, 1.0);
+        * sh.step(0.0, u) * sh.step(u, 1.0);
 
     # Short range: an occluder far from the shading point casts almost nothing,
     # so a shadow falls off within a few tiles instead of running to the edge of
     # the light's reach.
-    val hit: f32 = t * sh.sqrt(rx * rx + ry * ry);
+    val hit:  f32 = t * sh.sqrt(rx * rx + ry * ry);
     val near: f32 = 1.0 - sh.smooth_step(short * 0.35, short, hit);
 
     ret ok * inside * near;
@@ -91,11 +95,11 @@ fun seg_block(px: f32, py: f32, lx: f32, ly: f32,
 # The strongest of the three wall segments, gated by how many are live.
 fun walls_block(px: f32, py: f32, lx: f32, ly: f32, n: f32, short: f32) f32 {
     val w0: f32 = seg_block(px, py, lx, ly, scene.wall0[0], scene.wall0[1],
-                            scene.wall0[2], scene.wall0[3], short) * sh.step(0.5, n);
+        scene.wall0[2], scene.wall0[3], short) * sh.step(0.5, n);
     val w1: f32 = seg_block(px, py, lx, ly, scene.wall1[0], scene.wall1[1],
-                            scene.wall1[2], scene.wall1[3], short) * sh.step(1.5, n);
+        scene.wall1[2], scene.wall1[3], short) * sh.step(1.5, n);
     val w2: f32 = seg_block(px, py, lx, ly, scene.wall2[0], scene.wall2[1],
-                            scene.wall2[2], scene.wall2[3], short) * sh.step(2.5, n);
+        scene.wall2[2], scene.wall2[3], short) * sh.step(2.5, n);
     ret sh.max(w0, sh.max(w1, w2));
 }
 
@@ -105,8 +109,8 @@ fun walls_block(px: f32, py: f32, lx: f32, ly: f32, n: f32, short: f32) f32 {
 # distance from the occluder on its own, which is what makes a shadow read as
 # cast by something with size in the room.
 fun soft_block(px: f32, py: f32, lx: f32, ly: f32, width: f32, n: f32, short: f32) f32 {
-    val dx: f32 = lx - px;
-    val dy: f32 = ly - py;
+    val dx:  f32 = lx - px;
+    val dy:  f32 = ly - py;
     val len: f32 = sh.max(sh.sqrt(dx * dx + dy * dy), 0.0001);
 
     # Perpendicular to the line to the light, so the taps spread across the
@@ -125,10 +129,10 @@ fun soft_block(px: f32, py: f32, lx: f32, ly: f32, width: f32, n: f32, short: f3
 # One light's contribution at a texel: diffuse plus a Blinn specular lobe,
 # attenuated by range and by shadow.
 fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32,
-             pos: f32x4, col: f32x4, nwalls: f32, floor: f32) f32x3 {
-    val dx: f32 = pos[0] - px;
-    val dy: f32 = pos[1] - py;
-    val dz: f32 = pos[2];
+    pos: f32x4, col: f32x4, nwalls: f32, floor: f32) f32x3 {
+    val dx:   f32 = pos[0] - px;
+    val dy:   f32 = pos[1] - py;
+    val dz:   f32 = pos[2];
     val dist: f32 = sh.max(sh.sqrt(dx * dx + dy * dy + dz * dz), 0.0001);
 
     val lx: f32 = dx / dist;
@@ -136,16 +140,16 @@ fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32,
     val lz: f32 = dz / dist;
 
     val fall: f32 = sh.clamp(1.0 - dist / sh.max(pos[3], 0.0001), 0.0, 1.0);
-    val att: f32 = fall * fall * col[3];
+    val att:  f32 = fall * fall * col[3];
 
     val ndl: f32 = sh.max(n[0] * lx + n[1] * ly + n[2] * lz, 0.0);
 
     # The view is straight down in a top-down 2D scene, so the half vector is
     # the light direction with one added to Z and renormalised.
-    val hx: f32 = lx;
-    val hy: f32 = ly;
-    val hz: f32 = lz + 1.0;
-    val hl: f32 = sh.max(sh.sqrt(hx * hx + hy * hy + hz * hz), 0.0001);
+    val hx:  f32 = lx;
+    val hy:  f32 = ly;
+    val hz:  f32 = lz + 1.0;
+    val hl:  f32 = sh.max(sh.sqrt(hx * hx + hy * hy + hz * hz), 0.0001);
     val ndh: f32 = sh.max((n[0] * hx + n[1] * hy + n[2] * hz) / hl, 0.0);
 
     # Roughness drives the lobe width. Squaring the smooth end keeps a polished
@@ -161,11 +165,11 @@ fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32,
     # Shadow scales the light and stops at the floor, so a shadowed region reads
     # dimmer and never black. Ambient is added by the composite, not here.
     val occ: f32 = soft_block(px, py, pos[0], pos[1], sh.max(pos[3] * 0.06, 1.0),
-                              nwalls, scene.counts[1]);
+        nwalls, scene.counts[1]);
     val shade: f32 = sh.mix(1.0, floor, occ);
 
     val diff: f32 = ndl * (1.0 - metal * 0.9) * att * shade;
-    val s: f32 = spec * att * shade;
+    val s:    f32 = spec * att * shade;
 
     ret f32x3{col[0] * diff + s, col[1] * diff + s, col[2] * diff + s};
 }
@@ -179,20 +183,20 @@ fun frag_main() {
 
     # Z is recovered rather than stored, exact for a unit normal facing the
     # camera, which every tangent-space normal in a top-down scene is.
-    val nx: f32 = g[0] * 2.0 - 1.0;
-    val ny: f32 = g[1] * 2.0 - 1.0;
-    val nz: f32 = sh.sqrt(sh.max(1.0 - nx * nx - ny * ny, 0.0));
-    val n: f32x3 = sh.normalize_3(f32x3{nx, ny, nz});
+    val nx: f32   = g[0] * 2.0 - 1.0;
+    val ny: f32   = g[1] * 2.0 - 1.0;
+    val nz: f32   = sh.sqrt(sh.max(1.0 - nx * nx - ny * ny, 0.0));
+    val n:  f32x3 = sh.normalize_3(f32x3{nx, ny, nz});
 
     val rough: f32 = sh.clamp(g[2], 0.02, 1.0);
     val metal: f32 = sh.clamp(g[3], 0.0, 1.0);
 
     val nwalls: f32 = scene.counts[0];
-    val floor: f32 = scene.ambient[3];
+    val floor:  f32 = scene.ambient[3];
 
     val a: f32x3 = light_at(px, py, n, rough, metal, scene.l0_pos, scene.l0_col, nwalls, floor);
     val b: f32x3 = light_at(px, py, n, rough, metal, scene.l1_pos, scene.l1_col, nwalls, floor)
-                 * f32x3{sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3])};
+        * f32x3{sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3]), sh.step(1.5, scene.view[3])};
 
     out_light = f32x4{a[0] + b[0], a[1] + b[1], a[2] + b[2], 1.0};
 }

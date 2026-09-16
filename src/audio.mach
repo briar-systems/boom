@@ -34,28 +34,24 @@
 # callback, which is a few milliseconds late rather than wrong. The stream
 # cursor stays the audio thread's alone, so nothing here races it.
 
+use audio;
+use boom.math.sqrtf;
+use boom.vfs;
+use allo: std.allocator;
+use std.allocator.page;
+use std.collections.vector;
+use std.memory;
+use std.sync.atomic;
+use std.sync.thread;
+use std.system.os;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use std.types.result.unwrap_ok;
-use std.types.result.unwrap_err;
-use allo:   std.allocator;
-use page:   std.allocator.page;
-use fs:     std.filesystem;
-use vector: std.collections.vector;
-use atomic: std.sync.atomic;
-use thread: std.sync.thread;
-use memory: std.memory;
-use os:     std.system.os;
-use audio;
-use vfs: boom.vfs;
-use boom.math.sqrtf;
 
 # How many sounds may play at once
 #
@@ -81,6 +77,39 @@ val FREE: i64 = 0;
 val PLAYING: i64 = 1;
 # The game thread has asked for the slot back; the audio thread will free it
 val STOPPING: i64 = 2;
+
+# why a mixer or a sound could not be brought up
+# ---
+# alloc:       a host allocation or release was refused
+# buffer:      a sample buffer could not be created, including a source with no channels
+# device:      the output device refused to open or start
+# decode:      the WAV bytes did not decode
+# load:        the clip's file could not be read through its virtual path
+# empty_clip:  a clip reports no sample rate, channels, or frames, so it cannot be conformed
+# zero_frames: a clip resamples to zero frames at the device rate
+pub tag AudioError: u8 {
+    alloc:  allo.Error;
+    buffer: audio.BufferError;
+    device: audio.DeviceError;
+    decode: audio.DecodeError;
+    load:   vfs.ReadError;
+    empty_clip;
+    zero_frames;
+}
+
+# a one-line description of an audio failure
+# ---
+# e:   the failure
+# ret: static text naming the case
+pub fun audio_error_message(e: AudioError) str {
+    if (sel e.alloc)      { ret "out of memory"; }
+    if (sel e.buffer)     { ret "could not create a sample buffer"; }
+    if (sel e.device)     { ret "the audio device could not be opened or started"; }
+    if (sel e.decode)     { ret "the clip is not a WAV file boom decodes"; }
+    if (sel e.load)       { ret vfs.read_error_message(e.load); }
+    if (sel e.empty_clip) { ret "a decoded clip reports no rate, channels, or frames"; }
+    ret "a clip resamples to zero frames";
+}
 
 # A decoded clip, ready to play any number of times
 #
@@ -114,7 +143,11 @@ rec Voice {
 #
 # Carries the generation the slot held when it started, so stopping a voice
 # that already finished cannot silence whatever took its place. the same
-# reasoning as the asset store's handles, and the same bug avoided.
+# reasoning as the asset store's handles, and the same bug avoided. generations
+# start at one, so a zeroed id names no voice.
+# ---
+# slot: index into the voice table
+# gen:  the slot's generation when this voice was claimed
 pub rec VoiceId {
     slot: usize;
     gen:  i64;
@@ -148,11 +181,6 @@ pub rec Audio {
     started: bool;
 }
 
-# The voice id that names nothing
-pub fun voice_none() VoiceId {
-    ret VoiceId{slot: 0, gen: 0};
-}
-
 # ------------------------------------------------------------ audio thread
 
 # Mix every playing voice into the device's output buffer
@@ -164,9 +192,12 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
 
     # Silence first: the device buffer is not guaranteed zeroed, and a voice
     # that ends mid-callback would otherwise leave stale samples audible
-    var i: usize = 0;
+    var i:     usize = 0;
     val total: usize = frames::usize * channels::usize;
-    for (i < total) { out[i] = 0.0; i = i + 1; }
+    for (i < total) {
+        out[i] = 0.0;
+        i      = i + 1;
+    }
 
     var v: usize = 0;
     for (v < MAX_VOICES) {
@@ -180,11 +211,14 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
         }
         or (st == PLAYING) {
             var k: usize = 0;
-            for (k < total) { s.scratch[k] = 0.0; k = k + 1; }
+            for (k < total) {
+                s.scratch[k] = 0.0;
+                k            = k + 1;
+            }
             audio.pull(?s.voices[v].stream, s.scratch, frames, channels);
             audio.mix_add_pan(out, s.scratch, frames::usize, channels::usize,
-                              s.voices[v].left  * s.voices[v].gain * s.master,
-                              s.voices[v].right * s.voices[v].gain * s.master);
+                s.voices[v].left * s.voices[v].gain * s.master,
+                s.voices[v].right * s.voices[v].gain * s.master);
 
             if (audio.done(s.voices[v].stream)) {
                 atomic.store(?s.voices[v].state, FREE);
@@ -206,54 +240,58 @@ fun render(out: *f32, frames: u32, channels: u32, user: ptr) {
 # a:        allocator for the scratch buffer and decoded clips
 # rate:     requested sample rate
 # channels: requested channel count
-pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Result[bool, str] {
-    s.a      = a;
-    s.master = 1.0;
-    s.ready  = false;
+# ret:      ok, or why the scratch or the device could not be brought up
+pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) err[AudioError] {
+    s.a       = a;
+    s.master  = 1.0;
+    s.ready   = false;
     s.started = false;
 
     var cl: usize = 0;
-    for (cl < MAX_CLASSES) { s.limits[cl] = 0; cl = cl + 1; }
+    for (cl < MAX_CLASSES) {
+        s.limits[cl] = 0;
+        cl           = cl + 1;
+    }
 
-    s.chans  = channels::usize;
-    s.rate   = rate;
+    s.chans = channels::usize;
+    s.rate  = rate;
 
     var v: usize = 0;
     for (v < MAX_VOICES) {
         s.voices[v].state = FREE;
         s.voices[v].gain  = 1.0;
         s.gens[v]         = 1;
-        v = v + 1;
+        v                 = v + 1;
     }
 
     # A generous scratch: the device asks for a frame count per callback and
     # we must never allocate to serve a larger one
     s.frames = 4096;
-    val sr: Result[*f32, str] = allo.allocate[f32](a, s.frames * s.chans);
-    if (is_err[*f32, str](sr)) { ret err[bool, str](unwrap_err[*f32, str](sr)); }
-    s.scratch = unwrap_ok[*f32, str](sr);
+    val sr: res[*f32, allo.Error] = allo.allocate[f32](a, s.frames * s.chans);
+    if (sel sr.err) { ret err[AudioError].err{AudioError.alloc{sr.err}}; }
+    s.scratch = sr.ok;
 
     var fmt: audio.Format;
     fmt.sample_rate = rate;
     fmt.channels    = channels;
 
-    val dr: Result[audio.Device, str] = audio.open(fmt, render, s::ptr);
-    if (is_err[audio.Device, str](dr)) {
+    val dr: res[audio.Device, audio.DeviceError] = audio.open(fmt, render, s::ptr);
+    if (sel dr.err) {
         allo.deallocate[f32](a, s.scratch, s.frames * s.chans);
-        ret err[bool, str](unwrap_err[audio.Device, str](dr));
+        ret err[AudioError].err{AudioError.device{dr.err}};
     }
-    s.device = unwrap_ok[audio.Device, str](dr);
+    s.device = dr.ok;
 
-    val st: Result[bool, str] = audio.start(?s.device);
-    if (is_err[bool, str](st)) {
+    val st: err[audio.DeviceError] = audio.start(?s.device);
+    if (sel st.err) {
         audio.close(?s.device);
         allo.deallocate[f32](a, s.scratch, s.frames * s.chans);
-        ret err[bool, str](unwrap_err[bool, str](st));
+        ret err[AudioError].err{AudioError.device{st.err}};
     }
 
-    s.ready = true;
+    s.ready   = true;
     s.started = true;
-    ret ok[bool, str](true);
+    ret err[AudioError].ok{};
 }
 
 # Stop and join the audio callback before borrowed sounds are released.
@@ -262,8 +300,8 @@ pub fun audio_init(s: *Audio, a: *allo.Allocator, rate: u32, channels: u16) Resu
 # idempotent and retires every voice after the callback has stopped reading.
 pub fun audio_quiesce(s: *Audio) {
     if (!s.ready || !s.started) { ret; }
-    val stopped: Result[bool, str] = audio.stop(?s.device);
-    if (is_err[bool, str](stopped)) {
+    val stopped: err[audio.DeviceError] = audio.stop(?s.device);
+    if (sel stopped.err) {
         # Closing is the terminal fallback: it joins the callback even when
         # the backend refuses a normal stop. audio_dnit closes idempotently.
         audio.close(?s.device);
@@ -281,13 +319,20 @@ pub fun audio_quiesce(s: *Audio) {
 # Stop the device and release the mixer's own memory
 #
 # Decoded Sounds are not freed here: a game may hold them past the device, and
-# sound_free is where that decision belongs.
-pub fun audio_dnit(s: *Audio) {
-    if (!s.ready) { ret; }
+# sound_free is where that decision belongs. A refused release leaves the mixer
+# ready and owning its scratch, so a later call retries it; the device is closed
+# either way.
+# ---
+# s:   mixer to tear down
+# ret: ok, or the allocator's refusal of the scratch release
+pub fun audio_dnit(s: *Audio) err[allo.Error] {
+    if (!s.ready) { ret err[allo.Error].ok{}; }
     audio_quiesce(s);
     audio.close(?s.device);
-    allo.deallocate[f32](s.a, s.scratch, s.frames * s.chans);
+    val freed: err[allo.Error] = allo.deallocate[f32](s.a, s.scratch, s.frames * s.chans);
+    if (sel freed.err) { ret freed; }
     s.ready = false;
+    ret err[allo.Error].ok{};
 }
 
 # Decode a clip from borrowed WAV bytes.
@@ -300,13 +345,11 @@ pub fun audio_dnit(s: *Audio) {
 # data: complete encoded WAV byte stream, borrowed for this call
 # len:  encoded byte count
 # ret:  an owned Sound, or a decode/conform error
-pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) Result[Sound, str] {
-    val dr: Result[audio.Buffer, str] = audio.decode(s.a, data, len);
-    if (is_err[audio.Buffer, str](dr)) {
-        ret err[Sound, str](unwrap_err[audio.Buffer, str](dr));
-    }
+pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) res[Sound, AudioError] {
+    val dr: res[audio.Buffer, audio.DecodeError] = audio.decode(s.a, data, len);
+    if (sel dr.err) { ret res[Sound, AudioError].err{AudioError.decode{dr.err}}; }
 
-    var decoded: audio.Buffer = unwrap_ok[audio.Buffer, str](dr);
+    var decoded: audio.Buffer = dr.ok;
 
     # CONFORM THE CLIP TO THE DEVICE, ONCE, HERE. mach-audio's `pull` emits
     # silence and does not advance its cursor when a stream's channel count
@@ -321,49 +364,44 @@ pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) Result[Sound, str] {
     #
     # At load rather than in the render callback, which must not allocate. The
     # cost is one pass per clip at load time and nothing per frame.
-    val cr: Result[audio.Buffer, str] = conform(s, ?decoded);
-    if (is_err[audio.Buffer, str](cr)) {
+    val cr: res[audio.Buffer, AudioError] = conform(s, ?decoded);
+    if (sel cr.err) {
         audio.dnit(?decoded);
-        ret err[Sound, str](unwrap_err[audio.Buffer, str](cr));
+        ret res[Sound, AudioError].err{cr.err};
     }
 
     var snd: Sound;
-    snd.buffer = unwrap_ok[audio.Buffer, str](cr);
+    snd.buffer = cr.ok;
     snd.valid  = true;
-    ret ok[Sound, str](snd);
+    ret res[Sound, AudioError].ok{snd};
 }
 
 # Copy a decoded clip into a device-conformed Sound.
 #
 # The source is borrowed only for this call. The returned Sound owns an
 # independent copy, so an asset store may release or reload its decoded buffer
-# without affecting playback.
+# without affecting playback. A source with no channels is refused by the
+# buffer it would be copied into.
 # ---
 # s:   mixer whose allocator and device format own the returned sound
 # src: decoded source buffer, borrowed for this call
 # ret: independent device-conformed sound, or an allocation/conform error
-pub fun sound_from_buffer(s: *Audio, src: *audio.Buffer) Result[Sound, str] {
-    if (s == nil || src == nil || src.format.channels == 0) {
-        ret err[Sound, str]("sound needs a mixer and a valid source buffer");
-    }
-
-    val br: Result[audio.Buffer, str] = audio.init(s.a, src.format, src.frames);
-    if (is_err[audio.Buffer, str](br)) {
-        ret err[Sound, str](unwrap_err[audio.Buffer, str](br));
-    }
-    var owned: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+pub fun sound_from_buffer(s: *Audio, src: *audio.Buffer) res[Sound, AudioError] {
+    val br: res[audio.Buffer, audio.BufferError] = audio.init(s.a, src.format, src.frames);
+    if (sel br.err) { ret res[Sound, AudioError].err{AudioError.buffer{br.err}}; }
+    var owned: audio.Buffer = br.ok;
     memory.copy[f32](owned.samples, src.samples, audio.sample_count(@src));
 
-    val cr: Result[audio.Buffer, str] = conform(s, ?owned);
-    if (is_err[audio.Buffer, str](cr)) {
+    val cr: res[audio.Buffer, AudioError] = conform(s, ?owned);
+    if (sel cr.err) {
         audio.dnit(?owned);
-        ret err[Sound, str](unwrap_err[audio.Buffer, str](cr));
+        ret res[Sound, AudioError].err{cr.err};
     }
 
     var snd: Sound;
-    snd.buffer = unwrap_ok[audio.Buffer, str](cr);
+    snd.buffer = cr.ok;
     snd.valid  = true;
-    ret ok[Sound, str](snd);
+    ret res[Sound, AudioError].ok{snd};
 }
 
 # Decode a clip from a virtual path.
@@ -371,67 +409,68 @@ pub fun sound_from_buffer(s: *Audio, src: *audio.Buffer) Result[Sound, str] {
 # The whole file is decoded into memory, so this is for sound effects and
 # short music. `res://sfx/hit.wav` resolves through boom.vfs like every other
 # asset path.
-pub fun sound_load(s: *Audio, vpath: str) Result[Sound, str] {
-    val pr: Result[str, str] = vfs.vfs_resolve(s.a, vpath);
-    if (is_err[str, str](pr)) { ret err[Sound, str](unwrap_err[str, str](pr)); }
-    val real: str = unwrap_ok[str, str](pr);
+pub fun sound_load(s: *Audio, vpath: str) res[Sound, AudioError] {
+    val br: res[vector.Vector[u8], vfs.ReadError] = vfs.vfs_read_bytes(s.a, vpath);
+    if (sel br.err) { ret res[Sound, AudioError].err{AudioError.load{br.err}}; }
+    var bytes: vector.Vector[u8] = br.ok;
 
-    val br: Result[vector.Vector[u8], str] = fs.read_bytes(s.a, real);
-    if (is_err[vector.Vector[u8], str](br)) {
-        ret err[Sound, str](unwrap_err[vector.Vector[u8], str](br));
+    val sr:       res[Sound, AudioError] = sound_from_bytes(s, bytes.data, bytes.len);
+    val released: err[allo.Error]        = vector.dnit[u8](?bytes);
+    if (sel sr.err) { ret sr; }
+    if (sel released.err) {
+        var loaded: Sound = sr.ok;
+        sound_free(s, ?loaded);
+        ret res[Sound, AudioError].err{AudioError.alloc{released.err}};
     }
-    var bytes: vector.Vector[u8] = unwrap_ok[vector.Vector[u8], str](br);
-
-    val sr: Result[Sound, str] = sound_from_bytes(s, bytes.data, bytes.len);
-    vector.dnit[u8](?bytes);
     ret sr;
 }
 
 # Resample and remix a decoded clip into the device's format.
 #
 # Returns the input unchanged when it already matches, so the common case
-# allocates nothing and copies nothing.
+# allocates nothing and copies nothing. otherwise the source is released once
+# the conformed copy exists; on any failure the caller still owns it.
 #
 # Linear interpolation for rate, and for channels: one source channel is copied
 # to every output channel, several are averaged. Neither is the best available
 # method. Both are what a sound effect needs, and the alternative today is
 # silence or the wrong pitch.
-fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
+fun conform(s: *Audio, src: *audio.Buffer) res[audio.Buffer, AudioError] {
     val src_rate:  usize = src.format.sample_rate::usize;
     val src_chans: usize = src.format.channels::usize;
     val dst_rate:  usize = s.rate::usize;
     val dst_chans: usize = s.chans;
 
     if (src_rate == dst_rate && src_chans == dst_chans) {
-        ret ok[audio.Buffer, str](@src);
+        ret res[audio.Buffer, AudioError].ok{@src};
     }
     if (src_rate == 0 || src_chans == 0 || src.frames == 0) {
-        ret err[audio.Buffer, str]("a decoded clip reports no rate, channels, or frames");
+        ret res[audio.Buffer, AudioError].err{AudioError.empty_clip{}};
     }
 
     # Round rather than truncate: truncating drops the final partial frame, and
     # a clip whose length is a whole number of source frames should stay one.
     val dst_frames: usize = (src.frames * dst_rate + src_rate / 2) / src_rate;
     if (dst_frames == 0) {
-        ret err[audio.Buffer, str]("a clip resamples to zero frames");
+        ret res[audio.Buffer, AudioError].err{AudioError.zero_frames{}};
     }
 
     var fmt: audio.Format;
     fmt.sample_rate = s.rate;
     fmt.channels    = dst_chans::u16;
-    val br: Result[audio.Buffer, str] = audio.init(s.a, fmt, dst_frames);
-    if (is_err[audio.Buffer, str](br)) { ret br; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+    val br: res[audio.Buffer, audio.BufferError] = audio.init(s.a, fmt, dst_frames);
+    if (sel br.err) { ret res[audio.Buffer, AudioError].err{AudioError.buffer{br.err}}; }
+    var out: audio.Buffer = br.ok;
 
     var f: usize = 0;
     for (f < dst_frames) {
         # Where this output frame falls in the source, as a whole frame and a
         # fraction of the way to the next.
-        val pos:   usize = f * src_rate;
-        var  i:    usize = pos / dst_rate;
-        val  rem:  usize = pos - i * dst_rate;
-        val  frac: f32   = rem::f32 / dst_rate::f32;
-        var  j:    usize = i + 1;
+        val pos:  usize = f * src_rate;
+        var i:    usize = pos / dst_rate;
+        val rem:  usize = pos - i * dst_rate;
+        val frac: f32   = rem::f32 / dst_rate::f32;
+        var j:    usize = i + 1;
         if (j >= src.frames) { j = src.frames - 1; }
         if (i >= src.frames) { i = src.frames - 1; }
 
@@ -440,8 +479,8 @@ fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
         var c: usize = 0;
         for (c < dst_chans) {
             val sc: usize = c;
-            var a0: f32 = 0.0;
-            var a1: f32 = 0.0;
+            var a0: f32   = 0.0;
+            var a1: f32   = 0.0;
             # Fewer outputs than the source has, or an output channel the source
             # does not have: average all of the source into it. Copying channel
             # c instead would drop everything the extra channels carry, so a
@@ -452,7 +491,7 @@ fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
                 for (k < src_chans) {
                     a0 = a0 + src.samples[i * src_chans + k];
                     a1 = a1 + src.samples[j * src_chans + k];
-                    k = k + 1;
+                    k  = k + 1;
                 }
                 a0 = a0 / src_chans::f32;
                 a1 = a1 / src_chans::f32;
@@ -468,25 +507,32 @@ fun conform(s: *Audio, src: *audio.Buffer) Result[audio.Buffer, str] {
                 a1 = src.samples[j * src_chans + sc];
             }
             out.samples[f * dst_chans + c] = a0 + (a1 - a0) * frac;
-            c = c + 1;
+            c                              = c + 1;
         }
         f = f + 1;
     }
 
-    audio.dnit(src);
-    ret ok[audio.Buffer, str](out);
+    val released: err[allo.Error] = audio.dnit(src);
+    if (sel released.err) {
+        audio.dnit(?out);
+        ret res[audio.Buffer, AudioError].err{AudioError.alloc{released.err}};
+    }
+    ret res[audio.Buffer, AudioError].ok{out};
 }
 
 # Release a decoded clip after retiring every voice that borrows it.
 #
 # The game thread owns sound lifetime and calls this serially with audio_play.
 # A playing voice is handed back through STOPPING, then the call waits for the
-# audio callback to acknowledge FREE before releasing the sample storage.
+# audio callback to acknowledge FREE before releasing the sample storage. A
+# refused release leaves the sound valid and owning its samples, with every
+# borrowing voice already retired.
 # ---
 # s:   mixer that created and may be playing the sound
 # snd: sound to stop and release
-pub fun sound_free(s: *Audio, snd: *Sound) {
-    if (s == nil || snd == nil || !snd.valid) { ret; }
+# ret: ok, or the allocator's refusal of the sample release
+pub fun sound_free(s: *Audio, snd: *Sound) err[allo.Error] {
+    if (!snd.valid) { ret err[allo.Error].ok{}; }
 
     var v: usize = 0;
     if (s.ready) {
@@ -515,7 +561,7 @@ pub fun sound_free(s: *Audio, snd: *Sound) {
             var waiting: bool = true;
             for (waiting) {
                 waiting = false;
-                v = 0;
+                v       = 0;
                 for (v < MAX_VOICES) {
                     if (atomic.load(?s.voices[v].state) == STOPPING
                         && s.voices[v].stream.samples == snd.buffer.samples) {
@@ -528,43 +574,48 @@ pub fun sound_free(s: *Audio, snd: *Sound) {
         }
     }
 
-    audio.dnit(?snd.buffer);
+    val freed: err[allo.Error] = audio.dnit(?snd.buffer);
+    if (sel freed.err) { ret freed; }
     snd.valid = false;
+    ret err[allo.Error].ok{};
 }
 
-# Claim a free voice, or MAX_VOICES when all are busy
+# Claim a free voice, or none when all are busy
 #
 # The compare-and-swap is what makes this safe against another game-thread
 # caller claiming the same slot; the audio thread never sets a slot to
 # anything but FREE, so it cannot interfere.
-fun claim(s: *Audio) usize {
+fun claim(s: *Audio) opt[usize] {
     var v: usize = 0;
     for (v < MAX_VOICES) {
         var expected: i64 = FREE;
-        if (atomic.cas(?s.voices[v].state, ?expected, STOPPING)) { ret v; }
+        if (atomic.cas(?s.voices[v].state, ?expected, STOPPING)) { ret opt[usize].some{v}; }
         v = v + 1;
     }
-    ret MAX_VOICES;
+    ret opt[usize].none{};
 }
 
 # Start a clip centred, at its own pitch, in the default class
-pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) VoiceId {
+pub fun audio_play(s: *Audio, snd: *Sound, gain: f32, looping: bool) opt[VoiceId] {
     ret audio_play_ex(s, snd, gain, 0.0, 1.0, looping, CLASS_DEFAULT);
 }
 
 # Start a clip, returning the voice playing it
 #
 # `looping` restarts the clip at its end rather than freeing the voice, so a
-# looping voice occupies its slot until stopped.
+# looping voice occupies its slot until stopped. A request the mixer drops,
+# because it is not running, the sound is released, the class is out of range
+# or at its budget, or every voice is busy, plays nothing and yields none.
 # ---
-# gain:    linear volume
-# pan:     -1 left, 0 centre, 1 right
-# rate:    playback speed, 1 being the clip's own pitch
-# class:   the budget this voice counts against, below MAX_CLASSES
+# gain:  linear volume
+# pan:   -1 left, 0 centre, 1 right
+# rate:  playback speed, 1 being the clip's own pitch
+# class: the budget this voice counts against, below MAX_CLASSES
+# ret:   the voice playing the clip, or none when the request was dropped
 pub fun audio_play_ex(s: *Audio, snd: *Sound, gain: f32, pan: f32, rate: f32,
-                      looping: bool, class: usize) VoiceId {
-    if (!s.ready || !s.started || !snd.valid)  { ret voice_none(); }
-    if (class >= MAX_CLASSES)    { ret voice_none(); }
+    looping: bool, class: usize) opt[VoiceId] {
+    if (!s.ready || !s.started || !snd.valid) { ret opt[VoiceId].none{}; }
+    if (class >= MAX_CLASSES)                 { ret opt[VoiceId].none{}; }
 
     # ADMISSION CONTROL, NOT STEALING. A class at its budget refuses the new
     # sound rather than taking a slot back from a playing one. Taking one back
@@ -574,25 +625,26 @@ pub fun audio_play_ex(s: *Audio, snd: *Sound, gain: f32, pan: f32, rate: f32,
     # because the budget's whole job is to keep headroom free for the classes
     # that matter, and the ninth simultaneous impact is one nobody can pick out.
     if (s.limits[class] != 0 && audio_class_playing(s, class) >= s.limits[class]) {
-        ret voice_none();
+        ret opt[VoiceId].none{};
     }
 
-    val v: usize = claim(s);
-    if (v == MAX_VOICES) { ret voice_none(); }
+    val claimed: opt[usize] = claim(s);
+    if (sel claimed.none) { ret opt[VoiceId].none{}; }
+    val v: usize = claimed.some;
 
     # The slot is ours and invisible to the audio thread: it reads only
     # PLAYING, and this is STOPPING until the store below
     s.voices[v].stream = audio.stream_over(?snd.buffer, looping);
     audio.stream_set_rate(?s.voices[v].stream, rate);
-    s.voices[v].gain   = gain;
-    s.voices[v].class  = class;
+    s.voices[v].gain  = gain;
+    s.voices[v].class = class;
     pan_gains(pan, ?s.voices[v].left, ?s.voices[v].right);
-    s.gens[v]          = s.gens[v] + 1;
+    s.gens[v] = s.gens[v] + 1;
     val g: i64 = s.gens[v];
 
     # Publishes every write above, and must therefore come last
     atomic.store(?s.voices[v].state, PLAYING);
-    ret VoiceId{slot: v + 1, gen: g};
+    ret opt[VoiceId].some{VoiceId{slot: v, gen: g}};
 }
 
 # Constant-power channel gains for a pan position
@@ -639,51 +691,49 @@ pub fun audio_class_playing(s: *Audio, class: usize) usize {
 #
 # Each writes one aligned 32-bit word that the audio thread reads, so a
 # callback in flight sees the old value or the new one and never a mixture.
-# A stale id is ignored rather than retuning whatever took the slot.
+# A stale id is ignored rather than retuning whatever took the slot, and the
+# answer is whether the voice was still live.
 pub fun audio_set_gain(s: *Audio, id: VoiceId, gain: f32) bool {
     if (!live(s, id)) { ret false; }
-    s.voices[id.slot - 1].gain = gain;
+    s.voices[id.slot].gain = gain;
     ret true;
 }
 
 pub fun audio_set_pan(s: *Audio, id: VoiceId, pan: f32) bool {
     if (!live(s, id)) { ret false; }
-    pan_gains(pan, ?s.voices[id.slot - 1].left, ?s.voices[id.slot - 1].right);
+    pan_gains(pan, ?s.voices[id.slot].left, ?s.voices[id.slot].right);
     ret true;
 }
 
 pub fun audio_set_rate(s: *Audio, id: VoiceId, rate: f32) bool {
     if (!live(s, id)) { ret false; }
-    audio.stream_set_rate(?s.voices[id.slot - 1].stream, rate);
+    audio.stream_set_rate(?s.voices[id.slot].stream, rate);
     ret true;
 }
 
 fun live(s: *Audio, id: VoiceId) bool {
-    if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
-    val v: usize = id.slot - 1;
-    if (s.gens[v] != id.gen) { ret false; }
-    ret atomic.load(?s.voices[v].state) == PLAYING;
+    if (id.slot >= MAX_VOICES)     { ret false; }
+    if (s.gens[id.slot] != id.gen) { ret false; }
+    ret atomic.load(?s.voices[id.slot].state) == PLAYING;
 }
 
 # Stop a voice, if it is still the one that started
 #
 # A stale id -- one whose voice already finished and whose slot was reused --
 # is ignored rather than silencing the new occupant.
+# ---
+# ret: whether this call stopped a live voice
 pub fun audio_stop(s: *Audio, id: VoiceId) bool {
-    if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
-    val v: usize = id.slot - 1;
-    if (s.gens[v] != id.gen) { ret false; }
+    if (id.slot >= MAX_VOICES)     { ret false; }
+    if (s.gens[id.slot] != id.gen) { ret false; }
 
     var expected: i64 = PLAYING;
-    ret atomic.cas(?s.voices[v].state, ?expected, STOPPING);
+    ret atomic.cas(?s.voices[id.slot].state, ?expected, STOPPING);
 }
 
 # Whether a voice is still playing
 pub fun audio_playing(s: *Audio, id: VoiceId) bool {
-    if (id.slot == 0 || id.slot > MAX_VOICES) { ret false; }
-    val v: usize = id.slot - 1;
-    if (s.gens[v] != id.gen) { ret false; }
-    ret atomic.load(?s.voices[v].state) == PLAYING;
+    ret live(s, id);
 }
 
 # Set the volume applied to every voice
@@ -710,89 +760,104 @@ pub fun audio_voice_count(s: *Audio) usize {
 # the concurrency bugs would be.
 
 # A mixer with its table initialized but no device, for tests
-fun test_audio(a: *allo.Allocator, chans: usize) Audio {
-    var s: Audio;
-    s.a      = a;
-    s.master = 1.0;
-    s.chans  = chans;
-    s.frames = 64;
-    s.ready  = true;
+fun test_audio(s: *Audio, a: *allo.Allocator, chans: usize) bool {
+    s.a       = a;
+    s.master  = 1.0;
+    s.chans   = chans;
+    s.frames  = 64;
+    s.ready   = true;
     s.started = false;
     var v: usize = 0;
     for (v < MAX_VOICES) {
-        s.voices[v].state = FREE;
+        s.voices[v].state          = FREE;
         s.voices[v].stream.samples = nil;
-        s.voices[v].gain  = 1.0;
-        s.gens[v]         = 1;
-        v = v + 1;
+        s.voices[v].gain           = 1.0;
+        s.gens[v]                  = 1;
+        v                          = v + 1;
     }
-    s.scratch = unwrap_ok[*f32, str](allo.allocate[f32](a, s.frames * chans));
-    ret s;
+    val scratch: res[*f32, allo.Error] = allo.allocate[f32](a, s.frames * chans);
+    if (sel scratch.err) { ret false; }
+    s.scratch = scratch.ok;
+    ret true;
+}
+
+# whether a claim handed out a slot
+fun claimed(c: opt[usize]) bool {
+    ret sel c.some;
 }
 
 test "audio: a claimed voice is not handed out twice" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
-    val v1: usize = claim(?s);
-    val v2: usize = claim(?s);
-    if (v1 == v2)          { ret 1; }
-    if (v1 == MAX_VOICES)  { ret 1; }
-    if (v2 == MAX_VOICES)  { ret 1; }
+    val v1: opt[usize] = claim(?s);
+    val v2: opt[usize] = claim(?s);
+    if (!sel v1.some)       { ret 2; }
+    if (!sel v2.some)       { ret 3; }
+    if (v1.some == v2.some) { ret 4; }
     ret 0;
 }
 
 test "audio: the table fills and then refuses rather than stealing" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
     var n: usize = 0;
     for (n < MAX_VOICES) {
-        if (claim(?s) == MAX_VOICES) { ret 1; }
+        if (!claimed(claim(?s))) { ret 2; }
         n = n + 1;
     }
     # Every slot taken: the next request is dropped, not granted by evicting
     # something already playing
-    if (claim(?s) != MAX_VOICES) { ret 1; }
+    if (claimed(claim(?s))) { ret 3; }
     ret 0;
 }
 
 test "audio: render releases a STOPPING voice and skips it" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
-    val v: usize = claim(?s);
+    val c: opt[usize] = claim(?s);
+    if (!sel c.some) { ret 2; }
+    val v: usize = c.some;
     # Claim leaves the slot STOPPING: it is ours, not yet published
-    if (atomic.load(?s.voices[v].state) != STOPPING) { ret 1; }
+    if (atomic.load(?s.voices[v].state) != STOPPING) { ret 3; }
 
     var out: [128]f32;
     render(?out[0], 64, 2, (?s)::ptr);
 
     # The audio thread is the only writer of a PLAYING slot, so it is also
     # what returns a STOPPING one to FREE
-    if (atomic.load(?s.voices[v].state) != FREE) { ret 1; }
+    if (atomic.load(?s.voices[v].state) != FREE) { ret 4; }
     ret 0;
 }
 
 test "audio: render silences the output buffer before mixing" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
     var out: [128]f32;
-    var i: usize = 0;
+    var i:   usize = 0;
     # The device buffer is not guaranteed zeroed; leaving it would make a
     # frame with no voices play whatever was there last
-    for (i < 128) { out[i] = 0.5; i = i + 1; }
+    for (i < 128) {
+        out[i] = 0.5;
+        i      = i + 1;
+    }
 
     render(?out[0], 64, 2, (?s)::ptr);
 
     i = 0;
     for (i < 128) {
-        if (out[i] != 0.0) { ret 1; }
+        if (out[i] != 0.0) { ret 2; }
         i = i + 1;
     }
     ret 0;
@@ -801,14 +866,17 @@ test "audio: render silences the output buffer before mixing" {
 test "audio: a stale voice id neither stops nor reports playing" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
-    val v: usize = claim(?s);
+    val c: opt[usize] = claim(?s);
+    if (!sel c.some) { ret 2; }
+    val v: usize = c.some;
     s.gens[v] = s.gens[v] + 1;
-    val id: VoiceId = VoiceId{slot: v + 1, gen: s.gens[v]};
+    val id: VoiceId = VoiceId{slot: v, gen: s.gens[v]};
     atomic.store(?s.voices[v].state, PLAYING);
 
-    if (!audio_playing(?s, id)) { ret 1; }
+    if (!audio_playing(?s, id)) { ret 3; }
 
     # The voice ends and its slot is reused by something else
     atomic.store(?s.voices[v].state, FREE);
@@ -816,41 +884,46 @@ test "audio: a stale voice id neither stops nor reports playing" {
     atomic.store(?s.voices[v].state, PLAYING);
 
     # The old id must not silence the new occupant
-    if (audio_stop(?s, id))    { ret 1; }
-    if (audio_playing(?s, id)) { ret 1; }
+    if (audio_stop(?s, id))    { ret 4; }
+    if (audio_playing(?s, id)) { ret 5; }
     ret 0;
 }
 
-test "audio: the null voice id is inert" {
+test "audio: a zeroed voice id is inert" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
-    if (audio_playing(?s, voice_none())) { ret 1; }
-    if (audio_stop(?s, voice_none()))    { ret 1; }
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
+    var zero: VoiceId;
+    atomic.store(?s.voices[0].state, PLAYING);
+    if (audio_playing(?s, zero)) { ret 2; }
+    if (audio_stop(?s, zero))    { ret 3; }
     ret 0;
 }
 
 test "audio: voice_count reflects only published voices" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
-    val v: usize = claim(?s);
+    val c: opt[usize] = claim(?s);
+    if (!sel c.some) { ret 2; }
     # Claimed but not yet published: the audio thread must not see it, so
     # neither should the count
-    if (audio_voice_count(?s) != 0) { ret 1; }
+    if (audio_voice_count(?s) != 0) { ret 3; }
 
-    atomic.store(?s.voices[v].state, PLAYING);
-    if (audio_voice_count(?s) != 1) { ret 1; }
+    atomic.store(?s.voices[c.some].state, PLAYING);
+    if (audio_voice_count(?s) != 1) { ret 4; }
     ret 0;
 }
 
 # Shared state for the concurrent claim test
-var race_audio: *Audio = nil;
-var race_hits:  [32]i64;
-var race_total: i64 = 0;
-var race_overlap: i64 = 0;
-val RACE_ROUNDS: usize = 20000;
+var race_audio:   *Audio = nil;
+var race_hits:    [32]i64;
+var race_total:   i64    = 0;
+var race_overlap: i64    = 0;
+val RACE_ROUNDS:  usize  = 20000;
 
 # Claim until the table is exhausted, tallying which slot each claim returned
 fun race_claimer(arg: *u8) {
@@ -859,30 +932,42 @@ fun race_claimer(arg: *u8) {
     # would let threads drift onto different slots and never race at all.
     var n: usize = 0;
     for (n < RACE_ROUNDS) {
-        val v: usize = claim(race_audio);
-        if (v != MAX_VOICES) {
+        val c: opt[usize] = claim(race_audio);
+        if (sel c.some) {
             # Count concurrent holders of this slot. exactly one may be
             # inside this region at a time; two means the claim was not atomic.
             if (atomic.fetch_add(?race_total, 1) != 0) {
                 atomic.store(?race_overlap, 1);
             }
             atomic.fetch_sub(?race_total, 1);
-            atomic.store(?race_audio.voices[v].state, FREE);
+            atomic.store(?race_audio.voices[c.some].state, FREE);
         }
         n = n + 1;
     }
 }
 
+# whether a thread operation succeeded
+fun thread_ok(r: thread.Operation) bool {
+    ret sel r.ok;
+}
+
 test "audio: concurrent claims never hand the same voice to two callers" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
     var i: usize = 0;
-    for (i < MAX_VOICES) { race_hits[i] = 0; i = i + 1; }
+    for (i < MAX_VOICES) {
+        race_hits[i] = 0;
+        i            = i + 1;
+    }
     # Fill every slot but the last, so contention lands on one address
     i = 0;
-    for (i < MAX_VOICES - 1) { s.voices[i].state = PLAYING; i = i + 1; }
+    for (i < MAX_VOICES - 1) {
+        s.voices[i].state = PLAYING;
+        i                 = i + 1;
+    }
     race_audio = ?s;
     atomic.store(?race_total, 0);
 
@@ -894,21 +979,21 @@ test "audio: concurrent claims never hand the same voice to two callers" {
     var t2: thread.Thread;
     var t3: thread.Thread;
     var t4: thread.Thread;
-    thread.spawn_with(race_claimer, nil, ?t1);
-    thread.spawn_with(race_claimer, nil, ?t2);
-    thread.spawn_with(race_claimer, nil, ?t3);
-    thread.spawn_with(race_claimer, nil, ?t4);
-    thread.join(?t1);
-    thread.join(?t2);
-    thread.join(?t3);
-    thread.join(?t4);
+    if (!thread_ok(thread.spawn_with(race_claimer, nil, ?t1))) { ret 2; }
+    if (!thread_ok(thread.spawn_with(race_claimer, nil, ?t2))) { ret 3; }
+    if (!thread_ok(thread.spawn_with(race_claimer, nil, ?t3))) { ret 4; }
+    if (!thread_ok(thread.spawn_with(race_claimer, nil, ?t4))) { ret 5; }
+    if (!thread_ok(thread.join(?t1)))                          { ret 6; }
+    if (!thread_ok(thread.join(?t2)))                          { ret 7; }
+    if (!thread_ok(thread.join(?t3)))                          { ret 8; }
+    if (!thread_ok(thread.join(?t4)))                          { ret 9; }
 
     # Every successful claim of the contended slot must have been exclusive.
     # Claim sets STOPPING and the claimer resets to FREE, so a correct run
     # sees the slot handed out exactly as many times as it was returned. a
     # non-atomic claim lets two threads leave with the same slot, and the
     # tally of concurrent holders exceeds one.
-    if (atomic.load(?race_overlap) != 0) { ret 1; }
+    if (atomic.load(?race_overlap) != 0) { ret 10; }
     ret 0;
 }
 
@@ -917,21 +1002,21 @@ test "audio: concurrent claims never hand the same voice to two callers" {
 # conform reads only the allocator, the rate and the channel count, so this
 # needs no device and the whole conversion is reachable in CI.
 fun conform_fixture(s: *Audio, a: *allo.Allocator, rate: u32, chans: usize) {
-    s.a     = a;
-    s.rate  = rate;
-    s.chans = chans;
-    s.ready = false;
+    s.a       = a;
+    s.rate    = rate;
+    s.chans   = chans;
+    s.ready   = false;
     s.started = false;
 }
 
 # Write one little-endian integer into a byte fixture.
 fun wav_u16(b: *u8, at: usize, v: u16) {
-    b[at] = (v & 255)::u8;
+    b[at]     = (v & 255)::u8;
     b[at + 1] = ((v >> 8) & 255)::u8;
 }
 
 fun wav_u32(b: *u8, at: usize, v: u32) {
-    b[at] = (v & 255)::u8;
+    b[at]     = (v & 255)::u8;
     b[at + 1] = ((v >> 8) & 255)::u8;
     b[at + 2] = ((v >> 16) & 255)::u8;
     b[at + 3] = ((v >> 24) & 255)::u8;
@@ -939,41 +1024,57 @@ fun wav_u32(b: *u8, at: usize, v: u32) {
 
 fun wav_tag(b: *u8, at: usize, tag: str) {
     var i: usize = 0;
-    for (i < 4) { b[at + i] = tag[i]; i = i + 1; }
+    for (i < 4) {
+        b[at + i] = tag[i];
+        i         = i + 1;
+    }
 }
 
 # Two mono PCM frames at 48 kHz: silence and one half-scale sample.
 fun wav_fixture(b: *u8) {
-    wav_tag(b, 0, "RIFF"); wav_u32(b, 4, 40);
-    wav_tag(b, 8, "WAVE"); wav_tag(b, 12, "fmt ");
-    wav_u32(b, 16, 16); wav_u16(b, 20, 1); wav_u16(b, 22, 1);
-    wav_u32(b, 24, 48000); wav_u32(b, 28, 96000);
-    wav_u16(b, 32, 2); wav_u16(b, 34, 16);
-    wav_tag(b, 36, "data"); wav_u32(b, 40, 4);
-    wav_u16(b, 44, 0); wav_u16(b, 46, 16384);
+    wav_tag(b, 0, "RIFF");
+    wav_u32(b, 4, 40);
+    wav_tag(b, 8, "WAVE");
+    wav_tag(b, 12, "fmt ");
+    wav_u32(b, 16, 16);
+    wav_u16(b, 20, 1);
+    wav_u16(b, 22, 1);
+    wav_u32(b, 24, 48000);
+    wav_u32(b, 28, 96000);
+    wav_u16(b, 32, 2);
+    wav_u16(b, 34, 16);
+    wav_tag(b, 36, "data");
+    wav_u32(b, 40, 4);
+    wav_u16(b, 44, 0);
+    wav_u16(b, 46, 16384);
 }
 
 # Build a source buffer of `frames` frames with `chans` channels, filled by
 # `vals` in interleaved order.
-fun conform_source(a: *allo.Allocator, rate: u32, chans: u16, frames: usize, vals: *f32) Result[audio.Buffer, str] {
+fun conform_source(a: *allo.Allocator, rate: u32, chans: u16, frames: usize, vals: *f32) res[audio.Buffer, audio.BufferError] {
     var fmt: audio.Format;
     fmt.sample_rate = rate;
     fmt.channels    = chans;
-    val br: Result[audio.Buffer, str] = audio.init(a, fmt, frames);
-    if (is_err[audio.Buffer, str](br)) { ret br; }
-    var b: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
-    var i: usize = 0;
+    val br: res[audio.Buffer, audio.BufferError] = audio.init(a, fmt, frames);
+    if (sel br.err) { ret br; }
+    var b: audio.Buffer = br.ok;
+    var i: usize        = 0;
     for (i < frames * chans::usize) {
         b.samples[i] = vals[i];
-        i = i + 1;
+        i            = i + 1;
     }
-    ret ok[audio.Buffer, str](b);
+    ret res[audio.Buffer, audio.BufferError].ok{b};
 }
 
 fun near(a: f32, b: f32) bool {
     var d: f32 = a - b;
     if (d < 0.0) { d = 0.0 - d; }
     ret d < 0.001;
+}
+
+# whether a release succeeded
+fun released(r: err[allo.Error]) bool {
+    ret sel r.ok;
 }
 
 test "audio: borrowed WAV bytes decode and conform into an owned sound" {
@@ -984,11 +1085,17 @@ test "audio: borrowed WAV bytes decode and conform into an owned sound" {
 
     var bytes: [48]u8;
     wav_fixture(?bytes[0]);
-    val sr: Result[Sound, str] = sound_from_bytes(?s, ?bytes[0], 48);
-    if (is_err[Sound, str](sr)) { ret 1; }
-    var snd: Sound = unwrap_ok[Sound, str](sr);
-    if (!snd.valid || snd.buffer.frames != 2) { sound_free(?s, ?snd); ret 2; }
-    if (snd.buffer.format.channels != 2)      { sound_free(?s, ?snd); ret 3; }
+    val sr: res[Sound, AudioError] = sound_from_bytes(?s, ?bytes[0], 48);
+    if (sel sr.err) { ret 1; }
+    var snd: Sound = sr.ok;
+    if (!snd.valid || snd.buffer.frames != 2) {
+        sound_free(?s, ?snd);
+        ret 2;
+    }
+    if (snd.buffer.format.channels != 2) {
+        sound_free(?s, ?snd);
+        ret 3;
+    }
     if (!near(snd.buffer.samples[0], 0.0)
         || !near(snd.buffer.samples[1], 0.0)
         || !near(snd.buffer.samples[2], 0.5)
@@ -999,9 +1106,30 @@ test "audio: borrowed WAV bytes decode and conform into an owned sound" {
 
     # The owned sample buffer survives destruction of the encoded span.
     var i: usize = 0;
-    for (i < 48) { bytes[i] = 0; i = i + 1; }
-    if (!near(snd.buffer.samples[2], 0.5)) { sound_free(?s, ?snd); ret 5; }
-    sound_free(?s, ?snd);
+    for (i < 48) {
+        bytes[i] = 0;
+        i        = i + 1;
+    }
+    if (!near(snd.buffer.samples[2], 0.5)) {
+        sound_free(?s, ?snd);
+        ret 5;
+    }
+    if (!released(sound_free(?s, ?snd))) { ret 6; }
+    ret 0;
+}
+
+test "audio: undecodable bytes report the decoder's refusal" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 48000, 2);
+
+    var bytes: [48]u8;
+    wav_fixture(?bytes[0]);
+    bytes[0] = 'X';
+    val sr: res[Sound, AudioError] = sound_from_bytes(?s, ?bytes[0], 48);
+    if (!sel sr.err)        { ret 1; }
+    if (!sel sr.err.decode) { ret 2; }
     ret 0;
 }
 
@@ -1011,41 +1139,61 @@ test "audio: a decoded asset becomes an independent sound" {
     var s: Audio;
     conform_fixture(?s, ?a, 48000, 2);
 
-    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
-    val br: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
-    if (is_err[audio.Buffer, str](br)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](br);
+    var vals: [4]f32                               = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val br:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (sel br.err) { ret 1; }
+    var src: audio.Buffer = br.ok;
 
-    val sr: Result[Sound, str] = sound_from_buffer(?s, ?src);
-    if (is_err[Sound, str](sr)) { audio.dnit(?src); ret 2; }
-    var snd: Sound = unwrap_ok[Sound, str](sr);
+    val sr: res[Sound, AudioError] = sound_from_buffer(?s, ?src);
+    if (sel sr.err) {
+        audio.dnit(?src);
+        ret 2;
+    }
+    var snd: Sound = sr.ok;
     if (snd.buffer.samples == src.samples) { ret 3; }
 
     src.samples[0] = -1.0;
     if (!near(snd.buffer.samples[0], 0.25)) { ret 4; }
-    audio.dnit(?src);
-    sound_free(?s, ?snd);
+    if (!released(audio.dnit(?src)))        { ret 5; }
+    if (!released(sound_free(?s, ?snd)))    { ret 6; }
+    ret 0;
+}
+
+test "audio: a source with no channels is refused by its buffer" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 48000, 2);
+
+    var src: audio.Buffer;
+    src.format.sample_rate = 48000;
+    src.format.channels    = 0;
+    src.frames             = 2;
+    val sr: res[Sound, AudioError] = sound_from_buffer(?s, ?src);
+    if (!sel sr.err)        { ret 1; }
+    if (!sel sr.err.buffer) { ret 2; }
     ret 0;
 }
 
 test "audio: releasing a sound retires every borrowing voice" {
     var a: allo.Allocator;
     page.make(?a);
-    var s: Audio = test_audio(?a, 2);
+    var s: Audio;
+    if (!test_audio(?s, ?a, 2)) { ret 1; }
 
-    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
-    val br: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
-    if (is_err[audio.Buffer, str](br)) { ret 1; }
+    var vals: [4]f32                               = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val br:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (sel br.err) { ret 2; }
     var snd: Sound;
-    snd.buffer = unwrap_ok[audio.Buffer, str](br);
-    snd.valid = true;
+    snd.buffer = br.ok;
+    snd.valid  = true;
 
     s.voices[0].stream = audio.stream_over(?snd.buffer, true);
     atomic.store(?s.voices[0].state, PLAYING);
-    sound_free(?s, ?snd);
+    if (!released(sound_free(?s, ?snd))) { ret 3; }
 
-    if (snd.valid || atomic.load(?s.voices[0].state) != FREE) { ret 2; }
-    allo.deallocate[f32](?a, s.scratch, s.frames * s.chans);
+    if (snd.valid || atomic.load(?s.voices[0].state) != FREE)               { ret 4; }
+    if (!released(allo.deallocate[f32](?a, s.scratch, s.frames * s.chans))) { ret 5; }
     ret 0;
 }
 
@@ -1057,18 +1205,18 @@ test "audio: a clip already in the device's format is passed through untouched" 
     var s: Audio;
     conform_fixture(?s, ?a, 48000, 2);
 
-    var vals: [4]f32 = [4]f32{0.25, 0.5, 0.75, 1.0};
-    val sr: Result[audio.Buffer, str] = conform_source(?a, 48000, 2, 2, ?vals[0]);
-    if (is_err[audio.Buffer, str](sr)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
-    val before: *f32 = src.samples;
+    var vals: [4]f32                               = [4]f32{0.25, 0.5, 0.75, 1.0};
+    val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 48000, 2, 2, ?vals[0]);
+    if (sel sr.err) { ret 1; }
+    var src:    audio.Buffer = sr.ok;
+    val before: *f32         = src.samples;
 
-    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
-    if (is_err[audio.Buffer, str](cr)) { ret 2; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
-    if (out.samples != before) { ret 3; }
-    if (out.frames != 2)       { ret 4; }
-    audio.dnit(?out);
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (sel cr.err) { ret 2; }
+    var out: audio.Buffer = cr.ok;
+    if (out.samples != before)       { ret 3; }
+    if (out.frames != 2)             { ret 4; }
+    if (!released(audio.dnit(?out))) { ret 5; }
     ret 0;
 }
 
@@ -1082,21 +1230,21 @@ test "audio: a mono clip fans out to every channel of a stereo device" {
     var s: Audio;
     conform_fixture(?s, ?a, 8000, 2);
 
-    var vals: [3]f32 = [3]f32{0.2, 0.4, 0.6};
-    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 1, 3, ?vals[0]);
-    if (is_err[audio.Buffer, str](sr)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+    var vals: [3]f32                               = [3]f32{0.2, 0.4, 0.6};
+    val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 8000, 1, 3, ?vals[0]);
+    if (sel sr.err) { ret 1; }
+    var src: audio.Buffer = sr.ok;
 
-    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
-    if (is_err[audio.Buffer, str](cr)) { ret 2; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (sel cr.err) { ret 2; }
+    var out: audio.Buffer = cr.ok;
 
-    if (out.frames != 3)           { ret 3; }
-    if (out.format.channels != 2)  { ret 4; }
+    if (out.frames != 3)                                          { ret 3; }
+    if (out.format.channels != 2)                                 { ret 4; }
     if (!near(out.samples[0], 0.2) || !near(out.samples[1], 0.2)) { ret 5; }
     if (!near(out.samples[2], 0.4) || !near(out.samples[3], 0.4)) { ret 6; }
     if (!near(out.samples[4], 0.6) || !near(out.samples[5], 0.6)) { ret 7; }
-    audio.dnit(?out);
+    if (!released(audio.dnit(?out)))                              { ret 8; }
     ret 0;
 }
 
@@ -1106,20 +1254,20 @@ test "audio: a stereo clip is averaged down for a mono device" {
     var s: Audio;
     conform_fixture(?s, ?a, 8000, 1);
 
-    var vals: [4]f32 = [4]f32{0.2, 0.6, 0.0, 1.0};
-    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 2, 2, ?vals[0]);
-    if (is_err[audio.Buffer, str](sr)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+    var vals: [4]f32                               = [4]f32{0.2, 0.6, 0.0, 1.0};
+    val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 8000, 2, 2, ?vals[0]);
+    if (sel sr.err) { ret 1; }
+    var src: audio.Buffer = sr.ok;
 
-    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
-    if (is_err[audio.Buffer, str](cr)) { ret 2; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (sel cr.err) { ret 2; }
+    var out: audio.Buffer = cr.ok;
 
-    if (out.frames != 2)          { ret 3; }
-    if (out.format.channels != 1) { ret 4; }
-    if (!near(out.samples[0], 0.4)) { ret 5; }
-    if (!near(out.samples[1], 0.5)) { ret 6; }
-    audio.dnit(?out);
+    if (out.frames != 2)             { ret 3; }
+    if (out.format.channels != 1)    { ret 4; }
+    if (!near(out.samples[0], 0.4))  { ret 5; }
+    if (!near(out.samples[1], 0.5))  { ret 6; }
+    if (!released(audio.dnit(?out))) { ret 7; }
     ret 0;
 }
 
@@ -1133,23 +1281,23 @@ test "audio: doubling the rate interpolates a sample between each pair" {
     var s: Audio;
     conform_fixture(?s, ?a, 16000, 1);
 
-    var vals: [2]f32 = [2]f32{0.0, 1.0};
-    val sr: Result[audio.Buffer, str] = conform_source(?a, 8000, 1, 2, ?vals[0]);
-    if (is_err[audio.Buffer, str](sr)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+    var vals: [2]f32                               = [2]f32{0.0, 1.0};
+    val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 8000, 1, 2, ?vals[0]);
+    if (sel sr.err) { ret 1; }
+    var src: audio.Buffer = sr.ok;
 
-    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
-    if (is_err[audio.Buffer, str](cr)) { ret 2; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (sel cr.err) { ret 2; }
+    var out: audio.Buffer = cr.ok;
 
     # Twice the rate is twice the frames, and the new frame between the two
     # source frames is their midpoint.
-    if (out.frames != 4)                { ret 3; }
+    if (out.frames != 4)                 { ret 3; }
     if (out.format.sample_rate != 16000) { ret 4; }
-    if (!near(out.samples[0], 0.0))     { ret 5; }
-    if (!near(out.samples[1], 0.5))     { ret 6; }
-    if (!near(out.samples[2], 1.0))     { ret 7; }
-    audio.dnit(?out);
+    if (!near(out.samples[0], 0.0))      { ret 5; }
+    if (!near(out.samples[1], 0.5))      { ret 6; }
+    if (!near(out.samples[2], 1.0))      { ret 7; }
+    if (!released(audio.dnit(?out)))     { ret 8; }
     ret 0;
 }
 
@@ -1159,19 +1307,35 @@ test "audio: halving the rate halves the frame count" {
     var s: Audio;
     conform_fixture(?s, ?a, 8000, 1);
 
-    var vals: [4]f32 = [4]f32{0.0, 0.25, 0.5, 0.75};
-    val sr: Result[audio.Buffer, str] = conform_source(?a, 16000, 1, 4, ?vals[0]);
-    if (is_err[audio.Buffer, str](sr)) { ret 1; }
-    var src: audio.Buffer = unwrap_ok[audio.Buffer, str](sr);
+    var vals: [4]f32                               = [4]f32{0.0, 0.25, 0.5, 0.75};
+    val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 16000, 1, 4, ?vals[0]);
+    if (sel sr.err) { ret 1; }
+    var src: audio.Buffer = sr.ok;
 
-    val cr: Result[audio.Buffer, str] = conform(?s, ?src);
-    if (is_err[audio.Buffer, str](cr)) { ret 2; }
-    var out: audio.Buffer = unwrap_ok[audio.Buffer, str](cr);
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (sel cr.err) { ret 2; }
+    var out: audio.Buffer = cr.ok;
 
-    if (out.frames != 2)            { ret 3; }
-    if (!near(out.samples[0], 0.0)) { ret 4; }
-    if (!near(out.samples[1], 0.5)) { ret 5; }
-    audio.dnit(?out);
+    if (out.frames != 2)             { ret 3; }
+    if (!near(out.samples[0], 0.0))  { ret 4; }
+    if (!near(out.samples[1], 0.5))  { ret 5; }
+    if (!released(audio.dnit(?out))) { ret 6; }
+    ret 0;
+}
+
+test "audio: a clip with no rate is refused rather than divided by" {
+    var a: allo.Allocator;
+    page.make(?a);
+    var s: Audio;
+    conform_fixture(?s, ?a, 8000, 1);
+
+    var src: audio.Buffer;
+    src.format.sample_rate = 0;
+    src.format.channels    = 2;
+    src.frames             = 4;
+    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    if (!sel cr.err)            { ret 1; }
+    if (!sel cr.err.empty_clip) { ret 2; }
     ret 0;
 }
 
@@ -1186,9 +1350,9 @@ test "audio: the pan law holds power flat across the sweep" {
     var p: f32 = l * l + r * r;
     if (p < 0.999 || p > 1.001) { ret 1; }
     # Centre is equal, and notably not 0.5 each.
-    if (l != r)      { ret 2; }
-    if (l > 0.708)   { ret 3; }
-    if (l < 0.706)   { ret 4; }
+    if (l != r)    { ret 2; }
+    if (l > 0.708) { ret 3; }
+    if (l < 0.706) { ret 4; }
 
     pan_gains(-1.0, ?l, ?r);
     if (l != 1.0 || r != 0.0) { ret 5; }
@@ -1218,21 +1382,27 @@ test "audio: a class budget refuses rather than filling the table" {
     var s: Audio;
     s.ready = false;
     var c: usize = 0;
-    for (c < MAX_CLASSES) { s.limits[c] = 0; c = c + 1; }
+    for (c < MAX_CLASSES) {
+        s.limits[c] = 0;
+        c           = c + 1;
+    }
     var v: usize = 0;
     for (v < MAX_VOICES) {
         s.voices[v].state = FREE;
         s.voices[v].class = 0;
-        v = v + 1;
+        v                 = v + 1;
     }
 
     audio_set_class_limit(?s, 3, 2);
     if (s.limits[3] != 2) { ret 1; }
 
     # Two of class 3 playing, and one of another class that must not count.
-    s.voices[0].state = PLAYING; s.voices[0].class = 3;
-    s.voices[1].state = PLAYING; s.voices[1].class = 3;
-    s.voices[2].state = PLAYING; s.voices[2].class = 5;
+    s.voices[0].state = PLAYING;
+    s.voices[0].class = 3;
+    s.voices[1].state = PLAYING;
+    s.voices[1].class = 3;
+    s.voices[2].state = PLAYING;
+    s.voices[2].class = 5;
 
     if (audio_class_playing(?s, 3) != 2) { ret 2; }
     if (audio_class_playing(?s, 5) != 1) { ret 3; }
@@ -1243,13 +1413,19 @@ test "audio: a class budget refuses rather than filling the table" {
 test "audio: an out-of-range class is refused and does not corrupt a budget" {
     var s: Audio;
     var c: usize = 0;
-    for (c < MAX_CLASSES) { s.limits[c] = 0; c = c + 1; }
+    for (c < MAX_CLASSES) {
+        s.limits[c] = 0;
+        c           = c + 1;
+    }
 
     audio_set_class_limit(?s, MAX_CLASSES, 4);
     if (audio_class_playing(?s, MAX_CLASSES) != 0) { ret 1; }
 
     var v: usize = 0;
-    for (v < MAX_VOICES) { s.voices[v].state = FREE; v = v + 1; }
+    for (v < MAX_VOICES) {
+        s.voices[v].state = FREE;
+        v                 = v + 1;
+    }
     c = 0;
     for (c < MAX_CLASSES) {
         if (s.limits[c] != 0) { ret 2; }
@@ -1261,17 +1437,21 @@ test "audio: an out-of-range class is refused and does not corrupt a budget" {
 test "audio: a stale voice id does not retune whatever took the slot" {
     var s: Audio;
     var v: usize = 0;
-    for (v < MAX_VOICES) { s.voices[v].state = FREE; s.gens[v] = 0; v = v + 1; }
+    for (v < MAX_VOICES) {
+        s.voices[v].state = FREE;
+        s.gens[v]         = 0;
+        v                 = v + 1;
+    }
 
     s.voices[0].state = PLAYING;
     s.gens[0]         = 7;
     s.voices[0].gain  = 1.0;
 
-    val stale: VoiceId = VoiceId{slot: 1, gen: 6};
+    val stale: VoiceId = VoiceId{slot: 0, gen: 6};
     if (audio_set_gain(?s, stale, 0.0)) { ret 1; }
     if (s.voices[0].gain != 1.0)        { ret 2; }
 
-    val good: VoiceId = VoiceId{slot: 1, gen: 7};
+    val good: VoiceId = VoiceId{slot: 0, gen: 7};
     if (!audio_set_gain(?s, good, 0.25)) { ret 3; }
     if (s.voices[0].gain != 0.25)        { ret 4; }
 
@@ -1282,24 +1462,30 @@ test "audio: a stale voice id does not retune whatever took the slot" {
     ret 0;
 }
 
-test "audio: voice_none names nothing and is refused everywhere" {
+test "audio: an out-of-range voice id is refused everywhere" {
     var s: Audio;
     var v: usize = 0;
-    for (v < MAX_VOICES) { s.voices[v].state = PLAYING; s.gens[v] = 0; v = v + 1; }
-    val none: VoiceId = voice_none();
-    if (audio_set_gain(?s, none, 0.5)) { ret 1; }
-    if (audio_set_pan(?s, none, 0.5))  { ret 2; }
-    if (audio_set_rate(?s, none, 2.0)) { ret 3; }
+    for (v < MAX_VOICES) {
+        s.voices[v].state = PLAYING;
+        s.gens[v]         = 0;
+        v                 = v + 1;
+    }
+    val outside: VoiceId = VoiceId{slot: MAX_VOICES, gen: 0};
+    if (audio_set_gain(?s, outside, 0.5)) { ret 1; }
+    if (audio_set_pan(?s, outside, 0.5))  { ret 2; }
+    if (audio_set_rate(?s, outside, 2.0)) { ret 3; }
+    if (audio_stop(?s, outside))          { ret 4; }
+    if (audio_playing(?s, outside))       { ret 5; }
     ret 0;
 }
 
 test "audio: a quiesced mixer refuses new voices" {
     var s: Audio;
-    s.ready = true;
+    s.ready   = true;
     s.started = false;
     var snd: Sound;
     snd.valid = true;
-    val id: VoiceId = audio_play(?s, ?snd, 1.0, false);
-    if (id.slot != 0 || id.gen != 0) { ret 1; }
+    val id: opt[VoiceId] = audio_play(?s, ?snd, 1.0, false);
+    if (!sel id.none) { ret 1; }
     ret 0;
 }

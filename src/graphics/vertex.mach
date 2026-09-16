@@ -18,8 +18,8 @@
 # a Component to a GL type when it binds the attributes.
 
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
 
 # the most attributes a single vertex format carries
@@ -29,19 +29,19 @@ pub val MAX_ATTRIBUTES: usize = 8;
 pub def Semantic: u8;
 
 # vertex position, glTF POSITION
-pub val SEMANTIC_POSITION:   Semantic = 0;
+pub val SEMANTIC_POSITION: Semantic = 0;
 # surface normal, glTF NORMAL
-pub val SEMANTIC_NORMAL:     Semantic = 1;
+pub val SEMANTIC_NORMAL: Semantic = 1;
 # first texture coordinate set, glTF TEXCOORD_0
 pub val SEMANTIC_TEXCOORD_0: Semantic = 2;
 # first vertex color set, glTF COLOR_0
-pub val SEMANTIC_COLOR_0:    Semantic = 3;
+pub val SEMANTIC_COLOR_0: Semantic = 3;
 # tangent frame, glTF TANGENT
-pub val SEMANTIC_TANGENT:    Semantic = 4;
+pub val SEMANTIC_TANGENT: Semantic = 4;
 # skin joint indices, glTF JOINTS_0, bound as an integer attribute
-pub val SEMANTIC_JOINTS_0:   Semantic = 5;
+pub val SEMANTIC_JOINTS_0: Semantic = 5;
 # skin joint weights, glTF WEIGHTS_0
-pub val SEMANTIC_WEIGHTS_0:  Semantic = 6;
+pub val SEMANTIC_WEIGHTS_0: Semantic = 6;
 
 # an attribute component's storage type
 pub def Component: u8;
@@ -49,13 +49,13 @@ pub def Component: u8;
 # 32-bit float
 pub val COMP_F32: Component = 0;
 # 8-bit unsigned integer
-pub val COMP_U8:  Component = 1;
+pub val COMP_U8: Component = 1;
 # 16-bit unsigned integer
 pub val COMP_U16: Component = 2;
 # 32-bit unsigned integer
 pub val COMP_U32: Component = 3;
 # 8-bit signed integer
-pub val COMP_I8:  Component = 4;
+pub val COMP_I8: Component = 4;
 # 16-bit signed integer
 pub val COMP_I16: Component = 5;
 
@@ -140,16 +140,16 @@ pub fun vertex_format_add(f: *VertexFormat, semantic: Semantic, location: u32, c
         ret false;
     }
     var a: VertexAttribute;
-    a.semantic   = semantic;
-    a.location   = location;
-    a.component  = component;
-    a.count      = count;
-    a.normalized = normalized;
-    a.integer    = integer;
-    a.offset     = f.stride;
+    a.semantic            = semantic;
+    a.location            = location;
+    a.component           = component;
+    a.count               = count;
+    a.normalized          = normalized;
+    a.integer             = integer;
+    a.offset              = f.stride;
     f.attributes[f.count] = a;
-    f.count  = f.count + 1;
-    f.stride = f.stride + attribute_bytes(?a);
+    f.count               = f.count + 1;
+    f.stride              = f.stride + attribute_bytes(?a);
     ret true;
 }
 
@@ -162,8 +162,8 @@ pub fun vertex_format_add(f: *VertexFormat, semantic: Semantic, location: u32, c
 # ret: the standard 3D format
 pub fun vertex_format_standard() VertexFormat {
     var f: VertexFormat = vertex_format();
-    vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 3, 0, 0);
-    vertex_format_add(?f, SEMANTIC_NORMAL,     1, COMP_F32, 3, 0, 0);
+    vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0);
+    vertex_format_add(?f, SEMANTIC_NORMAL, 1, COMP_F32, 3, 0, 0);
     vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 2, COMP_F32, 2, 0, 0);
     ret f;
 }
@@ -182,7 +182,7 @@ pub fun vertex_format_standard() VertexFormat {
 # ret: the standard skinned format
 pub fun vertex_format_skinned() VertexFormat {
     var f: VertexFormat = vertex_format_standard();
-    vertex_format_add(?f, SEMANTIC_JOINTS_0,  5, COMP_U16, 4, 0, 1);
+    vertex_format_add(?f, SEMANTIC_JOINTS_0, 5, COMP_U16, 4, 0, 1);
     vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 6, COMP_F32, 4, 0, 0);
     ret f;
 }
@@ -207,9 +207,9 @@ pub fun vertex_format_skinned() VertexFormat {
 # ret: the immediate-mode format
 pub fun vertex_format_ui() VertexFormat {
     var f: VertexFormat = vertex_format();
-    vertex_format_add(?f, SEMANTIC_POSITION,   0, COMP_F32, 2, 0, 0);
+    vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0);
     vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
-    vertex_format_add(?f, SEMANTIC_COLOR_0,    3, COMP_F32, 4, 0, 0);
+    vertex_format_add(?f, SEMANTIC_COLOR_0, 3, COMP_F32, 4, 0, 0);
     ret f;
 }
 
@@ -234,13 +234,13 @@ pub fun vertex_format_eq(a: *VertexFormat, b: *VertexFormat) bool {
     for (i < a.count) {
         val x: *VertexAttribute = ?a.attributes[i];
         val y: *VertexAttribute = ?b.attributes[i];
-        if (x.semantic   != y.semantic)   { ret false; }
-        if (x.location   != y.location)   { ret false; }
-        if (x.component  != y.component)  { ret false; }
-        if (x.count      != y.count)      { ret false; }
+        if (x.semantic != y.semantic)     { ret false; }
+        if (x.location != y.location)     { ret false; }
+        if (x.component != y.component)   { ret false; }
+        if (x.count != y.count)           { ret false; }
         if (x.normalized != y.normalized) { ret false; }
-        if (x.integer    != y.integer)    { ret false; }
-        if (x.offset     != y.offset)     { ret false; }
+        if (x.integer != y.integer)       { ret false; }
+        if (x.offset != y.offset)         { ret false; }
         i = i + 1;
     }
     ret true;
@@ -257,9 +257,9 @@ pub fun vertex_format_eq(a: *VertexFormat, b: *VertexFormat) bool {
 pub fun vertex_format_is_skinned(f: *VertexFormat) bool {
     var joints:  bool = false;
     var weights: bool = false;
-    var i: u32 = 0;
+    var i:       u32  = 0;
     for (i < f.count) {
-        if (f.attributes[i].semantic == SEMANTIC_JOINTS_0)  { joints  = true; }
+        if (f.attributes[i].semantic == SEMANTIC_JOINTS_0)  { joints = true; }
         if (f.attributes[i].semantic == SEMANTIC_WEIGHTS_0) { weights = true; }
         i = i + 1;
     }
@@ -273,54 +273,54 @@ test "vertex: the immediate-mode format matches blit's vertex exactly" {
     # compile anywhere: it reinterprets every UI vertex, and the symptom is a UI
     # drawn in the wrong place in the wrong colours.
     var f: VertexFormat = vertex_format_ui();
-    if (f.count != 3)  { ret 1; }
+    if (f.count != 3)   { ret 1; }
     if (f.stride != 32) { ret 2; }
 
-    if (f.attributes[0].semantic != SEMANTIC_POSITION)   { ret 3; }
-    if (f.attributes[0].offset != 0)                     { ret 4; }
-    if (f.attributes[0].count != 2)                      { ret 5; }
+    if (f.attributes[0].semantic != SEMANTIC_POSITION) { ret 3; }
+    if (f.attributes[0].offset != 0)                   { ret 4; }
+    if (f.attributes[0].count != 2)                    { ret 5; }
 
     if (f.attributes[1].semantic != SEMANTIC_TEXCOORD_0) { ret 6; }
     if (f.attributes[1].offset != 8)                     { ret 7; }
     if (f.attributes[1].count != 2)                      { ret 8; }
 
-    if (f.attributes[2].semantic != SEMANTIC_COLOR_0)    { ret 9; }
-    if (f.attributes[2].offset != 16)                    { ret 10; }
-    if (f.attributes[2].count != 4)                      { ret 11; }
+    if (f.attributes[2].semantic != SEMANTIC_COLOR_0) { ret 9; }
+    if (f.attributes[2].offset != 16)                 { ret 10; }
+    if (f.attributes[2].count != 4)                   { ret 11; }
 
     # Floats, not normalized bytes. blit's colours are straight rgba f32, and a
     # format claiming u8 here would read four colour channels out of the first
     # four bytes of the float and draw the whole UI black.
-    if (f.attributes[2].component != COMP_F32)           { ret 12; }
-    if (f.attributes[2].normalized != 0)                 { ret 13; }
+    if (f.attributes[2].component != COMP_F32) { ret 12; }
+    if (f.attributes[2].normalized != 0)       { ret 13; }
     ret 0;
 }
 
 test "vertex: standard format packs to a 32-byte stride" {
     var f: VertexFormat = vertex_format_standard();
-    if (f.count != 3) { ret 1; }
-    if (f.attributes[0].offset != 0) { ret 2; }
+    if (f.count != 3)                 { ret 1; }
+    if (f.attributes[0].offset != 0)  { ret 2; }
     if (f.attributes[1].offset != 12) { ret 3; }
     if (f.attributes[2].offset != 24) { ret 4; }
-    if (f.stride != 32) { ret 5; }
+    if (f.stride != 32)               { ret 5; }
     ret 0;
 }
 
 test "vertex: skinning attributes describe joints and weights" {
     var f: VertexFormat = vertex_format_standard();
-    if (!vertex_format_add(?f, SEMANTIC_JOINTS_0,  3, COMP_U16, 4, 0, 1)) { ret 1; }
+    if (!vertex_format_add(?f, SEMANTIC_JOINTS_0, 3, COMP_U16, 4, 0, 1))  { ret 1; }
     if (!vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 4, COMP_F32, 4, 0, 0)) { ret 2; }
     val joints: *VertexAttribute = ?f.attributes[3];
-    if (joints.integer != 1) { ret 3; }
+    if (joints.integer != 1)          { ret 3; }
     if (attribute_bytes(joints) != 8) { ret 4; }
     if (f.attributes[3].offset != 32) { ret 5; }
-    if (f.stride != 56) { ret 6; }
+    if (f.stride != 56)               { ret 6; }
     ret 0;
 }
 
 test "vertex: add refuses to overflow the attribute table" {
     var f: VertexFormat = vertex_format();
-    var i: u32 = 0;
+    var i: u32          = 0;
     for (i < MAX_ATTRIBUTES::u32) {
         if (!vertex_format_add(?f, SEMANTIC_POSITION, i, COMP_F32, 1, 0, 0)) { ret 1; }
         i = i + 1;

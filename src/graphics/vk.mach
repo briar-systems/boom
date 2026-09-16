@@ -20,23 +20,23 @@
 # family and a present-capable family are frequently the same one and are not
 # required to be, so both are resolved independently and may coincide.
 
+use boom.graphics.error.DeviceError;
+use boom.graphics.error.Error;
+use boom.graphics.error.LoaderError;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
+use gc: glfw.c;
+use glfw.glfw;
+use glfw.vulkan.SurfaceError;
 use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
 use vk;
-use glfw.glfw;
-use gc: glfw.c;
-use boom.graphics.error.Error;
-use boom.graphics.error.error;
-
-# A queue family index, or NO_FAMILY when none was found.
-pub val NO_FAMILY: u32 = 0xFFFFFFFF;
 
 # Packed API versions, as (major << 22) | (minor << 12) | patch.
 #
@@ -52,103 +52,41 @@ val API_VERSION_1_3: u32 = 0x00403000;
 # as mach-vk spells KHR_SWAPCHAIN_EXTENSION_NAME: the registry's name without
 # the VK_ prefix the generator drops.
 val INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x00000001;
-val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME: *u8 = "VK_KHR_portability_enumeration";
-val KHR_PORTABILITY_SUBSET_EXTENSION_NAME: *u8 = "VK_KHR_portability_subset";
+val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME:    *u8 = "VK_KHR_portability_enumeration";
+val KHR_PORTABILITY_SUBSET_EXTENSION_NAME:         *u8 = "VK_KHR_portability_subset";
 
 # The version the instance requests.
 #
-# 1.3, NOT 1.0. Mach emits SPIR-V 1.6, and the SPIR-V version a driver will
-# accept is fixed by the API version the instance declared: 1.0 permits only
-# SPIR-V 1.0. Requesting 1.0 and handing over 1.6 is rejected by
-# vkCreateShaderModule under validation and is undefined without it, which is
-# why it went unnoticed — the drivers tested happened to accept the module and
-# render correctly anyway.
+# 1.3 where the loader offers it, and whatever it offers below that otherwise.
+# boom's own modules are built for the vulkan1.0 SPIR-V environment, so they load
+# under any instance version. A game's own shaders may target a later
+# environment, and a driver accepts only the SPIR-V version its instance
+# declared, so the request is as high as the loader allows rather than the
+# floor boom needs.
 #
 # vkEnumerateInstanceVersion is itself a 1.1 entry point and is absent on a 1.0
-# loader, so a nil there is the loader saying it is 1.0. In that case the
-# request drops to 1.0 and instance creation proceeds; shader module creation is
-# then the thing that fails, with a message naming the version, rather than the
-# instance failing with one that does not.
-# name one failed Vulkan call after the result it actually returned
-#
-# a bring-up failure that says only "failed" costs a report-and-reply round
-# trip to learn whether the machine lacks a driver or the request was wrong.
-# the common results are named; anything else keeps the bare call name.
-# ---
-# call: the Vulkan entry point that failed
-# code: the VkResult it returned
-# ret:  a static message naming both
-fun result_name(call: str, code: i32) str {
-    if (code == vk.ERROR_INCOMPATIBLE_DRIVER) {
-        if (same(call, "vkCreateInstance")) {
-            ret "vkCreateInstance: VK_ERROR_INCOMPATIBLE_DRIVER (no Vulkan-capable graphics driver on this machine)";
-        }
-        ret "vkCreateDevice: VK_ERROR_INCOMPATIBLE_DRIVER";
-    }
-    if (code == vk.ERROR_EXTENSION_NOT_PRESENT) {
-        if (same(call, "vkCreateInstance")) {
-            ret "vkCreateInstance: VK_ERROR_EXTENSION_NOT_PRESENT";
-        }
-        ret "vkCreateDevice: VK_ERROR_EXTENSION_NOT_PRESENT";
-    }
-    if (code == vk.ERROR_LAYER_NOT_PRESENT) {
-        if (same(call, "vkCreateInstance")) {
-            ret "vkCreateInstance: VK_ERROR_LAYER_NOT_PRESENT";
-        }
-        ret "vkCreateDevice: VK_ERROR_LAYER_NOT_PRESENT";
-    }
-    if (code == vk.ERROR_INITIALIZATION_FAILED) {
-        if (same(call, "vkCreateInstance")) {
-            ret "vkCreateInstance: VK_ERROR_INITIALIZATION_FAILED";
-        }
-        ret "vkCreateDevice: VK_ERROR_INITIALIZATION_FAILED";
-    }
-    if (code == vk.ERROR_OUT_OF_HOST_MEMORY
-        || code == vk.ERROR_OUT_OF_DEVICE_MEMORY) {
-        if (same(call, "vkCreateInstance")) {
-            ret "vkCreateInstance: out of memory";
-        }
-        ret "vkCreateDevice: out of memory";
-    }
-    if (code == vk.ERROR_FEATURE_NOT_PRESENT) {
-        ret "vkCreateDevice: VK_ERROR_FEATURE_NOT_PRESENT";
-    }
-    if (same(call, "vkCreateInstance")) {
-        ret "vkCreateInstance failed with an unlisted VkResult";
-    }
-    ret "vkCreateDevice failed with an unlisted VkResult";
-}
-
-fun same(a: str, b: str) bool {
-    var i: usize = 0;
-    for (a[i] != 0 && b[i] != 0) {
-        if (a[i] != b[i]) { ret false; }
-        i = i + 1;
-    }
-    ret a[i] == b[i];
-}
-
+# loader, so a nil there is the loader saying it is 1.0.
 fun requested_api_version() u32 {
     if (vk.vkEnumerateInstanceVersion == nil) { ret API_VERSION_1_0; }
     var supported: u32 = 0;
     if (vk.vkEnumerateInstanceVersion(?supported) != vk.SUCCESS) { ret API_VERSION_1_0; }
-    if (supported < API_VERSION_1_3) { ret supported; }
+    if (supported < API_VERSION_1_3)                             { ret supported; }
     ret API_VERSION_1_3;
 }
 
 # The device-level objects a renderer needs before it can build a swapchain.
 # ---
-# instance:       The Vulkan instance.
-# surface:        The window surface. GLFW hands it back as a u64 because a
-#                 non-dispatchable handle is 64-bit everywhere; mach-vk types it
-#                 as ptr, so the conversion happens once, here.
-# physical:       The selected physical device.
-# device:         The logical device.
-# graphics_queue: Queue for draw submission.
-# present_queue:  Queue for presentation; may equal graphics_queue.
+# instance:        The Vulkan instance.
+# surface:         The window surface. GLFW hands it back as a u64 because a
+#                  non-dispatchable handle is 64-bit everywhere; mach-vk types it
+#                  as ptr, so the conversion happens once, here.
+# physical:        The selected physical device.
+# device:          The logical device.
+# graphics_queue:  Queue for draw submission.
+# present_queue:   Queue for presentation; may equal graphics_queue.
 # graphics_family: Family index behind graphics_queue.
 # present_family:  Family index behind present_queue.
-# ready:          Whether bring-up completed.
+# ready:           Whether bring-up completed.
 pub rec Vk {
     instance:        vk.Instance;
     surface:         vk.SurfaceKHR;
@@ -167,25 +105,23 @@ pub rec Vk {
 #
 # The window must have been created with the client API hint set to none;
 # a window carrying a GL context cannot back a Vulkan surface.
-pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] {
-    v.ready           = false;
-    v.graphics_family = NO_FAMILY;
-    v.present_family  = NO_FAMILY;
+pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
+    v.ready = false;
 
     if (!glfw.vulkan_supported()) {
-        ret err[bool, Error](error("no Vulkan loader or ICD available"));
+        ret err[Error].err{Error.loader{LoaderError.unavailable{}}};
     }
 
     if (vk.load_global(gc.glfwGetInstanceProcAddress:~vk.GetInstanceProcAddr) <= 0) {
-        ret err[bool, Error](error("could not resolve global Vulkan commands"));
+        ret err[Error].err{Error.loader{LoaderError.global{}}};
     }
 
     # The surface extensions GLFW requires for this platform. An instance
     # created without them cannot present.
-    var ext_count: u32 = 0;
-    val exts: **u8 = glfw.required_instance_extensions(?ext_count);
+    var ext_count: u32  = 0;
+    val exts:      **u8 = glfw.required_instance_extensions(?ext_count);
     if (exts == nil || ext_count == 0) {
-        ret err[bool, Error](error("GLFW reported no required instance extensions"));
+        ret err[Error].err{Error.device{DeviceError.no_instance_extensions{}}};
     }
 
     # GLFW's list plus whatever the platform adds, in a fixed array rather than
@@ -202,13 +138,13 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     # of the cause and pointing at the wrong subsystem. A bound that can be
     # refused here says what actually went wrong.
     if (ext_count > 15) {
-        ret err[bool, Error](error("GLFW requires more instance extensions than boom can enable"));
+        ret err[Error].err{Error.device{DeviceError.instance_extensions{ext_count}}};
     }
-    var enabled: [16]*u8;
+    var enabled:       [16]*u8;
     var enabled_count: u32 = 0;
     for (enabled_count < ext_count) {
         enabled[enabled_count] = exts[enabled_count];
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     $if ($mach.build.os == $mach.os.darwin) {
@@ -223,7 +159,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
         # at device selection, with a message that names nothing to do with
         # portability.
         enabled[enabled_count] = KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     var app: vk.ApplicationInfo;
@@ -257,23 +193,31 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
 
     val made: i32 = vk.vkCreateInstance(?ici, nil, ?v.instance);
     if (made != vk.SUCCESS) {
-        ret err[bool, Error](error(result_name("vkCreateInstance", made)));
+        ret err[Error].err{vk_failed(VkCall.create_instance{}, made)};
     }
     if (vk.load_instance(gc.glfwGetInstanceProcAddress:~vk.GetInstanceProcAddr, v.instance::ptr) <= 0) {
-        ret err[bool, Error](error("could not resolve instance Vulkan commands"));
+        vk.vkDestroyInstance(v.instance, nil);
+        ret err[Error].err{Error.loader{LoaderError.instance{}}};
     }
 
-    var raw_surface: u64 = 0;
-    if (!glfw.create_window_surface(v.instance::ptr, window, ?raw_surface)) {
-        ret err[bool, Error](error("could not create a window surface"));
+    val surface: res[u64, SurfaceError] = glfw.create_window_surface(v.instance::ptr, window);
+    if (sel surface.err) {
+        vk.vkDestroyInstance(v.instance, nil);
+        ret err[Error].err{Error.device{DeviceError.surface{surface.err}}};
     }
-    v.surface = raw_surface::vk.SurfaceKHR;
+    v.surface = surface.ok::vk.SurfaceKHR;
 
-    val pr: Result[bool, Error] = pick_physical(v);
-    if (is_err[bool, Error](pr)) { ret pr; }
+    val pr: err[Error] = pick_physical(v);
+    if (sel pr.err) {
+        destroy_surface_and_instance(v);
+        ret pr;
+    }
 
-    val dr: Result[bool, Error] = create_device(v);
-    if (is_err[bool, Error](dr)) { ret dr; }
+    val dr: err[Error] = create_device(v);
+    if (sel dr.err) {
+        destroy_surface_and_instance(v);
+        ret dr;
+    }
 
     # THE COLOUR FORMAT IS THE SURFACE'S, AND IT IS PICKED ONCE, HERE. It is a
     # property of the surface, which this module owns, and three separate things
@@ -284,15 +228,23 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
     # incompatible with the window pass and every draw into it would be rejected.
     # Deriving it in one place makes that agreement structural rather than a
     # convention each caller has to remember.
-    var fmt: vk.SurfaceFormatKHR;
-    if (!pick_format(v, ?fmt)) {
-        ret err[bool, Error](error("surface reported no formats"));
+    val picked: res[vk.SurfaceFormatKHR, Error] = pick_format(v);
+    if (sel picked.err) {
+        vk.vkDestroyDevice(v.device, nil);
+        destroy_surface_and_instance(v);
+        ret err[Error].err{picked.err};
     }
-    v.color_format = fmt.format;
-    v.color_space  = fmt.colorSpace;
+    v.color_format = picked.ok.format;
+    v.color_space  = picked.ok.colorSpace;
 
     v.ready = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
+}
+
+# release the surface and instance of a bring-up that failed after creating them
+fun destroy_surface_and_instance(v: *Vk) {
+    vk.vkDestroySurfaceKHR(v.instance, v.surface, nil);
+    vk.vkDestroyInstance(v.instance, nil);
 }
 
 # Pick a surface format, preferring 8-bit sRGB.
@@ -300,18 +252,22 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) Result[bool, Error] 
 # Falls back to the first format the surface reports rather than failing. Every
 # surface offers at least one, and a renderer that insists on a preferred format
 # cannot start on hardware that does not offer it.
-fun pick_format(v: *Vk, out: *vk.SurfaceFormatKHR) bool {
-    var count: u32 = 0;
-    if (!enumerated(vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?count, nil))) {
-        ret false;
+fun pick_format(v: *Vk) res[vk.SurfaceFormatKHR, Error] {
+    var count:   u32 = 0;
+    val counted: i32 = vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?count, nil);
+    if (!enumerated(counted)) {
+        ret res[vk.SurfaceFormatKHR, Error].err{vk_failed(VkCall.get_surface_formats{}, counted)};
     }
-    if (count == 0) { ret false; }
+    if (count == 0) {
+        ret res[vk.SurfaceFormatKHR, Error].err{Error.device{DeviceError.no_surface_format{}}};
+    }
 
     var formats: [32]vk.SurfaceFormatKHR;
-    var cap: u32 = 32;
+    var cap:     u32 = 32;
     if (count < cap) { cap = count; }
-    if (!enumerated(vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?cap, ?formats[0]))) {
-        ret false;
+    val listed: i32 = vk.vkGetPhysicalDeviceSurfaceFormatsKHR(v.physical, v.surface, ?cap, ?formats[0]);
+    if (!enumerated(listed)) {
+        ret res[vk.SurfaceFormatKHR, Error].err{vk_failed(VkCall.get_surface_formats{}, listed)};
     }
 
     # AN sRGB SURFACE IS WHAT MAKES THE COLOUR PIPELINE CLOSE. Textures are
@@ -323,8 +279,7 @@ fun pick_format(v: *Vk, out: *vk.SurfaceFormatKHR) bool {
     for (i < cap) {
         if (formats[i].format == vk.FORMAT_B8G8R8A8_SRGB
             || formats[i].format == vk.FORMAT_R8G8B8A8_SRGB) {
-            @out = formats[i];
-            ret true;
+            ret res[vk.SurfaceFormatKHR, Error].ok{formats[i]};
         }
         i = i + 1;
     }
@@ -333,8 +288,7 @@ fun pick_format(v: *Vk, out: *vk.SurfaceFormatKHR) bool {
     # renderer working; it does not encode, so colours come out darker than
     # authored. Reporting it is the caller's job, since there is nothing better
     # to do about it here.
-    @out = formats[0];
-    ret true;
+    ret res[vk.SurfaceFormatKHR, Error].ok{formats[0]};
 }
 
 # Whether a surface format encodes sRGB on write.
@@ -366,70 +320,90 @@ pub fun vk_wait_idle(v: *Vk) {
 # The first device satisfying both is taken. Preferring a discrete GPU is a
 # refinement, not a correctness matter, and is deliberately left out until
 # there is a reason to rank devices.
-fun pick_physical(v: *Vk) Result[bool, Error] {
-    var count: u32 = 0;
-    if (!enumerated(vk.vkEnumeratePhysicalDevices(v.instance, ?count, nil)) || count == 0) {
-        ret err[bool, Error](error("no Vulkan physical devices"));
+fun pick_physical(v: *Vk) err[Error] {
+    var count:   u32 = 0;
+    val counted: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?count, nil);
+    if (!enumerated(counted)) {
+        ret err[Error].err{vk_failed(VkCall.enumerate_physical_devices{}, counted)};
+    }
+    if (count == 0) {
+        ret err[Error].err{Error.device{DeviceError.no_physical_device{}}};
     }
 
     var devices: [16]vk.PhysicalDevice;
-    var cap: u32 = 16;
+    var cap:     u32 = 16;
     if (count < cap) { cap = count; }
-    if (!enumerated(vk.vkEnumeratePhysicalDevices(v.instance, ?cap, ?devices[0]))) {
-        ret err[bool, Error](error("could not enumerate physical devices"));
+    val listed: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?cap, ?devices[0]);
+    if (!enumerated(listed)) {
+        ret err[Error].err{vk_failed(VkCall.enumerate_physical_devices{}, listed)};
     }
 
     var i: u32 = 0;
     for (i < cap) {
         val d: vk.PhysicalDevice = devices[i];
-        var g: u32 = NO_FAMILY;
-        var p: u32 = NO_FAMILY;
-        find_families(v, d, ?g, ?p);
-        if (g != NO_FAMILY && p != NO_FAMILY) {
-            v.physical        = d;
-            v.graphics_family = g;
-            v.present_family  = p;
-            ret ok[bool, Error](true);
+        val f: Families          = find_families(v, d);
+        if (sel f.graphics.some) {
+            if (sel f.present.some) {
+                v.physical        = d;
+                v.graphics_family = f.graphics.some;
+                v.present_family  = f.present.some;
+                ret err[Error].ok{};
+            }
         }
         i = i + 1;
     }
-    ret err[bool, Error](error("no device can both render and present to this surface"));
+    ret err[Error].err{Error.device{DeviceError.no_capable_device{}}};
+}
+
+# the queue families a device offers for drawing and for presenting
+# ---
+# graphics: the first graphics-capable family, if any
+# present:  the first family that can present to the surface, if any
+rec Families {
+    graphics: opt[u32];
+    present:  opt[u32];
 }
 
 # Resolve a graphics-capable and a present-capable family on a device.
 #
 # They are resolved independently because they are not required to be the same
 # family, even though on most hardware they are.
-fun find_families(v: *Vk, d: vk.PhysicalDevice, out_g: *u32, out_p: *u32) {
-    @out_g = NO_FAMILY;
-    @out_p = NO_FAMILY;
+fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
+    var f: Families = Families{graphics: opt[u32].none{}, present: opt[u32].none{}};
 
     var count: u32 = 0;
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?count, nil);
-    if (count == 0) { ret; }
+    if (count == 0) { ret f; }
 
     var props: [16]vk.QueueFamilyProperties;
-    var cap: u32 = 16;
+    var cap:   u32 = 16;
     if (count < cap) { cap = count; }
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?cap, ?props[0]);
 
-    var i: u32 = 0;
+    var have_graphics: bool = false;
+    var have_present:  bool = false;
+    var i:             u32  = 0;
     for (i < cap) {
-        if (@out_g == NO_FAMILY && (props[i].queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0) {
-            @out_g = i;
+        if (!have_graphics && (props[i].queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0) {
+            f.graphics    = opt[u32].some{i};
+            have_graphics = true;
         }
-        if (@out_p == NO_FAMILY) {
+        if (!have_present) {
             var supported: u32 = 0;
             if (vk.vkGetPhysicalDeviceSurfaceSupportKHR(d, i, v.surface, ?supported) == vk.SUCCESS) {
-                if (supported != 0) { @out_p = i; }
+                if (supported != 0) {
+                    f.present    = opt[u32].some{i};
+                    have_present = true;
+                }
             }
         }
         i = i + 1;
     }
+    ret f;
 }
 
 # Create the logical device and fetch its queues.
-fun create_device(v: *Vk) Result[bool, Error] {
+fun create_device(v: *Vk) err[Error] {
     var prio: f32 = 1.0;
 
     var qci: [2]vk.DeviceQueueCreateInfo;
@@ -450,7 +424,7 @@ fun create_device(v: *Vk) Result[bool, Error] {
         qci[1].queueFamilyIndex = v.present_family;
         qci[1].queueCount       = 1;
         qci[1].pQueuePriorities = ?prio;
-        qcount = 2;
+        qcount                  = 2;
     }
 
     # The device extension list, fixed for the same reason the instance's is.
@@ -459,10 +433,10 @@ fun create_device(v: *Vk) Result[bool, Error] {
     # so that the next one to be needed is a line rather than a resize. What
     # does not go here is an extension boom could do without, for the reason the
     # features paragraph below gives about optional things.
-    var enabled: [8]*u8;
+    var enabled:       [8]*u8;
     var enabled_count: u32 = 0;
     enabled[enabled_count] = vk.KHR_SWAPCHAIN_EXTENSION_NAME;
-    enabled_count = enabled_count + 1;
+    enabled_count          = enabled_count + 1;
 
     $if ($mach.build.os == $mach.os.darwin) {
         # PORTABILITY_SUBSET IS NOT OPTIONAL WHERE IT IS OFFERED. A device
@@ -483,7 +457,7 @@ fun create_device(v: *Vk) Result[bool, Error] {
         # is a second caller this becomes a query against
         # vkEnumerateDeviceExtensionProperties and the $if goes away.
         enabled[enabled_count] = KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
-        enabled_count = enabled_count + 1;
+        enabled_count          = enabled_count + 1;
     }
 
     # NO OPTIONAL FEATURES, AND THAT IS A CLAIM ABOUT THE SHADERS. A device is
@@ -519,7 +493,7 @@ fun create_device(v: *Vk) Result[bool, Error] {
 
     val built: i32 = vk.vkCreateDevice(v.physical, ?dci, nil, ?v.device);
     if (built != vk.SUCCESS) {
-        ret err[bool, Error](error(result_name("vkCreateDevice", built)));
+        ret err[Error].err{vk_failed(VkCall.create_device{}, built)};
     }
     # THE DEVICE LOADER'S BOOTSTRAP COMES FROM THE INSTANCE, NOT FROM ITSELF.
     # mach-vk's `vkGetDeviceProcAddr` global is *set by* load_device, so passing
@@ -529,15 +503,17 @@ fun create_device(v: *Vk) Result[bool, Error] {
     # loader against the instance.
     val raw_gdpa: ptr = gc.glfwGetInstanceProcAddress(v.instance::ptr, "vkGetDeviceProcAddr"::*u8);
     if (raw_gdpa == nil) {
-        ret err[bool, Error](error("the loader does not provide vkGetDeviceProcAddr"));
+        vk.vkDestroyDevice(v.device, nil);
+        ret err[Error].err{Error.loader{LoaderError.device_proc_addr{}}};
     }
     if (vk.load_device(raw_gdpa:~vk.GetDeviceProcAddr, v.device::ptr) <= 0) {
-        ret err[bool, Error](error("could not resolve device Vulkan commands"));
+        vk.vkDestroyDevice(v.device, nil);
+        ret err[Error].err{Error.loader{LoaderError.device{}}};
     }
 
     vk.vkGetDeviceQueue(v.device, v.graphics_family, 0, ?v.graphics_queue);
     vk.vkGetDeviceQueue(v.device, v.present_family, 0, ?v.present_queue);
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Whether an enumeration call succeeded, counting a truncated result as success.
@@ -573,13 +549,10 @@ pub fun vk_dnit(v: *Vk) {
 # Bring-up needs a Vulkan loader, an ICD, and a window, so vk_init is not
 # reachable here. These cover the pure decisions around it.
 
-test "vk: a fresh handle is not ready and has no queue families" {
+test "vk: a fresh handle is not ready" {
     var v: Vk;
-    v.ready           = false;
-    v.graphics_family = NO_FAMILY;
-    v.present_family  = NO_FAMILY;
-    if (v.ready)                        { ret 1; }
-    if (v.graphics_family != NO_FAMILY) { ret 1; }
+    v.ready = false;
+    if (v.ready) { ret 1; }
     # Teardown on a handle that never initialized must be a no-op rather than
     # destroying a device that was never created.
     vk_dnit(?v);
@@ -587,21 +560,21 @@ test "vk: a fresh handle is not ready and has no queue families" {
 }
 
 test "vk: the packed API versions decode to the versions they name" {
-    # Mach emits SPIR-V 1.6, which a driver only accepts when the instance
+    # A game's SPIR-V may need a version a driver only accepts when the instance
     # declared API 1.3 or later. A wrong constant here is accepted by instance
     # creation and rejected later by every vkCreateShaderModule.
-    if (API_VERSION_1_3 != 0x00403000)              { ret 1; }
-    if ((API_VERSION_1_3 >> 22) != 1)               { ret 2; }
-    if (((API_VERSION_1_3 >> 12) & 0x3FF) != 3)     { ret 3; }
-    if (API_VERSION_1_3 <= API_VERSION_1_0)         { ret 4; }
+    if (API_VERSION_1_3 != 0x00403000)          { ret 1; }
+    if ((API_VERSION_1_3 >> 22) != 1)           { ret 2; }
+    if (((API_VERSION_1_3 >> 12) & 0x3FF) != 3) { ret 3; }
+    if (API_VERSION_1_3 <= API_VERSION_1_0)     { ret 4; }
     ret 0;
 }
 
 test "vk: the packed API version is VK_API_VERSION_1_0" {
     # (1 << 22) | (0 << 12) | 0. A wrong value is accepted by the loader and
     # then silently caps or rejects features later.
-    if (API_VERSION_1_0 != 0x00400000)      { ret 1; }
-    if ((API_VERSION_1_0 >> 22) != 1)       { ret 1; }
+    if (API_VERSION_1_0 != 0x00400000)          { ret 1; }
+    if ((API_VERSION_1_0 >> 22) != 1)           { ret 1; }
     if (((API_VERSION_1_0 >> 12) & 0x3FF) != 0) { ret 1; }
     ret 0;
 }

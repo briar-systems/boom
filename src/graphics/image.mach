@@ -16,27 +16,29 @@
 # pixel-art game and a photographic one differ in the sampler alone, which is why
 # `sampler_init` takes the filter rather than deriving it.
 
-use std.types.bool.bool;
-use std.types.bool.true;
-use std.types.bool.false;
-use std.types.size.usize;
-use std.types.result.Result;
-use std.types.result.ok;
-use std.types.result.err;
-use std.types.result.is_err;
-use vk;
-use boom.graphics.error.Error;
-use boom.graphics.error.error;
-use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_wait_idle;
 use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.buffer_init;
-use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_unmap;
-use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.pick_memory_type;
-use boom.graphics.buffer.NO_MEMORY_TYPE;
+use boom.graphics.error.DeviceError;
+use boom.graphics.error.Error;
+use boom.graphics.error.ImageError;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
+use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
 
 # Bytes per pixel of the one format this module uploads.
 #
@@ -74,20 +76,24 @@ pub fun image_bytes(width: u32, height: u32) usize {
 
 # Bytes occupied by one texel of an image format boom can read back.
 #
-# Zero means the raw layout is not part of the readback contract. Depth and
+# None means the raw layout is not part of the readback contract. Depth and
 # compressed formats are deliberately absent: copying them into a tightly
 # packed colour buffer needs more than a byte count.
-pub fun image_format_bytes(format: i32) usize {
-    if (format == vk.FORMAT_R16G16B16A16_SFLOAT) { ret 8; }
+pub fun image_format_bytes(format: i32) opt[usize] {
+    if (format == vk.FORMAT_R16G16B16A16_SFLOAT) { ret opt[usize].some{8}; }
     if (format == vk.FORMAT_R8G8B8A8_SRGB || format == vk.FORMAT_R8G8B8A8_UNORM
-        || format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_B8G8R8A8_UNORM) { ret 4; }
-    ret 0;
+        || format == vk.FORMAT_B8G8R8A8_SRGB || format == vk.FORMAT_B8G8R8A8_UNORM) {
+        ret opt[usize].some{4};
+    }
+    ret opt[usize].none{};
 }
 
-# The tightly packed raw byte size of an image, or zero for an unsupported
+# The tightly packed raw byte size of an image, or none for an unsupported
 # readback format.
-pub fun image_raw_bytes(i: *Image) usize {
-    ret i.width::usize * i.height::usize * image_format_bytes(i.format);
+pub fun image_raw_bytes(i: *Image) opt[usize] {
+    val texel: opt[usize] = image_format_bytes(i.format);
+    if (sel texel.none) { ret opt[usize].none{}; }
+    ret opt[usize].some{i.width::usize * i.height::usize * texel.some};
 }
 
 # What the bytes in an image mean, which decides how sampling reads them.
@@ -96,17 +102,18 @@ pub fun image_raw_bytes(i: *Image) usize {
 # roughness mask, and a height field are all "not sRGB" for different reasons,
 # and a format-per-purpose is where this ends up. A named space now means adding
 # one is an entry rather than a second flag threaded through every constructor.
-pub def ColorSpace: u8;
-
-# Colour authored for display. Sampling applies the inverse sRGB transfer
-# function, so the shader receives linear values. Alpha is untouched: Vulkan's
-# sRGB formats leave the fourth channel linear, which is why a glyph atlas
-# storing coverage in alpha belongs here too.
-pub val COLOR_SRGB:   ColorSpace = 0;
-# Data that happens to be stored in an image. Sampling reads the bytes as they
-# are. A normal map or a mask read as sRGB comes back subtly wrong in a way that
-# looks like a lighting bug rather than a format one.
-pub val COLOR_LINEAR: ColorSpace = 1;
+# ---
+# srgb:   Colour authored for display. Sampling applies the inverse sRGB transfer
+#         function, so the shader receives linear values. Alpha is untouched:
+#         Vulkan's sRGB formats leave the fourth channel linear, which is why a
+#         glyph atlas storing coverage in alpha belongs here too.
+# linear: Data that happens to be stored in an image. Sampling reads the bytes as
+#         they are. A normal map or a mask read as sRGB comes back subtly wrong in
+#         a way that looks like a lighting bug rather than a format one.
+pub tag ColorSpace: u8 {
+    srgb;
+    linear;
+}
 
 # The Vulkan format for a colour space.
 #
@@ -117,7 +124,7 @@ pub val COLOR_LINEAR: ColorSpace = 1;
 # second time. The result is washed out and there is no diagnostic: every stage
 # did exactly what it was told.
 pub fun image_format(space: ColorSpace) i32 {
-    if (space == COLOR_SRGB) { ret vk.FORMAT_R8G8B8A8_SRGB; }
+    if (sel space.srgb) { ret vk.FORMAT_R8G8B8A8_SRGB; }
     ret vk.FORMAT_R8G8B8A8_UNORM;
 }
 
@@ -128,23 +135,25 @@ pub fun image_format(space: ColorSpace) i32 {
 # failure is not at the draw: it is at vkCreateFramebuffer, which a driver
 # without validation may accept anyway and then render into an image it was
 # never told to make renderable.
-pub def ImageUsage: i32;
-
-# Uploaded from the host and sampled. What a loaded texture needs.
-pub val USAGE_TEXTURE: ImageUsage = 0;
-# The above, and also rendered into and read back. What an offscreen target's
-# colour attachment needs; it keeps the sampled bit because a later pass samples
-# the target, and both transfer bits because a target may be seeded by an upload
-# and is the thing a screenshot or a rendering test copies out of.
-pub val USAGE_TARGET:  ImageUsage = 1;
+# ---
+# texture: Uploaded from the host and sampled. What a loaded texture needs.
+# target:  The above, and also rendered into and read back. What an offscreen
+#          target's colour attachment needs; it keeps the sampled bit because a
+#          later pass samples the target, and both transfer bits because a target
+#          may be seeded by an upload and is the thing a screenshot or a rendering
+#          test copies out of.
+pub tag ImageUsage: u8 {
+    texture;
+    target;
+}
 
 # The Vulkan usage bits for an intended use.
 pub fun image_usage_bits(u: ImageUsage) u32 {
-    if (u == USAGE_TARGET) {
+    if (sel u.target) {
         ret vk.IMAGE_USAGE_TRANSFER_DST_BIT
-          | vk.IMAGE_USAGE_TRANSFER_SRC_BIT
-          | vk.IMAGE_USAGE_SAMPLED_BIT
-          | vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            | vk.IMAGE_USAGE_TRANSFER_SRC_BIT
+            | vk.IMAGE_USAGE_SAMPLED_BIT
+            | vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     }
     ret vk.IMAGE_USAGE_TRANSFER_DST_BIT | vk.IMAGE_USAGE_SAMPLED_BIT;
 }
@@ -156,30 +165,30 @@ pub fun image_usage_bits(u: ImageUsage) u32 {
 # surface, because a pipeline built for the window pass can only draw into an
 # attachment of the same format. Neither is expressible in terms of the other,
 # so the primitive takes the format both arrive at.
-pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usage: ImageUsage) Result[bool, Error] {
+pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usage: ImageUsage) err[Error] {
     i.handle = nil;
     i.memory = nil;
     i.view   = nil;
     i.format = format;
     i.ready  = false;
 
-    if (!v.ready) { ret err[bool, Error](error("Vulkan device is not initialized")); }
+    if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
     if (width == 0 || height == 0) {
-        ret err[bool, Error](error("cannot create a zero-sized image"));
+        ret err[Error].err{Error.image{ImageError.empty{}}};
     }
 
     var ci: vk.ImageCreateInfo;
-    ci.sType                 = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ci.pNext                 = nil;
-    ci.flags                 = 0;
-    ci.imageType             = vk.IMAGE_TYPE_2D;
-    ci.format                = format;
-    ci.extent.width          = width;
-    ci.extent.height         = height;
-    ci.extent.depth          = 1;
-    ci.mipLevels             = 1;
-    ci.arrayLayers           = 1;
-    ci.samples               = vk.SAMPLE_COUNT_1_BIT::i32;
+    ci.sType         = vk.STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ci.pNext         = nil;
+    ci.flags         = 0;
+    ci.imageType     = vk.IMAGE_TYPE_2D;
+    ci.format        = format;
+    ci.extent.width  = width;
+    ci.extent.height = height;
+    ci.extent.depth  = 1;
+    ci.mipLevels     = 1;
+    ci.arrayLayers   = 1;
+    ci.samples       = vk.SAMPLE_COUNT_1_BIT::i32;
     # Optimal tiling is a driver-chosen layout the GPU reads faster. It is not
     # addressable from the host, which is why the upload goes through a staging
     # buffer rather than a map.
@@ -190,8 +199,10 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usag
     ci.pQueueFamilyIndices   = nil;
     ci.initialLayout         = vk.IMAGE_LAYOUT_UNDEFINED;
 
-    if (vk.vkCreateImage(v.device, ?ci, nil, ?i.handle) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateImage failed"));
+    val created: i32 = vk.vkCreateImage(v.device, ?ci, nil, ?i.handle);
+    if (created != vk.SUCCESS) {
+        i.handle = nil;
+        ret err[Error].err{vk_failed(VkCall.create_image{}, created)};
     }
 
     var req: vk.MemoryRequirements;
@@ -200,47 +211,56 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usag
     var props: vk.PhysicalDeviceMemoryProperties;
     vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
 
-    val index: u32 = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (index == 0xFFFFFFFF) {
-        ret err[bool, Error](error("no device-local memory type for this image"));
+    val index: opt[u32] = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (sel index.none) {
+        image_dnit(i, v);
+        ret err[Error].err{Error.device{DeviceError.no_memory_type{}}};
     }
 
     var ai: vk.MemoryAllocateInfo;
     ai.sType           = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.pNext           = nil;
     ai.allocationSize  = req.size;
-    ai.memoryTypeIndex = index;
-    if (vk.vkAllocateMemory(v.device, ?ai, nil, ?i.memory) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkAllocateMemory failed for an image"));
+    ai.memoryTypeIndex = index.some;
+    val allocated: i32 = vk.vkAllocateMemory(v.device, ?ai, nil, ?i.memory);
+    if (allocated != vk.SUCCESS) {
+        i.memory = nil;
+        image_dnit(i, v);
+        ret err[Error].err{vk_failed(VkCall.allocate_memory{}, allocated)};
     }
-    if (vk.vkBindImageMemory(v.device, i.handle, i.memory, 0) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkBindImageMemory failed"));
+    val bound: i32 = vk.vkBindImageMemory(v.device, i.handle, i.memory, 0);
+    if (bound != vk.SUCCESS) {
+        image_dnit(i, v);
+        ret err[Error].err{vk_failed(VkCall.bind_image_memory{}, bound)};
     }
 
     var vci: vk.ImageViewCreateInfo;
-    vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    vci.pNext    = nil;
-    vci.flags    = 0;
-    vci.image    = i.handle;
-    vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
-    vci.format   = i.format;
-    vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
-    vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
-    vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
-    vci.components.a = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.sType                           = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.pNext                           = nil;
+    vci.flags                           = 0;
+    vci.image                           = i.handle;
+    vci.viewType                        = vk.IMAGE_VIEW_TYPE_2D;
+    vci.format                          = i.format;
+    vci.components.r                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.g                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.b                    = vk.COMPONENT_SWIZZLE_IDENTITY;
+    vci.components.a                    = vk.COMPONENT_SWIZZLE_IDENTITY;
     vci.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
     vci.subresourceRange.baseMipLevel   = 0;
     vci.subresourceRange.levelCount     = 1;
     vci.subresourceRange.baseArrayLayer = 0;
     vci.subresourceRange.layerCount     = 1;
-    if (vk.vkCreateImageView(v.device, ?vci, nil, ?i.view) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not create an image view"));
+    val viewed: i32 = vk.vkCreateImageView(v.device, ?vci, nil, ?i.view);
+    if (viewed != vk.SUCCESS) {
+        i.view = nil;
+        image_dnit(i, v);
+        ret err[Error].err{vk_failed(VkCall.create_image_view{}, viewed)};
     }
 
     i.width  = width;
     i.height = height;
     i.ready  = true;
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # The stage and access masks for a layout transition.
@@ -251,26 +271,19 @@ pub fun image_init(i: *Image, v: *Vk, width: u32, height: u32, format: i32, usag
 # synchronization produces correct output anyway, so the bug appears only on
 # other hardware.
 #
-# Returns false for a transition this module does not perform, rather than
-# emitting a barrier with zeroed masks that synchronizes nothing.
-pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
-                         src_access: *u32, dst_access: *u32) bool {
+# None for a transition this module does not perform, rather than a barrier
+# with zeroed masks that synchronizes nothing.
+pub fun transition_masks(old: i32, new: i32) opt[TransitionMasks] {
     if (old == vk.IMAGE_LAYOUT_UNDEFINED && new == vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         # Nothing has touched the image, so there is nothing to wait for; the
         # transfer stage is where the write happens.
-        @src_stage  = vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        @dst_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
-        @src_access = 0;
-        @dst_access = vk.ACCESS_TRANSFER_WRITE_BIT;
-        ret true;
+        ret masks(vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+            0, vk.ACCESS_TRANSFER_WRITE_BIT);
     }
     if (old == vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         # The copy's write must complete before the fragment stage reads it.
-        @src_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
-        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        @src_access = vk.ACCESS_TRANSFER_WRITE_BIT;
-        @dst_access = vk.ACCESS_SHADER_READ_BIT;
-        ret true;
+        ret masks(vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_SHADER_READ_BIT);
     }
     if (old == vk.IMAGE_LAYOUT_UNDEFINED && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         # A render target's colour image, put into a readable layout before
@@ -278,32 +291,43 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
         # fine; what matters is that a game sampling the target before its
         # first render finds the image in the layout its descriptor claims,
         # rather than in UNDEFINED.
-        @src_stage  = vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        @src_access = 0;
-        @dst_access = vk.ACCESS_SHADER_READ_BIT;
-        ret true;
+        ret masks(vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, vk.ACCESS_SHADER_READ_BIT);
     }
     if (old == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL && new == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
         # Reading a rendered target back to the host. Any sampling of it must
         # finish before the copy reads the same memory.
-        @src_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        @dst_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
-        @src_access = vk.ACCESS_SHADER_READ_BIT;
-        @dst_access = vk.ACCESS_TRANSFER_READ_BIT;
-        ret true;
+        ret masks(vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+            vk.ACCESS_SHADER_READ_BIT, vk.ACCESS_TRANSFER_READ_BIT);
     }
     if (old == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         # And back, so the target is left in the layout its descriptor claims.
         # Without this a read would leave every later sample reading an image in
         # a layout the descriptor set does not describe.
-        @src_stage  = vk.PIPELINE_STAGE_TRANSFER_BIT;
-        @dst_stage  = vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        @src_access = vk.ACCESS_TRANSFER_READ_BIT;
-        @dst_access = vk.ACCESS_SHADER_READ_BIT;
-        ret true;
+        ret masks(vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            vk.ACCESS_TRANSFER_READ_BIT, vk.ACCESS_SHADER_READ_BIT);
     }
-    ret false;
+    ret opt[TransitionMasks].none{};
+}
+
+# the stages a layout transition waits between and the access it grants
+# ---
+# src_stage:  the stage whose use of the image must finish first
+# dst_stage:  the stage that uses the image in its new layout
+# src_access: the access the prior use held
+# dst_access: the access the new use needs
+pub rec TransitionMasks {
+    src_stage:  u32;
+    dst_stage:  u32;
+    src_access: u32;
+    dst_access: u32;
+}
+
+fun masks(src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) opt[TransitionMasks] {
+    ret opt[TransitionMasks].some{TransitionMasks{
+        src_stage:  src_stage, dst_stage: dst_stage,
+        src_access: src_access, dst_access: dst_access,
+    }};
 }
 
 # Allocate and begin a command buffer recorded once and thrown away.
@@ -311,15 +335,17 @@ pub fun transition_masks(old: i32, new: i32, src_stage: *u32, dst_stage: *u32,
 # Factored out because a transition and an upload need the same six calls
 # around them, and the second copy of a submit-and-wait is where the wait goes
 # missing.
-fun begin_one_shot(v: *Vk, pool: vk.CommandPool, out: *vk.CommandBuffer) Result[bool, Error] {
-    var ai: vk.CommandBufferAllocateInfo;
+fun begin_one_shot(v: *Vk, pool: vk.CommandPool) res[vk.CommandBuffer, Error] {
+    var cmd: vk.CommandBuffer;
+    var ai:  vk.CommandBufferAllocateInfo;
     ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     ai.pNext              = nil;
     ai.commandPool        = pool;
     ai.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
     ai.commandBufferCount = 1;
-    if (vk.vkAllocateCommandBuffers(v.device, ?ai, out) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not allocate a one-shot command buffer"));
+    val allocated: i32 = vk.vkAllocateCommandBuffers(v.device, ?ai, ?cmd);
+    if (allocated != vk.SUCCESS) {
+        ret res[vk.CommandBuffer, Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
     }
 
     var bi: vk.CommandBufferBeginInfo;
@@ -327,8 +353,12 @@ fun begin_one_shot(v: *Vk, pool: vk.CommandPool, out: *vk.CommandBuffer) Result[
     bi.pNext            = nil;
     bi.flags            = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     bi.pInheritanceInfo = nil;
-    vk.vkBeginCommandBuffer(@out, ?bi);
-    ret ok[bool, Error](true);
+    val begun: i32 = vk.vkBeginCommandBuffer(cmd, ?bi);
+    if (begun != vk.SUCCESS) {
+        vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
+        ret res[vk.CommandBuffer, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
+    }
+    ret res[vk.CommandBuffer, Error].ok{cmd};
 }
 
 # End, submit, wait for, and free a one-shot command buffer.
@@ -336,10 +366,14 @@ fun begin_one_shot(v: *Vk, pool: vk.CommandPool, out: *vk.CommandBuffer) Result[
 # The wait is not optional: the command buffer and anything it reads are in use
 # until the queue drains, and freeing either first is a use-after-free the
 # validation layers report far from here.
-fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) Result[bool, Error] {
-    vk.vkEndCommandBuffer(cmd);
+fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) err[Error] {
+    var c:     vk.CommandBuffer = cmd;
+    val ended: i32              = vk.vkEndCommandBuffer(cmd);
+    if (ended != vk.SUCCESS) {
+        vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
+        ret err[Error].err{vk_failed(VkCall.end_command_buffer{}, ended)};
+    }
 
-    var c: vk.CommandBuffer = cmd;
     var si: vk.SubmitInfo;
     si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
     si.pNext                = nil;
@@ -355,9 +389,9 @@ fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) Result[boo
     vk.vkQueueWaitIdle(v.graphics_queue);
     vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
     if (rc != vk.SUCCESS) {
-        ret err[bool, Error](error("vkQueueSubmit failed for a one-shot command buffer"));
+        ret err[Error].err{vk_failed(VkCall.queue_submit{}, rc)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Put an image into a layout with a one-shot command buffer.
@@ -371,49 +405,44 @@ fun end_one_shot(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) Result[boo
 # pool: a command pool for the one-shot buffer
 # old:  the layout the image is in
 # new:  the layout to leave it in
-# ret:  true on success, or the step that failed
-pub fun image_transition(i: *Image, v: *Vk, pool: vk.CommandPool, old: i32, new: i32) Result[bool, Error] {
-    if (!i.ready) { ret err[bool, Error](error("cannot transition an image that was not created")); }
+# ret:  ok, or the step that failed
+pub fun image_transition(i: *Image, v: *Vk, pool: vk.CommandPool, old: i32, new: i32) err[Error] {
+    if (!i.ready) { ret err[Error].err{Error.image{ImageError.not_created{}}}; }
+    val m: opt[TransitionMasks] = transition_masks(old, new);
+    if (sel m.none) { ret err[Error].err{Error.image{ImageError.transition{}}}; }
 
-    var cmd: vk.CommandBuffer;
-    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
-    if (is_err[bool, Error](br)) { ret br; }
+    val br: res[vk.CommandBuffer, Error] = begin_one_shot(v, pool);
+    if (sel br.err) { ret err[Error].err{br.err}; }
 
-    if (!transition(cmd, i.handle, old, new)) {
-        end_one_shot(v, pool, cmd);
-        ret err[bool, Error](error("unhandled image layout transition"));
-    }
-    ret end_one_shot(v, pool, cmd);
+    record_barrier(br.ok, i.handle, old, new, m.some);
+    ret end_one_shot(v, pool, br.ok);
 }
 
-# Record a layout transition into a command buffer.
-fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool {
-    var src_stage:  u32 = 0;
-    var dst_stage:  u32 = 0;
-    var src_access: u32 = 0;
-    var dst_access: u32 = 0;
-    if (!transition_masks(old, new, ?src_stage, ?dst_stage, ?src_access, ?dst_access)) {
-        ret false;
-    }
+# Record a transition this module performs into a command buffer.
+fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) {
+    val m: opt[TransitionMasks] = transition_masks(old, new);
+    if (sel m.some) { record_barrier(cmd, image, old, new, m.some); }
+}
 
+# Record a layout transition with its masks into a command buffer.
+fun record_barrier(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32, m: TransitionMasks) {
     var b: vk.ImageMemoryBarrier;
-    b.sType               = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.pNext               = nil;
-    b.srcAccessMask       = src_access;
-    b.dstAccessMask       = dst_access;
-    b.oldLayout           = old;
-    b.newLayout           = new;
-    b.srcQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = vk.QUEUE_FAMILY_IGNORED;
-    b.image               = image;
+    b.sType                           = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.pNext                           = nil;
+    b.srcAccessMask                   = m.src_access;
+    b.dstAccessMask                   = m.dst_access;
+    b.oldLayout                       = old;
+    b.newLayout                       = new;
+    b.srcQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
+    b.image                           = image;
     b.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
     b.subresourceRange.baseMipLevel   = 0;
     b.subresourceRange.levelCount     = 1;
     b.subresourceRange.baseArrayLayer = 0;
     b.subresourceRange.layerCount     = 1;
 
-    vk.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nil, 0, nil, 1, ?b);
-    ret true;
+    vk.vkCmdPipelineBarrier(cmd, m.src_stage, m.dst_stage, 0, 0, nil, 0, nil, 1, ?b);
 }
 
 # Copy an image's pixels back to host memory in its native packed format.
@@ -441,11 +470,12 @@ fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) bool 
 # pool: a command pool for the one-shot copy
 # out:  destination for image_raw_bytes bytes
 # len:  size of out in bytes, checked against the image
-pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) Result[bool, Error] {
-    if (!i.ready) { ret err[bool, Error](error("cannot read an image that was never created")); }
-    val size: usize = image_raw_bytes(i);
-    if (size == 0) { ret err[bool, Error](error("this image format does not support raw readback")); }
-    if (len < size) { ret err[bool, Error](error("the destination is smaller than the image")); }
+pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize) err[Error] {
+    if (!i.ready) { ret err[Error].err{Error.image{ImageError.not_created{}}}; }
+    val raw: opt[usize] = image_raw_bytes(i);
+    if (sel raw.none) { ret err[Error].err{Error.image{ImageError.readback_format{}}}; }
+    val size: usize = raw.some;
+    if (len < size) { ret err[Error].err{Error.image{ImageError.readback_short{size}}}; }
 
     # THE COPY MUST NOT OVERLAP THE WORK THAT DREW THIS IMAGE. A game reads a
     # target while frames are in flight, and a submission is only ordered
@@ -469,61 +499,61 @@ pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize
     vk_wait_idle(v);
 
     var staging: Buffer;
-    val sr: Result[bool, Error] = buffer_init(?staging, v, size::u64,
+    val sr:      err[Error] = buffer_init(?staging, v, size::u64,
         vk.BUFFER_USAGE_TRANSFER_DST_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](sr)) { ret sr; }
+    if (sel sr.err) { ret sr; }
 
-    var cmd: vk.CommandBuffer;
-    val br: Result[bool, Error] = begin_one_shot(v, pool, ?cmd);
-    if (is_err[bool, Error](br)) {
+    val br: res[vk.CommandBuffer, Error] = begin_one_shot(v, pool);
+    if (sel br.err) {
         buffer_dnit(?staging, v);
-        ret br;
+        ret err[Error].err{br.err};
     }
+    val cmd: vk.CommandBuffer = br.ok;
 
     transition(cmd, i.handle, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     var region: vk.BufferImageCopy;
-    region.bufferOffset      = 0;
-    region.bufferRowLength   = 0;
-    region.bufferImageHeight = 0;
+    region.bufferOffset                    = 0;
+    region.bufferRowLength                 = 0;
+    region.bufferImageHeight               = 0;
     region.imageSubresource.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.mipLevel       = 0;
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount     = 1;
-    region.imageOffset.x      = 0;
-    region.imageOffset.y      = 0;
-    region.imageOffset.z      = 0;
-    region.imageExtent.width  = i.width;
-    region.imageExtent.height = i.height;
-    region.imageExtent.depth  = 1;
+    region.imageOffset.x                   = 0;
+    region.imageOffset.y                   = 0;
+    region.imageOffset.z                   = 0;
+    region.imageExtent.width               = i.width;
+    region.imageExtent.height              = i.height;
+    region.imageExtent.depth               = 1;
     vk.vkCmdCopyImageToBuffer(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                              staging.handle, 1, ?region);
+        staging.handle, 1, ?region);
 
     transition(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    val er: Result[bool, Error] = end_one_shot(v, pool, cmd);
-    if (is_err[bool, Error](er)) {
+    val er: err[Error] = end_one_shot(v, pool, cmd);
+    if (sel er.err) {
         buffer_dnit(?staging, v);
         ret er;
     }
 
-    val mapped: ptr = buffer_map(?staging, v);
-    if (mapped == nil) {
+    val mapped: res[ptr, Error] = buffer_map(?staging, v);
+    if (sel mapped.err) {
         buffer_dnit(?staging, v);
-        ret err[bool, Error](error("could not map the readback buffer"));
+        ret err[Error].err{mapped.err};
     }
-    val src: *u8 = mapped:~*u8;
-    var k: usize = 0;
+    val src: *u8   = mapped.ok:~*u8;
+    var k:   usize = 0;
     for (k < size) {
         out[k] = src[k];
-        k = k + 1;
+        k      = k + 1;
     }
     buffer_unmap(?staging, v);
     buffer_dnit(?staging, v);
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Create an image and fill it from tightly packed RGBA pixels.
@@ -531,103 +561,85 @@ pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize
 # The three steps are performed together because their order is the contract:
 # receive, copy, read. A caller that could do them separately could get it wrong.
 pub fun image_upload(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8,
-                     width: u32, height: u32, space: ColorSpace) Result[bool, Error] {
+    width: u32, height: u32, space: ColorSpace) err[Error] {
     val size: usize = image_bytes(width, height);
-    if (size == 0) { ret err[bool, Error](error("cannot upload a zero-sized image")); }
+    if (size == 0) { ret err[Error].err{Error.image{ImageError.empty{}}}; }
 
-    val ir: Result[bool, Error] = image_init(i, v, width, height, image_format(space), USAGE_TEXTURE);
-    if (is_err[bool, Error](ir)) { ret ir; }
+    val ir: err[Error] = image_init(i, v, width, height, image_format(space), ImageUsage.texture{});
+    if (sel ir.err) { ret ir; }
 
     var staging: Buffer;
-    val sr: Result[bool, Error] = buffer_init(?staging, v, size::u64,
+    val sr:      err[Error] = buffer_init(?staging, v, size::u64,
         vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (is_err[bool, Error](sr)) {
+    if (sel sr.err) {
         image_dnit(i, v);
         ret sr;
     }
-    if (!buffer_write(?staging, v, pixels, size::u64)) {
+    val wr: err[Error] = buffer_write(?staging, v, pixels, size::u64);
+    if (sel wr.err) {
         buffer_dnit(?staging, v);
         image_dnit(i, v);
-        ret err[bool, Error](error("could not stage the image pixels"));
+        ret wr;
     }
 
-    var cmd: vk.CommandBuffer;
-    var ai: vk.CommandBufferAllocateInfo;
-    ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    ai.pNext              = nil;
-    ai.commandPool        = pool;
-    ai.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
-    ai.commandBufferCount = 1;
-    if (vk.vkAllocateCommandBuffers(v.device, ?ai, ?cmd) != vk.SUCCESS) {
+    val br: res[vk.CommandBuffer, Error] = begin_one_shot(v, pool);
+    if (sel br.err) {
         buffer_dnit(?staging, v);
         image_dnit(i, v);
-        ret err[bool, Error](error("could not allocate an upload command buffer"));
+        ret err[Error].err{br.err};
     }
-
-    var bi: vk.CommandBufferBeginInfo;
-    bi.sType            = vk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.pNext            = nil;
-    bi.flags            = vk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    bi.pInheritanceInfo = nil;
-    vk.vkBeginCommandBuffer(cmd, ?bi);
+    val cmd: vk.CommandBuffer = br.ok;
 
     transition(cmd, i.handle, vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
     var region: vk.BufferImageCopy;
-    region.bufferOffset      = 0;
+    region.bufferOffset = 0;
     # Zero means tightly packed, which is what the decoders produce. A non-zero
     # value would describe a source with padding between rows.
-    region.bufferRowLength   = 0;
-    region.bufferImageHeight = 0;
+    region.bufferRowLength                 = 0;
+    region.bufferImageHeight               = 0;
     region.imageSubresource.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.mipLevel       = 0;
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount     = 1;
-    region.imageOffset.x     = 0;
-    region.imageOffset.y     = 0;
-    region.imageOffset.z     = 0;
-    region.imageExtent.width  = width;
-    region.imageExtent.height = height;
-    region.imageExtent.depth  = 1;
+    region.imageOffset.x                   = 0;
+    region.imageOffset.y                   = 0;
+    region.imageOffset.z                   = 0;
+    region.imageExtent.width               = width;
+    region.imageExtent.height              = height;
+    region.imageExtent.depth               = 1;
     vk.vkCmdCopyBufferToImage(cmd, staging.handle, i.handle,
-                              vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, ?region);
+        vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, ?region);
 
     transition(cmd, i.handle, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
-    vk.vkEndCommandBuffer(cmd);
-
-    var si: vk.SubmitInfo;
-    si.sType                = vk.STRUCTURE_TYPE_SUBMIT_INFO;
-    si.pNext                = nil;
-    si.waitSemaphoreCount   = 0;
-    si.pWaitSemaphores      = nil;
-    si.pWaitDstStageMask    = nil;
-    si.commandBufferCount   = 1;
-    si.pCommandBuffers      = ?cmd;
-    si.signalSemaphoreCount = 0;
-    si.pSignalSemaphores    = nil;
-
-    val rc: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, nil);
     # The staging buffer and the command buffer are both in use until the queue
-    # drains, so the wait is not optional even though it stalls.
-    vk.vkQueueWaitIdle(v.graphics_queue);
-    vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
+    # drains, so end_one_shot's wait is not optional even though it stalls.
+    val er: err[Error] = end_one_shot(v, pool, cmd);
     buffer_dnit(?staging, v);
-
-    if (rc != vk.SUCCESS) {
+    if (sel er.err) {
         image_dnit(i, v);
-        ret err[bool, Error](error("vkQueueSubmit failed for an image upload"));
+        ret er;
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Destroy the view, the image, and its memory.
 pub fun image_dnit(i: *Image, v: *Vk) {
-    if (i.view != nil)   { vk.vkDestroyImageView(v.device, i.view, nil); i.view = nil; }
-    if (i.handle != nil) { vk.vkDestroyImage(v.device, i.handle, nil); i.handle = nil; }
-    if (i.memory != nil) { vk.vkFreeMemory(v.device, i.memory, nil); i.memory = nil; }
+    if (i.view != nil) {
+        vk.vkDestroyImageView(v.device, i.view, nil);
+        i.view = nil;
+    }
+    if (i.handle != nil) {
+        vk.vkDestroyImage(v.device, i.handle, nil);
+        i.handle = nil;
+    }
+    if (i.memory != nil) {
+        vk.vkFreeMemory(v.device, i.memory, nil);
+        i.memory = nil;
+    }
     i.ready = false;
 }
 
@@ -637,24 +649,24 @@ pub fun image_dnit(i: *Image, v: *Vk) {
 # filtering softens scaled images, but arbitrary packed atlases need their own
 # edge gutters to keep neighbouring sprites out of the filter footprint. Boom's
 # font atlases provide those gutters.
-pub fun sampler_init(out: *vk.Sampler, v: *Vk, nearest: bool) Result[bool, Error] {
+pub fun sampler_init(out: *vk.Sampler, v: *Vk, nearest: bool) err[Error] {
     var filter: i32 = vk.FILTER_LINEAR;
     if (nearest) { filter = vk.FILTER_NEAREST; }
 
     var ci: vk.SamplerCreateInfo;
-    ci.sType                   = vk.STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    ci.pNext                   = nil;
-    ci.flags                   = 0;
-    ci.magFilter               = filter;
-    ci.minFilter               = filter;
-    ci.mipmapMode              = vk.SAMPLER_MIPMAP_MODE_NEAREST;
+    ci.sType      = vk.STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    ci.pNext      = nil;
+    ci.flags      = 0;
+    ci.magFilter  = filter;
+    ci.minFilter  = filter;
+    ci.mipmapMode = vk.SAMPLER_MIPMAP_MODE_NEAREST;
     # Clamping rather than repeating, because every texture here is an atlas: a
     # repeat at a sub-rect edge wraps to the far side of the atlas rather than to
     # the far side of the sprite.
-    ci.addressModeU            = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ci.addressModeV            = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ci.addressModeW            = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    ci.mipLodBias              = 0.0;
+    ci.addressModeU = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ci.addressModeV = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ci.addressModeW = vk.SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ci.mipLodBias   = 0.0;
     # Anisotropy is a device feature that must be enabled at device creation, and
     # boom does not request it. Asking for it here without that is invalid usage.
     ci.anisotropyEnable        = vk.FALSE;
@@ -666,10 +678,11 @@ pub fun sampler_init(out: *vk.Sampler, v: *Vk, nearest: bool) Result[bool, Error
     ci.borderColor             = vk.BORDER_COLOR_INT_OPAQUE_BLACK;
     ci.unnormalizedCoordinates = vk.FALSE;
 
-    if (vk.vkCreateSampler(v.device, ?ci, nil, out) != vk.SUCCESS) {
-        ret err[bool, Error](error("vkCreateSampler failed"));
+    val rc: i32 = vk.vkCreateSampler(v.device, ?ci, nil, out);
+    if (rc != vk.SUCCESS) {
+        ret err[Error].err{vk_failed(VkCall.create_sampler{}, rc)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Destroy a sampler.
@@ -691,16 +704,22 @@ test "image: byte size is width times height times four" {
     ret 0;
 }
 
+fun raw_bytes_are(i: *Image, expected: usize) bool {
+    val raw: opt[usize] = image_raw_bytes(i);
+    ret sel raw.some && raw.some == expected;
+}
+
 test "image: raw byte size follows the image format" {
     var i: Image;
-    i.width = 2;
+    i.width  = 2;
     i.height = 3;
     i.format = vk.FORMAT_R8G8B8A8_UNORM;
-    if (image_raw_bytes(?i) != 24) { ret 1; }
+    if (!raw_bytes_are(?i, 24)) { ret 1; }
     i.format = vk.FORMAT_R16G16B16A16_SFLOAT;
-    if (image_raw_bytes(?i) != 48) { ret 2; }
+    if (!raw_bytes_are(?i, 48)) { ret 2; }
     i.format = vk.FORMAT_D32_SFLOAT;
-    if (image_raw_bytes(?i) != 0)  { ret 3; }
+    val depth: opt[usize] = image_raw_bytes(?i);
+    if (!sel depth.none) { ret 3; }
     ret 0;
 }
 
@@ -713,43 +732,41 @@ test "image: a large texture does not overflow its size" {
 }
 
 test "image: the receive transition waits for nothing and writes at transfer" {
-    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
-    if (!transition_masks(vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
-    if (ss != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT) { ret 2; }
-    if (ds != vk.PIPELINE_STAGE_TRANSFER_BIT)    { ret 3; }
-    if (sa != 0)                                 { ret 4; }
-    if (da != vk.ACCESS_TRANSFER_WRITE_BIT)      { ret 5; }
+    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
+        vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (!sel m.some)                                           { ret 1; }
+    if (m.some.src_stage != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT) { ret 2; }
+    if (m.some.dst_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)    { ret 3; }
+    if (m.some.src_access != 0)                                { ret 4; }
+    if (m.some.dst_access != vk.ACCESS_TRANSFER_WRITE_BIT)     { ret 5; }
     ret 0;
 }
 
 test "image: the read transition orders the copy before the fragment stage" {
-    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
-    if (!transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!sel m.some) { ret 1; }
     # Naming a later source stage or an earlier destination lets the fragment
     # stage sample the image before the copy lands, which a driver is free to
     # do and most do not, so it fails on other hardware and not on this one.
-    if (ss != vk.PIPELINE_STAGE_TRANSFER_BIT)          { ret 2; }
-    if (ds != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT)   { ret 3; }
-    if (sa != vk.ACCESS_TRANSFER_WRITE_BIT)            { ret 4; }
-    if (da != vk.ACCESS_SHADER_READ_BIT)               { ret 5; }
+    if (m.some.src_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)        { ret 2; }
+    if (m.some.dst_stage != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
+    if (m.some.src_access != vk.ACCESS_TRANSFER_WRITE_BIT)         { ret 4; }
+    if (m.some.dst_access != vk.ACCESS_SHADER_READ_BIT)            { ret 5; }
     ret 0;
 }
 
 test "image: an unhandled transition is refused rather than zeroed" {
-    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
     # Emitting a barrier with zeroed masks synchronizes nothing while looking
     # like it did, so the reverse direction must fail rather than be recorded.
-    if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    val reverse: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if (!sel reverse.none) { ret 1; }
     # An arbitrary pair nothing in boom performs. The point is that the table
     # is a closed set, not that it happens to be missing this one.
-    if (transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                         vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                         ?ss, ?ds, ?sa, ?da)) { ret 2; }
+    val present: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (!sel present.none) { ret 2; }
     ret 0;
 }
 
@@ -757,16 +774,15 @@ test "image: a target's colour image can be made readable before anything draws"
     # A game may sample a render target before its first render. The image is
     # in UNDEFINED then, while the descriptor claims SHADER_READ_ONLY_OPTIMAL,
     # which is a lie about the layout rather than merely undefined contents.
-    var ss: u32 = 0; var ds: u32 = 0; var sa: u32 = 0; var da: u32 = 0;
-    if (!transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
-                          vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                          ?ss, ?ds, ?sa, ?da)) { ret 1; }
+    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
+        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!sel m.some) { ret 1; }
     # Nothing has touched the image, so there is nothing to wait for, but the
     # fragment stage's read is what must wait for the transition.
-    if (ss != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT)     { ret 2; }
-    if (ds != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
-    if (sa != 0)                                     { ret 4; }
-    if (da != vk.ACCESS_SHADER_READ_BIT)             { ret 5; }
+    if (m.some.src_stage != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT)     { ret 2; }
+    if (m.some.dst_stage != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
+    if (m.some.src_access != 0)                                    { ret 4; }
+    if (m.some.dst_access != vk.ACCESS_SHADER_READ_BIT)            { ret 5; }
     ret 0;
 }
 
@@ -814,7 +830,7 @@ pub rec DepthAttachment {
 # width:  width in pixels
 # height: height in pixels
 # ret:    true on success, or the step that failed
-pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i32) Result[bool, Error] {
+pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i32) err[Error] {
     d.image = nil;
     d.mem   = nil;
     d.view  = nil;
@@ -838,38 +854,46 @@ pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i
     ci.pQueueFamilyIndices   = nil;
     ci.initialLayout         = vk.IMAGE_LAYOUT_UNDEFINED;
 
-    if (vk.vkCreateImage(v.device, ?ci, nil, ?d.image) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not create the depth image"));
+    val created: i32 = vk.vkCreateImage(v.device, ?ci, nil, ?d.image);
+    if (created != vk.SUCCESS) {
+        d.image = nil;
+        ret err[Error].err{vk_failed(VkCall.create_image{}, created)};
     }
 
     var req: vk.MemoryRequirements;
     vk.vkGetImageMemoryRequirements(v.device, d.image, ?req);
     var props: vk.PhysicalDeviceMemoryProperties;
     vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
-    val index: u32 = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (index == NO_MEMORY_TYPE) {
-        ret err[bool, Error](error("no device-local memory type for the depth image"));
+    val index: opt[u32] = pick_memory_type(?props, req.memoryTypeBits, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (sel index.none) {
+        depth_attachment_dnit(d, v);
+        ret err[Error].err{Error.device{DeviceError.no_memory_type{}}};
     }
 
     var ai: vk.MemoryAllocateInfo;
     ai.sType           = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.pNext           = nil;
     ai.allocationSize  = req.size;
-    ai.memoryTypeIndex = index;
-    if (vk.vkAllocateMemory(v.device, ?ai, nil, ?d.mem) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not allocate depth memory"));
+    ai.memoryTypeIndex = index.some;
+    val allocated: i32 = vk.vkAllocateMemory(v.device, ?ai, nil, ?d.mem);
+    if (allocated != vk.SUCCESS) {
+        d.mem = nil;
+        depth_attachment_dnit(d, v);
+        ret err[Error].err{vk_failed(VkCall.allocate_memory{}, allocated)};
     }
-    if (vk.vkBindImageMemory(v.device, d.image, d.mem, 0) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not bind depth memory"));
+    val bound: i32 = vk.vkBindImageMemory(v.device, d.image, d.mem, 0);
+    if (bound != vk.SUCCESS) {
+        depth_attachment_dnit(d, v);
+        ret err[Error].err{vk_failed(VkCall.bind_image_memory{}, bound)};
     }
 
     var vci: vk.ImageViewCreateInfo;
-    vci.sType    = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    vci.pNext    = nil;
-    vci.flags    = 0;
-    vci.image    = d.image;
-    vci.viewType = vk.IMAGE_VIEW_TYPE_2D;
-    vci.format   = DEPTH_FORMAT;
+    vci.sType        = vk.STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.pNext        = nil;
+    vci.flags        = 0;
+    vci.image        = d.image;
+    vci.viewType     = vk.IMAGE_VIEW_TYPE_2D;
+    vci.format       = DEPTH_FORMAT;
     vci.components.r = vk.COMPONENT_SWIZZLE_IDENTITY;
     vci.components.g = vk.COMPONENT_SWIZZLE_IDENTITY;
     vci.components.b = vk.COMPONENT_SWIZZLE_IDENTITY;
@@ -881,37 +905,46 @@ pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i
     vci.subresourceRange.levelCount     = 1;
     vci.subresourceRange.baseArrayLayer = 0;
     vci.subresourceRange.layerCount     = 1;
-    if (vk.vkCreateImageView(v.device, ?vci, nil, ?d.view) != vk.SUCCESS) {
-        ret err[bool, Error](error("could not create the depth view"));
+    val viewed: i32 = vk.vkCreateImageView(v.device, ?vci, nil, ?d.view);
+    if (viewed != vk.SUCCESS) {
+        d.view = nil;
+        depth_attachment_dnit(d, v);
+        ret err[Error].err{vk_failed(VkCall.create_image_view{}, viewed)};
     }
-    ret ok[bool, Error](true);
+    ret err[Error].ok{};
 }
 
 # Destroy a depth attachment, in reverse order of creation.
 #
-# Safe on a partially created one: each handle is checked, because the failure
-# path in depth_attachment_init leaves the later handles nil.
+# Safe on a partially created one: each handle is checked, because a failure in
+# depth_attachment_init releases what it made with the later handles still nil.
 pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
-    if (d.view  != nil) { vk.vkDestroyImageView(v.device, d.view, nil);  d.view  = nil; }
-    if (d.image != nil) { vk.vkDestroyImage(v.device, d.image, nil);     d.image = nil; }
-    if (d.mem   != nil) { vk.vkFreeMemory(v.device, d.mem, nil);         d.mem   = nil; }
+    if (d.view != nil) {
+        vk.vkDestroyImageView(v.device, d.view, nil);
+        d.view = nil;
+    }
+    if (d.image != nil) {
+        vk.vkDestroyImage(v.device, d.image, nil);
+        d.image = nil;
+    }
+    if (d.mem != nil) {
+        vk.vkFreeMemory(v.device, d.mem, nil);
+        d.mem = nil;
+    }
 }
 
 test "image: a colour space maps to the format that applies its transfer function" {
     # An sRGB texture read through a UNORM image hands the shader raw bytes as
     # though they were linear. Every stage then does exactly what it was told
     # and the result is washed out, with no diagnostic anywhere.
-    if (image_format(COLOR_SRGB) != vk.FORMAT_R8G8B8A8_SRGB)    { ret 1; }
-    if (image_format(COLOR_LINEAR) != vk.FORMAT_R8G8B8A8_UNORM) { ret 2; }
+    if (image_format(ColorSpace.srgb{}) != vk.FORMAT_R8G8B8A8_SRGB)    { ret 1; }
+    if (image_format(ColorSpace.linear{}) != vk.FORMAT_R8G8B8A8_UNORM) { ret 2; }
     ret 0;
 }
 
-test "image: an unknown colour space falls back to linear, not to sRGB" {
-    # Fail toward the space that changes nothing. A new space defaulting to sRGB
-    # would apply a transfer function to data that is not colour, which is a
-    # subtle wrongness; defaulting to linear is at worst an un-decoded colour,
-    # which is visible immediately.
-    if (image_format(7::ColorSpace) != vk.FORMAT_R8G8B8A8_UNORM) { ret 1; }
+test "image: a zeroed colour space is sRGB, the space textures are authored in" {
+    var space: ColorSpace;
+    if (!sel space.srgb) { ret 1; }
     ret 0;
 }
 

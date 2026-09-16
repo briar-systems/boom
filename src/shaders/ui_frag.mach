@@ -11,12 +11,16 @@
 
 use tex: shader.texture;
 
-#[sampler(0, 1)] var atlas: tex.Sampler2D;
+#[sampler(0, 1)]
+var atlas: tex.Sampler2D;
 
-#[input(0)] var in_uv:     f32x2;
-#[input(1)] var in_colour: f32x4;
+#[input(0)]
+var in_uv: f32x2;
+#[input(1)]
+var in_colour: f32x4;
 
-#[output(0)] var out_colour: f32x4;
+#[output(0)]
+var out_colour: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {
