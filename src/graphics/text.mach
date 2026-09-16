@@ -1,14 +1,37 @@
-# Text rendering: a rasterized glyph atlas drawn through the sprite path.
+# Text rendering: a demand-filled glyph atlas drawn through the sprite path.
 #
 # mach-font parses TrueType and rasterizes a glyph into an 8-bit coverage
 # bitmap. It does not decide where glyphs live, how they are uploaded, or how a
 # string becomes draw calls. Those are an engine's job.
 #
-# Every glyph is rasterized once at load into a single RGBA texture laid out as
-# a grid of fixed cells. Drawing a string is then N sprite quads against one
-# texture, so a frame counter costs no per-frame rasterization and no texture
-# thrash. Rasterizing per draw is the obvious implementation and is why naive
-# text rendering is slow.
+# COVERAGE IS THE WHOLE OF UNICODE, ADMITTED WHEN A CODEPOINT IS FIRST ASKED
+# FOR. An earlier cut rasterized ASCII 32 to 126 into one texture at load and
+# indexed it by `codepoint - 32`. That is why a Chinese string drew nothing: the
+# string was also walked one byte at a time, so every byte of a multi-byte
+# sequence fell outside the range and was dropped. Both halves of that are gone.
+# Strings are decoded as UTF-8 and any codepoint the face has a glyph for draws.
+#
+# A FIXED TABLE CANNOT BE WIDENED INTO THIS. A CJK face carries twenty thousand
+# glyphs or more. Rasterizing them at load is seconds of work and tens of
+# megabytes for a frame counter that uses eleven of them. So a glyph enters the
+# atlas the first time it is drawn or measured and stays for the font's life. A
+# string of repeated text still costs no per-frame rasterization, which is the
+# property the fixed table was there for.
+#
+# A CELL BELONGS TO A GLYPH, NOT TO A CODEPOINT. Every codepoint the face lacks
+# resolves to glyph 0, the face's .notdef box, and a face may map several
+# codepoints to one outline. Keying cells by codepoint would rasterize and store
+# the same box once per unsupported character, which is what lets a page of
+# text in a script the face does not cover exhaust the atlas.
+#
+# THE ATLAS IS PAGED AND A PAGE NEVER RESIZES. A sprite quad bakes its UVs into
+# the frame's vertex arena when it is appended, and the batch is not drawn until
+# the pass ends. Growing a page mid-frame would therefore move the source
+# rectangle of every quad already recorded against it, silently, with no way to
+# find the ones that were already wrong. A full page is retired and a new one is
+# created instead, which costs a batch break and nothing else. `MAX_PAGES`
+# bounds the total. Past it a glyph keeps its correct advance and draws blank,
+# and `font_missing` reports how many.
 #
 # Coverage is stored in the alpha channel with RGB left white, so the existing
 # sprite shader tints text by multiplying. No text-specific shader and no
@@ -16,17 +39,22 @@
 #
 # Each cell has a transparent one-texel gutter. Linear sampling can therefore
 # soften coverage at a scaled edge without pulling in the neighbouring glyph.
+# The gutter is written once when a page is cleared, not per glyph, so admitting
+# a glyph uploads exactly its own cell.
 #
-# The atlas uses a fixed cell grid rather than tight packing. A tight packer
-# buys atlas space and costs a rectangle-packing algorithm plus per-glyph
-# bookkeeping. At one size and 95 glyphs the whole atlas is a few hundred
-# kilobytes either way, so space is not the constraint and the simpler layout
-# wins.
+# The atlas uses a fixed cell grid rather than tight packing. Every cell is
+# sized for the face's line box and a Han glyph fills about one em, so the grid
+# holds the demanding cases it exists for and space is not the constraint that
+# decides this.
 #
-# Coverage is ASCII 32 to 126. That is a deliberate first cut and the limit is
-# stated rather than hidden, because a codepoint outside the range draws
-# nothing instead of drawing a wrong glyph. Wider coverage needs a real cmap
-# walk and a packer, and neither changes the shapes here.
+# WHAT THIS STILL DOES NOT DO, stated rather than hidden. A codepoint maps to
+# one glyph through the face's cmap and glyphs are placed left to right at their
+# own advances. That is correct for Han, Kana, Hangul, Cyrillic, Greek, and
+# Latin with precomposed diacritics. It is not shaping: there is no bidi, no
+# Arabic joining, no Indic reordering, and no ligature or mark positioning, so
+# Arabic and the Brahmic scripts render as disjoint isolated forms. Kerning is
+# not applied either. Those need a shaping pass between the string and this
+# layer, and none of the shapes here change when one arrives.
 
 use boom.vfs;
 use font.error.FontError;
@@ -35,10 +63,14 @@ use fglyf:   font.glyf;
 use fhhea:   font.hhea;
 use fhmtx:   font.hmtx;
 use finfo:   font.info;
+use fmaxp:   font.maxp;
 use fraster: font.raster;
 use allo:    std.allocator;
 use std.allocator.page;
+use gmap: std.collections.map;
 use std.collections.vector;
+use mem: std.memory;
+use std.text.utf8;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -50,6 +82,7 @@ use std.types.string.str;
 use std.types.string.str_len;
 
 use boom.graphics.device.Device;
+use boom.graphics.error.Capacity;
 use boom.graphics.error.Error;
 use boom.graphics.error.content.TextError;
 use boom.graphics.image.ColorSpace;
@@ -60,12 +93,28 @@ use boom.graphics.sprite.rect;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture;
 use boom.graphics.texture.texture_delete;
+use boom.graphics.texture.texture_upload_region;
 use boom.math.vec.Vec4;
 
-# First and last codepoint the atlas covers
-pub val FIRST_CP:    u32   = 32;
-pub val LAST_CP:     u32   = 126;
-pub val GLYPH_COUNT: usize = 95;
+# Preferred atlas page side in texels.
+#
+# One page at a 16 pixel face holds about seventeen hundred glyphs, so ordinary
+# European text never leaves the first page and a full CJK working set fits in
+# a handful. Every driver guarantees at least 4096, so this is portable with
+# room to spare. The cost of a page is four megabytes of transient host memory
+# at creation, which is why it is not simply set to the maximum.
+pub val ATLAS_PAGE: usize = 1024;
+
+# The largest atlas page side any face may need.
+#
+# A cell is sized from the face's line box, so a large enough requested pixel
+# height needs a page larger than a driver is required to support. Refusing at
+# load names the real limit. Growing past it would fail inside vkCreateImage
+# with nothing pointing back at the font size that caused it.
+pub val ATLAS_PAGE_MAX: usize = 4096;
+
+# How many pages one face may occupy before it stops admitting glyphs.
+pub val MAX_PAGES: usize = 16;
 
 # how glyph coverage and placement are represented
 # ---
@@ -114,22 +163,34 @@ pub fun font_pixel_options() FontOptions {
     };
 }
 
-# Scratch bounds for one glyph's outline, sized for the demanding glyphs in a
-# normal text face rather than the worst case in any font ever made
-val MAX_POINTS:   usize = 512;
-val MAX_CONTOURS: usize = 32;
-val MAX_EDGES:    usize = 1024;
-val GUTTER:       usize = 1;
+val GUTTER: usize = 1;
 
-# One glyph's placement in the atlas and its metrics
+# U+000A, the one control codepoint that means something to layout here
+val NEWLINE: u32 = 10;
+
+# Ceiling on the flattened-edge scratch buffer, in edges.
+#
+# The buffer is sized from the face's own declared point maxima, so a font that
+# lies about them or one built to be hostile is the only way to reach this. Four
+# megabytes of edges is far past any real glyph and is a bound rather than a
+# budget.
+val MAX_EDGES: usize = 262144;
+
+# The point and contour scratch for a face whose maxp does not declare maxima.
+val FALLBACK_POINTS:   usize = 512;
+val FALLBACK_CONTOURS: usize = 32;
+
+# One glyph's residency in the atlas and its metrics
 # ---
-# cell:     index into the atlas grid
+# page:     which atlas page holds the cell
+# cell:     index into that page's cell grid
 # advance:  pen movement after drawing, in pixels
 # offset_x: horizontal bearing from the pen to the atlas cell
 # offset_y: vertical bearing from the line top to the atlas cell
-# w:        rendered width in pixels
+# w:        rendered width in pixels, zero when the glyph draws nothing
 # h:        rendered height in pixels
 rec Glyph {
+    page:     usize;
     cell:     usize;
     advance:  f32;
     offset_x: f32;
@@ -142,41 +203,91 @@ rec Glyph {
 #
 # A face may rasterize above its logical size. Its atlas then carries more edge
 # coverage while measurement and drawing remain in the caller's coordinates.
+#
+# THE FACE OUTLIVES THE CALLER'S BYTES. Rasterizing on demand means the encoded
+# font has to still be readable long after `font_from_bytes` returned, so the
+# Font owns a copy of it. That is what keeps the documented promise that a
+# caller may release the span it passed in, and it is why a Font holds an
+# allocator and a device rather than borrowing them for one call.
+#
+# A Font is a unique owner. Copying the record and deleting both copies frees
+# its storage twice.
 # ---
-# atlas:        the uploaded glyph texture
-# glyphs:       per-codepoint placement and logical metrics
-# cell_w:       atlas cell width in raster texels
-# cell_h:       atlas cell height in raster texels
-# cols:         cells per atlas row
-# height:       logical ascent-to-descent height used for layout
-# ascent:       logical line-top-to-baseline distance
-# descent:      logical baseline-to-line-bottom distance, normally negative
-# raster_scale: atlas texels per logical pixel
-# pixel_snap:   whether origins and metrics stay on whole pixels
-# valid:        whether the face holds a live atlas, cleared by font_delete
+# a:              allocator owning the encoded bytes, scratch, and both maps
+# d:              device the atlas pages are created against
+# data:           owned copy of the encoded TrueType bytes
+# len:            encoded byte count
+# face:           parsed handle over `data`
+# glyphs:         codepoint to glyph, filled as codepoints are asked for
+# cells:          glyph index to glyph, one atlas cell per outline
+# pages:          the atlas textures, `page_count` of them live
+# page_count:     how many pages have been created
+# page_side:      page width and height in texels
+# cell:           cell side in raster texels, gutter excluded
+# cols:           cells per page row
+# cells_per_page: cells one page holds
+# next_cell:      next free cell in the newest page
+# pts:            outline point scratch, sized from the face's maxima
+# pts_cap:        points pts holds
+# ends:           contour end scratch, sized from the face's maxima
+# ends_cap:       contour ends ends holds
+# edges:          flattened edge scratch
+# edges_cap:      edges edges holds
+# cov:            one cell of 8-bit coverage
+# stage:          one cell of RGBA8, staged for upload
+# logical_scale:  design units to logical pixels
+# glyph_scale:    design units to raster texels
+# height:         logical ascent-to-descent height used for layout
+# ascent:         logical line-top-to-baseline distance
+# descent:        logical baseline-to-line-bottom distance, normally negative
+# raster_scale:   atlas texels per logical pixel
+# raster:         coverage policy the atlas was built under
+# pixel_snap:     whether origins and metrics stay on whole pixels
+# missing:        glyphs that could not be given a cell or rasterized
+# valid:          whether the face holds a live atlas, cleared by font_delete
 pub rec Font {
-    atlas:        Texture;
-    glyphs:       [95]Glyph;
-    cell_w:       usize;
-    cell_h:       usize;
-    cols:         usize;
-    height:       f32;
-    ascent:       f32;
-    descent:      f32;
-    raster_scale: f32;
-    pixel_snap:   bool;
-    valid:        bool;
+    a:              *allo.Allocator;
+    d:              *Device;
+    data:           *u8;
+    len:            usize;
+    face:           finfo.Font;
+    glyphs:         gmap.Map[u32, Glyph];
+    cells:          gmap.Map[u32, Glyph];
+    pages:          [MAX_PAGES]Texture;
+    page_count:     usize;
+    page_side:      usize;
+    cell:           usize;
+    cols:           usize;
+    cells_per_page: usize;
+    next_cell:      usize;
+    pts:            *fglyf.Point;
+    pts_cap:        usize;
+    ends:           *u16;
+    ends_cap:       usize;
+    edges:          *fraster.Edge;
+    edges_cap:      usize;
+    cov:            *u8;
+    stage:          *u8;
+    logical_scale:  f32;
+    glyph_scale:    f32;
+    height:         f32;
+    ascent:         f32;
+    descent:        f32;
+    raster_scale:   f32;
+    raster:         FontRaster;
+    pixel_snap:     bool;
+    missing:        usize;
+    valid:          bool;
 }
 
 # Rasterize a face from borrowed TrueType bytes.
 #
-# The encoded bytes are read only during this call. The returned Font owns its
-# uploaded atlas and glyph metrics, so the caller may release the byte span
-# immediately after return.
-#
+# The encoded bytes are read only during this call: the Font takes its own copy,
+# so the caller may release the byte span immediately after return. The returned
+# Font owns that copy, its atlas pages, and its glyph maps.
 # ---
-# a:      allocator for temporary atlas and glyph storage
-# d:      device receiving the rasterized atlas
+# a:      allocator for the retained font bytes, scratch, and atlas storage
+# d:      device the atlas pages are created against
 # data:   complete TrueType byte stream, borrowed for this call
 # len:    encoded byte count
 # pixels: logical pixel height to rasterize and draw at
@@ -191,8 +302,8 @@ pub fun font_from_bytes(a: *allo.Allocator, d: *Device, data: *u8, len: usize,
 # Oversampling improves scaled text without changing advances or layout. The
 # encoded bytes remain borrowed only for this call, as in `font_from_bytes`.
 # ---
-# a:          allocator for temporary atlas and glyph storage
-# d:          device receiving the rasterized atlas
+# a:          allocator for the retained font bytes, scratch, and atlas storage
+# d:          device the atlas pages are created against
 # data:       complete TrueType byte stream, borrowed for this call
 # len:        encoded byte count
 # pixels:     logical pixel height used for measurement and drawing
@@ -228,13 +339,35 @@ fun options_refusal(pixels: f32, options: FontOptions) opt[TextError] {
     ret opt[TextError].none{};
 }
 
-# whether a glyph refusal means only that boom's scratch cannot hold it
+# the cell grid a face at this cell size lays out, or why it cannot
+# ---
+# cell: cell side in raster texels, gutter excluded
+# ret:  the page side, or cell_empty or page_limit
+fun page_side_for(cell: usize) res[usize, TextError] {
+    if (cell == 0) { ret res[usize, TextError].err{TextError.cell_empty{}}; }
+    val stride: usize = cell + GUTTER * 2;
+    if (stride > ATLAS_PAGE_MAX) { ret res[usize, TextError].err{TextError.page_limit{}}; }
+    if (stride > ATLAS_PAGE)     { ret res[usize, TextError].ok{stride}; }
+    ret res[usize, TextError].ok{ATLAS_PAGE};
+}
+
+# Parse a face and prove it has what on-demand rasterization will read.
 #
-# such a glyph keeps its advance and draws nothing, as a codepoint the face
-# lacks does. every other refusal is a malformed face and fails the load.
-fun glyph_unrenderable(e: FontError) bool {
-    ret sel e.points_full || sel e.contours_full || sel e.edges_full
-        || sel e.point_matched_component;
+# Checked at load because a failure after load has nowhere to go: a draw cannot
+# return an error, so a face without a cmap or horizontal metrics would draw
+# nothing forever with no reason given.
+fun face_open(data: *u8, len: usize) res[finfo.Font, FontError] {
+    val parsed: res[finfo.Font, FontError] = finfo.init(data, len);
+    if (sel parsed.err) { ret parsed; }
+    var face: finfo.Font = parsed.ok;
+    if (sel face.cmap.err) { ret res[finfo.Font, FontError].err{face.cmap.err}; }
+    val metrics: res[fhhea.Hhea, FontError] = line_metrics(?face);
+    if (sel metrics.err) { ret res[finfo.Font, FontError].err{metrics.err}; }
+    val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?face, 0);
+    if (sel hm.err) { ret res[finfo.Font, FontError].err{hm.err}; }
+    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?face, 0);
+    if (sel info.err) { ret res[finfo.Font, FontError].err{info.err}; }
+    ret parsed;
 }
 
 # Rasterize borrowed TrueType bytes with an explicit atlas policy.
@@ -245,85 +378,80 @@ pub fun font_from_bytes_with_options(a: *allo.Allocator, d: *Device,
     data: *u8, len: usize, pixels: f32,
     options: FontOptions) res[Font, Error] {
     var f: Font;
-    f.valid = false;
+    font_blank(?f, a, d);
 
     val refused: opt[TextError] = options_refusal(pixels, options);
-    if (sel refused.some) { ret res[Font, Error].err{text_refused(refused.some)}; }
+    if (sel refused.some)        { ret res[Font, Error].err{text_refused(refused.some)}; }
+    if (len == 0 || data == nil) { ret res[Font, Error].err{text_refused(TextError.empty{})}; }
 
-    val parsed: res[finfo.Font, FontError] = finfo.init(data, len);
-    if (sel parsed.err) { ret res[Font, Error].err{font_failed(parsed.err)}; }
-    var face:    finfo.Font                 = parsed.ok;
-    val metrics: res[fhhea.Hhea, FontError] = line_metrics(?face);
-    if (sel metrics.err) { ret res[Font, Error].err{font_failed(metrics.err)}; }
-    val hhea: fhhea.Hhea = metrics.ok;
+    # parsed against the caller's bytes first, so a stream that is not a usable
+    # font is refused before anything is allocated or copied
+    val probe: res[finfo.Font, FontError] = face_open(data, len);
+    if (sel probe.err) { ret res[Font, Error].err{font_failed(probe.err)}; }
 
-    val raster_scale: f32                 = options.oversample::f32;
-    val scaled:       res[f32, FontError] = font_scale(?face, pixels, options.size_mode);
+    var probed: finfo.Font          = probe.ok;
+    val scaled: res[f32, FontError] = font_scale(?probed, pixels, options.size_mode);
     if (sel scaled.err) { ret res[Font, Error].err{font_failed(scaled.err)}; }
-    val logical_scale: f32 = scaled.ok;
-    val glyph_scale:   f32 = logical_scale * raster_scale;
-    val line_height:   f32 =
-        (hhea.ascent::i32 - hhea.descent::i32)::f32 * logical_scale;
+    val metrics: res[fhhea.Hhea, FontError] = line_metrics(?probed);
+    if (sel metrics.err) { ret res[Font, Error].err{font_failed(metrics.err)}; }
+    val hhea:        fhhea.Hhea = metrics.ok;
+    val line_height: f32        = (hhea.ascent::i32 - hhea.descent::i32)::f32 * scaled.ok;
 
     # Scale the complete established cell, including its margin, so changing
     # atlas resolution cannot change the logical destination rectangle.
-    val cell: usize = logical_cell_size(line_height) * options.oversample;
-    f.cell_w       = cell;
-    f.cell_h       = cell;
-    f.cols         = 16;
-    f.height       = line_height;
-    f.ascent       = hhea.ascent::f32 * logical_scale;
-    f.descent      = hhea.descent::f32 * logical_scale;
-    f.raster_scale = raster_scale;
-    f.pixel_snap   = sel options.raster.pixel;
+    val cell: usize                 = logical_cell_size(line_height) * options.oversample;
+    val side: res[usize, TextError] = page_side_for(cell);
+    if (sel side.err) { ret res[Font, Error].err{text_refused(side.err)}; }
+
+    val dr: res[*u8, allo.Error] = allo.allocate[u8](a, len);
+    if (sel dr.err) { ret res[Font, Error].err{Error.alloc{dr.err}}; }
+    f.data = dr.ok;
+    f.len  = len;
+    mem.raw_copy(f.data::ptr, data::ptr, len);
+
+    # re-parsed against the retained copy, because the handle caches a data
+    # pointer and the one that survives has to address bytes this Font owns
+    val kept: res[finfo.Font, FontError] = finfo.init(f.data, f.len);
+    if (sel kept.err) {
+        font_release(?f);
+        ret res[Font, Error].err{font_failed(kept.err)};
+    }
+    f.face = kept.ok;
+
+    f.raster_scale   = options.oversample::f32;
+    f.logical_scale  = scaled.ok;
+    f.glyph_scale    = f.logical_scale * f.raster_scale;
+    f.raster         = options.raster;
+    f.pixel_snap     = sel options.raster.pixel;
+    f.height         = line_height;
+    f.ascent         = hhea.ascent::f32 * f.logical_scale;
+    f.descent        = hhea.descent::f32 * f.logical_scale;
+    f.cell           = cell;
+    f.page_side      = side.ok;
+    f.cols           = f.page_side / (cell + GUTTER * 2);
+    f.cells_per_page = f.cols * f.cols;
     if (f.pixel_snap) {
         f.height  = pixel_round(f.height);
         f.ascent  = pixel_round(f.ascent);
         f.descent = pixel_round(f.descent);
     }
 
-    val rows:   usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
-    val stride: usize = cell + GUTTER * 2;
-    val aw:     usize = f.cols * stride;
-    val ah:     usize = rows * stride;
-
-    val ar: res[*u8, allo.Error] = allo.allocate[u8](a, aw * ah * 4);
-    if (sel ar.err) { ret res[Font, Error].err{Error.alloc{ar.err}}; }
-    val rgba: *u8 = ar.ok;
-    clear_atlas(rgba, aw * ah);
-
-    val cr: res[*u8, allo.Error] = allo.allocate[u8](a, cell * cell);
-    if (sel cr.err) {
-        allo.deallocate[u8](a, rgba, aw * ah * 4);
-        ret res[Font, Error].err{Error.alloc{cr.err}};
-    }
-    val cov: *u8 = cr.ok;
-
-    val laid: err[Error] = raster_glyphs(?f, ?face, rgba, aw, cov, cell,
-        logical_scale, glyph_scale, options.raster);
-    if (sel laid.err) {
-        allo.deallocate[u8](a, cov, cell * cell);
-        allo.deallocate[u8](a, rgba, aw * ah * 4);
-        ret res[Font, Error].err{laid.err};
+    val sr: err[Error] = scratch_init(?f);
+    if (sel sr.err) {
+        font_release(?f);
+        ret res[Font, Error].err{sr.err};
     }
 
-    # sRGB. The atlas leaves RGB white and stores coverage in alpha, and Vulkan's
-    # sRGB formats leave alpha linear, so the transfer function touches only the
-    # white and coverage arrives at the shader exactly as rasterized.
-    val tr:         res[Texture, Error] = texture(d, rgba, aw::i32, ah::i32, ColorSpace.srgb{});
-    val cov_freed:  err[allo.Error]     = allo.deallocate[u8](a, cov, cell * cell);
-    val rgba_freed: err[allo.Error]     = allo.deallocate[u8](a, rgba, aw * ah * 4);
-    if (sel tr.err) { ret res[Font, Error].err{tr.err}; }
-    f.atlas = tr.ok;
+    # The first page is created here rather than on the first glyph, so a font
+    # that cannot get atlas memory at all fails at load where a caller is
+    # already handling errors, not mid-frame.
+    val pr: err[Error] = page_add(?f);
+    if (sel pr.err) {
+        font_release(?f);
+        ret res[Font, Error].err{pr.err};
+    }
+
     f.valid = true;
-    if (sel cov_freed.err) {
-        font_delete(d, ?f);
-        ret res[Font, Error].err{Error.alloc{cov_freed.err}};
-    }
-    if (sel rgba_freed.err) {
-        font_delete(d, ?f);
-        ret res[Font, Error].err{Error.alloc{rgba_freed.err}};
-    }
     ret res[Font, Error].ok{f};
 }
 
@@ -333,77 +461,10 @@ fun line_metrics(face: *finfo.Font) res[fhhea.Hhea, FontError] {
     ret res[fhhea.Hhea, FontError].err{FontError.missing_table{TableId.hhea{}}};
 }
 
-# rasterize every covered codepoint into its atlas cell and record its metrics
-fun raster_glyphs(f: *Font, face: *finfo.Font, rgba: *u8, aw: usize, cov: *u8,
-    cell: usize, logical_scale: f32, glyph_scale: f32,
-    raster: FontRaster) err[Error] {
-    var pts:   [512]fglyf.Point;
-    var ends:  [32]u16;
-    var edges: [1024]fraster.Edge;
-
-    var g: usize = 0;
-    for (g < GLYPH_COUNT) {
-        val cp: u32 = FIRST_CP + g::u32;
-        f.glyphs[g].cell     = g;
-        f.glyphs[g].advance  = 0.0;
-        f.glyphs[g].offset_x = 0.0;
-        f.glyphs[g].offset_y = 0.0;
-        f.glyphs[g].w        = 0.0;
-        f.glyphs[g].h        = 0.0;
-
-        val mapped: res[u16, FontError] = finfo.glyph_index(face, cp);
-        if (sel mapped.err) { ret err[Error].err{font_failed(mapped.err)}; }
-        val gi: u16 = mapped.ok;
-
-        val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(face, gi);
-        if (sel hm.err) { ret err[Error].err{font_failed(hm.err)}; }
-        f.glyphs[g].advance  = hm.ok.advance::f32 * logical_scale;
-        f.glyphs[g].offset_x = hm.ok.lsb::f32 * logical_scale;
-        if (f.pixel_snap) {
-            f.glyphs[g].advance  = pixel_round(f.glyphs[g].advance);
-            f.glyphs[g].offset_x = pixel_round(f.glyphs[g].offset_x);
-        }
-
-        val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(face, gi);
-        if (sel info.err) { ret err[Error].err{font_failed(info.err)}; }
-
-        var k: usize = 0;
-        for (k < cell * cell) {
-            cov[k] = 0;
-            k      = k + 1;
-        }
-
-        val rendered: err[FontError] = finfo.render_glyph(face, gi, glyph_scale,
-            ?pts[0], MAX_POINTS, ?ends[0], MAX_CONTOURS,
-            ?edges[0], MAX_EDGES, cov, cell::u16, cell::u16);
-        if (sel rendered.err) {
-            if (!glyph_unrenderable(rendered.err)) { ret err[Error].err{font_failed(rendered.err)}; }
-        }
-        or (sel info.ok.some) {
-            val visible: bool = blit_cell(rgba, aw, cov, cell, g, f.cols, raster);
-            if (visible) {
-                f.glyphs[g].w        = cell::f32 / f.raster_scale;
-                f.glyphs[g].h        = cell::f32 / f.raster_scale;
-                f.glyphs[g].offset_y = baseline_offset(
-                    f.ascent,
-                    f.glyphs[g].h,
-                    info.ok.some.y_min,
-                    logical_scale,
-                );
-                if (f.pixel_snap) {
-                    f.glyphs[g].offset_y = pixel_round(f.glyphs[g].offset_y);
-                }
-            }
-        }
-        g = g + 1;
-    }
-    ret err[Error].ok{};
-}
-
 # Load a face from a virtual path and rasterize its atlas.
 # ---
-# a:      allocator for the file bytes and temporary atlas storage
-# d:      device receiving the rasterized atlas
+# a:      allocator for the retained font bytes, scratch, and atlas storage
+# d:      device the atlas pages are created against
 # vpath:  virtual path to a TrueType file, e.g. res://fonts/ui.ttf
 # pixels: logical pixel height to rasterize and draw at
 # ret:    an owned Font, or a read/parse/allocation/upload error
@@ -438,10 +499,301 @@ pub fun font_load_with_options(a: *allo.Allocator, d: *Device, vpath: str,
     ret fr;
 }
 
+# Every field of a Font that has never been through a constructor.
+#
+# Written before the first fallible step so `font_release` can run over a
+# half-built Font and free exactly what exists.
+fun font_blank(f: *Font, a: *allo.Allocator, d: *Device) {
+    mem.raw_zero(f::ptr, $size_of(Font));
+    f.a            = a;
+    f.d            = d;
+    f.raster_scale = 1.0;
+    f.raster       = FontRaster.smooth{};
+    f.glyphs       = gmap.init[u32, Glyph](a, gmap.hash_u32, gmap.eq_u32);
+    f.cells        = gmap.init[u32, Glyph](a, gmap.hash_u32, gmap.eq_u32);
+}
+
+# The scratch sizes a face needs, from what it declares.
+#
+# A fixed 512-point, 1024-edge buffer is sized for a Latin face. A dense Han
+# glyph passes both. maxp declares the maxima for the font in hand, which is the
+# only number that is actually right, and a composite glyph resolves to more
+# points than a simple one, so the larger of the two pairs is what has to fit.
+# ---
+# m:    the face's declared maxima, none for a maxp 0.5 face
+# cell: cell side in raster texels
+# ret:  points, contours, and edges, in that order
+fun scratch_sizes(m: opt[fmaxp.Maxima], cell: usize) [3]usize {
+    var points:   usize = FALLBACK_POINTS;
+    var contours: usize = FALLBACK_CONTOURS;
+    if (sel m.some) {
+        points   = m.some.max_points::usize;
+        contours = m.some.max_contours::usize;
+        if (m.some.max_composite_points::usize > points)     { points = m.some.max_composite_points::usize; }
+        if (m.some.max_composite_contours::usize > contours) { contours = m.some.max_composite_contours::usize; }
+    }
+    # a face declaring zero maxima still needs buffers the calls can address
+    if (points < 16)  { points = 16; }
+    if (contours < 4) { contours = 4; }
+
+    var edges: usize = points * quad_segments(cell) + 128;
+    if (edges > MAX_EDGES) { edges = MAX_EDGES; }
+    ret [3]usize{points, contours, edges};
+}
+
+# Allocate the per-face outline and cell scratch.
+fun scratch_init(f: *Font) err[Error] {
+    val declared: res[opt[fmaxp.Maxima], FontError] = finfo.outline_maxima(?f.face);
+    if (sel declared.err) { ret err[Error].err{font_failed(declared.err)}; }
+    val sizes: [3]usize = scratch_sizes(declared.ok, f.cell);
+
+    val pr: res[*fglyf.Point, allo.Error] = allo.allocate[fglyf.Point](f.a, sizes[0]);
+    if (sel pr.err) { ret err[Error].err{Error.alloc{pr.err}}; }
+    f.pts     = pr.ok;
+    f.pts_cap = sizes[0];
+
+    val er: res[*u16, allo.Error] = allo.allocate[u16](f.a, sizes[1]);
+    if (sel er.err) { ret err[Error].err{Error.alloc{er.err}}; }
+    f.ends     = er.ok;
+    f.ends_cap = sizes[1];
+
+    val gr: res[*fraster.Edge, allo.Error] = allo.allocate[fraster.Edge](f.a, sizes[2]);
+    if (sel gr.err) { ret err[Error].err{Error.alloc{gr.err}}; }
+    f.edges     = gr.ok;
+    f.edges_cap = sizes[2];
+
+    val cr: res[*u8, allo.Error] = allo.allocate[u8](f.a, f.cell * f.cell);
+    if (sel cr.err) { ret err[Error].err{Error.alloc{cr.err}}; }
+    f.cov = cr.ok;
+
+    val tr: res[*u8, allo.Error] = allo.allocate[u8](f.a, f.cell * f.cell * 4);
+    if (sel tr.err) { ret err[Error].err{Error.alloc{tr.err}}; }
+    f.stage = tr.ok;
+    ret err[Error].ok{};
+}
+
+# How many line segments one quadratic curve flattens into at this cell size.
+#
+# mach-font subdivides until the flatness error falls under its tolerance,
+# halving the segment length and quartering the deviation each level. The worst
+# a curve can deviate is the span it is drawn across, so counting the levels that
+# takes bounds the segments a curve can contribute and, with the point maxima,
+# the edges a glyph can. Guessing a constant instead is what makes a big face at
+# a big size silently drop its densest glyphs.
+fun quad_segments(cell: usize) usize {
+    var segments: usize = 1;
+    var span:     f32   = cell::f32;
+    # raster.TOL_SQ is 0.1, so the deviation bound is its square root
+    for (span > 0.316 && segments < 65536) {
+        span     = span / 4.0;
+        segments = segments * 2;
+    }
+    ret segments;
+}
+
+# Create one more atlas page, cleared to transparent white.
+#
+# The clear is the whole page rather than per-cell, which is what lets a glyph
+# upload be exactly one cell: every gutter and every cell not yet claimed is
+# already the transparent white a filtered edge sample needs.
+fun page_add(f: *Font) err[Error] {
+    if (f.page_count >= MAX_PAGES) { ret err[Error].err{Error.full{Capacity.glyph_pages{}}}; }
+
+    val texels: usize                = f.page_side * f.page_side;
+    val br:     res[*u8, allo.Error] = allo.allocate[u8](f.a, texels * 4);
+    if (sel br.err) { ret err[Error].err{Error.alloc{br.err}}; }
+    clear_atlas(br.ok, texels);
+
+    # sRGB. The atlas leaves RGB white and stores coverage in alpha, and Vulkan's
+    # sRGB formats leave alpha linear, so the transfer function touches only the
+    # white and coverage arrives at the shader exactly as rasterized.
+    val tr: res[Texture, Error] = texture(f.d, br.ok, f.page_side::i32,
+        f.page_side::i32, ColorSpace.srgb{});
+    val freed: err[allo.Error] = allo.deallocate[u8](f.a, br.ok, texels * 4);
+    if (sel tr.err) { ret err[Error].err{tr.err}; }
+
+    f.pages[f.page_count] = tr.ok;
+    f.page_count          = f.page_count + 1;
+    f.next_cell           = 0;
+    if (sel freed.err) { ret err[Error].err{Error.alloc{freed.err}}; }
+    ret err[Error].ok{};
+}
+
+# the page and cell a new glyph goes into, opening a page when the newest is full
+rec CellAt {
+    page: usize;
+    cell: usize;
+}
+
+# Claim the next free cell.
+fun cell_take(f: *Font) opt[CellAt] {
+    if (f.page_count == 0 || f.next_cell >= f.cells_per_page) {
+        val added: err[Error] = page_add(f);
+        if (sel added.err) { ret opt[CellAt].none{}; }
+    }
+    val at: CellAt = CellAt{page: f.page_count - 1, cell: f.next_cell};
+    f.next_cell = f.next_cell + 1;
+    ret opt[CellAt].some{at};
+}
+
+# Copy the staged cell into its page.
+fun cell_upload(f: *Font, at: CellAt) err[Error] {
+    val stride: usize = f.cell + GUTTER * 2;
+    val x:      usize = (at.cell % f.cols) * stride + GUTTER;
+    val y:      usize = (at.cell / f.cols) * stride + GUTTER;
+    ret texture_upload_region(f.d, ?f.pages[at.page], f.stage,
+        x::i32, y::i32, f.cell::i32, f.cell::i32);
+}
+
+# Rasterize one glyph and give it a home in the atlas.
+#
+# Never fails outright. A glyph whose metrics cannot be read contributes no
+# advance, and one that cannot be rasterized or given a cell keeps its advance
+# and draws blank. Both count in `missing`, so the layout stays right and a
+# game that cares can say which characters did not draw.
+fun glyph_raster(f: *Font, gi: u16) Glyph {
+    var g:  Glyph;
+    val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?f.face, gi);
+    if (sel hm.err) {
+        f.missing = f.missing + 1;
+        ret g;
+    }
+    g.advance  = hm.ok.advance::f32 * f.logical_scale;
+    g.offset_x = hm.ok.lsb::f32 * f.logical_scale;
+    if (f.pixel_snap) {
+        g.advance  = pixel_round(g.advance);
+        g.offset_x = pixel_round(g.offset_x);
+    }
+
+    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?f.face, gi);
+    if (sel info.err) {
+        f.missing = f.missing + 1;
+        ret g;
+    }
+    # an empty glyph, a space most obviously, has an advance and nothing to draw
+    if (sel info.ok.none) { ret g; }
+    val y_min: i16 = info.ok.some.y_min;
+
+    # the coverage buffer is not pre-cleared: render_glyph writes every texel
+    val rendered: err[FontError] = finfo.render_glyph(?f.face, gi, f.glyph_scale,
+        f.pts, f.pts_cap, f.ends, f.ends_cap,
+        f.edges, f.edges_cap, f.cov, f.cell::u16, f.cell::u16);
+    if (sel rendered.err) {
+        f.missing = f.missing + 1;
+        ret g;
+    }
+    if (!stage_cell(f.stage, f.cov, f.cell, f.raster)) { ret g; }
+
+    val at: opt[CellAt] = cell_take(f);
+    if (sel at.none) {
+        f.missing = f.missing + 1;
+        ret g;
+    }
+    val sent: err[Error] = cell_upload(f, at.some);
+    if (sel sent.err) {
+        f.missing = f.missing + 1;
+        ret g;
+    }
+    g.page     = at.some.page;
+    g.cell     = at.some.cell;
+    g.w        = f.cell::f32 / f.raster_scale;
+    g.h        = f.cell::f32 / f.raster_scale;
+    g.offset_y = baseline_offset(f.ascent, g.h, y_min, f.logical_scale);
+    if (f.pixel_snap) { g.offset_y = pixel_round(g.offset_y); }
+    ret g;
+}
+
+# The glyph a codepoint draws as, admitting it the first time it is asked for.
+#
+# Returned by value rather than as a pointer into a map: admitting a glyph can
+# rehash, and a pointer taken before that is into the old table.
+#
+# An unmapped codepoint resolves to glyph 0, the face's .notdef box, so text
+# with one character the font lacks reads as one bad character instead of as a
+# layout that mysteriously closed up. A cmap that cannot be read for this
+# codepoint is treated the same way.
+# ---
+# ret: the glyph, or none when the codepoint could not be recorded
+fun glyph_of(f: *Font, cp: u32) opt[Glyph] {
+    var key:   u32         = cp;
+    val known: opt[*Glyph] = gmap.get[u32, Glyph](?f.glyphs, ?key);
+    if (sel known.some) { ret opt[Glyph].some{@known.some}; }
+
+    var gi:     u16                 = 0;
+    val mapped: res[u16, FontError] = finfo.glyph_index(?f.face, cp);
+    if (sel mapped.ok) { gi = mapped.ok; }
+
+    var g:   Glyph;
+    var gk:  u32         = gi::u32;
+    val had: opt[*Glyph] = gmap.get[u32, Glyph](?f.cells, ?gk);
+    if (sel had.some) {
+        g = @had.some;
+    }
+    or {
+        g = glyph_raster(f, gi);
+        val kept: res[bool, allo.Error] = gmap.insert[u32, Glyph](?f.cells, gk, g);
+        if (sel kept.err) {
+            f.missing = f.missing + 1;
+            ret opt[Glyph].none{};
+        }
+    }
+    val put: res[bool, allo.Error] = gmap.insert[u32, Glyph](?f.glyphs, cp, g);
+    if (sel put.err) {
+        f.missing = f.missing + 1;
+        ret opt[Glyph].none{};
+    }
+    ret opt[Glyph].some{g};
+}
+
+# Rasterize and admit every codepoint in a string without drawing it.
+#
+# Admitting a glyph stalls on a queue wait, so a screen of text whose glyphs are
+# all new pays that cost inside the frame that first shows it. A game that knows
+# its strings can move the whole cost to load with this. It changes nothing about
+# what draws. It only decides when the work happens.
+# ---
+# f:   the face to fill
+# s:   UTF-8 text whose codepoints should be resident
+# ret: whether no glyph went missing while admitting s
+pub fun font_preload(f: *Font, s: str) bool {
+    if (!f.valid || s == nil) { ret false; }
+    val before: usize = f.missing;
+    var i:      usize = 0;
+    val n:      usize = str_len(s);
+    for (i < n) {
+        var cp: u32 = 0;
+        i = i + decode_at(s, i, n, ?cp);
+        if (!is_layout_control(cp)) { glyph_of(f, cp); }
+    }
+    ret f.missing == before;
+}
+
+# How many distinct codepoints the face has resolved.
+pub fun font_glyph_count(f: *Font) usize {
+    ret gmap.length[u32, Glyph](f.glyphs);
+}
+
+# How many atlas pages the face has created.
+pub fun font_page_count(f: *Font) usize {
+    ret f.page_count;
+}
+
+# How many glyphs the face could not draw.
+#
+# Non-zero means characters are missing from what draws. A glyph the atlas had
+# no room for, or one the rasterizer refused, keeps its correct advance and draws
+# blank, so the layout stays right and the character is invisible. Raising
+# MAX_PAGES or lowering the font size fixes the first. A codepoint the glyph map
+# could not take contributes nothing at all, which only happens when the
+# allocator is exhausted.
+pub fun font_missing(f: *Font) usize {
+    ret f.missing;
+}
+
 # Fill an atlas with transparent white so filtered coverage keeps its colour.
-fun clear_atlas(rgba: *u8, pixels: usize) {
+fun clear_atlas(rgba: *u8, texels: usize) {
     var i: usize = 0;
-    for (i < pixels) {
+    for (i < texels) {
         val o: usize = i * 4;
         rgba[o]     = 255;
         rgba[o + 1] = 255;
@@ -451,28 +803,23 @@ fun clear_atlas(rgba: *u8, pixels: usize) {
     }
 }
 
-# Copy one coverage bitmap into the padded atlas cell as white-with-alpha.
-fun blit_cell(rgba: *u8, atlas_w: usize, cov: *u8,
-    cell: usize, index: usize, cols: usize,
-    raster: FontRaster) bool {
-    val stride:  usize = cell + GUTTER * 2;
-    val cx:      usize = (index % cols) * stride + GUTTER;
-    val cy:      usize = (index / cols) * stride + GUTTER;
+# Turn one coverage bitmap into a cell of white-with-alpha, ready to upload.
+#
+# Returns whether anything is covered, so a glyph that rasterized to nothing
+# never claims a cell.
+fun stage_cell(stage: *u8, cov: *u8, cell: usize, raster: FontRaster) bool {
     var visible: bool  = false;
-    var y:       usize = 0;
-    for (y < cell) {
-        var x: usize = 0;
-        for (x < cell) {
-            val o:     usize = ((cy + y) * atlas_w + (cx + x)) * 4;
-            val alpha: u8    = coverage_alpha(cov[y * cell + x], raster);
-            if (alpha != 0) { visible = true; }
-            rgba[o]     = 255;
-            rgba[o + 1] = 255;
-            rgba[o + 2] = 255;
-            rgba[o + 3] = alpha;
-            x           = x + 1;
-        }
-        y = y + 1;
+    var i:       usize = 0;
+    val n:       usize = cell * cell;
+    for (i < n) {
+        val o:     usize = i * 4;
+        val alpha: u8    = coverage_alpha(cov[i], raster);
+        if (alpha != 0) { visible = true; }
+        stage[o]     = 255;
+        stage[o + 1] = 255;
+        stage[o + 2] = 255;
+        stage[o + 3] = alpha;
+        i            = i + 1;
     }
     ret visible;
 }
@@ -500,60 +847,138 @@ fun baseline_offset(ascent: f32, cell_height: f32,
     ret ascent - cell_height - y_min::f32 * scale;
 }
 
-# Release the atlas texture
-pub fun font_delete(d: *Device, f: *Font) {
-    if (!f.valid) { ret; }
-    texture_delete(d, ?f.atlas);
-    f.valid = false;
-}
-
-# The glyph slot for a codepoint, none when outside the atlas
-fun slot_of(cp: u32) opt[usize] {
-    if (cp < FIRST_CP || cp > LAST_CP) { ret opt[usize].none{}; }
-    ret opt[usize].some{(cp - FIRST_CP)::usize};
-}
-
-# Width of a string in pixels, without drawing it
-#
-# UI has to lay out before it draws, so this walks the same advances the draw
-# does. measuring by counting characters times a fixed width is wrong for any
-# proportional face, which is every face worth using.
-pub fun text_measure(f: *Font, s: str) f32 {
-    if (!f.valid || s == nil) { ret 0.0; }
-    var w: f32   = 0.0;
+# Free everything a Font owns, whether or not it finished loading.
+fun font_release(f: *Font) {
     var i: usize = 0;
-    val n: usize = str_len(s);
-    for (i < n) {
-        val sl: opt[usize] = slot_of(s[i]::u32);
-        if (sel sl.some) { w = w + f.glyphs[sl.some].advance; }
+    for (i < f.page_count) {
+        texture_delete(f.d, ?f.pages[i]);
         i = i + 1;
     }
-    ret w;
+    f.page_count = 0;
+
+    gmap.dnit[u32, Glyph](?f.glyphs);
+    gmap.dnit[u32, Glyph](?f.cells);
+    if (f.stage != nil) { allo.deallocate[u8](f.a, f.stage, f.cell * f.cell * 4); }
+    if (f.cov != nil)   { allo.deallocate[u8](f.a, f.cov, f.cell * f.cell); }
+    if (f.edges != nil) { allo.deallocate[fraster.Edge](f.a, f.edges, f.edges_cap); }
+    if (f.ends != nil)  { allo.deallocate[u16](f.a, f.ends, f.ends_cap); }
+    if (f.pts != nil)   { allo.deallocate[fglyf.Point](f.a, f.pts, f.pts_cap); }
+    if (f.data != nil)  { allo.deallocate[u8](f.a, f.data, f.len); }
+    f.stage     = nil;
+    f.cov       = nil;
+    f.edges     = nil;
+    f.edges_cap = 0;
+    f.ends      = nil;
+    f.ends_cap  = 0;
+    f.pts       = nil;
+    f.pts_cap   = 0;
+    f.data      = nil;
+    f.len       = 0;
+    f.valid     = false;
 }
 
-# The source rect of a glyph's cell in the atlas, in normalized UV
-fun cell_uv(f: *Font, slot: usize) Rect {
-    val cols:     usize = f.cols;
-    val rows:     usize = (GLYPH_COUNT + cols - 1) / cols;
-    val stride_x: usize = f.cell_w + GUTTER * 2;
-    val stride_y: usize = f.cell_h + GUTTER * 2;
-    val aw:       f32   = (cols * stride_x)::f32;
-    val ah:       f32   = (rows * stride_y)::f32;
-    val u:        f32   = ((slot % cols) * stride_x + GUTTER)::f32 / aw;
-    val v:        f32   = ((slot / cols) * stride_y + GUTTER)::f32 / ah;
-    ret rect(u, v, f.cell_w::f32 / aw, f.cell_h::f32 / ah);
+# Release the atlas pages, the glyph maps, and the retained font bytes
+# ---
+# d: the device the font was created against
+# f: the font, unusable afterwards
+pub fun font_delete(d: *Device, f: *Font) {
+    if (!f.valid) { ret; }
+    f.d = d;
+    font_release(f);
 }
 
-fun glyph_dest(f: *Font, glyph: *Glyph, x: f32, y: f32) Rect {
+# Whether a codepoint is a control character layout skips.
+#
+# `\n` is excluded because it is the one that means something here. The rest
+# contribute neither a quad nor an advance, so a tab or a carriage return cannot
+# put a .notdef box in the middle of a line.
+fun is_layout_control(cp: u32) bool {
+    if (cp == NEWLINE) { ret false; }
+    ret cp < 0x20 || cp == 0x7F;
+}
+
+# Decode one codepoint at a byte offset, always making progress.
+#
+# A malformed sequence decodes to U+FFFD and consumes one byte. Consuming zero
+# is what the decoder reports for invalid input and would spin here forever, and
+# skipping the whole rest of the string would lose text that is merely preceded
+# by a bad byte.
+fun decode_at(s: str, i: usize, n: usize, out: *u32) usize {
+    val used: usize = utf8.decode(?s[i], n - i, out);
+    if (used == 0) { ret 1; }
+    ret used;
+}
+
+# Width of the widest line in pixels, without drawing it
+#
+# UI has to lay out before it draws, so this walks the same advances the draw
+# does, over the same UTF-8 decode and the same line breaks. Measuring by
+# counting characters times a fixed width is wrong for any proportional face,
+# and counting bytes is wrong for any text that is not ASCII.
+#
+# NOT FREE THE FIRST TIME. A codepoint this face has not seen is rasterized and
+# uploaded here, exactly as it would be in a draw, because a measurement that
+# guessed would not match what the draw then does.
+pub fun text_measure(f: *Font, s: str) f32 {
+    if (!f.valid || s == nil) { ret 0.0; }
+    var widest: f32   = 0.0;
+    var w:      f32   = 0.0;
+    var i:      usize = 0;
+    val n:      usize = str_len(s);
+    for (i < n) {
+        var cp: u32 = 0;
+        i = i + decode_at(s, i, n, ?cp);
+        if (cp == NEWLINE) {
+            if (w > widest) { widest = w; }
+            w = 0.0;
+        }
+        or (!is_layout_control(cp)) {
+            val g: opt[Glyph] = glyph_of(f, cp);
+            if (sel g.some) { w = w + g.some.advance; }
+        }
+    }
+    if (w > widest) { widest = w; }
+    ret widest;
+}
+
+# Height of a text block in pixels, one line box per line
+pub fun text_height(f: *Font, s: str) f32 {
+    if (!f.valid || s == nil) { ret 0.0; }
+    ret text_lines(f, s)::f32 * f.height;
+}
+
+# How many lines a string draws as
+pub fun text_lines(f: *Font, s: str) usize {
+    if (!f.valid || s == nil) { ret 0; }
+    var lines: usize = 1;
+    var i:     usize = 0;
+    val n:     usize = str_len(s);
+    for (i < n) {
+        if (s[i] == NEWLINE::u8) { lines = lines + 1; }
+        i = i + 1;
+    }
+    ret lines;
+}
+
+# The source rect of a glyph's cell in its page, in normalized UV
+fun cell_uv(f: *Font, g: *Glyph) Rect {
+    val stride: usize = f.cell + GUTTER * 2;
+    val side:   f32   = f.page_side::f32;
+    val u:      f32   = ((g.cell % f.cols) * stride + GUTTER)::f32 / side;
+    val v:      f32   = ((g.cell / f.cols) * stride + GUTTER)::f32 / side;
+    ret rect(u, v, f.cell::f32 / side, f.cell::f32 / side);
+}
+
+fun glyph_dest(f: *Font, g: *Glyph, x: f32, y: f32) Rect {
     var px: f32 = x;
     var py: f32 = y;
     if (f.pixel_snap) {
         px = pixel_round(px);
         py = pixel_round(py);
     }
-    ret rect(px + glyph.offset_x, py + glyph.offset_y,
-        f.cell_w::f32 / f.raster_scale,
-        f.cell_h::f32 / f.raster_scale);
+    ret rect(px + g.offset_x, py + g.offset_y,
+        f.cell::f32 / f.raster_scale,
+        f.cell::f32 / f.raster_scale);
 }
 
 fun logical_cell_size(pixels: f32) usize {
@@ -565,67 +990,97 @@ fun logical_cell_size(pixels: f32) usize {
 #
 # `x`/`y` are the top-left of the line box in the pass's coordinate space,
 # which for an overlay pass is pixels. Glyph bearings place every atlas cell
-# against the line's shared baseline. One sprite quad per glyph against one
-# texture lets a caller draw many strings without a bind between them.
+# against the line's shared baseline. One sprite quad per glyph against one page
+# lets a caller draw many strings without a bind between them. A string that
+# spills onto a second page costs one extra draw at the crossing.
+#
+# `\n` starts a new line box at `x`, one `height` further down. The returned pen
+# is on the last line, so chaining a draw after one that broke continues where
+# the text actually ended.
 # ---
 # p:    the pass to draw into, normally an overlay pass
 # f:    the loaded face
-# s:    the string
+# s:    UTF-8 text
 # x:    left edge of the first glyph
-# y:    top edge of the line
+# y:    top edge of the first line
 # tint: colour multiplied over the glyph coverage
 # ret:  the x the next glyph would start at, for chained draws
 pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     if (!f.valid || s == nil) { ret x; }
-    var pen: f32 = x;
-    if (f.pixel_snap) { pen = pixel_round(pen); }
-    var i: usize = 0;
-    val n: usize = str_len(s);
+    var origin: f32 = x;
+    if (f.pixel_snap) { origin = pixel_round(origin); }
+    var pen:  f32   = origin;
+    var line: f32   = y;
+    var i:    usize = 0;
+    val n:    usize = str_len(s);
     for (i < n) {
-        val sl: opt[usize] = slot_of(s[i]::u32);
-        if (sel sl.some) {
-            # A space has an advance and no coverage, so skipping the quad
-            # saves a draw call per space without changing the layout
-            if (f.glyphs[sl.some].w > 0.0) {
-                val dest: Rect = glyph_dest(f, ?f.glyphs[sl.some], pen, y);
-                pass_draw_sprite_uv(p, opt[*Texture].some{?f.atlas}, dest, cell_uv(f, sl.some), tint);
-            }
-            pen = pen + f.glyphs[sl.some].advance;
+        var cp: u32 = 0;
+        i = i + decode_at(s, i, n, ?cp);
+        if (cp == NEWLINE) {
+            pen  = origin;
+            line = line + f.height;
         }
-        i = i + 1;
+        or (!is_layout_control(cp)) {
+            val found: opt[Glyph] = glyph_of(f, cp);
+            if (sel found.some) {
+                var g: Glyph = found.some;
+                # a glyph with no coverage skips its quad without changing layout
+                if (g.w > 0.0) {
+                    val dest: Rect = glyph_dest(f, ?g, pen, line);
+                    pass_draw_sprite_uv(p, opt[*Texture].some{?f.pages[g.page]}, dest,
+                        cell_uv(f, ?g), tint);
+                }
+                pen = pen + g.advance;
+            }
+        }
     }
     ret pen;
 }
 
-# --------------------------------------------------------------------- tests
-#
-# Rasterizing and uploading need a font file and a device, so these cover
-# the layout arithmetic -- slot mapping, measurement, and atlas UVs -- which is
-# what a caller's positioning depends on and where an off-by-one is silent.
+# Rasterizing and uploading need a font file and a device, so these cover what
+# does not: the UTF-8 walk, line breaking, the cell grid arithmetic, atlas UVs,
+# and the scratch sizing. A test font is seeded with the codepoints it measures,
+# so glyph_of never reaches the face or the device.
 
 # A face with known metrics, for layout tests that need no font file
-fun test_font(advance: f32) Font {
+fun test_font(a: *allo.Allocator, advance: f32) Font {
     var f: Font;
-    f.cell_w       = 16;
-    f.cell_h       = 16;
-    f.cols         = 16;
-    f.height       = 12.0;
-    f.ascent       = 9.0;
-    f.descent      = 0.0 - 3.0;
-    f.raster_scale = 1.0;
-    f.pixel_snap   = false;
-    f.valid        = true;
-    var g: usize = 0;
-    for (g < GLYPH_COUNT) {
-        f.glyphs[g].cell     = g;
-        f.glyphs[g].advance  = advance;
-        f.glyphs[g].offset_x = 0.0;
-        f.glyphs[g].offset_y = 0.0;
-        f.glyphs[g].w        = 16.0;
-        f.glyphs[g].h        = 16.0;
-        g                    = g + 1;
+    font_blank(?f, a, nil);
+    f.cell           = 16;
+    f.page_side      = 64;
+    f.cols           = 3;
+    f.cells_per_page = 9;
+    f.height         = 12.0;
+    f.ascent         = 9.0;
+    f.descent        = 0.0 - 3.0;
+    f.valid          = true;
+
+    var cp: u32 = 32;
+    for (cp < 127) {
+        test_glyph(?f, cp, advance);
+        cp = cp + 1;
     }
+    # a two, a three and a four byte sequence, so the walk is not only tested on
+    # the one width that happens to be ASCII
+    test_glyph(?f, 0x00E9, advance);
+    test_glyph(?f, 0x4F60, advance);
+    test_glyph(?f, 0x1F600, advance);
+    test_glyph(?f, utf8.REPLACEMENT, advance);
     ret f;
+}
+
+fun test_glyph(f: *Font, cp: u32, advance: f32) {
+    var g: Glyph;
+    g.cell    = (cp % 9)::usize;
+    g.advance = advance;
+    g.w       = 16.0;
+    g.h       = 16.0;
+    gmap.insert[u32, Glyph](?f.glyphs, cp, g);
+}
+
+fun test_font_free(f: *Font) {
+    gmap.dnit[u32, Glyph](?f.glyphs);
+    gmap.dnit[u32, Glyph](?f.cells);
 }
 
 fun text_near(a: f32, b: f32) bool {
@@ -634,29 +1089,121 @@ fun text_near(a: f32, b: f32) bool {
     ret d < 0.000001;
 }
 
-test "text: a codepoint outside the atlas maps to no slot" {
-    # Below the range, above it, and the boundaries themselves
-    val below: opt[usize] = slot_of(31);
-    if (!sel below.none) { ret 1; }
-    val above: opt[usize] = slot_of(127);
-    if (!sel above.none) { ret 2; }
-    val first: opt[usize] = slot_of(32);
-    if (!(sel first.some && first.some == 0)) { ret 3; }
-    val last: opt[usize] = slot_of(126);
-    if (!(sel last.some && last.some == GLYPH_COUNT - 1)) { ret 4; }
+fun test_alloc(a: *allo.Allocator) bool {
+    val made: err[allo.Error] = page.make(a);
+    ret sel made.ok;
+}
+
+test "text: a string is walked as codepoints, not as bytes" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+
+    # Spelled as bytes because that is what the defect was about: the old walk
+    # read one byte at a time, and every byte past the first here is 0x80 or
+    # above, so all of them fell outside an ASCII table and vanished.
+    # 'a', U+4F60, U+1F600: three codepoints in eight bytes.
+    var mixed: [9]u8 = [9]u8{0x61, 0xE4, 0xBD, 0xA0, 0xF0, 0x9F, 0x98, 0x80, 0};
+    if (text_measure(?f, ?mixed[0]) != 21.0) { ret 2; }
+
+    # U+00E9, a two-byte sequence, where Latin text outside English already left
+    # the old range
+    var acute: [3]u8 = [3]u8{0xC3, 0xA9, 0};
+    if (text_measure(?f, ?acute[0]) != 7.0) { ret 3; }
+
+    if (text_measure(?f, "abc") != 21.0) { ret 4; }
+    if (text_measure(?f, "") != 0.0)     { ret 5; }
+    ret 0;
+}
+
+test "text: a control character contributes neither a quad nor an advance" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+
+    # a tab must not resolve through the cmap, or .notdef would draw a box in
+    # the middle of a line and take a real advance with it
+    if (text_measure(?f, "a\tb") != 14.0)                                                 { ret 2; }
+    if (text_measure(?f, "a\rb") != 14.0)                                                 { ret 3; }
+    if (!is_layout_control(9) || !is_layout_control(13) || !is_layout_control(0x7F))      { ret 4; }
+    if (is_layout_control(NEWLINE) || is_layout_control(32) || is_layout_control(0x4F60)) { ret 5; }
+    ret 0;
+}
+
+test "text: a line break measures the widest line, not the whole string" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+
+    # end to end this is five glyphs and 35 pixels, which would size a panel to
+    # the concatenation of its lines
+    if (text_measure(?f, "ab\ncde") != 21.0) { ret 2; }
+    if (text_measure(?f, "abc\nde") != 21.0) { ret 3; }
+
+    if (text_lines(?f, "ab\ncde") != 2) { ret 4; }
+    if (text_lines(?f, "abc") != 1)     { ret 5; }
+    # a trailing break opens a line that is empty rather than closing the last
+    if (text_lines(?f, "a\n") != 2) { ret 6; }
+
+    if (text_height(?f, "abc") != 12.0)     { ret 7; }
+    if (text_height(?f, "ab\ncde") != 24.0) { ret 8; }
+    ret 0;
+}
+
+test "text: a malformed byte advances one byte and does not stall" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+
+    var cp: u32 = 0;
+    # a lone continuation byte reports one byte consumed, not zero
+    var lone: [3]u8 = [3]u8{0x80, 0x61, 0};
+    if (decode_at(?lone[0], 0, 2, ?cp) != 1) { ret 2; }
+    if (cp != utf8.REPLACEMENT)              { ret 3; }
+    # the bad byte draws as U+FFFD and the byte after it still measures
+    if (text_measure(?f, ?lone[0]) != 14.0) { ret 4; }
+
+    # a truncated three-byte sequence at the end of the buffer is also one byte
+    var cut: [2]u8 = [2]u8{0xE4, 0};
+    if (decode_at(?cut[0], 0, 1, ?cp) != 1) { ret 5; }
+
+    # a well-formed sequence still reports its real length
+    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
+    if (decode_at(?ni[0], 0, 3, ?cp) != 3) { ret 6; }
+    if (cp != 0x4F60)                      { ret 7; }
+    ret 0;
+}
+
+test "text: an invalid face measures zero rather than reading glyphs" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+    f.valid = false;
+    if (text_measure(?f, "abc") != 0.0) { ret 2; }
+    if (text_height(?f, "abc") != 0.0)  { ret 3; }
+    if (text_lines(?f, "abc") != 0)     { ret 4; }
+    if (font_preload(?f, "abc"))        { ret 5; }
     ret 0;
 }
 
 test "text: borrowed invalid font bytes return a parse error before upload" {
-    var a:    allo.Allocator;
-    val made: err[allo.Error] = page.make(?a);
-    if (sel made.err) { ret 1; }
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
     var d:     Device;
     var bytes: [4]u8            = [4]u8{0, 1, 2, 3};
     val r:     res[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 4, 16.0);
     if (!sel r.err)           { ret 2; }
     if (!sel r.err.text)      { ret 3; }
     if (!sel r.err.text.font) { ret 4; }
+
+    # an empty span is refused rather than copied and parsed
+    val e: res[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 0, 16.0);
+    if (!(sel e.err && (sel e.err.text && sel e.err.text.empty))) { ret 5; }
     ret 0;
 }
 
@@ -704,34 +1251,22 @@ test "text: an invalid atlas policy is refused with its case" {
     ret 0;
 }
 
-test "text: measuring walks advances, not character count" {
-    var f: Font = test_font(7.0);
-    if (text_measure(?f, "abc") != 21.0) { ret 1; }
-    if (text_measure(?f, "") != 0.0)     { ret 1; }
-
-    # A codepoint outside the atlas contributes nothing rather than a default
-    # width, so an unsupported character cannot silently shift a layout
-    if (text_measure(?f, "a\tb") != 14.0) { ret 1; }
-    ret 0;
-}
-
-test "text: an invalid face measures zero rather than reading glyphs" {
-    var f: Font = test_font(7.0);
-    f.valid = false;
-    if (text_measure(?f, "abc") != 0.0) { ret 1; }
-    ret 0;
-}
-
 test "text: oversampling preserves logical glyph geometry" {
-    var f: Font = test_font(7.0);
-    if (logical_cell_size(16.0) != 22) { ret 1; }
-    f.cell_w       = logical_cell_size(16.0) * 2;
-    f.cell_h       = logical_cell_size(16.0) * 2;
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+    if (logical_cell_size(16.0) != 22) { ret 2; }
+    f.cell         = logical_cell_size(16.0) * 2;
     f.raster_scale = 2.0;
-    val d: Rect = glyph_dest(?f, ?f.glyphs[0], 3.0, 5.0);
-    if (d.x != 3.0 || d.y != 5.0)        { ret 2; }
-    if (d.w != 22.0 || d.h != 22.0)      { ret 3; }
-    if (text_measure(?f, "abc") != 21.0) { ret 4; }
+
+    val g: opt[Glyph] = glyph_of(?f, 97);
+    if (!sel g.some) { ret 3; }
+    var glyph: Glyph = g.some;
+    val d:     Rect  = glyph_dest(?f, ?glyph, 3.0, 5.0);
+    if (d.x != 3.0 || d.y != 5.0)        { ret 4; }
+    if (d.w != 22.0 || d.h != 22.0)      { ret 5; }
+    if (text_measure(?f, "abc") != 21.0) { ret 6; }
     ret 0;
 }
 
@@ -747,83 +1282,162 @@ test "text: glyph cells preserve one baseline across vertical bearings" {
 }
 
 test "text: atlas UVs leave a transparent gutter between glyphs" {
-    var f:        Font  = test_font(7.0);
-    val rows:     usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
-    val stride_x: usize = f.cell_w + GUTTER * 2;
-    val stride_y: usize = f.cell_h + GUTTER * 2;
-    val aw:       f32   = (f.cols * stride_x)::f32;
-    val ah:       f32   = (rows * stride_y)::f32;
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+    val side: f32 = f.page_side::f32;
 
-    val first: Rect = cell_uv(?f, 0);
-    if (!text_near(first.x, 1.0 / aw) || !text_near(first.y, 1.0 / ah)) { ret 1; }
-    if (!text_near(first.w, f.cell_w::f32 / aw))                        { ret 1; }
-    if (!text_near(first.h, f.cell_h::f32 / ah))                        { ret 1; }
+    var g0: Glyph;
+    var g1: Glyph;
+    var g3: Glyph;
+    g1.cell = 1;
+    g3.cell = 3;
 
-    # Adjacent source rectangles have two transparent texels between them: the
-    # trailing gutter of one slot and the leading gutter of the next.
-    val col1: Rect = cell_uv(?f, 1);
-    if (!text_near(col1.x - (first.x + first.w), 2.0 / aw)) { ret 1; }
+    val first: Rect = cell_uv(?f, ?g0);
+    if (!text_near(first.x, 1.0 / side) || !text_near(first.y, 1.0 / side)) { ret 2; }
+    if (!text_near(first.w, f.cell::f32 / side))                            { ret 3; }
 
-    val row1: Rect = cell_uv(?f, 16);
-    if (!text_near(row1.y - (first.y + first.h), 2.0 / ah)) { ret 1; }
+    # adjacent source rectangles have two transparent texels between them: the
+    # trailing gutter of one cell and the leading gutter of the next
+    val col1: Rect = cell_uv(?f, ?g1);
+    if (!text_near(col1.x - (first.x + first.w), 2.0 / side)) { ret 4; }
+    val row1: Rect = cell_uv(?f, ?g3);
+    if (!text_near(row1.y - (first.y + first.h), 2.0 / side)) { ret 5; }
     ret 0;
 }
 
-test "text: glyph coverage stays inside a white transparent gutter" {
-    var rgba: [64]u8;
-    var cov:  [4]u8 = [4]u8{32, 64, 128, 255};
-    clear_atlas(?rgba[0], 16);
-    blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1, FontRaster.smooth{});
+test "text: the last cell of a page stays inside it" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
 
-    # Both outer corners remain transparent white, so a linear edge sample
-    # softens alpha without introducing a dark fringe.
-    if (rgba[0] != 255 || rgba[1] != 255 || rgba[2] != 255 || rgba[3] != 0)     { ret 1; }
-    if (rgba[60] != 255 || rgba[61] != 255 || rgba[62] != 255 || rgba[63] != 0) { ret 2; }
-
-    # The two-by-two coverage starts one texel inside the four-by-four slot.
-    if (rgba[23] != 32 || rgba[27] != 64)   { ret 3; }
-    if (rgba[39] != 128 || rgba[43] != 255) { ret 4; }
+    var last: Glyph;
+    last.cell = f.cells_per_page - 1;
+    val r: Rect = cell_uv(?f, ?last);
+    # a cell running past 1.0 samples outside the page and wraps
+    if (r.x + r.w > 1.0001) { ret 2; }
+    if (r.y + r.h > 1.0001) { ret 3; }
     ret 0;
 }
 
-test "text: empty coverage remains advance-only" {
-    var rgba: [64]u8;
-    var cov:  [4]u8;
-    clear_atlas(?rgba[0], 16);
-    if (blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1, FontRaster.smooth{})) { ret 1; }
+test "text: a cell grid is derived from the page and the cell" {
+    # a face small enough that many cells fit the preferred page
+    val small: res[usize, TextError] = page_side_for(22);
+    if (!(sel small.ok && small.ok == ATLAS_PAGE)) { ret 1; }
+    if (ATLAS_PAGE / (22 + GUTTER * 2) != 42)      { ret 2; }
+
+    # a cell that does not fit the preferred page grows the page to it, so a
+    # large size still gets one cell per page rather than none
+    val big: res[usize, TextError] = page_side_for(2000);
+    if (!(sel big.ok && big.ok == 2000 + GUTTER * 2)) { ret 3; }
+
+    val empty: res[usize, TextError] = page_side_for(0);
+    if (!(sel empty.err && sel empty.err.cell_empty)) { ret 4; }
+    val huge: res[usize, TextError] = page_side_for(ATLAS_PAGE_MAX);
+    if (!(sel huge.err && sel huge.err.page_limit)) { ret 5; }
+    ret 0;
+}
+
+test "text: glyph coverage is staged as white with alpha" {
+    var stage: [16]u8;
+    var cov:   [4]u8 = [4]u8{32, 64, 128, 255};
+    if (!stage_cell(?stage[0], ?cov[0], 2, FontRaster.smooth{})) { ret 1; }
+
+    # RGB stays white so a filtered edge softens alpha without a dark fringe.
+    # The gutter around this comes from the page clear, not from here.
+    if (stage[0] != 255 || stage[1] != 255 || stage[2] != 255) { ret 2; }
+    if (stage[3] != 32 || stage[7] != 64)                      { ret 3; }
+    if (stage[11] != 128 || stage[15] != 255)                  { ret 4; }
+    ret 0;
+}
+
+test "text: empty coverage claims no cell" {
+    var stage: [16]u8;
+    var cov:   [4]u8;
+    if (stage_cell(?stage[0], ?cov[0], 2, FontRaster.smooth{})) { ret 1; }
     ret 0;
 }
 
 test "text: pixel coverage is one bit at the threshold" {
-    var rgba: [64]u8;
-    var cov:  [4]u8 = [4]u8{0, 127, 128, 255};
-    clear_atlas(?rgba[0], 16);
-    if (!blit_cell(?rgba[0], 4, ?cov[0], 2, 0, 1, FontRaster.pixel{128})) { ret 1; }
-    if (rgba[23] != 0 || rgba[27] != 0)                                   { ret 2; }
-    if (rgba[39] != 255 || rgba[43] != 255)                               { ret 3; }
+    var stage: [16]u8;
+    var cov:   [4]u8 = [4]u8{0, 127, 128, 255};
+    if (!stage_cell(?stage[0], ?cov[0], 2, FontRaster.pixel{128})) { ret 1; }
+    if (stage[3] != 0 || stage[7] != 0)                            { ret 2; }
+    if (stage[11] != 255 || stage[15] != 255)                      { ret 3; }
+    ret 0;
+}
+
+test "text: a page clears to transparent white" {
+    var rgba: [16]u8;
+    clear_atlas(?rgba[0], 4);
+    var i: usize = 0;
+    for (i < 4) {
+        val o: usize = i * 4;
+        if (rgba[o] != 255 || rgba[o + 1] != 255 || rgba[o + 2] != 255) { ret 1; }
+        if (rgba[o + 3] != 0)                                           { ret 2; }
+        i = i + 1;
+    }
     ret 0;
 }
 
 test "text: pixel fonts quantize glyph placement" {
-    var f: Font = test_font(7.0);
-    f.pixel_snap         = true;
-    f.glyphs[0].offset_x = 2.0;
-    f.glyphs[0].offset_y = 0.0 - 3.0;
-    val d: Rect = glyph_dest(?f, ?f.glyphs[0], 3.49, 5.51);
-    if (d.x != 5.0 || d.y != 3.0)                            { ret 1; }
-    if (pixel_round(1.49) != 1.0 || pixel_round(1.5) != 2.0) { ret 2; }
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: Font = test_font(?a, 7.0);
+    fin { test_font_free(?f); }
+    f.pixel_snap = true;
+    var g: Glyph;
+    g.offset_x = 2.0;
+    g.offset_y = 0.0 - 3.0;
+    val d: Rect = glyph_dest(?f, ?g, 3.49, 5.51);
+    if (d.x != 5.0 || d.y != 3.0)                            { ret 2; }
+    if (pixel_round(1.49) != 1.0 || pixel_round(1.5) != 2.0) { ret 3; }
     if (pixel_round(0.0 - 1.49) != 0.0 - 1.0
-        || pixel_round(0.0 - 1.5) != 0.0 - 2.0) { ret 3; }
+        || pixel_round(0.0 - 1.5) != 0.0 - 2.0) { ret 4; }
     ret 0;
 }
 
-test "text: the last glyph's cell stays inside the atlas" {
-    var f:    Font  = test_font(7.0);
-    val rows: usize = (GLYPH_COUNT + f.cols - 1) / f.cols;
-    val last: Rect  = cell_uv(?f, GLYPH_COUNT - 1);
-    # A cell running past 1.0 samples outside the texture and wraps, which
-    # renders a neighbouring glyph's edge into this one
-    if (last.x + last.w > 1.0001) { ret 1; }
-    if (last.y + last.h > 1.0001) { ret 1; }
+test "text: the scratch is sized from the face and the curve, not a guess" {
+    # deviation quarters and segment count doubles per subdivision level, so a
+    # bigger cell needs strictly more segments
+    if (quad_segments(22) != 16)  { ret 1; }
+    if (quad_segments(128) != 32) { ret 2; }
+    if (quad_segments(512) != 64) { ret 3; }
+
+    # a dense CJK face at a UI size stays well inside the ceiling
+    val cjk: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points:           900, max_contours: 60,
+        max_composite_points: 1200, max_composite_contours: 40,
+    }}, 22);
+    if (cjk[0] != 1200 || cjk[1] != 60) { ret 4; }
+    if (cjk[2] != 1200 * 16 + 128)      { ret 5; }
+    if (cjk[2] >= MAX_EDGES)            { ret 6; }
+
+    # a maxp 0.5 face keeps the fixed fallback
+    val old: [3]usize = scratch_sizes(opt[fmaxp.Maxima].none{}, 22);
+    if (old[0] != FALLBACK_POINTS || old[1] != FALLBACK_CONTOURS) { ret 7; }
+
+    # a hostile declaration is clamped rather than trusted
+    val hostile: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points:           65535, max_contours: 1,
+        max_composite_points: 0, max_composite_contours: 0,
+    }}, 512);
+    if (hostile[2] != MAX_EDGES) { ret 8; }
+    if (hostile[1] != 4)         { ret 9; }
+    ret 0;
+}
+
+test "text: a decode after an earlier decode reads its own bytes" {
+    # the shape of a mach opt 2 miscompile: an indexed address flowing into an
+    # inlined utf8.decode returned U+FFFD after a decode on another stack array.
+    # this is meaningful under the release profile, which CI runs.
+    var cp:   u32   = 0;
+    var head: [2]u8 = [2]u8{0x41, 0};
+    if (decode_at(?head[0], 0, 1, ?cp) != 1 || cp != 0x41) { ret 1; }
+    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
+    if (decode_at(?ni[0], 0, 3, ?cp) != 3) { ret 2; }
+    if (cp != 0x4F60)                      { ret 3; }
     ret 0;
 }

@@ -26,11 +26,13 @@ jobs:
       # the windows and darwin targets need a C cross toolchain for glfw
       all-targets: false
       # mach-glfw builds GLFW from source with the host cc, the text example
-      # needs a font, and the examples drive lavapipe under xvfb
+      # needs a latin face and a TrueType Han face, and the examples drive
+      # lavapipe under xvfb
       legs: >-
         [{"name": "x86_64-linux", "runs-on": "ubuntu-latest",
           "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
-                  "wayland-protocols", "fonts-dejavu-core", "mesa-vulkan-drivers",
+                  "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
+                  "mesa-vulkan-drivers",
                   "vulkan-tools", "xvfb", "spirv-tools"]}]
       # the examples are the only check on the shape of the public API: nothing
       # inside boom calls it the way a game does. each resolves boom by path, so

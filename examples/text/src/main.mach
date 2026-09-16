@@ -1,8 +1,30 @@
-# Finite ownership check for font_from_bytes.
+# End-to-end check for the glyph atlas: ownership, unicode, and line breaking.
 #
-# The encoded file is released before the first draw. A pass therefore proves
-# the returned Font owns both its glyph metrics and uploaded atlas rather than
-# retaining a pointer into the caller's byte buffer.
+# Everything here needs a real face and a real device, which is why it is an
+# example and not a unit test. Each check is made against pixels that were
+# actually rasterized, uploaded, sampled and read back, because each of them
+# looks fine in isolation and fails only once the whole path runs.
+#
+# ONE: the encoded file is released before the first glyph is rasterized, so the
+# Font is shown to own its bytes rather than to have retained a pointer into the
+# caller's buffer. It rasterizes on demand, so it reads those bytes after load.
+#
+# TWO: a Chinese string draws ink. It drew nothing at all before unicode: the
+# atlas covered ASCII 32 to 126 and the string was walked one byte at a time, so
+# every byte of every multi-byte sequence fell outside the table. Counting
+# covered pixels is the check that catches it. A face without Han glyphs draws
+# its .notdef box for them, which is still ink the old walk never produced.
+#
+# THREE: a leading line break moves the same ink down by exactly one line box.
+# `\n` used to be dropped along with everything else outside the table.
+#
+# FOUR: a face is pushed past one atlas page and the glyph that opened the second
+# page still draws where it should. Every UV is relative to its own page, so a
+# glyph that resolved through the wrong page would draw a plausible neighbouring
+# glyph rather than nothing, and only a face that has overflowed a page gets here.
+#
+# The strings are spelled as bytes. Mach has no unicode escape, and writing the
+# encoding out is what a test of a UTF-8 walk should be doing anyway.
 
 use boom.app.App;
 use boom.context.Config;
@@ -28,6 +50,7 @@ use std.collections.vector;
 use fs: std.filesystem;
 use std.print;
 use std.runtime;
+use std.text.utf8;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -38,22 +61,95 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 
+val CHECK_W:     i32   = 256;
+val CHECK_H:     i32   = 96;
+val CHECK_BYTES: usize = 98304;
+
+# where the text is drawn in the offscreen target, in pixels
+val TEXT_X: f32 = 8.0;
+val TEXT_Y: f32 = 8.0;
+
+val PIXELS: f32 = 18.0;
+
+# the codepoint range walked to fill a page
+val WALK_FIRST: u32 = 0x20;
+val WALK_LAST:  u32 = 0xFFFD;
+
+# the bounding box of everything brighter than the clear, in target pixels
+# ---
+# covered: how many pixels carry ink
+# min_x:   leftmost inked column
+# max_x:   rightmost inked column
+# min_y:   topmost inked row
+# max_y:   bottom inked row
+rec Ink {
+    covered: usize;
+    min_x:   i32;
+    max_x:   i32;
+    min_y:   i32;
+    max_y:   i32;
+}
+
 rec Check {
     a:           allo.Allocator;
     renderer:    gfx.Renderer;
     font:        gfx.Font;
+    target:      gfx.RenderTarget;
+    shot:        *u8;
+    plain:       Ink;
+    broken:      Ink;
+    late:        [32]u8;
+    rolled:      bool;
     renderer_ok: bool;
     font_ok:     bool;
-    drawn:       usize;
+    target_ok:   bool;
+    phase:       usize;
+    failures:    usize;
 }
 
+# "你好世界", and the same text behind one line break. No ASCII, so the byte
+# walk this replaces drew and measured exactly nothing for it.
+var HELLO: [13]u8 = [13]u8{
+    0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD,
+    0xE4, 0xB8, 0x96, 0xE7, 0x95, 0x8C, 0,
+};
+var HELLO_BROKEN: [14]u8 = [14]u8{
+    0x0A,
+    0xE4, 0xBD, 0xA0, 0xE5, 0xA5, 0xBD,
+    0xE4, 0xB8, 0x96, 0xE7, 0x95, 0x8C, 0,
+};
+
 var FONT_PATH: str = "";
+
+fun hello() str {
+    ret ?HELLO[0];
+}
+
+fun hello_broken() str {
+    ret ?HELLO_BROKEN[0];
+}
+
+fun fail(c: *Check, msg: str) {
+    print.eprintlnf("FAIL: {}", msg);
+    c.failures = c.failures + 1;
+}
+
+# stop the run over a setup failure the checks cannot proceed past
+fun abort(ctx: *Context, msg: str, e: gfx.Error) {
+    print.eprintlnf("{}: {}", msg, gfx.error_message(e));
+    context_fail(ctx, 1);
+}
 
 fun on_init(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
     c.renderer_ok = false;
     c.font_ok     = false;
-    c.drawn       = 0;
+    c.target_ok   = false;
+    c.shot        = nil;
+    c.phase       = 0;
+    c.failures    = 0;
+    c.rolled      = false;
+    c.late[0]     = 0;
     val made: err[allo.Error] = page.make(?c.a);
     if (sel made.err) {
         print.eprintln("could not make the page allocator");
@@ -63,11 +159,11 @@ fun on_init(ctx: *Context) {
 
     val rr: err[gfx.Error] = gfx.renderer_init(?c.renderer, ?ctx.window);
     if (sel rr.err) {
-        print.eprintlnf("renderer init error: {}", gfx.error_message(rr.err));
-        context_fail(ctx, 1);
+        abort(ctx, "renderer init error", rr.err);
         ret;
     }
     c.renderer_ok = true;
+    val d: *gfx.Device = gfx.renderer_device(?c.renderer);
 
     val br: res[vector.Vector[u8], fs.FsError] = fs.read_bytes(?c.a, FONT_PATH);
     if (sel br.err) {
@@ -76,15 +172,13 @@ fun on_init(ctx: *Context) {
         ret;
     }
     var bytes: vector.Vector[u8]        = br.ok;
-    val fr:    res[gfx.Font, gfx.Error] = gfx.font_from_bytes(
-        ?c.a, gfx.renderer_device(?c.renderer), bytes.data, bytes.len, 18.0);
+    val fr:    res[gfx.Font, gfx.Error] = gfx.font_from_bytes(?c.a, d, bytes.data, bytes.len, PIXELS);
 
-    # The source lifetime ends here, before metrics are inspected or the atlas
-    # is sampled by a draw.
+    # The source lifetime ends here, before any glyph has been rasterized, so
+    # every glyph below is rasterized out of the Font's own copy.
     val released: err[allo.Error] = vector.dnit[u8](?bytes);
     if (sel fr.err) {
-        print.eprintlnf("font bytes error: {}", gfx.error_message(fr.err));
-        context_fail(ctx, 1);
+        abort(ctx, "font bytes error", fr.err);
         ret;
     }
     c.font    = fr.ok;
@@ -94,9 +188,81 @@ fun on_init(ctx: *Context) {
         context_fail(ctx, 1);
         ret;
     }
-    if (gfx.text_measure(?c.font, "borrowed bytes") <= 0.0) {
-        print.eprintln("font metrics did not survive their encoded source");
+
+    val tr: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, CHECK_W, CHECK_H);
+    if (sel tr.err) {
+        abort(ctx, "check target error", tr.err);
+        ret;
+    }
+    c.target    = tr.ok;
+    c.target_ok = true;
+
+    val sr: res[*u8, allo.Error] = allo.allocate[u8](?c.a, CHECK_BYTES);
+    if (sel sr.err) {
+        print.eprintln("could not allocate the readback buffer");
         context_fail(ctx, 1);
+        ret;
+    }
+    c.shot = sr.ok;
+
+    check_metrics(c);
+}
+
+# what can be checked before anything is drawn
+fun check_metrics(c: *Check) {
+    # a face that has drawn nothing has admitted nothing, which is the whole
+    # reason a twenty-thousand-glyph face is loadable at all
+    if (gfx.font_glyph_count(?c.font) != 0) {
+        fail(c, "a freshly loaded face had already admitted glyphs");
+    }
+    if (gfx.font_page_count(?c.font) != 1) {
+        fail(c, "a freshly loaded face did not open exactly one atlas page");
+    }
+
+    # measuring admits the glyphs it measures, so this is the first
+    # rasterization the face has done, out of bytes the caller already freed
+    if (gfx.text_measure(?c.font, "borrowed bytes") <= 0.0) {
+        fail(c, "ASCII text measured to nothing");
+    }
+
+    # The regression. Walking bytes dropped every one of these, so the old
+    # measure was zero. Four glyphs clear one line height whether the face draws
+    # them as Han or as .notdef boxes.
+    val wide: f32 = gfx.text_measure(?c.font, hello());
+    if (wide <= 0.0) {
+        fail(c, "Chinese text measured to nothing");
+    }
+    or (wide < PIXELS) {
+        fail(c, "four Han codepoints measured narrower than one line height");
+    }
+
+    # "borrowed bytes" covers ten distinct codepoints and the Chinese string adds
+    # four more. Exactly fourteen: more would mean the walk resolved something
+    # not in the text, and fewer that it dropped something that is.
+    val admitted: usize = gfx.font_glyph_count(?c.font);
+    if (admitted != 14) {
+        print.eprintlnf("admitted {} codepoints", admitted);
+        fail(c, "measuring did not admit exactly the codepoints it walked");
+    }
+
+    # measuring again resolves out of the map rather than rasterizing twice
+    gfx.text_measure(?c.font, hello());
+    if (gfx.font_glyph_count(?c.font) != admitted) {
+        fail(c, "a repeated string admitted its codepoints twice");
+    }
+
+    # a line break is layout, not a glyph, and must not enter the atlas
+    if (gfx.text_lines(?c.font, hello_broken()) != 2) {
+        fail(c, "a leading line break did not open a second line");
+    }
+    if (gfx.text_measure(?c.font, hello_broken()) != wide) {
+        fail(c, "a leading line break changed the widest line's width");
+    }
+    if (gfx.font_glyph_count(?c.font) != admitted) {
+        fail(c, "a line break was admitted to the atlas as a glyph");
+    }
+    if (gfx.font_missing(?c.font) != 0) {
+        fail(c, "the atlas could not admit every glyph of a short string");
     }
 }
 
@@ -104,46 +270,250 @@ fun on_tick(ctx: *Context) {}
 
 fun on_draw(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
-    if (!c.font_ok) {
+    if (!c.font_ok || !c.target_ok || c.shot == nil) {
         context_fail(ctx, 1);
         ret;
     }
+
+    var text: str = hello();
+    if (c.phase == 1) { text = hello_broken(); }
+    if (c.phase == 2) { text = ?c.late[0]; }
 
     val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?c.renderer);
     if (sel br.err) {
-        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
-        context_fail(ctx, 1);
+        abort(ctx, "begin frame error", br.err);
         ret;
     }
+    # a frame skipped while the swapchain is out of date renders nothing to read
     if (!br.ok) { ret; }
 
     var desc: gfx.PassDesc = gfx.pass_overlay();
-    desc.clear = opt[gm.Vec4].some{gm.vec4(0.02, 0.02, 0.03, 1.0)};
+    desc.target = opt[*gfx.RenderTarget].some{?c.target};
+    desc.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
     var pass: gfx.Pass = gfx.pass_begin(?c.renderer, ?desc);
-    gfx.text_draw(?pass, ?c.font, "borrowed bytes", 16.0, 16.0,
-        gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.text_draw(?pass, ?c.font, text, TEXT_X, TEXT_Y, gm.vec4(1.0, 1.0, 1.0, 1.0));
     gfx.pass_end(?pass);
 
     val er: err[gfx.Error] = gfx.renderer_end_frame(?c.renderer);
     if (sel er.err) {
-        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
-        context_fail(ctx, 1);
+        abort(ctx, "end frame error", er.err);
         ret;
     }
-    c.drawn = c.drawn + 1;
-    if (c.drawn == 2) { ctx.running = false; }
+
+    val d:  *gfx.Device    = gfx.renderer_device(?c.renderer);
+    val rr: err[gfx.Error] = gfx.render_target_read(d, ?c.target, c.shot, CHECK_BYTES);
+    if (sel rr.err) {
+        abort(ctx, "target read error", rr.err);
+        ret;
+    }
+
+    if (c.phase == 0) { c.plain = measure_ink(c.shot); }
+    or (c.phase == 1) { c.broken = measure_ink(c.shot); }
+    or                { check_late(c, measure_ink(c.shot)); }
+
+    c.phase = c.phase + 1;
+    if (c.phase == 2) {
+        # ordered before the overflow, because these are about a short string
+        # on a fresh atlas and filling it would invalidate them
+        check_pixels(c);
+        stress_pages(c);
+    }
+    if (c.phase == 3) {
+        report(c);
+        if (c.failures != 0) { context_fail(ctx, 1); }
+        or                   { ctx.running = false; }
+    }
+}
+
+# Admit glyphs until the atlas opens a second page, and keep the codepoint that
+# opened it.
+#
+# Nothing shorter reaches the rollover. A page holds on the order of fifteen
+# hundred cells at this size and never resizes, so the only way to make a second
+# one is to fill the first with distinct outlines. Codepoints the face lacks all
+# share its .notdef cell, so the walk covers the whole basic plane and stops as
+# soon as a page opens.
+fun stress_pages(c: *Check) {
+    val before: usize = gfx.font_page_count(?c.font);
+    var one:    [8]u8;
+    var cp:     u32   = WALK_FIRST;
+    for (cp <= WALK_LAST && !c.rolled) {
+        # surrogates are not scalar values and have no encoding
+        if (cp < 0xD800 || cp > 0xDFFF) {
+            val n: usize = utf8.encode(cp, ?one[0], 8);
+            one[n] = 0;
+            gfx.text_measure(?c.font, ?one[0]);
+            if (gfx.font_page_count(?c.font) > before) {
+                # the codepoint whose admission opened the page is the one
+                # glyph certain to live on it
+                var lo: usize = 0;
+                var k:  usize = 0;
+                for (k < 3) {
+                    lo = lo + utf8.encode(cp, ?c.late[lo], 32 - lo);
+                    k  = k + 1;
+                }
+                c.late[lo] = 0;
+                c.rolled   = true;
+            }
+        }
+        cp = cp + 1;
+    }
+
+    if (!c.rolled) {
+        # reported rather than passed over: a silent skip reads as a pass
+        print.printlnf("SKIP: this face admitted {} codepoints without filling a page",
+            gfx.font_glyph_count(?c.font));
+        ret;
+    }
+    if (gfx.font_missing(?c.font) != 0) {
+        print.eprintlnf("{} glyphs missing", gfx.font_missing(?c.font));
+        fail(c, "a glyph went missing while the atlas was filling");
+    }
+}
+
+fun check_late(c: *Check, k: Ink) {
+    if (!c.rolled) { ret; }
+    if (k.covered == 0) {
+        fail(c, "the glyph that opened the second atlas page drew nothing");
+        ret;
+    }
+    # ink starts at the pen and stops within a cell of where the advances leave
+    # it. A cell addressed through the wrong page still lands somewhere, so the
+    # box is what catches it.
+    val width:  f32 = gfx.text_measure(?c.font, ?c.late[0]);
+    val height: f32 = gfx.text_height(?c.font, ?c.late[0]);
+    val slop:   f32 = PIXELS;
+    if (k.min_x::f32 < TEXT_X - slop) {
+        fail(c, "ink from the second atlas page started left of the pen");
+    }
+    if (k.max_x::f32 > TEXT_X + width + slop) {
+        fail(c, "ink from the second atlas page ran past the measured width");
+    }
+    if (k.min_y::f32 < TEXT_Y - 1.0 || k.max_y::f32 > TEXT_Y + height + 1.0) {
+        fail(c, "ink from the second atlas page fell outside the line box");
+    }
+}
+
+# The bounding box of every pixel brighter than the clear.
+#
+# The tint is white and the clear is black, so any colour channel above the
+# midpoint is ink, whichever order the target comes back in.
+fun measure_ink(shot: *u8) Ink {
+    var k: Ink;
+    k.covered = 0;
+    k.min_x   = CHECK_W;
+    k.max_x   = 0 - 1;
+    k.min_y   = CHECK_H;
+    k.max_y   = 0 - 1;
+
+    var y: i32 = 0;
+    for (y < CHECK_H) {
+        var x: i32 = 0;
+        for (x < CHECK_W) {
+            val o: usize = (y::usize * CHECK_W::usize + x::usize) * 4;
+            if (shot[o] > 128 || shot[o + 1] > 128 || shot[o + 2] > 128) {
+                k.covered = k.covered + 1;
+                if (x < k.min_x) { k.min_x = x; }
+                if (x > k.max_x) { k.max_x = x; }
+                if (y < k.min_y) { k.min_y = y; }
+                if (y > k.max_y) { k.max_y = y; }
+            }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    ret k;
+}
+
+fun check_pixels(c: *Check) {
+    # THE CHECK THIS EXAMPLE EXISTS FOR. Before unicode this was zero: the
+    # quads were never emitted and nothing reached the target.
+    if (c.plain.covered == 0) {
+        fail(c, "Chinese text drew no pixels at all");
+        ret;
+    }
+
+    # Ink starts at the pen, give or take the first glyph's side bearing, and
+    # ends within a cell of where the measured advance puts the pen. A wrong
+    # atlas UV, a wrong advance, and a wrong quad all draw something, so
+    # covering anything is not by itself the check.
+    val width: f32 = gfx.text_measure(?c.font, hello());
+    val slop:  f32 = PIXELS;
+    if (c.plain.min_x::f32 < TEXT_X - slop) {
+        fail(c, "ink started left of the pen");
+    }
+    if (c.plain.max_x::f32 > TEXT_X + width + slop) {
+        fail(c, "ink ran past the measured width of the line");
+    }
+    # and it is not a single mark: the string spans most of what it measured
+    if (c.plain.max_x::f32 < TEXT_X + width * 0.5) {
+        fail(c, "ink covered less than half the measured width");
+    }
+
+    val height: f32 = gfx.text_height(?c.font, hello());
+    if (c.plain.min_y::f32 < TEXT_Y - 1.0) {
+        fail(c, "ink started above the line box");
+    }
+    if (c.plain.max_y::f32 > TEXT_Y + height + 1.0) {
+        fail(c, "ink ran below the line box");
+    }
+
+    # The same glyphs behind a line break: one line box lower, same left edge,
+    # and the same amount of ink. A dropped break puts both at the same height.
+    if (c.broken.covered == 0) {
+        fail(c, "text after a line break drew nothing");
+        ret;
+    }
+    if (c.broken.covered != c.plain.covered) {
+        fail(c, "a line break changed how much ink the same text drew");
+    }
+    if (c.broken.min_x != c.plain.min_x) {
+        fail(c, "a line break did not return the pen to the starting x");
+    }
+    val moved: i32 = c.broken.min_y - c.plain.min_y;
+    val line:  i32 = height::i32;
+    if (moved < line - 1 || moved > line + 1) {
+        fail(c, "a line break did not move the next line down by one line box");
+    }
+
+    if (gfx.font_page_count(?c.font) != 1) {
+        fail(c, "a short string filled an entire atlas page");
+    }
+}
+
+fun report(c: *Check) {
+    if (c.failures != 0) {
+        print.eprintlnf("{} check(s) failed", c.failures);
+        ret;
+    }
+    print.println("PASS: borrowed font bytes were released before any glyph was rasterized");
+    print.printlnf("PASS: Chinese text drew {} pixels of ink", c.plain.covered);
+    print.println("PASS: a line break moved the next line down by one line box");
+    if (c.rolled) {
+        print.println("PASS: the glyph that opened the second atlas page drew in place");
+    }
+    print.printlnf("PASS: {} codepoints admitted on demand across {} atlas page(s)",
+        gfx.font_glyph_count(?c.font), gfx.font_page_count(?c.font));
 }
 
 fun on_dnit(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
+    if (!c.renderer_ok) { ret; }
+    val d: *gfx.Device = gfx.renderer_device(?c.renderer);
+    if (c.shot != nil) {
+        allo.deallocate[u8](?c.a, c.shot, CHECK_BYTES);
+        c.shot = nil;
+    }
+    if (c.target_ok) {
+        gfx.render_target_delete(d, ?c.target);
+        c.target_ok = false;
+    }
     if (c.font_ok) {
-        gfx.font_delete(gfx.renderer_device(?c.renderer), ?c.font);
+        gfx.font_delete(d, ?c.font);
         c.font_ok = false;
     }
-    if (c.renderer_ok) {
-        gfx.renderer_dnit(?c.renderer);
-        c.renderer_ok = false;
-    }
+    gfx.renderer_dnit(?c.renderer);
+    c.renderer_ok = false;
 }
 
 #[symbol("main")]
@@ -172,7 +542,7 @@ fun main(argc: i64, argv: **u8) i64 {
     val cfg: Config = Config{
         width:     320,
         height:    120,
-        title:     "boom.graphics: borrowed font bytes",
+        title:     "boom.graphics: unicode text",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
         frame_dt:  SECOND / 60,
@@ -191,11 +561,9 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
     if (ran.ok != 0) { ret ran.ok; }
-
-    if (check.drawn != 2) {
-        print.eprintlnf("font check drew {} of 2 frames", check.drawn);
+    if (check.phase != 3) {
+        print.eprintlnf("the check ran {} of 3 frames", check.phase);
         ret 1;
     }
-    print.println("PASS: borrowed font bytes were released before atlas use");
     ret 0;
 }
