@@ -1,0 +1,52 @@
+[project]
+id = "probe"
+version = "0.3.1"
+src = "src"
+out = "out/{target.name}/{profile.name}"
+
+[target.linux-x86_64]
+default = true
+isa = "x86_64"
+os  = "linux"
+abi = "sysv64"
+
+[target.windows]
+isa = "x86_64"
+os  = "windows"
+abi = "win64"
+
+[target.darwin]
+isa = "x86_64"
+os  = "darwin"
+abi = "sysv64"
+
+[profile.debug]
+default = true
+opt = 0
+debug = true
+simd = "scalarize"
+vectorize = false
+float_reassoc = false
+
+[profile.release]
+opt = 2
+debug = false
+simd = "scalarize"
+vectorize = false
+float_reassoc = false
+
+[artifact.cube]
+default = true
+kind = "bin"
+entry = "main.mach"
+out = "bin/cube{artifact.suffix}"
+targets = ["linux-x86_64", "windows", "darwin"]
+link = []
+need = []
+
+[dep.boom]
+path = "../.."
+
+[dep.std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "tag/v2.1.0"

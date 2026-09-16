@@ -1,0 +1,294 @@
+# The boom.graphics end-to-end example: 3D, offscreen, and 2D in one frame.
+#
+# A standalone consumer of boom that proves the Renderer and Pass API drives 2D
+# and 3D through the same machinery, and that an offscreen render target
+# composites back into the window without erasing what the frame has drawn.
+# One frame runs three passes:
+#
+#   - A scene pass draws a spinning, textured, lit cube (loaded from a .glb,
+#     textured from a QOI image) into an offscreen render target.
+#   - A composite pass blits that target across the window as a sprite, which
+#     is a pass sampling a previous pass's output as a texture.
+#   - An overlay pass draws a HUD sprite on top.
+#
+# ONE RENDERER, NOT SEVERAL. A Renderer owns the Vulkan device, the swapchain,
+# and the frame loop, so there is exactly one per window. Compositing several
+# sources into a frame is what render targets and passes are for; it is not a
+# reason to have two renderers.
+#
+# NO SHADERS HERE. The renderer's programs are compiled from Mach to SPIR-V as
+# boom's shader artifacts and embedded, so a game selects a pipeline by the kind of pass it
+# begins rather than by handing over source. Everything goes through boom
+# handles: the game never imports vk, mach-glfw, mach-image, or mach-gltf. Run
+# it from this directory so the relative asset paths resolve. Geometry math
+# comes from boom.math (as gm).
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use gfx: boom.graphics;
+use boom.input;
+use gm: boom.math;
+use boom.window.WindowMode;
+use std.chrono.duration.MILLISECOND;
+use std.chrono.duration.SECOND;
+use std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.string.str;
+
+# The game's own state, carried through ctx.user.
+# ---
+# renderer:  the window's renderer, which owns the device every resource below
+#            was created against
+# mesh:      the cube geometry, loaded from cube.glb
+# texture:   the surface texture, loaded from checker.qoi
+# material:  the texture binding and base colour the cube draws with
+# camera:    the 3D viewpoint
+# transform: the cube's placement, spun each tick
+# scene:     the offscreen target the scene pass draws into
+# ready:     whether init succeeded; draw is skipped if not
+# paused:    whether the spin is advancing
+rec Game {
+    renderer:  gfx.Renderer;
+    mesh:      gfx.Mesh;
+    texture:   gfx.Texture;
+    material:  gfx.Material;
+    camera:    gfx.Camera;
+    transform: gm.Transform;
+    scene:     gfx.RenderTarget;
+    ready:     u8;
+    paused:    bool;
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready  = 0;
+    g.paused = false;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel ri.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(ri.err));
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    # Every GPU resource is created against the renderer's upload context.
+    # Vulkan has no implicit current device, so this is what replaces the
+    # ambient state a GL loader could rely on.
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    val loaded: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "assets/cube.glb");
+    if (sel loaded.err) {
+        print.eprintlnf("mesh load error: {}", gfx.error_message(loaded.err));
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.mesh = loaded.ok;
+
+    val tex: res[gfx.Texture, gfx.Error] = gfx.texture_load(d, "assets/checker.qoi");
+    if (sel tex.err) {
+        print.eprintlnf("texture load error: {}", gfx.error_message(tex.err));
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.texture = tex.ok;
+
+    g.material = gfx.material();
+    val added: err[gfx.MaterialError] = gfx.material_add_texture(?g.material, "u_texture0", ?g.texture);
+    if (sel added.err) {
+        print.eprintlnf("material error: {}", gfx.material_error_message(added.err));
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val st: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, w, h);
+    if (sel st.err) {
+        print.eprintlnf("render target error: {}", gfx.error_message(st.err));
+        gfx.texture_delete(d, ?g.texture);
+        gfx.mesh_delete(d, ?g.mesh);
+        gfx.renderer_dnit(?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.scene = st.ok;
+
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(0.0, 1.5, 4.0),
+        gm.vec3(0.0, 0.0, 0.0),
+        gm.radians(60.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.transform = gm.transform_identity();
+    g.ready     = 1;
+}
+
+# Accumulated spin angle in radians, advanced each fixed tick.
+var spin: f32 = 0.0;
+
+# The whole input surface a game needs, with no event loop to drain and no
+# platform key codes in sight: A/D steer the spin, SPACE pauses on the edge.
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    if (input.key_pressed(?ctx.input, input.KEY_SPACE)) {
+        g.paused = !g.paused;
+    }
+    if (!g.paused) {
+        # -1, 0, or 1 from a key pair, so steering is one call rather than two
+        # queries and a subtraction.
+        val steer: f32 = input.axis(?ctx.input, input.KEY_A, input.KEY_D);
+        spin                 = spin + 0.02 + steer * 0.04;
+        g.transform.rotation = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), spin);
+    }
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        # Minimized. There is nothing to draw into and the aspect ratio below
+        # would divide by zero.
+        ret;
+    }
+
+    # The window is resizable, so the aspect ratio is not fixed at init. The
+    # scene target keeps its original size on purpose: it is a fixed-resolution
+    # buffer that the composite pass stretches to fill the window.
+    g.camera.aspect = w / h;
+
+    # A frame that did not open is a swapchain that went out of date and was
+    # rebuilt, which happens on every resize. Skipping the frame is the
+    # correct response; drawing into it is not possible.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
+        ret;
+    }
+    if (!br.ok) {
+        ret;
+    }
+
+    # Scene pass: draw the 3D cube into the offscreen target.
+    var scene_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
+    scene_desc.target = opt[*gfx.RenderTarget].some{?g.scene};
+    scene_desc.clear  = opt[gm.Vec4].some{gm.vec4(0.05, 0.06, 0.09, 1.0)};
+    var scene_pass: gfx.Pass = gfx.pass_begin(?g.renderer, ?scene_desc);
+    gfx.pass_draw_material(?scene_pass, ?g.mesh, ?g.material, ?g.transform);
+    gfx.pass_end(?scene_pass);
+
+    # Composite pass: blit the scene target across the window, then a HUD
+    # sprite on top. Both are 2D passes over the window, so they could be one
+    # pass; they are two to show that passes compose without clearing.
+    var post_desc: gfx.PassDesc = gfx.pass_overlay();
+    var post_pass: gfx.Pass     = gfx.pass_begin(?g.renderer, ?post_desc);
+    gfx.pass_draw_sprite(?post_pass,
+        opt[*gfx.Texture].some{gfx.render_target_texture(?g.scene)},
+        gfx.rect(0.0, 0.0, w, h),
+        gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?post_pass);
+
+    var hud_desc: gfx.PassDesc = gfx.pass_overlay();
+    var hud_pass: gfx.Pass     = gfx.pass_begin(?g.renderer, ?hud_desc);
+    gfx.pass_draw_sprite(?hud_pass,
+        opt[*gfx.Texture].some{?g.texture},
+        gfx.rect(16.0, 16.0, 96.0, 96.0),
+        gm.vec4(1.0, 1.0, 1.0, 1.0));
+    gfx.pass_end(?hud_pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
+    }
+
+    # A dropped draw is otherwise invisible: the thing simply does not appear.
+    if (gfx.renderer_dropped(?g.renderer) != 0) {
+        print.eprintln("warning: draws were dropped, the uniform ring is too small");
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    gfx.render_target_delete(d, ?g.scene);
+    gfx.mesh_delete(d, ?g.mesh);
+    gfx.texture_delete(d, ?g.texture);
+    # The renderer owns the device, so it goes last.
+    gfx.renderer_dnit(?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "boom.graphics: 3D, offscreen, and 2D passes",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+    context_shutdown(?ctx);
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+      ret ran.ok;
+}
