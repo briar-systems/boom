@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - license: the copyright holder is Briar Systems LLC.
+- build: every manifest declares `mach = "^5.3"`, so boom needs mach 5.3 or
+  later and mach 5.3+ no longer warns about a missing compiler range.
 
 ## [0.26.0] - 2026-09-17
 
