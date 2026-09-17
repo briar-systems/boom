@@ -1,0 +1,553 @@
+# A typeface at one size and policy: everything layout needs, and no device.
+#
+# Layout depends on the font, not on the GPU. A face answers what a codepoint
+# measures (its glyph index, advance and bearing) and how tall a line is, so a
+# game can lay text out, and test that layout, without a renderer. Pixels are
+# the GlyphAtlas's job, and it takes the glyph index from here.
+#
+# THE GLYPH INDEX IS THE CONTRACT. A face maps codepoints to glyph indices and
+# metrics. An atlas maps glyph indices to cells. A shaping pass, when one
+# exists, sits between them: it reads glyph indices and the face's tables and
+# emits positioned glyphs, and neither layer changes shape for it.
+#
+# Measuring never rasterizes. Metrics come from hmtx and the glyph header, and
+# each codepoint's are cached the first time it is asked for.
+#
+# LIFETIME. A face borrows its Typeface, which must outlive it: face_init
+# counts the face on the typeface and face_delete uncounts it, so the typeface
+# refuses to delete while the face is live. Each GlyphAtlas counts itself on
+# its face the same way, and face_delete refuses while an atlas is live. A face
+# must stay where it is while atlases exist, which is documented rather than
+# detectable.
+
+use boom.graphics.error.Error;
+use boom.graphics.error.content.TextError;
+use boom.graphics.text.typeface.Typeface;
+use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.typeface_hhea;
+use font.error.FontError;
+use fglyf: font.glyf;
+use fhhea: font.hhea;
+use fhmtx: font.hmtx;
+use finfo: font.info;
+use allo:  std.allocator;
+use std.allocator.page;
+use gmap: std.collections.map;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+# how glyph coverage and placement are represented
+# ---
+# smooth: retain fractional raster coverage and metrics
+# pixel:  threshold coverage at the payload and place glyphs on whole pixels
+pub tag FontRaster: u8 {
+    smooth;
+    pixel: u8;
+}
+
+# how the requested font size maps onto the face's design space
+# ---
+# line_height: requested pixels span the face's ascent through descent
+# em:          requested pixels span one em, matching conventional font-size APIs
+pub tag FontSizeMode: u8 {
+    line_height;
+    em;
+}
+
+# font size and raster policy
+# ---
+# oversample: atlas texels per logical pixel; pixel fonts require one
+# raster:     smooth coverage, or binary pixel coverage at a threshold
+# size_mode:  whether the requested size describes the line or em square
+pub rec FontOptions {
+    oversample: usize;
+    raster:     FontRaster;
+    size_mode:  FontSizeMode;
+}
+
+# default smooth font policy
+pub fun font_options() FontOptions {
+    ret FontOptions{
+        oversample: 1,
+        raster:     FontRaster.smooth{},
+        size_mode:  FontSizeMode.line_height{},
+    };
+}
+
+# one-bit, em-sized font policy for pixel-sharp interfaces
+pub fun font_pixel_options() FontOptions {
+    ret FontOptions{
+        oversample: 1,
+        raster:     FontRaster.pixel{128},
+        size_mode:  FontSizeMode.em{},
+    };
+}
+
+# U+000A, the one control codepoint that means something to layout
+val NEWLINE: u32 = 10;
+
+# what one codepoint measures at a face's size
+# ---
+# glyph:     glyph index in the typeface, 0 (.notdef) for a codepoint it lacks
+# advance:   pen movement after the glyph, in logical pixels
+# bearing_x: horizontal distance from the pen to the glyph's left edge
+# y_min:     bottom of the outline's bounding box, in design units
+# empty:     whether the glyph has no outline to draw, as a space does
+# readable:  false when the typeface could not read this glyph's metrics
+pub rec GlyphMetrics {
+    glyph:     u16;
+    advance:   f32;
+    bearing_x: f32;
+    y_min:     i16;
+    empty:     bool;
+    readable:  bool;
+}
+
+# a typeface at one size and policy
+# ---
+# a:          allocator for the metrics cache
+# typeface:   the borrowed typeface, which must outlive this face
+# metrics:    codepoint to metrics, filled as codepoints are asked for
+# scale:      design units to logical pixels
+# span:       ascent-to-descent height before any pixel rounding
+# height:     logical line height used for layout
+# ascent:     logical line-top-to-baseline distance
+# descent:    logical baseline-to-line-bottom distance, normally negative
+# options:    the size and raster policy the face was made with
+# pixel_snap: whether origins and metrics stay on whole pixels
+# unreadable: glyphs whose metrics the typeface could not read
+# atlases:    live GlyphAtlas instances borrowing this face
+# valid:      whether the face is live, cleared by face_delete
+pub rec FontFace {
+    a:          *allo.Allocator;
+    typeface:   *Typeface;
+    metrics:    gmap.Map[u32, GlyphMetrics];
+    scale:      f32;
+    span:       f32;
+    height:     f32;
+    ascent:     f32;
+    descent:    f32;
+    options:    FontOptions;
+    pixel_snap: bool;
+    unreadable: usize;
+    atlases:    usize;
+    valid:      bool;
+}
+
+# the size policy a request may not use, or none when it is usable
+pub fun options_refusal(pixels: f32, options: FontOptions) opt[TextError] {
+    if (pixels <= 0.0)           { ret opt[TextError].some{TextError.pixel_height{}}; }
+    if (options.oversample == 0) { ret opt[TextError].some{TextError.oversample{}}; }
+    if (sel options.raster.pixel) {
+        if (options.raster.pixel == 0) { ret opt[TextError].some{TextError.threshold{}}; }
+        if (options.oversample != 1 || pixels != pixel_round(pixels)) {
+            ret opt[TextError].some{TextError.pixel_scale{}};
+        }
+    }
+    ret opt[TextError].none{};
+}
+
+fun font_scale(face: *finfo.Font, pixels: f32, mode: FontSizeMode) res[f32, FontError] {
+    if (sel mode.em) { ret res[f32, FontError].ok{finfo.scale_for_em_size(face, pixels)}; }
+    ret finfo.scale_for_pixel_height(face, pixels);
+}
+
+# round to the nearest whole pixel, halves away from zero
+pub fun pixel_round(value: f32) f32 {
+    if (value < 0.0) { ret (value - 0.5)::i64::f32; }
+    ret (value + 0.5)::i64::f32;
+}
+
+# Size a typeface.
+#
+# Pixel fonts use binary alpha, integral placement, and conventional em sizing,
+# so their requested size and raster scale must both be whole pixels.
+# ---
+# a:       allocator for the metrics cache
+# t:       the typeface, which must outlive the face
+# pixels:  logical pixel size, a line height or an em per `options.size_mode`
+# options: the size and raster policy
+# ret:     a face, or a policy or scale error
+pub fun face_init(a: *allo.Allocator, t: *Typeface, pixels: f32, options: FontOptions) res[FontFace, Error] {
+    var f: FontFace;
+    f.valid = false;
+    if (t == nil || !t.valid) { ret res[FontFace, Error].err{Error.text{TextError.empty{}}}; }
+    val refused: opt[TextError] = options_refusal(pixels, options);
+    if (sel refused.some) { ret res[FontFace, Error].err{Error.text{refused.some}}; }
+    val scaled: res[f32, FontError] = font_scale(?t.face, pixels, options.size_mode);
+    if (sel scaled.err) { ret res[FontFace, Error].err{font_failed(scaled.err)}; }
+
+    val hhea: fhhea.Hhea = typeface_hhea(t);
+    f.a          = a;
+    f.typeface   = t;
+    f.metrics    = gmap.init[u32, GlyphMetrics](a, gmap.hash_u32, gmap.eq_u32);
+    f.scale      = scaled.ok;
+    f.span       = (hhea.ascent::i32 - hhea.descent::i32)::f32 * f.scale;
+    f.height     = f.span;
+    f.ascent     = hhea.ascent::f32 * f.scale;
+    f.descent    = hhea.descent::f32 * f.scale;
+    f.options    = options;
+    f.pixel_snap = sel options.raster.pixel;
+    f.unreadable = 0;
+    f.atlases    = 0;
+    if (f.pixel_snap) {
+        f.height  = pixel_round(f.height);
+        f.ascent  = pixel_round(f.ascent);
+        f.descent = pixel_round(f.descent);
+    }
+    f.valid = true;
+    t.faces = t.faces + 1;
+    ret res[FontFace, Error].ok{f};
+}
+
+# Release a face's metrics cache and its hold on the typeface.
+#
+# Refused while a GlyphAtlas still borrows the face.
+# ---
+# f:   the face, unusable after a successful delete
+# ret: ok, in_use while atlases are live, or the allocator's refusal
+pub fun face_delete(f: *FontFace) err[Error] {
+    if (!f.valid)       { ret err[Error].ok{}; }
+    if (f.atlases != 0) { ret err[Error].err{Error.text{TextError.in_use{}}}; }
+    f.valid = false;
+    if (f.typeface != nil && f.typeface.faces > 0) { f.typeface.faces = f.typeface.faces - 1; }
+    val freed: err[allo.Error] = gmap.dnit[u32, GlyphMetrics](?f.metrics);
+    if (sel freed.err) { ret err[Error].err{Error.alloc{freed.err}}; }
+    ret err[Error].ok{};
+}
+
+# read one glyph's metrics from the typeface
+fun read_glyph(f: *FontFace, cp: u32) GlyphMetrics {
+    var m: GlyphMetrics;
+    m.readable = true;
+    val t: *Typeface = f.typeface;
+
+    # an unmapped codepoint resolves to glyph 0, the face's own .notdef box, so
+    # one character the font lacks reads as one bad character rather than as a
+    # layout that closed up around a hole. a cmap failure for one codepoint is
+    # treated the same way
+    val mapped: res[u16, FontError] = finfo.glyph_index(?t.face, cp);
+    if (sel mapped.ok) { m.glyph = mapped.ok; }
+
+    val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?t.face, m.glyph);
+    if (sel hm.err) {
+        m.readable = false;
+        m.empty    = true;
+        ret m;
+    }
+    m.advance   = hm.ok.advance::f32 * f.scale;
+    m.bearing_x = hm.ok.lsb::f32 * f.scale;
+    if (f.pixel_snap) {
+        m.advance   = pixel_round(m.advance);
+        m.bearing_x = pixel_round(m.bearing_x);
+    }
+
+    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?t.face, m.glyph);
+    if (sel info.err) {
+        m.readable = false;
+        m.empty    = true;
+        ret m;
+    }
+    if (sel info.ok.none) {
+        m.empty = true;
+        ret m;
+    }
+    m.y_min = info.ok.some.y_min;
+    ret m;
+}
+
+# What a codepoint measures at this face's size.
+#
+# Cached after the first call. When the cache cannot grow the metrics are still
+# returned, just read again next time, so a measurement never goes wrong
+# because memory ran short.
+# ---
+# f:   the face
+# cp:  the codepoint
+# ret: its glyph index and metrics
+pub fun face_glyph(f: *FontFace, cp: u32) GlyphMetrics {
+    var key:   u32                = cp;
+    val known: opt[*GlyphMetrics] = gmap.get[u32, GlyphMetrics](?f.metrics, ?key);
+    if (sel known.some) { ret @known.some; }
+    val m: GlyphMetrics = read_glyph(f, cp);
+    if (!m.readable) { f.unreadable = f.unreadable + 1; }
+    gmap.insert[u32, GlyphMetrics](?f.metrics, cp, m);
+    ret m;
+}
+
+# logical line height, the distance from one line's top to the next
+pub fun face_line_height(f: *FontFace) f32 {
+    ret f.height;
+}
+
+# logical distance from a line's top to its baseline
+pub fun face_ascent(f: *FontFace) f32 {
+    ret f.ascent;
+}
+
+# logical distance from the baseline to a line's bottom, normally negative
+pub fun face_descent(f: *FontFace) f32 {
+    ret f.descent;
+}
+
+# how many distinct codepoints the face has measured
+pub fun face_resolved(f: *FontFace) usize {
+    ret gmap.length[u32, GlyphMetrics](f.metrics);
+}
+
+# how many glyphs the typeface could not read metrics for
+pub fun face_unreadable(f: *FontFace) usize {
+    ret f.unreadable;
+}
+
+# Whether a codepoint is a control character layout skips.
+#
+# `\n` is excluded because it is the one that means something here. The rest
+# contribute neither a quad nor an advance, so a tab or a carriage return cannot
+# put a .notdef box in the middle of a line.
+pub fun is_layout_control(cp: u32) bool {
+    if (cp == NEWLINE) { ret false; }
+    ret cp < 0x20 || cp == 0x7F;
+}
+
+# Decode the codepoint at a byte offset, always making progress.
+#
+# This is the walk every measure and draw uses, public so layout built outside
+# boom steps by codepoint rather than by byte. A malformed sequence decodes to
+# U+FFFD and consumes one byte: consuming zero would spin a caller's loop, and
+# skipping the rest of the string would lose text that merely follows a bad
+# byte.
+# ---
+# s:   UTF-8 text
+# i:   byte offset to decode at, less than n
+# n:   byte length of s
+# cp:  receives the codepoint
+# ret: bytes consumed, at least one
+pub fun text_next(s: str, i: usize, n: usize, cp: *u32) usize {
+    val used: usize = utf8.decode(?s[i], n - i, cp);
+    if (used == 0) { ret 1; }
+    ret used;
+}
+
+# Width of the widest line in logical pixels.
+#
+# Walks the same codepoints and line breaks a draw does. Never rasterizes.
+pub fun face_measure(f: *FontFace, s: str) f32 {
+    if (f == nil || !f.valid || s == nil) { ret 0.0; }
+    var widest: f32   = 0.0;
+    var w:      f32   = 0.0;
+    var i:      usize = 0;
+    val n:      usize = str_len(s);
+    for (i < n) {
+        var cp: u32 = 0;
+        i = i + text_next(s, i, n, ?cp);
+        if (cp == NEWLINE) {
+            if (w > widest) { widest = w; }
+            w = 0.0;
+        }
+        or (!is_layout_control(cp)) {
+            w = w + face_glyph(f, cp).advance;
+        }
+    }
+    if (w > widest) { widest = w; }
+    ret widest;
+}
+
+# How many lines a string lays out as.
+pub fun face_lines(f: *FontFace, s: str) usize {
+    if (f == nil || !f.valid || s == nil) { ret 0; }
+    var lines: usize = 1;
+    var i:     usize = 0;
+    val n:     usize = str_len(s);
+    for (i < n) {
+        if (s[i] == NEWLINE::u8) { lines = lines + 1; }
+        i = i + 1;
+    }
+    ret lines;
+}
+
+# Height of a text block in logical pixels, one line box per line.
+pub fun face_height(f: *FontFace, s: str) f32 {
+    if (f == nil || !f.valid || s == nil) { ret 0.0; }
+    ret face_lines(f, s)::f32 * f.height;
+}
+
+# a face with known metrics and no typeface, for tests that need no font file
+fun seeded_face(a: *allo.Allocator, advance: f32) FontFace {
+    var f: FontFace;
+    f.a       = a;
+    f.metrics = gmap.init[u32, GlyphMetrics](a, gmap.hash_u32, gmap.eq_u32);
+    f.height  = 12.0;
+    f.valid   = true;
+    var cp: u32 = 32;
+    for (cp < 127) {
+        seed(?f, cp, advance);
+        cp = cp + 1;
+    }
+    seed(?f, 0x00E9, advance);
+    seed(?f, 0x4F60, advance);
+    seed(?f, 0x1F600, advance);
+    seed(?f, utf8.REPLACEMENT, advance);
+    ret f;
+}
+
+fun seed(f: *FontFace, cp: u32, advance: f32) {
+    var m: GlyphMetrics;
+    m.advance  = advance;
+    m.readable = true;
+    gmap.insert[u32, GlyphMetrics](?f.metrics, cp, m);
+}
+
+fun unseed(f: *FontFace) {
+    gmap.dnit[u32, GlyphMetrics](?f.metrics);
+}
+
+fun test_alloc(a: *allo.Allocator) bool {
+    val made: err[allo.Error] = page.make(a);
+    ret sel made.ok;
+}
+
+test "face: a string is walked as codepoints, not as bytes" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: FontFace = seeded_face(?a, 7.0);
+    fin { unseed(?f); }
+
+    # 'a', U+4F60, U+1F600: three codepoints in eight bytes. the byte walk this
+    # replaced dropped every byte of 0x80 or above
+    var mixed: [9]u8 = [9]u8{0x61, 0xE4, 0xBD, 0xA0, 0xF0, 0x9F, 0x98, 0x80, 0};
+    if (face_measure(?f, ?mixed[0]) != 21.0) { ret 2; }
+    var acute: [3]u8 = [3]u8{0xC3, 0xA9, 0};
+    if (face_measure(?f, ?acute[0]) != 7.0) { ret 3; }
+    if (face_measure(?f, "abc") != 21.0)    { ret 4; }
+    if (face_measure(?f, "") != 0.0)        { ret 5; }
+    ret 0;
+}
+
+test "face: a control character contributes no advance" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: FontFace = seeded_face(?a, 7.0);
+    fin { unseed(?f); }
+    if (face_measure(?f, "a\tb") != 14.0)                                                 { ret 2; }
+    if (face_measure(?f, "a\rb") != 14.0)                                                 { ret 3; }
+    if (!is_layout_control(9) || !is_layout_control(13) || !is_layout_control(0x7F))      { ret 4; }
+    if (is_layout_control(NEWLINE) || is_layout_control(32) || is_layout_control(0x4F60)) { ret 5; }
+    ret 0;
+}
+
+test "face: a line break measures the widest line" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: FontFace = seeded_face(?a, 7.0);
+    fin { unseed(?f); }
+    if (face_measure(?f, "ab\ncde") != 21.0) { ret 2; }
+    if (face_measure(?f, "abc\nde") != 21.0) { ret 3; }
+    if (face_lines(?f, "ab\ncde") != 2)      { ret 4; }
+    if (face_lines(?f, "abc") != 1)          { ret 5; }
+    if (face_lines(?f, "a\n") != 2)          { ret 6; }
+    if (face_height(?f, "abc") != 12.0)      { ret 7; }
+    if (face_height(?f, "ab\ncde") != 24.0)  { ret 8; }
+    ret 0;
+}
+
+test "face: text_next advances past malformed bytes one at a time" {
+    var cp:   u32   = 0;
+    var lone: [3]u8 = [3]u8{0x80, 0x61, 0};
+    if (text_next(?lone[0], 0, 2, ?cp) != 1) { ret 1; }
+    if (cp != utf8.REPLACEMENT)              { ret 2; }
+    var cut: [2]u8 = [2]u8{0xE4, 0};
+    if (text_next(?cut[0], 0, 1, ?cp) != 1) { ret 3; }
+    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
+    if (text_next(?ni[0], 0, 3, ?cp) != 3) { ret 4; }
+    if (cp != 0x4F60)                      { ret 5; }
+    ret 0;
+}
+
+test "face: a decode after an earlier decode reads its own bytes" {
+    # the shape of a mach opt 2 miscompile fixed in 5.2.1: an indexed address
+    # flowing into an inlined utf8.decode returned U+FFFD after a decode on
+    # another stack array. meaningful under the release profile CI runs
+    var cp:   u32   = 0;
+    var head: [2]u8 = [2]u8{0x41, 0};
+    if (text_next(?head[0], 0, 1, ?cp) != 1 || cp != 0x41) { ret 1; }
+    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
+    if (text_next(?ni[0], 0, 3, ?cp) != 3) { ret 2; }
+    if (cp != 0x4F60)                      { ret 3; }
+    ret 0;
+}
+
+test "face: an invalid face measures zero" {
+    var a: allo.Allocator;
+    if (!test_alloc(?a)) { ret 1; }
+    var f: FontFace = seeded_face(?a, 7.0);
+    fin { unseed(?f); }
+    f.valid = false;
+    if (face_measure(?f, "abc") != 0.0) { ret 2; }
+    if (face_height(?f, "abc") != 0.0)  { ret 3; }
+    if (face_lines(?f, "abc") != 0)     { ret 4; }
+    ret 0;
+}
+
+test "face: an invalid size policy is refused with its case" {
+    val bad_height: opt[TextError] = options_refusal(0.0, font_options());
+    if (!(sel bad_height.some && sel bad_height.some.pixel_height)) { ret 1; }
+    var zero: FontOptions = font_options();
+    zero.oversample = 0;
+    val bad_oversample: opt[TextError] = options_refusal(16.0, zero);
+    if (!(sel bad_oversample.some && sel bad_oversample.some.oversample)) { ret 2; }
+    var blind: FontOptions = font_pixel_options();
+    blind.raster = FontRaster.pixel{0};
+    val bad_threshold: opt[TextError] = options_refusal(11.0, blind);
+    if (!(sel bad_threshold.some && sel bad_threshold.some.threshold)) { ret 3; }
+    val fractional: opt[TextError] = options_refusal(11.5, font_pixel_options());
+    if (!(sel fractional.some && sel fractional.some.pixel_scale)) { ret 4; }
+    val usable: opt[TextError] = options_refusal(11.0, font_pixel_options());
+    if (!sel usable.none) { ret 5; }
+    ret 0;
+}
+
+test "face: pixel policy preserves an em-aligned design grid" {
+    val options: FontOptions = font_pixel_options();
+    if (!sel options.raster.pixel) { ret 1; }
+    if (!sel options.size_mode.em) { ret 2; }
+    var face: finfo.Font;
+    face.head.units_per_em = 550;
+    face.hhea              = opt[fhhea.Hhea].some{fhhea.Hhea{
+        ascent:            550, descent: 0 - 150, line_gap: 0,
+        advance_width_max: 0, num_h_metrics: 1,
+    }};
+    val scaled: res[f32, FontError] = font_scale(?face, 11.0, options.size_mode);
+    if (!sel scaled.ok) { ret 3; }
+    val scale: f32 = scaled.ok;
+    if (scale != 0.02)                                                               { ret 3; }
+    if (50.0 * scale != 1.0)                                                         { ret 4; }
+    if (pixel_round(1.49) != 1.0 || pixel_round(1.5) != 2.0)                         { ret 5; }
+    if (pixel_round(0.0 - 1.49) != 0.0 - 1.0 || pixel_round(0.0 - 1.5) != 0.0 - 2.0) { ret 6; }
+    ret 0;
+}
+
+test "face: a face with live atlases refuses to delete" {
+    var t: Typeface;
+    t.faces = 1;
+    var f: FontFace;
+    f.valid    = true;
+    f.typeface = ?t;
+    f.atlases  = 1;
+    val refused: err[Error] = face_delete(?f);
+    if (!(sel refused.err && (sel refused.err.text && sel refused.err.text.in_use))) { ret 1; }
+    if (t.faces != 1)                                                                { ret 2; }
+    f.atlases = 0;
+    val done: err[Error] = face_delete(?f);
+    if (!sel done.ok) { ret 3; }
+    if (t.faces != 0) { ret 4; }
+    ret 0;
+}

@@ -1,0 +1,742 @@
+# The GPU half of text: rasterized glyph cells for one face, and the draw.
+#
+# An atlas borrows a FontFace for metrics and rasterizes a glyph the first time
+# a draw or a preload asks for it. Cells are keyed by glyph index, which is the
+# contract with the face, so every codepoint a typeface lacks shares the one
+# .notdef cell and a future shaping pass can hand the atlas glyph indices
+# directly.
+#
+# THE ATLAS IS PAGED AND A PAGE NEVER RESIZES. A sprite quad bakes its UVs into
+# the frame's vertex arena when it is appended, and the batch is not drawn until
+# the pass ends. Growing a page mid-frame would move the source rectangle of
+# every quad already recorded against it. A full page is retired and a new one
+# is created, which costs a batch break and nothing else. `MAX_PAGES` bounds
+# the total. Past it a glyph keeps its advance and draws blank, and
+# `atlas_missing` counts it.
+#
+# Coverage is stored in the alpha channel with RGB left white, so the sprite
+# shader tints text by multiplying. Each cell has a transparent one-texel
+# gutter, written once when a page is cleared, so linear sampling softens a
+# scaled edge without pulling in a neighbour and admitting a glyph uploads
+# exactly its own cell.
+#
+# The grid is fixed rather than tightly packed. Every cell is sized for the
+# face's line box and a Han glyph fills about one em, so the grid holds the
+# demanding cases it exists for.
+#
+# LIFETIME. An atlas borrows its face, which must outlive it: atlas_init counts
+# the atlas on the face and atlas_delete uncounts it, so the face refuses to
+# delete while the atlas is live. An atlas is a unique owner of its pages.
+
+use boom.graphics.device.Device;
+use boom.graphics.error.Capacity;
+use boom.graphics.error.Error;
+use boom.graphics.error.content.TextError;
+use boom.graphics.image.ColorSpace;
+use boom.graphics.renderer.Pass;
+use boom.graphics.renderer.pass_draw_sprite_uv;
+use boom.graphics.sprite.Rect;
+use boom.graphics.sprite.rect;
+use boom.graphics.text.face.FontFace;
+use boom.graphics.text.face.FontRaster;
+use boom.graphics.text.face.GlyphMetrics;
+use boom.graphics.text.face.face_glyph;
+use boom.graphics.text.face.is_layout_control;
+use boom.graphics.text.face.pixel_round;
+use boom.graphics.text.face.text_next;
+use boom.graphics.text.typeface.font_failed;
+use boom.graphics.texture.Texture;
+use boom.graphics.texture.texture;
+use boom.graphics.texture.texture_delete;
+use boom.graphics.texture.texture_upload_region;
+use boom.math.vec.Vec4;
+use font.error.FontError;
+use fglyf:   font.glyf;
+use finfo:   font.info;
+use fmaxp:   font.maxp;
+use fraster: font.raster;
+use allo:    std.allocator;
+use std.allocator.page;
+use gmap: std.collections.map;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+# Preferred atlas page side in texels.
+#
+# One page at a 16 pixel face holds about seventeen hundred glyphs, so ordinary
+# European text never leaves the first page and a full CJK working set fits in
+# a handful. Every driver guarantees at least 4096. The cost of a page is four
+# megabytes of transient host memory at creation, which is why it is not simply
+# set to the maximum.
+pub val ATLAS_PAGE: usize = 1024;
+
+# The largest atlas page side any face may need.
+#
+# A cell is sized from the face's line box, so a large enough pixel height
+# needs a page larger than a driver is required to support. Refusing at init
+# names the real limit rather than failing inside vkCreateImage.
+pub val ATLAS_PAGE_MAX: usize = 4096;
+
+# How many pages one atlas may occupy before it stops admitting glyphs.
+pub val MAX_PAGES: usize = 16;
+
+val GUTTER: usize = 1;
+
+# Ceiling on the flattened-edge scratch buffer, in edges.
+#
+# The buffer is sized from the typeface's declared point maxima, so a font that
+# lies about them is the only way to reach this. It is a bound, not a budget.
+val MAX_EDGES: usize = 262144;
+
+# The point and contour scratch for a typeface whose maxp declares no maxima.
+val FALLBACK_POINTS:   usize = 512;
+val FALLBACK_CONTOURS: usize = 32;
+
+# where one glyph lives in the atlas
+# ---
+# page:     which page holds the cell
+# cell:     index into that page's grid
+# offset_y: vertical distance from the line top to the cell, in logical pixels
+# drawn:    whether the glyph has a cell at all; false draws nothing
+rec Cell {
+    page:     usize;
+    cell:     usize;
+    offset_y: f32;
+    drawn:    bool;
+}
+
+# rasterized glyph cells for one face
+# ---
+# a:              allocator for scratch, staging and the cell map
+# d:              device the pages are created against
+# face:           the borrowed face, which must outlive this atlas
+# cells:          glyph index to cell, filled as glyphs are drawn or preloaded
+# pages:          the page textures, `page_count` of them live
+# page_count:     pages created
+# page_side:      page width and height in texels
+# cell:           cell side in raster texels, gutter excluded
+# cols:           cells per page row
+# cells_per_page: cells one page holds
+# next_cell:      next free cell in the newest page
+# pts:            outline point scratch
+# pts_cap:        points pts holds
+# ends:           contour end scratch
+# ends_cap:       contour ends ends holds
+# edges:          flattened edge scratch
+# edges_cap:      edges edges holds
+# cov:            one cell of 8-bit coverage
+# stage:          one cell of RGBA8, staged for upload
+# raster_scale:   raster texels per logical pixel
+# glyph_scale:    design units to raster texels
+# missing:        glyphs that could not be rasterized or given a cell
+# valid:          whether the atlas is live, cleared by atlas_delete
+pub rec GlyphAtlas {
+    a:              *allo.Allocator;
+    d:              *Device;
+    face:           *FontFace;
+    cells:          gmap.Map[u32, Cell];
+    pages:          [MAX_PAGES]Texture;
+    page_count:     usize;
+    page_side:      usize;
+    cell:           usize;
+    cols:           usize;
+    cells_per_page: usize;
+    next_cell:      usize;
+    pts:            *fglyf.Point;
+    pts_cap:        usize;
+    ends:           *u16;
+    ends_cap:       usize;
+    edges:          *fraster.Edge;
+    edges_cap:      usize;
+    cov:            *u8;
+    stage:          *u8;
+    raster_scale:   f32;
+    glyph_scale:    f32;
+    missing:        usize;
+    valid:          bool;
+}
+
+fun logical_cell_size(pixels: f32) usize {
+    val whole: i64 = pixels::i64;
+    ret (whole + whole / 4 + 2)::usize;
+}
+
+# the page side a cell size lays out on, or why it cannot
+fun page_side_for(cell: usize) res[usize, TextError] {
+    if (cell == 0) { ret res[usize, TextError].err{TextError.cell_empty{}}; }
+    val stride: usize = cell + GUTTER * 2;
+    if (stride > ATLAS_PAGE_MAX) { ret res[usize, TextError].err{TextError.page_limit{}}; }
+    if (stride > ATLAS_PAGE)     { ret res[usize, TextError].ok{stride}; }
+    ret res[usize, TextError].ok{ATLAS_PAGE};
+}
+
+# How many line segments one quadratic curve flattens into at this cell size.
+#
+# mach-font subdivides until the flatness error falls under its tolerance,
+# halving the segment length and quartering the deviation each level, so
+# counting the levels bounds the segments a curve contributes. A constant
+# instead is what makes a big face at a big size silently drop its densest
+# glyphs.
+fun quad_segments(cell: usize) usize {
+    var segments: usize = 1;
+    var span:     f32   = cell::f32;
+    # raster.TOL_SQ is 0.1, so the deviation bound is its square root
+    for (span > 0.316 && segments < 65536) {
+        span     = span / 4.0;
+        segments = segments * 2;
+    }
+    ret segments;
+}
+
+# The scratch sizes a typeface needs, from what it declares.
+#
+# maxp declares the maxima for the font in hand, and a composite glyph resolves
+# to more points than a simple one, so the larger of the two pairs has to fit.
+# ---
+# m:    the declared maxima, none for a maxp 0.5 typeface
+# cell: cell side in raster texels
+# ret:  points, contours, and edges, in that order
+fun scratch_sizes(m: opt[fmaxp.Maxima], cell: usize) [3]usize {
+    var points:   usize = FALLBACK_POINTS;
+    var contours: usize = FALLBACK_CONTOURS;
+    if (sel m.some) {
+        points   = m.some.max_points::usize;
+        contours = m.some.max_contours::usize;
+        if (m.some.max_composite_points::usize > points)     { points = m.some.max_composite_points::usize; }
+        if (m.some.max_composite_contours::usize > contours) { contours = m.some.max_composite_contours::usize; }
+    }
+    if (points < 16)  { points = 16; }
+    if (contours < 4) { contours = 4; }
+    var edges: usize = points * quad_segments(cell) + 128;
+    if (edges > MAX_EDGES) { edges = MAX_EDGES; }
+    ret [3]usize{points, contours, edges};
+}
+
+fun scratch_init(g: *GlyphAtlas) err[Error] {
+    val declared: res[opt[fmaxp.Maxima], FontError] = finfo.outline_maxima(?g.face.typeface.face);
+    if (sel declared.err) { ret err[Error].err{font_failed(declared.err)}; }
+    val sizes: [3]usize = scratch_sizes(declared.ok, g.cell);
+
+    val pr: res[*fglyf.Point, allo.Error] = allo.allocate[fglyf.Point](g.a, sizes[0]);
+    if (sel pr.err) { ret err[Error].err{Error.alloc{pr.err}}; }
+    g.pts     = pr.ok;
+    g.pts_cap = sizes[0];
+
+    val er: res[*u16, allo.Error] = allo.allocate[u16](g.a, sizes[1]);
+    if (sel er.err) { ret err[Error].err{Error.alloc{er.err}}; }
+    g.ends     = er.ok;
+    g.ends_cap = sizes[1];
+
+    val gr: res[*fraster.Edge, allo.Error] = allo.allocate[fraster.Edge](g.a, sizes[2]);
+    if (sel gr.err) { ret err[Error].err{Error.alloc{gr.err}}; }
+    g.edges     = gr.ok;
+    g.edges_cap = sizes[2];
+
+    val cr: res[*u8, allo.Error] = allo.allocate[u8](g.a, g.cell * g.cell);
+    if (sel cr.err) { ret err[Error].err{Error.alloc{cr.err}}; }
+    g.cov = cr.ok;
+
+    val tr: res[*u8, allo.Error] = allo.allocate[u8](g.a, g.cell * g.cell * 4);
+    if (sel tr.err) { ret err[Error].err{Error.alloc{tr.err}}; }
+    g.stage = tr.ok;
+    ret err[Error].ok{};
+}
+
+# Create an atlas for a face.
+#
+# The first page is created here rather than on the first glyph, so a face that
+# cannot get atlas memory fails where a caller is already handling errors, not
+# mid-frame.
+# ---
+# a:   allocator for scratch, staging and the cell map
+# d:   device the pages are created against
+# f:   the face, which must outlive the atlas
+# ret: an atlas, or a size, scratch or upload error
+pub fun atlas_init(a: *allo.Allocator, d: *Device, f: *FontFace) res[GlyphAtlas, Error] {
+    var g: GlyphAtlas;
+    g.valid = false;
+    if (f == nil || !f.valid) { ret res[GlyphAtlas, Error].err{Error.text{TextError.empty{}}}; }
+    # the complete cell, margin included, scales with the oversample, so the
+    # atlas resolution never changes a glyph's logical rectangle
+    val cell: usize                 = logical_cell_size(f.span) * f.options.oversample;
+    val side: res[usize, TextError] = page_side_for(cell);
+    if (sel side.err) { ret res[GlyphAtlas, Error].err{Error.text{side.err}}; }
+
+    g.a              = a;
+    g.d              = d;
+    g.face           = f;
+    g.cells          = gmap.init[u32, Cell](a, gmap.hash_u32, gmap.eq_u32);
+    g.cell           = cell;
+    g.page_side      = side.ok;
+    g.cols           = g.page_side / (cell + GUTTER * 2);
+    g.cells_per_page = g.cols * g.cols;
+    g.raster_scale   = f.options.oversample::f32;
+    g.glyph_scale    = f.scale * g.raster_scale;
+
+    val scratched: err[Error] = scratch_init(?g);
+    if (sel scratched.err) {
+        release(?g);
+        ret res[GlyphAtlas, Error].err{scratched.err};
+    }
+    val paged: err[Error] = page_add(?g);
+    if (sel paged.err) {
+        release(?g);
+        ret res[GlyphAtlas, Error].err{paged.err};
+    }
+    g.valid   = true;
+    f.atlases = f.atlases + 1;
+    ret res[GlyphAtlas, Error].ok{g};
+}
+
+# free everything an atlas holds, whether or not it finished initializing
+fun release(g: *GlyphAtlas) {
+    var i: usize = 0;
+    for (i < g.page_count) {
+        texture_delete(g.d, ?g.pages[i]);
+        i = i + 1;
+    }
+    g.page_count = 0;
+    gmap.dnit[u32, Cell](?g.cells);
+    if (g.stage != nil) { allo.deallocate[u8](g.a, g.stage, g.cell * g.cell * 4); }
+    if (g.cov != nil)   { allo.deallocate[u8](g.a, g.cov, g.cell * g.cell); }
+    if (g.edges != nil) { allo.deallocate[fraster.Edge](g.a, g.edges, g.edges_cap); }
+    if (g.ends != nil)  { allo.deallocate[u16](g.a, g.ends, g.ends_cap); }
+    if (g.pts != nil)   { allo.deallocate[fglyf.Point](g.a, g.pts, g.pts_cap); }
+    g.stage = nil;
+    g.cov   = nil;
+    g.edges = nil;
+    g.ends  = nil;
+    g.pts   = nil;
+}
+
+# Release an atlas's pages and its hold on the face.
+# ---
+# d: the device the atlas was created against
+# g: the atlas, unusable afterwards
+pub fun atlas_delete(d: *Device, g: *GlyphAtlas) {
+    if (!g.valid) { ret; }
+    g.valid = false;
+    g.d     = d;
+    release(g);
+    if (g.face != nil && g.face.atlases > 0) { g.face.atlases = g.face.atlases - 1; }
+}
+
+# Fill a page with transparent white so filtered coverage keeps its colour.
+fun clear_atlas(rgba: *u8, texels: usize) {
+    var i: usize = 0;
+    for (i < texels) {
+        val o: usize = i * 4;
+        rgba[o]     = 255;
+        rgba[o + 1] = 255;
+        rgba[o + 2] = 255;
+        rgba[o + 3] = 0;
+        i           = i + 1;
+    }
+}
+
+# Create one more page, cleared to transparent white.
+fun page_add(g: *GlyphAtlas) err[Error] {
+    if (g.page_count >= MAX_PAGES) { ret err[Error].err{Error.full{Capacity.glyph_pages{}}}; }
+    val texels: usize                = g.page_side * g.page_side;
+    val br:     res[*u8, allo.Error] = allo.allocate[u8](g.a, texels * 4);
+    if (sel br.err) { ret err[Error].err{Error.alloc{br.err}}; }
+    clear_atlas(br.ok, texels);
+
+    # sRGB. RGB is white and coverage is alpha, and Vulkan's sRGB formats leave
+    # alpha linear, so coverage reaches the shader exactly as rasterized
+    val tr: res[Texture, Error] = texture(g.d, br.ok, g.page_side::i32,
+        g.page_side::i32, ColorSpace.srgb{});
+    val freed: err[allo.Error] = allo.deallocate[u8](g.a, br.ok, texels * 4);
+    if (sel tr.err) { ret err[Error].err{tr.err}; }
+
+    g.pages[g.page_count] = tr.ok;
+    g.page_count          = g.page_count + 1;
+    g.next_cell           = 0;
+    if (sel freed.err) { ret err[Error].err{Error.alloc{freed.err}}; }
+    ret err[Error].ok{};
+}
+
+# claim the next free cell, opening a page when the newest is full
+fun cell_take(g: *GlyphAtlas) opt[Cell] {
+    if (g.page_count == 0 || g.next_cell >= g.cells_per_page) {
+        val added: err[Error] = page_add(g);
+        if (sel added.err) { ret opt[Cell].none{}; }
+    }
+    var c: Cell;
+    c.page      = g.page_count - 1;
+    c.cell      = g.next_cell;
+    g.next_cell = g.next_cell + 1;
+    ret opt[Cell].some{c};
+}
+
+# copy the staged cell into its page
+fun cell_upload(g: *GlyphAtlas, c: *Cell) err[Error] {
+    val stride: usize = g.cell + GUTTER * 2;
+    val x:      usize = (c.cell % g.cols) * stride + GUTTER;
+    val y:      usize = (c.cell / g.cols) * stride + GUTTER;
+    ret texture_upload_region(g.d, ?g.pages[c.page], g.stage,
+        x::i32, y::i32, g.cell::i32, g.cell::i32);
+}
+
+# Turn one coverage bitmap into a cell of white-with-alpha, ready to upload.
+#
+# Returns whether anything is covered, so a glyph that rasterized to nothing
+# never claims a cell.
+fun stage_cell(stage: *u8, cov: *u8, cell: usize, raster: FontRaster) bool {
+    var visible: bool  = false;
+    var i:       usize = 0;
+    val n:       usize = cell * cell;
+    for (i < n) {
+        val o:     usize = i * 4;
+        val alpha: u8    = coverage_alpha(cov[i], raster);
+        if (alpha != 0) { visible = true; }
+        stage[o]     = 255;
+        stage[o + 1] = 255;
+        stage[o + 2] = 255;
+        stage[o + 3] = alpha;
+        i            = i + 1;
+    }
+    ret visible;
+}
+
+fun coverage_alpha(coverage: u8, raster: FontRaster) u8 {
+    if (sel raster.pixel) {
+        if (coverage >= raster.pixel) { ret 255; }
+        ret 0;
+    }
+    ret coverage;
+}
+
+fun baseline_offset(ascent: f32, cell_height: f32, y_min: i16, scale: f32) f32 {
+    ret ascent - cell_height - y_min::f32 * scale;
+}
+
+# Rasterize one glyph and give it a cell.
+#
+# Never fails outright. A glyph that cannot be rasterized or given a cell draws
+# nothing and counts in `missing`. Its advance is the face's, so layout stays
+# right either way.
+fun cell_raster(g: *GlyphAtlas, m: *GlyphMetrics) Cell {
+    var c: Cell;
+    c.drawn = false;
+    if (m.empty) { ret c; }
+    val f: *FontFace = g.face;
+
+    # the coverage buffer is not pre-cleared: render_glyph writes every texel
+    val rendered: err[FontError] = finfo.render_glyph(?f.typeface.face, m.glyph, g.glyph_scale,
+        g.pts, g.pts_cap, g.ends, g.ends_cap,
+        g.edges, g.edges_cap, g.cov, g.cell::u16, g.cell::u16);
+    if (sel rendered.err) {
+        g.missing = g.missing + 1;
+        ret c;
+    }
+    if (!stage_cell(g.stage, g.cov, g.cell, f.options.raster)) { ret c; }
+
+    val taken: opt[Cell] = cell_take(g);
+    if (sel taken.none) {
+        g.missing = g.missing + 1;
+        ret c;
+    }
+    c = taken.some;
+    val sent: err[Error] = cell_upload(g, ?c);
+    if (sel sent.err) {
+        g.missing = g.missing + 1;
+        c.drawn   = false;
+        ret c;
+    }
+    c.drawn    = true;
+    c.offset_y = baseline_offset(f.ascent, g.cell::f32 / g.raster_scale, m.y_min, f.scale);
+    if (f.pixel_snap) { c.offset_y = pixel_round(c.offset_y); }
+    ret c;
+}
+
+# The cell a glyph draws from, rasterizing it the first time it is asked for.
+#
+# Returned by value: rasterizing can grow the map, and a pointer taken before
+# that points into the old table.
+fun cell_of(g: *GlyphAtlas, m: *GlyphMetrics) Cell {
+    var key:   u32        = m.glyph::u32;
+    val known: opt[*Cell] = gmap.get[u32, Cell](?g.cells, ?key);
+    if (sel known.some) { ret @known.some; }
+    val c:    Cell                  = cell_raster(g, m);
+    val kept: res[bool, allo.Error] = gmap.insert[u32, Cell](?g.cells, key, c);
+    # a cell the map cannot record is rasterized again next time, which costs
+    # a cell per retry and is counted
+    if (sel kept.err && c.drawn) { g.missing = g.missing + 1; }
+    ret c;
+}
+
+# Rasterize every glyph a string uses, without drawing it.
+#
+# Admitting a glyph stalls on a queue wait, so a screen of new text pays that
+# inside the frame that first shows it. A game that knows its strings moves the
+# cost to load with this. It changes nothing about what draws.
+# ---
+# g:   the atlas to fill
+# s:   UTF-8 text
+# ret: whether no glyph went missing while admitting s
+pub fun atlas_preload(g: *GlyphAtlas, s: str) bool {
+    if (g == nil || !g.valid || s == nil) { ret false; }
+    val before: usize = g.missing;
+    var i:      usize = 0;
+    val n:      usize = str_len(s);
+    for (i < n) {
+        var cp: u32 = 0;
+        i = i + text_next(s, i, n, ?cp);
+        if (!is_layout_control(cp)) {
+            var m: GlyphMetrics = face_glyph(g.face, cp);
+            cell_of(g, ?m);
+        }
+    }
+    ret g.missing == before;
+}
+
+# how many glyphs the atlas has rasterized or found empty
+pub fun atlas_cell_count(g: *GlyphAtlas) usize {
+    ret gmap.length[u32, Cell](g.cells);
+}
+
+# how many pages the atlas has created
+pub fun atlas_page_count(g: *GlyphAtlas) usize {
+    ret g.page_count;
+}
+
+# How many glyphs the atlas could not draw.
+#
+# A glyph the atlas had no room for, or one the rasterizer refused, keeps its
+# advance and draws blank. Raising MAX_PAGES or lowering the size fixes the
+# first.
+pub fun atlas_missing(g: *GlyphAtlas) usize {
+    ret g.missing;
+}
+
+# the source rect of a cell in its page, in normalized UV
+fun cell_uv(g: *GlyphAtlas, c: *Cell) Rect {
+    val stride: usize = g.cell + GUTTER * 2;
+    val side:   f32   = g.page_side::f32;
+    val u:      f32   = ((c.cell % g.cols) * stride + GUTTER)::f32 / side;
+    val v:      f32   = ((c.cell / g.cols) * stride + GUTTER)::f32 / side;
+    ret rect(u, v, g.cell::f32 / side, g.cell::f32 / side);
+}
+
+fun glyph_dest(g: *GlyphAtlas, m: *GlyphMetrics, c: *Cell, x: f32, y: f32) Rect {
+    var px: f32 = x;
+    var py: f32 = y;
+    if (g.face.pixel_snap) {
+        px = pixel_round(px);
+        py = pixel_round(py);
+    }
+    ret rect(px + m.bearing_x, py + c.offset_y,
+        g.cell::f32 / g.raster_scale, g.cell::f32 / g.raster_scale);
+}
+
+# Draw a string into a pass, returning the pen x after the last glyph.
+#
+# `x`/`y` are the top-left of the line box in the pass's coordinate space,
+# which for an overlay pass is pixels. `\n` starts a new line box at `x`, one
+# line height further down, and the returned pen is on the last line. One
+# sprite quad per glyph against one page lets many strings draw without a bind
+# between them. A string that spills onto a second page costs one extra draw.
+# ---
+# p:    the pass to draw into, normally an overlay pass
+# g:    the atlas, whose face supplies the layout
+# s:    UTF-8 text
+# x:    left edge of the first glyph
+# y:    top edge of the first line
+# tint: colour multiplied over the glyph coverage
+# ret:  the x the next glyph would start at, for chained draws
+pub fun atlas_draw(p: *Pass, g: *GlyphAtlas, s: str, x: f32, y: f32, tint: Vec4) f32 {
+    if (g == nil || !g.valid || s == nil) { ret x; }
+    val f:      *FontFace = g.face;
+    var origin: f32       = x;
+    if (f.pixel_snap) { origin = pixel_round(origin); }
+    var pen:  f32   = origin;
+    var line: f32   = y;
+    var i:    usize = 0;
+    val n:    usize = str_len(s);
+    for (i < n) {
+        var cp: u32 = 0;
+        i = i + text_next(s, i, n, ?cp);
+        if (cp == 10) {
+            pen  = origin;
+            line = line + f.height;
+        }
+        or (!is_layout_control(cp)) {
+            var m: GlyphMetrics = face_glyph(f, cp);
+            var c: Cell         = cell_of(g, ?m);
+            if (c.drawn) {
+                pass_draw_sprite_uv(p, opt[*Texture].some{?g.pages[c.page]},
+                    glyph_dest(g, ?m, ?c, pen, line), cell_uv(g, ?c), tint);
+            }
+            pen = pen + m.advance;
+        }
+    }
+    ret pen;
+}
+
+# an atlas with a known grid and no device, for arithmetic tests
+fun grid_atlas() GlyphAtlas {
+    var g: GlyphAtlas;
+    g.cell           = 16;
+    g.page_side      = 64;
+    g.cols           = 3;
+    g.cells_per_page = 9;
+    g.raster_scale   = 1.0;
+    ret g;
+}
+
+fun near(a: f32, b: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < 0.000001;
+}
+
+test "atlas: UVs leave a transparent gutter between cells" {
+    var g:    GlyphAtlas = grid_atlas();
+    val side: f32        = g.page_side::f32;
+    var c0:   Cell;
+    var c1:   Cell;
+    var c3:   Cell;
+    c1.cell = 1;
+    c3.cell = 3;
+    val first: Rect = cell_uv(?g, ?c0);
+    if (!near(first.x, 1.0 / side) || !near(first.y, 1.0 / side)) { ret 1; }
+    if (!near(first.w, g.cell::f32 / side))                       { ret 2; }
+    # two transparent texels between neighbours: one cell's trailing gutter and
+    # the next one's leading gutter
+    val col1: Rect = cell_uv(?g, ?c1);
+    if (!near(col1.x - (first.x + first.w), 2.0 / side)) { ret 3; }
+    val row1: Rect = cell_uv(?g, ?c3);
+    if (!near(row1.y - (first.y + first.h), 2.0 / side)) { ret 4; }
+    ret 0;
+}
+
+test "atlas: the last cell of a page stays inside it" {
+    var g:    GlyphAtlas = grid_atlas();
+    var last: Cell;
+    last.cell = g.cells_per_page - 1;
+    val r: Rect = cell_uv(?g, ?last);
+    if (r.x + r.w > 1.0001) { ret 1; }
+    if (r.y + r.h > 1.0001) { ret 2; }
+    ret 0;
+}
+
+test "atlas: a page is derived from the cell" {
+    val small: res[usize, TextError] = page_side_for(22);
+    if (!(sel small.ok && small.ok == ATLAS_PAGE)) { ret 1; }
+    if (ATLAS_PAGE / (22 + GUTTER * 2) != 42)      { ret 2; }
+    val big: res[usize, TextError] = page_side_for(2000);
+    if (!(sel big.ok && big.ok == 2000 + GUTTER * 2)) { ret 3; }
+    val empty: res[usize, TextError] = page_side_for(0);
+    if (!(sel empty.err && sel empty.err.cell_empty)) { ret 4; }
+    val huge: res[usize, TextError] = page_side_for(ATLAS_PAGE_MAX);
+    if (!(sel huge.err && sel huge.err.page_limit)) { ret 5; }
+    if (logical_cell_size(16.0) != 22)              { ret 6; }
+    ret 0;
+}
+
+test "atlas: oversampling keeps the logical rectangle" {
+    var g: GlyphAtlas = grid_atlas();
+    var f: FontFace;
+    g.face         = ?f;
+    g.cell         = logical_cell_size(16.0) * 2;
+    g.raster_scale = 2.0;
+    var m: GlyphMetrics;
+    var c: Cell;
+    val d: Rect = glyph_dest(?g, ?m, ?c, 3.0, 5.0);
+    if (d.x != 3.0 || d.y != 5.0)   { ret 1; }
+    if (d.w != 22.0 || d.h != 22.0) { ret 2; }
+    ret 0;
+}
+
+test "atlas: pixel faces quantize placement" {
+    var g: GlyphAtlas = grid_atlas();
+    var f: FontFace;
+    f.pixel_snap = true;
+    g.face       = ?f;
+    var m: GlyphMetrics;
+    m.bearing_x = 2.0;
+    var c: Cell;
+    c.offset_y = 0.0 - 3.0;
+    val d: Rect = glyph_dest(?g, ?m, ?c, 3.49, 5.51);
+    if (d.x != 5.0 || d.y != 3.0) { ret 1; }
+    ret 0;
+}
+
+test "atlas: cells keep one baseline across vertical bearings" {
+    val upper:     f32 = baseline_offset(9.0, 16.0, 0, 1.0);
+    val descender: f32 = baseline_offset(9.0, 16.0, 0 - 3, 1.0);
+    if (upper != 0.0 - 7.0 || descender != 0.0 - 4.0)   { ret 1; }
+    if (upper + 16.0 != 9.0 || descender + 13.0 != 9.0) { ret 2; }
+    ret 0;
+}
+
+test "atlas: coverage is staged as white with alpha" {
+    var stage: [16]u8;
+    var cov:   [4]u8 = [4]u8{32, 64, 128, 255};
+    if (!stage_cell(?stage[0], ?cov[0], 2, FontRaster.smooth{})) { ret 1; }
+    if (stage[0] != 255 || stage[1] != 255 || stage[2] != 255)   { ret 2; }
+    if (stage[3] != 32 || stage[7] != 64)                        { ret 3; }
+    if (stage[11] != 128 || stage[15] != 255)                    { ret 4; }
+    var none: [4]u8;
+    if (stage_cell(?stage[0], ?none[0], 2, FontRaster.smooth{})) { ret 5; }
+    var bits: [4]u8 = [4]u8{0, 127, 128, 255};
+    if (!stage_cell(?stage[0], ?bits[0], 2, FontRaster.pixel{128})) { ret 6; }
+    if (stage[3] != 0 || stage[7] != 0)                             { ret 7; }
+    if (stage[11] != 255 || stage[15] != 255)                       { ret 8; }
+    ret 0;
+}
+
+test "atlas: a page clears to transparent white" {
+    var rgba: [16]u8;
+    clear_atlas(?rgba[0], 4);
+    var i: usize = 0;
+    for (i < 4) {
+        val o: usize = i * 4;
+        if (rgba[o] != 255 || rgba[o + 1] != 255 || rgba[o + 2] != 255) { ret 1; }
+        if (rgba[o + 3] != 0)                                           { ret 2; }
+        i = i + 1;
+    }
+    ret 0;
+}
+
+test "atlas: the scratch is sized from the face and the curve" {
+    if (quad_segments(22) != 16)  { ret 1; }
+    if (quad_segments(128) != 32) { ret 2; }
+    if (quad_segments(512) != 64) { ret 3; }
+    val cjk: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points:           900, max_contours: 60,
+        max_composite_points: 1200, max_composite_contours: 40,
+    }}, 22);
+    if (cjk[0] != 1200 || cjk[1] != 60) { ret 4; }
+    if (cjk[2] != 1200 * 16 + 128)      { ret 5; }
+    val old: [3]usize = scratch_sizes(opt[fmaxp.Maxima].none{}, 22);
+    if (old[0] != FALLBACK_POINTS || old[1] != FALLBACK_CONTOURS) { ret 6; }
+    val hostile: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points:           65535, max_contours: 1,
+        max_composite_points: 0, max_composite_contours: 0,
+    }}, 512);
+    if (hostile[2] != MAX_EDGES) { ret 7; }
+    if (hostile[1] != 4)         { ret 8; }
+    ret 0;
+}
+
+test "atlas: deleting uncounts the atlas on its face" {
+    var f: FontFace;
+    f.atlases = 1;
+    var g: GlyphAtlas;
+    g.valid = true;
+    g.face  = ?f;
+    var d: Device;
+    atlas_delete(?d, ?g);
+    if (f.atlases != 0) { ret 1; }
+    if (g.valid)        { ret 2; }
+    ret 0;
+}
