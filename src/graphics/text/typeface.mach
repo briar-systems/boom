@@ -1,0 +1,204 @@
+# A font file: its encoded bytes and parsed tables, with no size and no device.
+#
+# One Typeface serves every size a game draws a font at. A FontFace borrows it
+# for a size and policy, and a GlyphAtlas borrows a face for pixels, so the
+# bytes are held and parsed once however many sizes are in use.
+#
+# LIFETIME. A Typeface must outlive every FontFace made from it. That is
+# enforced rather than only documented: each face counts itself in `faces`,
+# and typeface_delete refuses with TextError.in_use while any face is live. A
+# face holds a pointer to its Typeface, so a Typeface must also stay where it
+# is while faces exist. Neither copying nor moving it is detectable, so that
+# half of the rule is documented. Like every owner here, a Typeface is unique:
+# deleting a copy as well as the original releases its bytes twice.
+
+use boom.graphics.error.Error;
+use boom.graphics.error.content.TextError;
+use boom.vfs;
+use font.error.FontError;
+use font.error.TableId;
+use fglyf: font.glyf;
+use fhhea: font.hhea;
+use fhmtx: font.hmtx;
+use finfo: font.info;
+use allo:  std.allocator;
+use std.collections.vector;
+use mem: std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+
+# a parsed font file
+# ---
+# a:     allocator that owns `data`, nil when the bytes are borrowed
+# data:  the encoded TrueType bytes
+# len:   encoded byte count
+# cap:   bytes allocated behind `data`, which is what is released
+# face:  the parsed handle over `data`
+# faces: live FontFace instances borrowing this typeface
+# valid: whether the typeface is live, cleared by typeface_delete
+pub rec Typeface {
+    a:     *allo.Allocator;
+    data:  *u8;
+    len:   usize;
+    cap:   usize;
+    face:  finfo.Font;
+    faces: usize;
+    valid: bool;
+}
+
+# the Error for a parser refusal
+pub fun font_failed(e: FontError) Error {
+    ret Error.text{TextError.font{e}};
+}
+
+# Parse a face and prove it has what layout and rasterization will read.
+#
+# Checked here because a failure after load has nowhere to go: a measure or a
+# draw cannot return an error, so a face without a cmap, horizontal metrics or
+# glyph data would measure and draw nothing forever with no reason given.
+fun parse(data: *u8, len: usize) res[finfo.Font, FontError] {
+    val parsed: res[finfo.Font, FontError] = finfo.init(data, len);
+    if (sel parsed.err) { ret parsed; }
+    var face: finfo.Font = parsed.ok;
+    if (sel face.cmap.err) { ret res[finfo.Font, FontError].err{face.cmap.err}; }
+    if (!sel face.hhea.some) {
+        ret res[finfo.Font, FontError].err{FontError.missing_table{TableId.hhea{}}};
+    }
+    val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?face, 0);
+    if (sel hm.err) { ret res[finfo.Font, FontError].err{hm.err}; }
+    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?face, 0);
+    if (sel info.err) { ret res[finfo.Font, FontError].err{info.err}; }
+    ret parsed;
+}
+
+# a typeface over bytes whose storage is already settled
+fun adopt(a: *allo.Allocator, data: *u8, len: usize, cap: usize) res[Typeface, Error] {
+    var t: Typeface;
+    t.a     = a;
+    t.data  = data;
+    t.len   = len;
+    t.cap   = cap;
+    t.faces = 0;
+    t.valid = false;
+    val parsed: res[finfo.Font, FontError] = parse(data, len);
+    if (sel parsed.err) { ret res[Typeface, Error].err{font_failed(parsed.err)}; }
+    t.face  = parsed.ok;
+    t.valid = true;
+    ret res[Typeface, Error].ok{t};
+}
+
+# Parse a font from borrowed bytes, keeping a copy.
+#
+# The bytes are read only during this call. They are parsed in place first, so
+# a stream that is not a usable font is refused before anything is allocated.
+# ---
+# a:    allocator for the retained copy
+# data: complete TrueType byte stream, borrowed for this call
+# len:  encoded byte count
+# ret:  an owned Typeface, or an empty, parse or allocation error
+pub fun typeface_from_bytes(a: *allo.Allocator, data: *u8, len: usize) res[Typeface, Error] {
+    if (len == 0 || data == nil) { ret res[Typeface, Error].err{Error.text{TextError.empty{}}}; }
+    val probe: res[finfo.Font, FontError] = parse(data, len);
+    if (sel probe.err) { ret res[Typeface, Error].err{font_failed(probe.err)}; }
+
+    val copied: res[*u8, allo.Error] = allo.allocate[u8](a, len);
+    if (sel copied.err) { ret res[Typeface, Error].err{Error.alloc{copied.err}}; }
+    mem.raw_copy(copied.ok::ptr, data::ptr, len);
+    val made: res[Typeface, Error] = adopt(a, copied.ok, len, len);
+    if (sel made.err) { allo.deallocate[u8](a, copied.ok, len); }
+    ret made;
+}
+
+# Parse a font over bytes that outlive the typeface, without copying them.
+#
+# For bytes a game embeds with #[embed] or otherwise keeps for its whole life.
+# The typeface reads them on every glyph lookup, so releasing them first is a
+# use after free.
+# ---
+# data: complete TrueType byte stream that outlives the typeface
+# len:  encoded byte count
+# ret:  a Typeface borrowing `data`, or an empty or parse error
+pub fun typeface_from_static(data: *u8, len: usize) res[Typeface, Error] {
+    if (len == 0 || data == nil) { ret res[Typeface, Error].err{Error.text{TextError.empty{}}}; }
+    ret adopt(nil, data, len, 0);
+}
+
+# Load a font file from a virtual path.
+#
+# The file's buffer becomes the typeface's storage, so the bytes are read once
+# and never copied.
+# ---
+# a:     allocator for the file bytes
+# vpath: virtual path to a TrueType file, e.g. res://fonts/ui.ttf
+# ret:   an owned Typeface, or a read, empty or parse error
+pub fun typeface_load(a: *allo.Allocator, vpath: str) res[Typeface, Error] {
+    val read: res[vector.Vector[u8], vfs.ReadError] = vfs.vfs_read_bytes(a, vpath);
+    if (sel read.err) { ret res[Typeface, Error].err{Error.load{read.err}}; }
+    var bytes: vector.Vector[u8] = read.ok;
+    if (bytes.len == 0) {
+        vector.dnit[u8](?bytes);
+        ret res[Typeface, Error].err{Error.text{TextError.empty{}}};
+    }
+    val made: res[Typeface, Error] = adopt(bytes.a, bytes.data, bytes.len, bytes.cap);
+    if (sel made.err) { vector.dnit[u8](?bytes); }
+    ret made;
+}
+
+# Release a typeface's bytes.
+#
+# Refused while a FontFace still borrows it, because every face reads these
+# bytes on each glyph it has not seen yet.
+# ---
+# t:   the typeface, unusable after a successful delete
+# ret: ok, in_use while faces are live, or the allocator's refusal
+pub fun typeface_delete(t: *Typeface) err[Error] {
+    if (!t.valid)     { ret err[Error].ok{}; }
+    if (t.faces != 0) { ret err[Error].err{Error.text{TextError.in_use{}}}; }
+    t.valid = false;
+    if (t.a == nil || t.data == nil) {
+        t.data = nil;
+        ret err[Error].ok{};
+    }
+    val freed: err[allo.Error] = allo.deallocate[u8](t.a, t.data, t.cap);
+    t.data = nil;
+    t.len  = 0;
+    t.cap  = 0;
+    if (sel freed.err) { ret err[Error].err{Error.alloc{freed.err}}; }
+    ret err[Error].ok{};
+}
+
+# The horizontal line metrics of a typeface, which parse guarantees are present.
+pub fun typeface_hhea(t: *Typeface) fhhea.Hhea {
+    var h: fhhea.Hhea;
+    if (sel t.face.hhea.some) { h = t.face.hhea.some; }
+    ret h;
+}
+
+test "typeface: bytes that are not a font are refused before any copy" {
+    var bytes: [4]u8                = [4]u8{0, 1, 2, 3};
+    val r:     res[Typeface, Error] = typeface_from_bytes(nil, ?bytes[0], 4);
+    if (!(sel r.err && (sel r.err.text && sel r.err.text.font))) { ret 1; }
+    val e: res[Typeface, Error] = typeface_from_static(?bytes[0], 0);
+    if (!(sel e.err && (sel e.err.text && sel e.err.text.empty))) { ret 2; }
+    ret 0;
+}
+
+test "typeface: a typeface with live faces refuses to delete" {
+    var t: Typeface;
+    t.valid = true;
+    t.faces = 1;
+    val refused: err[Error] = typeface_delete(?t);
+    if (!(sel refused.err && (sel refused.err.text && sel refused.err.text.in_use))) { ret 1; }
+    if (!t.valid)                                                                    { ret 2; }
+    t.faces = 0;
+    val done: err[Error] = typeface_delete(?t);
+    if (!sel done.ok) { ret 3; }
+    if (t.valid)      { ret 4; }
+    ret 0;
+}

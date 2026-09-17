@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-17
+
+### Added
+- graphics: text is three layers (#152).
+  - `Typeface` holds a font file's bytes and parsed tables, with no size and
+    no device: `typeface_from_bytes`, `typeface_from_static` for embedded
+    bytes, `typeface_load` and `typeface_delete`.
+  - `FontFace` is a typeface at one size and policy, and is everything layout
+    needs without a device: `face_init`, `face_glyph` (glyph index, advance,
+    bearing), `face_line_height`, `face_ascent`, `face_descent`,
+    `face_measure`, `face_height` and `face_lines`.
+  - `GlyphAtlas` holds the rasterized cells for one face and does the drawing:
+    `atlas_init`, `atlas_preload`, `atlas_draw`, `atlas_cell_count`,
+    `atlas_page_count` and `atlas_missing`.
+  - The glyph index is the contract between face and atlas.
+  - Layout, and tests of layout, no longer need a renderer. One file drawn at
+    several sizes is held and parsed once.
+- graphics: `text_next` is the UTF-8 walk every measure and draw uses. It lets
+  layout built outside boom step by codepoint and read one advance per
+  codepoint from `face_glyph`, instead of measuring one byte at a time.
+- graphics: `font_typeface`, `font_face` and `font_atlas` expose the layers a
+  `Font` owns.
+- graphics: `TextError.in_use` refuses `typeface_delete` while a face still
+  borrows the typeface, and `face_delete` while an atlas still borrows the
+  face.
+
+### Changed
+- graphics: `Font` owns one `Typeface`, `FontFace` and `GlyphAtlas`, and every
+  existing `font_*` and `text_*` signature is unchanged. It remains the API for
+  one font at one size.
+- graphics: `text_measure`, `text_height` and `text_lines` go through the face
+  and never rasterize or upload. A measured string is rasterized the first
+  time it is drawn or preloaded. `font_glyph_count` counts codepoints measured
+  or drawn, and `font_missing` adds the glyphs whose metrics could not be read
+  to those the atlas could not draw.
+- graphics: `FontRaster`, `FontSizeMode`, `FontOptions`, `font_options` and
+  `font_pixel_options` are declared in `boom.graphics.text.face`, and
+  `ATLAS_PAGE`, `ATLAS_PAGE_MAX` and `MAX_PAGES` in `boom.graphics.text.atlas`.
+  All of them are still exported from `boom.graphics` under the same names.
+
 ## [0.25.1] - 2026-09-16
 
 ### Changed

@@ -1,0 +1,253 @@
+# Text tests against a real face, with no device.
+#
+# Nothing in the library imports this module, so the embedded font never
+# reaches a consumer's build. `mach test` collects it all the same. The face is
+# a DejaVu Sans subset; res/test/fonts/README.md says how it is regenerated.
+#
+# Expected metrics are the subset's own hmtx values, read with fontTools when
+# the subset was made: units per em 2048, ascent 1901, descent -483.
+
+use boom.graphics.error.Error;
+use boom.graphics.text.Font;
+use boom.graphics.text.atlas.GlyphAtlas;
+use boom.graphics.text.atlas.atlas_cell_count;
+use boom.graphics.text.atlas.atlas_page_count;
+use boom.graphics.text.face.FontFace;
+use boom.graphics.text.face.GlyphMetrics;
+use boom.graphics.text.face.face_delete;
+use boom.graphics.text.face.face_glyph;
+use boom.graphics.text.face.face_height;
+use boom.graphics.text.face.face_init;
+use boom.graphics.text.face.face_line_height;
+use boom.graphics.text.face.face_measure;
+use boom.graphics.text.face.face_resolved;
+use boom.graphics.text.face.face_unreadable;
+use boom.graphics.text.face.font_options;
+use boom.graphics.text.face.font_pixel_options;
+use boom.graphics.text.face.text_next;
+use boom.graphics.text.font_glyph_count;
+use boom.graphics.text.text_height;
+use boom.graphics.text.text_lines;
+use boom.graphics.text.text_measure;
+use boom.graphics.text.typeface.Typeface;
+use boom.graphics.text.typeface.typeface_delete;
+use boom.graphics.text.typeface.typeface_from_bytes;
+use boom.graphics.text.typeface.typeface_from_static;
+use allo: std.allocator;
+use std.allocator.page;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_len;
+
+#[embed("../../../res/test/fonts/DejaVuSans-subset.ttf")]
+val DEJAVU: [_]u8;
+
+# the subset's design-unit line span, ascent minus descent
+val SPAN: f32 = 2384.0;
+
+fun dejavu() res[Typeface, Error] {
+    ret typeface_from_static(?DEJAVU[0], $length_of(DEJAVU));
+}
+
+fun units(advance: f32, pixels: f32) f32 {
+    ret advance * (pixels / SPAN);
+}
+
+fun pages(a: *allo.Allocator) bool {
+    val made: err[allo.Error] = page.make(a);
+    ret sel made.ok;
+}
+
+test "fixture: a typeface parses from embedded bytes without a device" {
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 1; }
+    var t: Typeface = made.ok;
+    if (!t.valid)     { ret 2; }
+    if (t.faces != 0) { ret 3; }
+    val done: err[Error] = typeface_delete(?t);
+    if (!sel done.ok) { ret 4; }
+    ret 0;
+}
+
+test "fixture: a face reports the typeface's own metrics" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 2; }
+    var t:     Typeface             = made.ok;
+    val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
+    if (!sel faced.ok) { ret 3; }
+    var f: FontFace = faced.ok;
+    fin {
+        face_delete(?f);
+        typeface_delete(?t);
+    }
+
+    if (face_line_height(?f) != 16.0) { ret 4; }
+
+    val cap_a: GlyphMetrics = face_glyph(?f, 0x41);
+    if (cap_a.glyph != 34)                    { ret 5; }
+    if (cap_a.advance != units(1401.0, 16.0)) { ret 6; }
+    if (cap_a.bearing_x != units(16.0, 16.0)) { ret 7; }
+    if (cap_a.empty || !cap_a.readable)       { ret 8; }
+
+    # a space has an advance and no outline
+    val space: GlyphMetrics = face_glyph(?f, 0x20);
+    if (space.advance != units(651.0, 16.0) || !space.empty) { ret 9; }
+
+    # U+00E9 is a composite glyph in this face
+    val acute: GlyphMetrics = face_glyph(?f, 0xE9);
+    if (acute.advance != units(1260.0, 16.0) || acute.empty) { ret 10; }
+
+    # Cyrillic and U+FFFD are in the subset
+    if (face_glyph(?f, 0x416).advance != units(2206.0, 16.0))  { ret 11; }
+    if (face_glyph(?f, 0xFFFD).advance != units(2100.0, 16.0)) { ret 12; }
+
+    # a codepoint the subset lacks is .notdef, glyph 0, with its own advance
+    val han: GlyphMetrics = face_glyph(?f, 0x4F60);
+    if (han.glyph != 0)                     { ret 13; }
+    if (han.advance != units(1229.0, 16.0)) { ret 14; }
+    if (face_unreadable(?f) != 0)           { ret 15; }
+    ret 0;
+}
+
+test "fixture: layout measures real advances and caches them" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 2; }
+    var t:     Typeface             = made.ok;
+    val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
+    if (!sel faced.ok) { ret 3; }
+    var f: FontFace = faced.ok;
+    fin {
+        face_delete(?f);
+        typeface_delete(?t);
+    }
+
+    # "abc" is a (1255), b (1300), c (1126)
+    val abc: f32 = units(1255.0, 16.0) + units(1300.0, 16.0) + units(1126.0, 16.0);
+    if (face_measure(?f, "abc") != abc)     { ret 4; }
+    if (face_measure(?f, "abc\nab") != abc) { ret 5; }
+    if (face_height(?f, "abc\nab") != 32.0) { ret 6; }
+    if (face_resolved(?f) != 3)             { ret 7; }
+    if (face_measure(?f, "cab") != abc)     { ret 8; }
+    if (face_resolved(?f) != 3)             { ret 9; }
+
+    # a consumer's own layout walks by codepoint and reads one advance each
+    var word: [5]u8 = [5]u8{0xD0, 0x96, 0x61, 0xC3, 0xA9};
+    var sum:  f32   = 0.0;
+    var i:    usize = 0;
+    for (i < 5) {
+        var cp: u32 = 0;
+        i   = i + text_next(?word[0], i, 5, ?cp);
+        sum = sum + face_glyph(?f, cp).advance;
+    }
+    if (sum != units(2206.0, 16.0) + units(1255.0, 16.0) + units(1260.0, 16.0)) { ret 10; }
+    ret 0;
+}
+
+test "fixture: pixel faces measure in whole pixels" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 2; }
+    var t:     Typeface             = made.ok;
+    val faced: res[FontFace, Error] = face_init(?a, ?t, 11.0, font_pixel_options());
+    if (!sel faced.ok) { ret 3; }
+    var f: FontFace = faced.ok;
+    fin {
+        face_delete(?f);
+        typeface_delete(?t);
+    }
+    val w: f32 = face_measure(?f, "Hello, world!");
+    if (w != (w::i64)::f32) { ret 4; }
+    if (w <= 0.0)           { ret 5; }
+    ret 0;
+}
+
+test "fixture: one typeface serves several faces and outlives them" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 2; }
+    var t: Typeface = made.ok;
+
+    val small: res[FontFace, Error] = face_init(?a, ?t, 12.0, font_options());
+    val large: res[FontFace, Error] = face_init(?a, ?t, 24.0, font_options());
+    if (!sel small.ok) { ret 3; }
+    if (!sel large.ok) { ret 3; }
+    var s: FontFace = small.ok;
+    var l: FontFace = large.ok;
+    if (t.faces != 2)                                             { ret 4; }
+    if (face_measure(?l, "abc") != 2.0 * face_measure(?s, "abc")) { ret 5; }
+
+    val early: err[Error] = typeface_delete(?t);
+    if (!(sel early.err && (sel early.err.text && sel early.err.text.in_use))) { ret 6; }
+    if (!t.valid)                                                              { ret 7; }
+
+    face_delete(?s);
+    face_delete(?l);
+    if (t.faces != 0) { ret 8; }
+    val done: err[Error] = typeface_delete(?t);
+    if (!sel done.ok) { ret 9; }
+    ret 0;
+}
+
+test "fixture: a copied typeface outlives the caller's bytes" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = typeface_from_bytes(?a, ?DEJAVU[0], $length_of(DEJAVU));
+    if (!sel made.ok) { ret 2; }
+    var t: Typeface = made.ok;
+    if (t.data == ?DEJAVU[0]) { ret 3; }
+    val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
+    if (!sel faced.ok) { ret 4; }
+    var f: FontFace = faced.ok;
+    if (face_glyph(?f, 0x41).glyph != 34) { ret 5; }
+    face_delete(?f);
+    val done: err[Error] = typeface_delete(?t);
+    if (!sel done.ok) { ret 6; }
+    ret 0;
+}
+
+test "fixture: measuring a font never admits a glyph to its atlas" {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu();
+    if (!sel made.ok) { ret 2; }
+    var t:     Typeface             = made.ok;
+    val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
+    if (!sel faced.ok) { ret 3; }
+    var f: FontFace = faced.ok;
+    fin {
+        face_delete(?f);
+        typeface_delete(?t);
+    }
+
+    # an atlas with no device and no pages: any admission would have to touch
+    # both, so an empty cell map afterwards is proof nothing tried
+    var g: GlyphAtlas;
+    g.valid = true;
+    g.face  = ?f;
+    var font: Font;
+    font.a        = ?a;
+    font.typeface = ?t;
+    font.face     = ?f;
+    font.atlas    = ?g;
+    font.valid    = true;
+
+    var mixed: [12]u8 = [12]u8{0x48, 0x69, 0x0A, 0xD0, 0x96, 0xC3, 0xA9, 0xE4, 0xBD, 0xA0, 0x21, 0};
+    if (text_measure(?font, ?mixed[0]) <= 0.0) { ret 4; }
+    if (text_height(?font, ?mixed[0]) != 32.0) { ret 5; }
+    if (text_lines(?font, ?mixed[0]) != 2)     { ret 6; }
+    if (font_glyph_count(?font) != 6)          { ret 7; }
+    if (atlas_cell_count(?g) != 0)             { ret 8; }
+    if (atlas_page_count(?g) != 0)             { ret 9; }
+    ret 0;
+}
