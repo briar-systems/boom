@@ -171,8 +171,9 @@ fun on_init(ctx: *Context) {
         context_fail(ctx, 1);
         ret;
     }
-    var bytes: vector.Vector[u8]        = br.ok;
-    val fr:    res[gfx.Font, gfx.Error] = gfx.font_from_bytes(?c.a, d, bytes.data, bytes.len, PIXELS);
+    var bytes: vector.Vector[u8] = br.ok;
+    check_layers(c, d, ?bytes);
+    val fr: res[gfx.Font, gfx.Error] = gfx.font_from_bytes(?c.a, d, bytes.data, bytes.len, PIXELS);
 
     # The source lifetime ends here, before any glyph has been rasterized, so
     # every glyph below is rasterized out of the Font's own copy.
@@ -208,19 +209,106 @@ fun on_init(ctx: *Context) {
     check_metrics(c);
 }
 
+# One typeface at two sizes, each with its own atlas, on a real device.
+#
+# The layered path a game with several sizes of one file takes. The typeface
+# refuses to go while a face still reads it, and each face refuses while its
+# atlas is live, so tearing down in the wrong order is reported rather than
+# freeing bytes a face still needs.
+fun check_layers(c: *Check, d: *gfx.Device, bytes: *vector.Vector[u8]) {
+    val made: res[gfx.Typeface, gfx.Error] = gfx.typeface_from_bytes(?c.a, bytes.data, bytes.len);
+    if (sel made.err) {
+        fail(c, "a typeface could not be made from the font bytes");
+        ret;
+    }
+    var t: gfx.Typeface = made.ok;
+
+    val small_made: res[gfx.FontFace, gfx.Error] = gfx.face_init(?c.a, ?t, 12.0, gfx.font_options());
+    if (sel small_made.err) {
+        fail(c, "a 12 pixel face could not be made");
+        gfx.typeface_delete(?t);
+        ret;
+    }
+    var small:      gfx.FontFace                 = small_made.ok;
+    val large_made: res[gfx.FontFace, gfx.Error] = gfx.face_init(?c.a, ?t, 24.0, gfx.font_options());
+    if (sel large_made.err) {
+        fail(c, "a 24 pixel face could not be made");
+        gfx.face_delete(?small);
+        gfx.typeface_delete(?t);
+        ret;
+    }
+    var large: gfx.FontFace = large_made.ok;
+
+    if (gfx.face_measure(?large, "Ab") != 2.0 * gfx.face_measure(?small, "Ab")) {
+        fail(c, "two sizes of one typeface did not measure in proportion");
+    }
+
+    val small_atlas: res[gfx.GlyphAtlas, gfx.Error] = gfx.atlas_init(?c.a, d, ?small);
+    if (sel small_atlas.err) {
+        fail(c, "an atlas could not be made over a shared typeface");
+        release_layers(c, ?t, ?small, ?large);
+        ret;
+    }
+    var sa:          gfx.GlyphAtlas                 = small_atlas.ok;
+    val large_atlas: res[gfx.GlyphAtlas, gfx.Error] = gfx.atlas_init(?c.a, d, ?large);
+    if (sel large_atlas.err) {
+        fail(c, "a second atlas could not be made over a shared typeface");
+        gfx.atlas_delete(d, ?sa);
+        release_layers(c, ?t, ?small, ?large);
+        ret;
+    }
+    var la: gfx.GlyphAtlas = large_atlas.ok;
+
+    if (!gfx.atlas_preload(?sa, "Ab") || !gfx.atlas_preload(?la, "Ab")) {
+        fail(c, "a shared typeface could not rasterize into two atlases");
+    }
+    # a cell belongs to a glyph, so a face that maps both letters to .notdef,
+    # as a Han-only face does, holds one cell and not two
+    var cells: usize = 2;
+    if (gfx.face_glyph(?small, 'A').glyph == gfx.face_glyph(?small, 'b').glyph) { cells = 1; }
+    if (gfx.atlas_cell_count(?sa) != cells || gfx.atlas_cell_count(?la) != cells) {
+        fail(c, "two atlases over one typeface did not each hold one cell per glyph");
+    }
+    val face_early: err[gfx.Error] = gfx.face_delete(?small);
+    if (!sel face_early.err) {
+        fail(c, "a face with a live atlas was deleted");
+    }
+    val type_early: err[gfx.Error] = gfx.typeface_delete(?t);
+    if (!sel type_early.err) {
+        fail(c, "a typeface with live faces was deleted");
+    }
+    gfx.atlas_delete(d, ?sa);
+    gfx.atlas_delete(d, ?la);
+    release_layers(c, ?t, ?small, ?large);
+}
+
+# delete two faces and their typeface, innermost first
+fun release_layers(c: *Check, t: *gfx.Typeface, small: *gfx.FontFace, large: *gfx.FontFace) {
+    gfx.face_delete(small);
+    gfx.face_delete(large);
+    val done: err[gfx.Error] = gfx.typeface_delete(t);
+    if (!sel done.ok) {
+        fail(c, "a typeface was still held after its faces were deleted");
+    }
+}
+
 # what can be checked before anything is drawn
 fun check_metrics(c: *Check) {
-    # a face that has drawn nothing has admitted nothing, which is the whole
-    # reason a twenty-thousand-glyph face is loadable at all
+    # a face that has drawn nothing has measured nothing and rasterized
+    # nothing, which is the whole reason a twenty-thousand-glyph face is
+    # loadable at all
     if (gfx.font_glyph_count(?c.font) != 0) {
-        fail(c, "a freshly loaded face had already admitted glyphs");
+        fail(c, "a freshly loaded face had already resolved codepoints");
+    }
+    if (gfx.atlas_cell_count(gfx.font_atlas(?c.font)) != 0) {
+        fail(c, "a freshly loaded atlas had already rasterized glyphs");
     }
     if (gfx.font_page_count(?c.font) != 1) {
         fail(c, "a freshly loaded face did not open exactly one atlas page");
     }
 
-    # measuring admits the glyphs it measures, so this is the first
-    # rasterization the face has done, out of bytes the caller already freed
+    # measuring reads metrics out of the font's own copy of the bytes, which
+    # the caller already freed
     if (gfx.text_measure(?c.font, "borrowed bytes") <= 0.0) {
         fail(c, "ASCII text measured to nothing");
     }
@@ -241,14 +329,20 @@ fun check_metrics(c: *Check) {
     # not in the text, and fewer that it dropped something that is.
     val admitted: usize = gfx.font_glyph_count(?c.font);
     if (admitted != 14) {
-        print.eprintlnf("admitted {} codepoints", admitted);
-        fail(c, "measuring did not admit exactly the codepoints it walked");
+        print.eprintlnf("resolved {} codepoints", admitted);
+        fail(c, "measuring did not resolve exactly the codepoints it walked");
     }
 
-    # measuring again resolves out of the map rather than rasterizing twice
+    # measuring again resolves out of the cache
     gfx.text_measure(?c.font, hello());
     if (gfx.font_glyph_count(?c.font) != admitted) {
-        fail(c, "a repeated string admitted its codepoints twice");
+        fail(c, "a repeated string resolved its codepoints twice");
+    }
+
+    # and none of it rasterized or uploaded anything: measuring is the face's
+    # job, and only drawing or preloading touches the atlas
+    if (gfx.atlas_cell_count(gfx.font_atlas(?c.font)) != 0) {
+        fail(c, "measuring rasterized glyphs into the atlas");
     }
 
     # a line break is layout, not a glyph, and must not enter the atlas
@@ -259,7 +353,7 @@ fun check_metrics(c: *Check) {
         fail(c, "a leading line break changed the widest line's width");
     }
     if (gfx.font_glyph_count(?c.font) != admitted) {
-        fail(c, "a line break was admitted to the atlas as a glyph");
+        fail(c, "a line break was resolved as a glyph");
     }
     if (gfx.font_missing(?c.font) != 0) {
         fail(c, "the atlas could not admit every glyph of a short string");
@@ -342,7 +436,7 @@ fun stress_pages(c: *Check) {
         if (cp < 0xD800 || cp > 0xDFFF) {
             val n: usize = utf8.encode(cp, ?one[0], 8);
             one[n] = 0;
-            gfx.text_measure(?c.font, ?one[0]);
+            gfx.font_preload(?c.font, ?one[0]);
             if (gfx.font_page_count(?c.font) > before) {
                 # the codepoint whose admission opened the page is the one
                 # glyph certain to live on it
@@ -492,7 +586,7 @@ fun report(c: *Check) {
     if (c.rolled) {
         print.println("PASS: the glyph that opened the second atlas page drew in place");
     }
-    print.printlnf("PASS: {} codepoints admitted on demand across {} atlas page(s)",
+    print.printlnf("PASS: {} codepoints resolved, drawn from {} atlas page(s)",
         gfx.font_glyph_count(?c.font), gfx.font_page_count(?c.font));
 }
 
