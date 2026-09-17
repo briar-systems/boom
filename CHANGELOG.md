@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-09-16
+
+### Changed
+- build: builds with std 4.0 and the graphics releases on it: mach-glfw 0.5.1,
+  mach-audio 0.6.1, mach-image 0.4.1, mach-font 0.4.1, mach-phys 0.3.1,
+  mach-vk 0.3.1 and mach-gltf 0.4.1. mach-shader stays at 0.3.0. std 4.0 needs
+  mach 5.2.0 or later. No std or dependency type in boom's public API changed.
+  An `io.error.Error` that reaches a caller through `ContextError`,
+  `EngineError`, the clock or a file load can carry a more specific `kind` than
+  before (`IO`, `NOT_FOUND` and others instead of `OTHER`), and its `code` is 0
+  when std raised the error itself.
+
 ## [0.25.0] - 2026-09-16
 
 ### Added

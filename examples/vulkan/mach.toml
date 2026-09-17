@@ -48,8 +48,8 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v3.2.0"
+ref = "tag/v4.0.0"
 
 [dep.image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "tag/v0.4.0"
+ref = "tag/v0.4.1"
