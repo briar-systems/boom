@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - license: the copyright holder is Briar Systems LLC.
 - build: every manifest declares `mach = "^5.3"`, so boom needs mach 5.3 or
   later and mach 5.3+ no longer warns about a missing compiler range.
+- graphics: the window's render pass begins with the first pass drawn to it
+  rather than in `renderer_begin_frame`, so that pass's `PassDesc.clear` is the
+  window's clear on load (#113). It is the window's background colour, with no
+  new API, and it no longer pays for a second full-window clear on top of a
+  black one. The pixels are unchanged. Only a later window pass that clears still
+  records a clear in place. At the frame loop level, `frame_begin` no longer
+  opens the window pass, and `frame_end` clears to black when nothing drew.
 
 ## [0.26.0] - 2026-09-17
 
