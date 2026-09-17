@@ -3,6 +3,7 @@
 [project]
 id = "game"
 version = "0.3.1"
+mach = "^5.3"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
