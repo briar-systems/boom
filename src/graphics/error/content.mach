@@ -29,6 +29,7 @@ pub tag TextureError: u8 {
 # empty:        the font byte span is empty
 # cell_empty:   the pixel height rounds to an empty glyph cell
 # page_limit:   one glyph cell needs an atlas page past ATLAS_PAGE_MAX
+# in_use:       a typeface or face was deleted while a face or atlas still borrows it
 # font:         the TrueType parser refused the face
 pub tag TextError: u8 {
     pixel_height;
@@ -38,6 +39,7 @@ pub tag TextError: u8 {
     empty;
     cell_empty;
     page_limit;
+    in_use;
     font: FontError;
 }
 
@@ -57,5 +59,6 @@ pub fun text_error_message(e: TextError) str {
     if (sel e.empty)        { ret "font byte stream is empty"; }
     if (sel e.cell_empty)   { ret "font pixel height rounds to an empty glyph cell"; }
     if (sel e.page_limit)   { ret "font pixel height needs an atlas page past the portable limit"; }
+    if (sel e.in_use)       { ret "a typeface or face is still borrowed by a face or atlas"; }
     ret "not a usable TrueType font";
 }

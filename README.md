@@ -109,18 +109,29 @@ The `font_from_bytes_oversampled` and `font_load_oversampled` variants keep
 logical text dimensions unchanged while rasterizing extra coverage for scaled
 or high-density interfaces.
 
-**Text is UTF-8 and the atlas fills on demand.** `text_draw` and `text_measure`
-decode their string as UTF-8 and draw any codepoint the face has a glyph for,
-so Chinese, Japanese, Korean, Cyrillic, Greek and accented Latin all render. A
-glyph is rasterized and uploaded the first time it is asked for and kept for
-the face's life, because a CJK face carries tens of thousands of glyphs.
-`font_preload` moves that first-use cost to load for text a game knows in
-advance. `\n` starts a new line box, `text_measure` reports the widest line
-and `text_height` the block, and `font_glyph_count`, `font_page_count` and
-`font_missing` report what the atlas holds. A codepoint the face does not cover
-draws the face's `.notdef` box rather than a hole. This is not shaping: there
-is no bidi, Arabic joining, Indic reordering, kerning, or ligature and mark
-positioning, so Arabic and the Brahmic scripts render as isolated forms.
+**Text is UTF-8, and layout needs no device.** Text is three layers.
+- A `Typeface` is a font file's bytes and tables.
+- A `FontFace` is a typeface at one size, and answers everything layout asks:
+  `face_glyph` gives a codepoint's glyph index and advance, and `face_measure`,
+  `face_height` and `face_lines` measure a string.
+- A `GlyphAtlas` rasterizes a face's glyphs on first draw and draws them.
+
+Only the atlas needs a device, so layout and its tests run without a renderer.
+`text_next` walks a string one codepoint at a time for layout built outside
+boom.
+
+`Font` owns one of each and is the API for one font at one size. Its
+`text_measure` goes through the face and never rasterizes. `font_preload`
+rasterizes a known string at load. A game drawing one file at several sizes
+builds one `Typeface` and a `FontFace` plus `GlyphAtlas` per size. The typeface
+refuses to delete while a face still uses it, and a face refuses while its
+atlas does.
+
+A codepoint the face does not cover draws the face's `.notdef` box rather than
+a hole, and every such codepoint shares that one atlas cell. This is not
+shaping: there is no bidi, Arabic joining, Indic reordering, kerning, or
+ligature and mark positioning, so Arabic and the Brahmic scripts render as
+isolated forms.
 
 **Shaders are pipelines, not programs.** A Vulkan pipeline bakes both stages and
 the whole fixed-function state into one immutable object, so there is no
