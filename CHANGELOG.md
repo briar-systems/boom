@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-09-16
+
 ### Changed
 - build: builds with std 4.0 and the graphics releases on it: mach-glfw 0.5.1,
   mach-audio 0.6.1, mach-image 0.4.1, mach-font 0.4.1, mach-phys 0.3.1,
