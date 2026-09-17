@@ -59,6 +59,54 @@ pub val MAX_FRAMES_IN_FLIGHT: usize = 2;
 # Nanoseconds to wait on a fence before treating the GPU as hung.
 val FENCE_TIMEOUT: u64 = 1000000000;
 
+# Where the window's render pass is in the frame being recorded.
+#
+# idle:      not begun this frame. Nothing has been drawn to the window, so the
+#            pass that begins it may clear on load for free.
+# open:      begun and recording.
+# suspended: ended part way for an offscreen excursion, and resumed through the
+#            loading pass when that excursion ends.
+pub tag WindowPass: u8 {
+    idle;
+    open;
+    suspended;
+}
+
+# What beginning a window pass records, decided by window_step.
+#
+# begin:  begin the clearing pass, with the pass's clear or black.
+# clear:  the pass is open and asked to clear, so erase in place.
+# keep:   the pass is open and asked for nothing.
+# nested: a window pass opened inside an offscreen one. No sequence of passes
+#         reaches it, which a test asserts, and nothing is recorded for it.
+pub tag WindowStep: u8 {
+    begin;
+    clear;
+    keep;
+    nested;
+}
+
+# What a window pass records, given where the window's render pass is.
+#
+# THIS IS WHY A BACKGROUND COLOUR NEEDS NO API OF ITS OWN. The window pass is
+# begun by the first window pass of the frame rather than by frame_begin, so the
+# colour that pass asks to clear to is the clear on load. Clearing before
+# anything is drawn and clearing on load leave the same pixels, so one field,
+# PassDesc.clear, says both, and only what it costs differs.
+pub fun window_step(state: WindowPass, clearing: bool) WindowStep {
+    if (sel state.idle)      { ret WindowStep.begin{}; }
+    if (sel state.suspended) { ret WindowStep.nested{}; }
+    if (clearing)            { ret WindowStep.clear{}; }
+    ret WindowStep.keep{};
+}
+
+# Where an offscreen pass leaves the window: suspended if it was open, and as
+# it was otherwise.
+pub fun window_suspended(state: WindowPass) WindowPass {
+    if (sel state.open) { ret WindowPass.suspended{}; }
+    ret state;
+}
+
 # Per-frame state, one set per in-flight frame.
 # ---
 # command:   Command buffer recorded this frame.
@@ -87,6 +135,7 @@ rec Frame {
 # frames:       Per-frame state.
 # current:      Which in-flight frame is next.
 # image_index:  Swapchain image acquired this frame.
+# window:       Where the window's render pass is in the frame being recorded.
 # ready:        Whether creation completed.
 pub rec FrameLoop {
     pass:         vk.RenderPass;
@@ -99,6 +148,7 @@ pub rec FrameLoop {
     frames:       [2]Frame;
     current:      usize;
     image_index:  u32;
+    window:       WindowPass;
     ready:        bool;
 }
 
@@ -106,6 +156,7 @@ pub rec FrameLoop {
 pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     f.ready   = false;
     f.current = 0;
+    f.window  = WindowPass.idle{};
 
     if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
     if (!s.ready) { ret err[Error].err{Error.uninitialized{Stage.swapchain{}}}; }
@@ -259,6 +310,10 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
 
 # Begin a frame: wait for its fence, acquire an image, and start recording.
 #
+# The window's render pass is not begun here. Whatever draws to the window
+# begins it through frame_begin_pass, and frame_end begins and clears it to
+# black if nothing did, so a frame with no window pass still presents.
+#
 # False when the swapchain is out of date, which is not an error: the caller
 # rebuilds and tries again next frame. Treating it as a failure would make every
 # window resize look like a crash.
@@ -303,24 +358,26 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
         ret res[bool, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
     }
 
-    frame_begin_pass(f, s, 0.0, 0.0, 0.0, 1.0);
+    # THE WINDOW PASS IS NOT BEGUN HERE. The first window pass of the frame
+    # begins it, so the colour that pass clears to is the clear on load rather
+    # than a second clear recorded over a black one. window_step decides.
+    f.window = WindowPass.idle{};
     ret res[bool, Error].ok{true};
 }
 
-# Begin the window render pass, clearing to a colour.
+# Begin the window render pass, clearing colour and depth on load.
 #
-# Split from frame_begin so an offscreen pass can suspend and resume it. The
-# clear happens here rather than at pass level because a Vulkan render pass
-# clears on load, so it is a property of beginning one.
-pub fun frame_begin_pass(f: *FrameLoop, s: *Swapchain, r: f32, g: f32, b: f32, a: f32) {
+# A Vulkan render pass clears on load, so the clear is a property of beginning
+# one, and this is only called while the window is idle.
+pub fun frame_begin_pass(f: *FrameLoop, s: *Swapchain, r: f32, g: f32, b: f32, a: f32, depth: f32) {
     var clears: [2]vk.ClearValue;
     clears[0].color.float32[0] = r;
     clears[0].color.float32[1] = g;
     clears[0].color.float32[2] = b;
     clears[0].color.float32[3] = a;
-    # Depth clears to 1.0, the far plane. Clearing to 0 makes every fragment
-    # fail the less-than test and the window come out empty.
-    clears[1].depthStencil.depth   = 1.0;
+    # The far value of the convention the pass draws with. 1.0 for a forward
+    # pass: clearing a less-than test to 0 leaves every fragment failing it.
+    clears[1].depthStencil.depth   = depth;
     clears[1].depthStencil.stencil = 0;
 
     var rbi: vk.RenderPassBeginInfo;
@@ -335,11 +392,20 @@ pub fun frame_begin_pass(f: *FrameLoop, s: *Swapchain, r: f32, g: f32, b: f32, a
     rbi.clearValueCount          = 2;
     rbi.pClearValues             = ?clears[0];
     vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+    f.window = WindowPass.open{};
 }
 
 # Suspend the window render pass so another may begin.
-pub fun frame_suspend_pass(f: *FrameLoop) {
+#
+# Only an open pass is suspended. True when this call suspended it, which is
+# what obliges the caller to resume it: a window never begun this frame stays
+# idle, and the first window pass after the excursion begins it with its clear.
+pub fun frame_suspend_pass(f: *FrameLoop) bool {
+    val was: WindowPass = f.window;
+    f.window = window_suspended(was);
+    if (!sel was.open) { ret false; }
     vk.vkCmdEndRenderPass(f.frames[f.current].command);
+    ret true;
 }
 
 # Resume the window render pass, preserving what is already drawn.
@@ -359,6 +425,7 @@ pub fun frame_resume_pass(f: *FrameLoop, s: *Swapchain) {
     rbi.clearValueCount          = 0;
     rbi.pClearValues             = nil;
     vk.vkCmdBeginRenderPass(f.frames[f.current].command, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+    f.window = WindowPass.open{};
 }
 
 # End the render pass, submit, and present.
@@ -368,7 +435,11 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     if (!f.ready) { ret res[bool, Error].err{Error.uninitialized{Stage.frame{}}}; }
 
     val i: usize = f.current;
+    # A frame that drew nothing to the window still presents a cleared image,
+    # and the barrier below expects the layout the pass leaves.
+    if (sel f.window.idle) { frame_begin_pass(f, s, 0.0, 0.0, 0.0, 1.0, 1.0); }
     vk.vkCmdEndRenderPass(f.frames[i].command);
+    f.window = WindowPass.idle{};
 
     # THE TRANSITION TO PRESENTABLE BELONGS HERE, NOT TO A RENDER PASS. A frame
     # is one pass, or three when the game renders into an offscreen target part
@@ -546,5 +617,76 @@ test "frame: teardown on an uninitialized loop is a no-op" {
     v.ready = false;
     frame_dnit(?f, ?v);
     if (f.ready) { ret 1; }
+    ret 0;
+}
+
+test "frame: a window pass begins an idle window and clears an open one in place" {
+    val a: WindowStep = window_step(WindowPass.idle{}, true);
+    val b: WindowStep = window_step(WindowPass.idle{}, false);
+    val c: WindowStep = window_step(WindowPass.open{}, true);
+    val d: WindowStep = window_step(WindowPass.open{}, false);
+    val e: WindowStep = window_step(WindowPass.suspended{}, true);
+    if (!sel a.begin)  { ret 1; }
+    if (!sel b.begin)  { ret 2; }
+    if (!sel c.clear)  { ret 3; }
+    if (!sel d.keep)   { ret 4; }
+    if (!sel e.nested) { ret 5; }
+    ret 0;
+}
+
+test "frame: an offscreen pass suspends only a window that is open" {
+    val open: WindowPass = window_suspended(WindowPass.open{});
+    val idle: WindowPass = window_suspended(WindowPass.idle{});
+    if (!sel open.suspended) { ret 1; }
+    if (!sel idle.idle)      { ret 2; }
+    ret 0;
+}
+
+# Every frame of up to six passes, each a clearing window pass, a window pass
+# that keeps, or an offscreen excursion. A window pass is never begun inside an
+# offscreen one, because pass_begin for the window records into whichever
+# render pass is open. So the suspended arm of window_step is unreachable, and
+# this is what keeps it so when the transitions change.
+test "frame: no sequence of passes begins a window pass while it is suspended" {
+    val ops:   u32 = 3;
+    val depth: u32 = 6;
+    var total: u32 = 1;
+    var k:     u32 = 0;
+    for (k < depth) {
+        total = total * ops;
+        k     = k + 1;
+    }
+
+    var code: u32 = 0;
+    for (code < total) {
+        var state: WindowPass = WindowPass.idle{};
+        var rest:  u32        = code;
+        var i:     u32        = 0;
+        for (i < depth) {
+            val op: u32 = rest % ops;
+            rest = rest / ops;
+            if (op == 2) {
+                if (sel state.suspended) { ret 1; }
+                val resumes: bool       = sel state.open;
+                val after:   WindowPass = window_suspended(state);
+                val parked:  bool       = sel after.suspended;
+                # suspended exactly when this excursion owes a resume
+                if (resumes != parked) { ret 2; }
+                state = after;
+                # pass_end resumes the window it suspended
+                if (resumes) { state = WindowPass.open{}; }
+            }
+            or {
+                val step: WindowStep = window_step(state, op == 0);
+                if (sel step.nested) { ret 3; }
+                if (sel step.begin)  { state = WindowPass.open{}; }
+            }
+            i = i + 1;
+        }
+        # frame_end ends an open pass or begins and ends an idle one, and has no
+        # way to finish a suspended one
+        if (sel state.suspended) { ret 4; }
+        code = code + 1;
+    }
     ret 0;
 }
