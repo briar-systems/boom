@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-17
+
 ### Changed
 - license: the copyright holder is Briar Systems LLC.
 - build: every manifest declares `mach = "^5.3"`, so boom needs mach 5.3 or
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   black one. The pixels are unchanged. Only a later window pass that clears still
   records a clear in place. At the frame loop level, `frame_begin` no longer
   opens the window pass, and `frame_end` clears to black when nothing drew.
+- graphics: `frame_begin_pass` takes the depth value to clear to, after the
+  colour (#113). It is not forwarded by `boom.graphics`.
 
 ## [0.26.0] - 2026-09-17
 
