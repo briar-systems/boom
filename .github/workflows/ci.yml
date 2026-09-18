@@ -3,7 +3,7 @@ name: CI
 # the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
 # one linux leg on a pull request into dev and into main. the examples are a
 # glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
-# nothing runs on push. release.yml calls this with heavy: all.
+# nothing runs on push. cd.yml calls this with heavy: all.
 
 on:
   pull_request:
