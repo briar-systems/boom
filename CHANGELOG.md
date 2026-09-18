@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#162). The colour still loads black when the pass asks for none.
 
 ### Changed
+- text: mach-font is v0.5.0, whose `glyph_info` measures a glyph's resolved
+  outline rather than reading the glyf header, so a font whose stored boxes are
+  stale or zero now places correctly. For every shipped font the numbers are
+  identical, checked by the device-free fixture against DejaVu. A `Typeface`
+  now owns the outline scratch its faces measure through, sized from the
+  face's maxima, so `typeface_from_static` takes an allocator for it.
+### Changed
 - lifecycle: **breaking.** `context_shutdown` returns `err[ContextError]` and
   refuses with `ContextError.window{WindowError.in_use{n}}` while `n` renderers
   still hold a surface on the window, leaving it open (#157). Teardown order is

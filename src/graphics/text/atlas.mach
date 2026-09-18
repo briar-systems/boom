@@ -45,6 +45,7 @@ use boom.graphics.text.face.is_layout_control;
 use boom.graphics.text.face.pixel_round;
 use boom.graphics.text.face.text_next;
 use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.outline_scratch_sizes;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture;
 use boom.graphics.texture.texture_delete;
@@ -94,10 +95,6 @@ val GUTTER: usize = 1;
 # The buffer is sized from the typeface's declared point maxima, so a font that
 # lies about them is the only way to reach this. It is a bound, not a budget.
 val MAX_EDGES: usize = 262144;
-
-# The point and contour scratch for a typeface whose maxp declares no maxima.
-val FALLBACK_POINTS:   usize = 512;
-val FALLBACK_CONTOURS: usize = 32;
 
 # where one glyph lives in the atlas
 # ---
@@ -197,24 +194,17 @@ fun quad_segments(cell: usize) usize {
 
 # The scratch sizes a typeface needs, from what it declares.
 #
-# maxp declares the maxima for the font in hand, and a composite glyph resolves
-# to more points than a simple one, so the larger of the two pairs has to fit.
+# The points and contours are the typeface's own sizing, so the atlas admits
+# exactly the glyphs the face can measure. The edges follow from the points.
 # ---
 # m:    the declared maxima, none for a maxp 0.5 typeface
 # cell: cell side in raster texels
 # ret:  points, contours, and edges, in that order
 fun scratch_sizes(m: opt[fmaxp.Maxima], cell: usize) [3]usize {
-    var points:   usize = FALLBACK_POINTS;
-    var contours: usize = FALLBACK_CONTOURS;
-    if (sel m.some) {
-        points   = m.some.max_points::usize;
-        contours = m.some.max_contours::usize;
-        if (m.some.max_composite_points::usize > points)     { points = m.some.max_composite_points::usize; }
-        if (m.some.max_composite_contours::usize > contours) { contours = m.some.max_composite_contours::usize; }
-    }
-    if (points < 16)  { points = 16; }
-    if (contours < 4) { contours = 4; }
-    var edges: usize = points * quad_segments(cell) + 128;
+    val outline:  [2]usize = outline_scratch_sizes(m);
+    val points:   usize    = outline[0];
+    val contours: usize    = outline[1];
+    var edges:    usize    = points * quad_segments(cell) + 128;
     if (edges > MAX_EDGES) { edges = MAX_EDGES; }
     ret [3]usize{points, contours, edges};
 }
@@ -711,14 +701,14 @@ test "atlas: the scratch is sized from the face and the curve" {
     if (quad_segments(22) != 16)  { ret 1; }
     if (quad_segments(128) != 32) { ret 2; }
     if (quad_segments(512) != 64) { ret 3; }
+    # points and contours are the typeface's sizing, tested there. the edges
+    # follow from the points and the curve
     val cjk: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
         max_points:           900, max_contours: 60,
         max_composite_points: 1200, max_composite_contours: 40,
     }}, 22);
     if (cjk[0] != 1200 || cjk[1] != 60) { ret 4; }
     if (cjk[2] != 1200 * 16 + 128)      { ret 5; }
-    val old: [3]usize = scratch_sizes(opt[fmaxp.Maxima].none{}, 22);
-    if (old[0] != FALLBACK_POINTS || old[1] != FALLBACK_CONTOURS) { ret 6; }
     val hostile: [3]usize = scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
         max_points:           65535, max_contours: 1,
         max_composite_points: 0, max_composite_contours: 0,
