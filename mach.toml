@@ -113,7 +113,7 @@ ref = "tag/v0.4.1"
 
 [dep.font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "tag/v0.4.1"
+ref = "tag/v0.5.0"
 
 [dep.vk]
 git = "https://github.com/briar-systems/mach-vk"

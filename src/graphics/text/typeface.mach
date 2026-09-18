@@ -21,6 +21,7 @@ use fglyf: font.glyf;
 use fhhea: font.hhea;
 use fhmtx: font.hmtx;
 use finfo: font.info;
+use fmaxp: font.maxp;
 use allo:  std.allocator;
 use std.collections.vector;
 use mem: std.memory;
@@ -33,23 +34,68 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 
+# The point and contour scratch for a typeface whose maxp declares no maxima.
+val FALLBACK_POINTS:   usize = 512;
+val FALLBACK_CONTOURS: usize = 32;
+
 # a parsed font file
 # ---
-# a:     allocator that owns `data`, nil when the bytes are borrowed
-# data:  the encoded TrueType bytes
-# len:   encoded byte count
-# cap:   bytes allocated behind `data`, which is what is released
-# face:  the parsed handle over `data`
-# faces: live FontFace instances borrowing this typeface
-# valid: whether the typeface is live, cleared by typeface_delete
+# a:        allocator for the outline scratch, and for `data` when owned
+# data:     the encoded TrueType bytes
+# len:      encoded byte count
+# cap:      bytes allocated behind `data`, which is what is released
+# owns:     whether `data` is released with the typeface, or borrowed
+# face:     the parsed handle over `data`
+# pts:      outline point scratch, sized from what the face declares
+# pts_cap:  points pts holds
+# ends:     contour end scratch
+# ends_cap: contour ends ends holds
+# faces:    live FontFace instances borrowing this typeface
+# valid:    whether the typeface is live, cleared by typeface_delete
 pub rec Typeface {
-    a:     *allo.Allocator;
-    data:  *u8;
-    len:   usize;
-    cap:   usize;
-    face:  finfo.Font;
-    faces: usize;
-    valid: bool;
+    a:        *allo.Allocator;
+    data:     *u8;
+    len:      usize;
+    cap:      usize;
+    owns:     bool;
+    face:     finfo.Font;
+    pts:      *fglyf.Point;
+    pts_cap:  usize;
+    ends:     *u16;
+    ends_cap: usize;
+    faces:    usize;
+    valid:    bool;
+}
+
+# The point and contour scratch a typeface needs, from what it declares.
+#
+# maxp declares the maxima for the font in hand, and a composite glyph resolves
+# to more points than a simple one, so the larger of the two pairs has to fit.
+# Scratch this size admits glyph_outline, and so glyph_info, for any glyph.
+# ---
+# m:   the declared maxima, none for a maxp 0.5 typeface
+# ret: points, then contours
+pub fun outline_scratch_sizes(m: opt[fmaxp.Maxima]) [2]usize {
+    var points:   usize = FALLBACK_POINTS;
+    var contours: usize = FALLBACK_CONTOURS;
+    if (sel m.some) {
+        points   = m.some.max_points::usize;
+        contours = m.some.max_contours::usize;
+        if (m.some.max_composite_points::usize > points)     { points = m.some.max_composite_points::usize; }
+        if (m.some.max_composite_contours::usize > contours) { contours = m.some.max_composite_contours::usize; }
+    }
+    if (points < 16)  { points = 16; }
+    if (contours < 4) { contours = 4; }
+    ret [2]usize{points, contours};
+}
+
+# Measure a glyph's resolved outline through the typeface's scratch.
+# ---
+# t:     the typeface
+# glyph: glyph index
+# ret:   the box, none for a glyph with no outline, or the parser's refusal
+pub fun typeface_glyph_bounds(t: *Typeface, glyph: u16) res[opt[fglyf.Bounds], FontError] {
+    ret finfo.glyph_info(?t.face, glyph, t.pts, t.pts_cap, t.ends, t.ends_cap);
 }
 
 # the Error for a parser refusal
@@ -72,25 +118,59 @@ fun parse(data: *u8, len: usize) res[finfo.Font, FontError] {
     }
     val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?face, 0);
     if (sel hm.err) { ret res[finfo.Font, FontError].err{hm.err}; }
-    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?face, 0);
-    if (sel info.err) { ret res[finfo.Font, FontError].err{info.err}; }
     ret parsed;
 }
 
 # a typeface over bytes whose storage is already settled
-fun adopt(a: *allo.Allocator, data: *u8, len: usize, cap: usize) res[Typeface, Error] {
+#
+# The outline scratch is allocated here, sized from the face's maxima, and the
+# .notdef glyph is measured through it: that proves glyph data is readable
+# before any face is made, since a measure later has no way to say it is not.
+fun adopt(a: *allo.Allocator, data: *u8, len: usize, cap: usize, owns: bool) res[Typeface, Error] {
     var t: Typeface;
     t.a     = a;
     t.data  = data;
     t.len   = len;
     t.cap   = cap;
+    t.owns  = owns;
     t.faces = 0;
     t.valid = false;
     val parsed: res[finfo.Font, FontError] = parse(data, len);
     if (sel parsed.err) { ret res[Typeface, Error].err{font_failed(parsed.err)}; }
-    t.face  = parsed.ok;
+    t.face = parsed.ok;
+
+    val declared: res[opt[fmaxp.Maxima], FontError] = finfo.outline_maxima(?t.face);
+    if (sel declared.err) { ret res[Typeface, Error].err{font_failed(declared.err)}; }
+    val sizes: [2]usize                      = outline_scratch_sizes(declared.ok);
+    val pr:    res[*fglyf.Point, allo.Error] = allo.allocate[fglyf.Point](a, sizes[0]);
+    if (sel pr.err) { ret res[Typeface, Error].err{Error.alloc{pr.err}}; }
+    t.pts     = pr.ok;
+    t.pts_cap = sizes[0];
+    val er: res[*u16, allo.Error] = allo.allocate[u16](a, sizes[1]);
+    if (sel er.err) {
+        allo.deallocate[fglyf.Point](a, t.pts, t.pts_cap);
+        ret res[Typeface, Error].err{Error.alloc{er.err}};
+    }
+    t.ends     = er.ok;
+    t.ends_cap = sizes[1];
+
+    val notdef: res[opt[fglyf.Bounds], FontError] = typeface_glyph_bounds(?t, 0);
+    if (sel notdef.err) {
+        release_scratch(?t);
+        ret res[Typeface, Error].err{font_failed(notdef.err)};
+    }
     t.valid = true;
     ret res[Typeface, Error].ok{t};
+}
+
+# a typeface that never allocated scratch, a zeroed one, has nothing to release
+fun release_scratch(t: *Typeface) {
+    if (t.pts != nil)  { allo.deallocate[fglyf.Point](t.a, t.pts, t.pts_cap); }
+    if (t.ends != nil) { allo.deallocate[u16](t.a, t.ends, t.ends_cap); }
+    t.pts      = nil;
+    t.pts_cap  = 0;
+    t.ends     = nil;
+    t.ends_cap = 0;
 }
 
 # Parse a font from borrowed bytes, keeping a copy.
@@ -110,7 +190,7 @@ pub fun typeface_from_bytes(a: *allo.Allocator, data: *u8, len: usize) res[Typef
     val copied: res[*u8, allo.Error] = allo.allocate[u8](a, len);
     if (sel copied.err) { ret res[Typeface, Error].err{Error.alloc{copied.err}}; }
     mem.raw_copy(copied.ok::ptr, data::ptr, len);
-    val made: res[Typeface, Error] = adopt(a, copied.ok, len, len);
+    val made: res[Typeface, Error] = adopt(a, copied.ok, len, len, true);
     if (sel made.err) { allo.deallocate[u8](a, copied.ok, len); }
     ret made;
 }
@@ -119,14 +199,15 @@ pub fun typeface_from_bytes(a: *allo.Allocator, data: *u8, len: usize) res[Typef
 #
 # For bytes a game embeds with #[embed] or otherwise keeps for its whole life.
 # The typeface reads them on every glyph lookup, so releasing them first is a
-# use after free.
+# use after free. The allocator serves only the outline scratch.
 # ---
+# a:    allocator for the outline scratch
 # data: complete TrueType byte stream that outlives the typeface
 # len:  encoded byte count
-# ret:  a Typeface borrowing `data`, or an empty or parse error
-pub fun typeface_from_static(data: *u8, len: usize) res[Typeface, Error] {
+# ret:  a Typeface borrowing `data`, or an empty, parse or allocation error
+pub fun typeface_from_static(a: *allo.Allocator, data: *u8, len: usize) res[Typeface, Error] {
     if (len == 0 || data == nil) { ret res[Typeface, Error].err{Error.text{TextError.empty{}}}; }
-    ret adopt(nil, data, len, 0);
+    ret adopt(a, data, len, 0, false);
 }
 
 # Load a font file from a virtual path.
@@ -145,7 +226,7 @@ pub fun typeface_load(a: *allo.Allocator, vpath: str) res[Typeface, Error] {
         vector.dnit[u8](?bytes);
         ret res[Typeface, Error].err{Error.text{TextError.empty{}}};
     }
-    val made: res[Typeface, Error] = adopt(bytes.a, bytes.data, bytes.len, bytes.cap);
+    val made: res[Typeface, Error] = adopt(bytes.a, bytes.data, bytes.len, bytes.cap, true);
     if (sel made.err) { vector.dnit[u8](?bytes); }
     ret made;
 }
@@ -161,7 +242,8 @@ pub fun typeface_delete(t: *Typeface) err[Error] {
     if (!t.valid)     { ret err[Error].ok{}; }
     if (t.faces != 0) { ret err[Error].err{Error.text{TextError.in_use{}}}; }
     t.valid = false;
-    if (t.a == nil || t.data == nil) {
+    release_scratch(t);
+    if (!t.owns || t.data == nil) {
         t.data = nil;
         ret err[Error].ok{};
     }
@@ -184,7 +266,7 @@ test "typeface: bytes that are not a font are refused before any copy" {
     var bytes: [4]u8                = [4]u8{0, 1, 2, 3};
     val r:     res[Typeface, Error] = typeface_from_bytes(nil, ?bytes[0], 4);
     if (!(sel r.err && (sel r.err.text && sel r.err.text.font))) { ret 1; }
-    val e: res[Typeface, Error] = typeface_from_static(?bytes[0], 0);
+    val e: res[Typeface, Error] = typeface_from_static(nil, ?bytes[0], 0);
     if (!(sel e.err && (sel e.err.text && sel e.err.text.empty))) { ret 2; }
     ret 0;
 }
@@ -200,5 +282,21 @@ test "typeface: a typeface with live faces refuses to delete" {
     val done: err[Error] = typeface_delete(?t);
     if (!sel done.ok) { ret 3; }
     if (t.valid)      { ret 4; }
+    ret 0;
+}
+
+test "typeface: the outline scratch is sized from the larger of the declared maxima" {
+    val cjk: [2]usize = outline_scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points:           900, max_contours: 60,
+        max_composite_points: 1200, max_composite_contours: 40,
+    }});
+    if (cjk[0] != 1200 || cjk[1] != 60) { ret 1; }
+    val old: [2]usize = outline_scratch_sizes(opt[fmaxp.Maxima].none{});
+    if (old[0] != FALLBACK_POINTS || old[1] != FALLBACK_CONTOURS) { ret 2; }
+    # a font that declares next to nothing still gets room for a real glyph
+    val tiny: [2]usize = outline_scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
+        max_points: 2, max_contours: 1, max_composite_points: 0, max_composite_contours: 0,
+    }});
+    if (tiny[0] != 16 || tiny[1] != 4) { ret 3; }
     ret 0;
 }
