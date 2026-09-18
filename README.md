@@ -59,11 +59,20 @@ fun main(argc: i64, argv: **u8) i64 {
     };
     val ran: res[i64, boom.engine.EngineError] = boom.engine.run(?ctx, ?app);
 
-    boom.context.context_shutdown(?ctx);
+    val closed: err[boom.context.ContextError] = boom.context.context_shutdown(?ctx);
+    if (sel closed.err) { ret 1; }
     if (sel ran.err) { ret 1; }
     ret ran.ok;
 }
 ```
+
+**Teardown order is resources, then the renderer, then the context.** A
+`Renderer` holds a surface created from the window, and every resource is
+released against the renderer's device, so the reverse of creation is the only
+order in which nothing dangles. Delete textures, meshes, models, fonts, targets
+and shaders (usually in `f_dnit`), then `renderer_dnit`, then
+`context_shutdown`. The context refuses to shut down while a renderer still
+holds its window, and says how many do.
 
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.

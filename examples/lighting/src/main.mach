@@ -1253,7 +1253,12 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     context_set_user(?ctx, (?game)::ptr);
     val ran: res[i64, EngineError] = run(?ctx, ?app);
-    context_shutdown(?ctx);
+    # the f_dnit hook released the renderer inside run, so the window is free
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf("FAIL: shutdown refused: {}", context_error_message(closed.err));
+        ret 1;
+    }
     if (sel ran.err) {
         print.eprintlnf("FAIL: the frame loop stopped: {}", engine_error_message(ran.err));
         ret 1;

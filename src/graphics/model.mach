@@ -583,6 +583,8 @@ pub fun model_joint(model: *Model, name: str) res[usize, Error] {
 # the buffers are released whatever the outcome. a refused release of the clip
 # storage leaves the arena owning it, and the model's names and clips are cleared
 # either way.
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 # ---
 # d:   the upload context the model was created against
 # m:   model to delete; the handle must not be used afterward

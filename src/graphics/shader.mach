@@ -211,6 +211,8 @@ pub fun shader_pipelines(s: *Shader) usize {
 # a game never names the Vulkan device this is really destroying against.
 #
 # The SPIR-V is not freed: it was borrowed.
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 pub fun shader_delete(s: *Shader, d: *Device) {
     if (d == nil || !d.ready) { ret; }
     val v: *Vk = d.vk;
