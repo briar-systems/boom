@@ -217,13 +217,41 @@ pub fun context_user(ctx: *Context) ptr {
 
 # tear the engine subsystems down
 #
-# closes the window and shuts down the platform layer. call once, after
-# a successful context_init.
+# closes the window and shuts down the platform layer. call once, after a
+# successful context_init.
+#
+# TEARDOWN ORDER IS RESOURCES, THEN THE RENDERER, THEN THIS. A renderer holds
+# a surface created from this window, and every resource is released against
+# the renderer's device, so the reverse of creation is the only order in which
+# nothing dangles. This refuses, and leaves the window open, while a renderer
+# still holds it: closing anyway would destroy the platform window under a live
+# surface, which is the fault the refusal exists to prevent.
 # ---
 # ctx: context to shut down
-pub fun context_shutdown(ctx: *Context) {
-    window_close(?ctx.window);
+# ret: ok, or in_use with how many renderers still hold the window
+pub fun context_shutdown(ctx: *Context) err[ContextError] {
+    val closed: err[WindowError] = window_close(?ctx.window);
+    if (sel closed.err) { ret err[ContextError].err{ContextError.window{closed.err}}; }
     ctx.running = false;
+    ret err[ContextError].ok{};
+}
+
+test "context: shutdown is refused while a renderer holds the window" {
+    # a zeroed window has no handle, so closing it destroys nothing
+    var ctx: Context;
+    ctx.window.renderers = 1;
+    ctx.running          = true;
+    val held: err[ContextError] = context_shutdown(?ctx);
+    if (!sel held.err)               { ret 1; }
+    if (!sel held.err.window)        { ret 2; }
+    if (!sel held.err.window.in_use) { ret 2; }
+    # the refusal leaves the context as it was
+    if (!ctx.running) { ret 3; }
+    ctx.window.renderers = 0;
+    val freed: err[ContextError] = context_shutdown(?ctx);
+    if (!sel freed.ok) { ret 4; }
+    if (ctx.running)   { ret 5; }
+    ret 0;
 }
 
 test "context: user pointer round-trips" {

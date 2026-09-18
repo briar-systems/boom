@@ -1283,7 +1283,13 @@ fun main(argc: i64, argv: **u8) i64 {
     gfx.texture_delete(d, ?tex);
     gfx.mesh_delete(d, ?mesh);
     gfx.renderer_dnit(?r);
-    window_close(?w);
+    # the window counts the renderers holding a surface on it and refuses to
+    # close while one does, so a close that succeeds here proves the order
+    val closed: err[WindowError] = window_close(?w);
+    if (sel closed.err) {
+        p.printlnf("FAIL: window refused to close: {}", window_error_message(closed.err));
+        ret 1;
+    }
     p.println("ok   teardown");
 
     if (presented == 0) {

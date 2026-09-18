@@ -39,6 +39,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (#162). The colour still loads black when the pass asks for none.
 
 ### Changed
+- lifecycle: **breaking.** `context_shutdown` returns `err[ContextError]` and
+  refuses with `ContextError.window{WindowError.in_use{n}}` while `n` renderers
+  still hold a surface on the window, leaving it open (#157). Teardown order is
+  resources, then the renderer, then the context: a renderer's surface is
+  created from the window, and every resource is released against the
+  renderer's device, so the reverse of creation is the only order in which
+  nothing dangles. `window_close` returns the same result. Migration: tear the
+  renderer down before `context_shutdown` (an `f_dnit` hook already runs before
+  `run` returns), and handle the result. Deleting a resource after
+  `renderer_dnit` is documented on every `*_delete` and not enforced.
+- window: **breaking.** A refused mode says what was asked and what was
+  missing (#157). `WindowError.no_monitor` carries `ModeRefusal{mode, part}`,
+  with `part` either `monitor` or `video_mode`, and `WindowError.create`
+  carries `ModeCreate{mode, cause}`. `window_error_message` names both. A
+  caller can now fall back to windowed only when a monitor-attached mode was
+  refused, rather than retrying every failure.
+### Changed
 - ci: release runs are serialized per tag, so a tag push GitHub delivers twice
   publishes once (#166).
 

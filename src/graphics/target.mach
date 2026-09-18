@@ -466,6 +466,8 @@ pub fun render_target_bgra(t: *RenderTarget) bool {
 }
 
 # release the target's images, render pass, and framebuffer
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 # ---
 # d: the upload context the target was created against
 # t: target to delete; the handle must not be used afterward

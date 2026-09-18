@@ -768,6 +768,8 @@ pub fun mesh_load(d: *Device, path: str) res[Mesh, Error] {
 }
 
 # release the GPU buffers backing a mesh
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 # ---
 # d: the upload context the mesh was created against
 # m: mesh to delete; the handle must not be used afterward

@@ -201,6 +201,8 @@ pub fun font_load_with_options(a: *allo.Allocator, d: *Device, vpath: str,
 }
 
 # Release a font's atlas, face and typeface.
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 # ---
 # d: the device the font was created against
 # f: the font, unusable afterwards

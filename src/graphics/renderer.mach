@@ -280,6 +280,7 @@ rec PendingMeshUpload {
 # Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:          glfw.Window;
+    owner:           *Window;
     vk:              Vk;
     dev:             Device;
     swap:            Swapchain;
@@ -383,6 +384,10 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
     r.ready_vk = true;
+    # The surface now exists, and it is created from the window's platform
+    # handle. The window refuses to close until renderer_dnit releases it.
+    r.owner          = window;
+    window.renderers = window.renderers + 1;
 
     val dr: err[Error] = device_init(?r.dev, ?r.vk);
     if (sel dr.err) {
@@ -1303,6 +1308,12 @@ pub fun renderer_culled(r: *Renderer) usize {
 }
 
 # release everything the renderer owns
+#
+# Every resource created against this renderer's device (textures, meshes,
+# models, fonts, targets, shaders) must be deleted before this, since their
+# delete waits on a device that no longer exists afterwards. The window is
+# closed after this, never before: it counts the renderers holding a surface
+# on it and refuses to close while this one does.
 # ---
 # r: renderer to shut down; must not be used afterward
 pub fun renderer_dnit(r: *Renderer) {
@@ -1370,6 +1381,9 @@ fun renderer_rollback(r: *Renderer) {
     if (r.ready_vk) {
         vk_dnit(?r.vk);
         r.ready_vk = false;
+        # The surface is gone, so the window may close.
+        if (r.owner != nil) { r.owner.renderers = r.owner.renderers - 1; }
+        r.owner = nil;
     }
     r.drawing = false;
 }
