@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- ci: release runs are serialized per tag, so a tag push GitHub delivers twice
+  publishes once (#166).
+
 ## [0.27.0] - 2026-09-17
 
 ### Changed
