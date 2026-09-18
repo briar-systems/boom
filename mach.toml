@@ -115,10 +115,6 @@ ref = "tag/v0.4.1"
 git = "https://github.com/briar-systems/mach-font"
 ref = "tag/v0.4.1"
 
-[dep.phys]
-git = "https://github.com/briar-systems/mach-phys"
-ref = "tag/v0.3.1"
-
 [dep.vk]
 git = "https://github.com/briar-systems/mach-vk"
 ref = "tag/v0.3.1"
