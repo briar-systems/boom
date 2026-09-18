@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-18
+
 ### Removed
 - physics: **breaking.** `boom.physics` is gone: `Physics`, `physics_new`,
   `physics_add`, `physics_remove`, `physics_set_velocity`, `physics_velocity`,
