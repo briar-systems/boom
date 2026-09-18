@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `font_load*`, `typeface_load`, `sound_load`) stay, as stateless conveniences
   over the byte constructors.
 
+### Fixed
+- graphics: a reversed-depth window pass that asks for no clear now draws.
+  The first window pass of a frame loads depth at the far value of its own
+  convention rather than a fixed 1.0, which a GREATER test could never pass
+  (#162). The colour still loads black when the pass asks for none.
+
 ### Changed
 - ci: release runs are serialized per tag, so a tag push GitHub delivers twice
   publishes once (#166).
