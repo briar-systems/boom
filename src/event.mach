@@ -6,7 +6,6 @@
 # queue is refused rather than overwriting unread events.
 
 use inp: boom.input;
-use boom.physics.BodyId;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -78,15 +77,6 @@ pub rec ResizeEvent {
     height: i32;
 }
 
-# two physics bodies collided
-# ---
-# a: the first body, as boom.physics reported it
-# b: the second body
-pub rec CollisionEvent {
-    a: BodyId;
-    b: BodyId;
-}
-
 # one input event
 # ---
 # close:        the window was asked to close
@@ -95,7 +85,6 @@ pub rec CollisionEvent {
 # mouse_move:   the cursor moved
 # scroll:       the scroll wheel moved
 # resize:       the framebuffer was resized
-# collision:    two physics bodies collided
 pub tag Event: u8 {
     close;
     key:          KeyEvent;
@@ -103,7 +92,6 @@ pub tag Event: u8 {
     mouse_move:   MoveEvent;
     scroll:       ScrollEvent;
     resize:       ResizeEvent;
-    collision:    CollisionEvent;
 }
 
 # why an event was not queued

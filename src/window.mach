@@ -33,7 +33,9 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
+use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_equals;
 
 # how a window is presented
 # ---
@@ -46,28 +48,81 @@ pub tag WindowMode: u8 {
     fullscreen;
 }
 
+# what a monitor-attached mode needed and did not get
+# ---
+# monitor:    no monitor was found for the window
+# video_mode: the monitor reports no video mode
+pub tag MonitorPart: u8 {
+    monitor;
+    video_mode;
+}
+
+# a borderless or fullscreen request the monitor could not satisfy
+#
+# The mode is carried so a caller can compare against the one it asked for
+# with the type it already holds, and fall back on purpose rather than retry
+# every failure as windowed. A windowed request never raises this.
+# ---
+# mode: the mode that was requested
+# part: which requirement of that mode was unmet
+pub rec ModeRefusal {
+    mode: WindowMode;
+    part: MonitorPart;
+}
+
+# the platform refused to create a window in a mode
+# ---
+# mode:  the mode the window was being created in
+# cause: the platform's error
+pub rec ModeCreate {
+    mode:  WindowMode;
+    cause: glfw.Error;
+}
+
 # why a window could not be opened or changed
 # ---
 # init:       the platform layer could not be initialized
-# no_monitor: a borderless or fullscreen mode found no monitor with a video mode
+# no_monitor: a borderless or fullscreen mode needed a monitor or video mode it did not get
 # create:     the platform refused to create the window
 # closed:     the window is not open
+# in_use:     the window cannot close while this many renderers hold it
 pub tag WindowError: u8 {
-    init: glfw.Error;
-    no_monitor;
-    create: glfw.Error;
+    init:       glfw.Error;
+    no_monitor: ModeRefusal;
+    create:     ModeCreate;
     closed;
+    in_use: usize;
 }
 
-# a one-line description of a window failure
+# a one-line description of a window failure, naming the mode where one was refused
 # ---
 # e:   the failure
 # ret: static text naming the case
 pub fun window_error_message(e: WindowError) str {
-    if (sel e.init)       { ret "could not initialize the platform window layer"; }
-    if (sel e.no_monitor) { ret "no monitor with a video mode for this window mode"; }
-    if (sel e.create)     { ret "the platform refused to create a window"; }
-    ret "the window is not open";
+    if (sel e.init) { ret "could not initialize the platform window layer"; }
+    if (sel e.no_monitor) {
+        val r: ModeRefusal = e.no_monitor;
+        if (sel r.part.monitor) {
+            if (sel r.mode.fullscreen) { ret "fullscreen needs a monitor and none was found"; }
+            ret "borderless needs a monitor and none was found";
+        }
+        if (sel r.mode.fullscreen) { ret "fullscreen needs a video mode and the monitor reports none"; }
+        ret "borderless needs a video mode and the monitor reports none";
+    }
+    if (sel e.create) {
+        val c: ModeCreate = e.create;
+        if (sel c.mode.fullscreen) { ret "the platform refused to create a fullscreen window"; }
+        if (sel c.mode.borderless) { ret "the platform refused to create a borderless window"; }
+        ret "the platform refused to create a window";
+    }
+    if (sel e.closed) { ret "the window is not open"; }
+    ret "the window cannot close while a renderer holds it";
+}
+
+# the refusal for a mode that needed a monitor and a video mode
+fun mode_refusal(mode: WindowMode, monitor: bool) WindowError {
+    if (!monitor) { ret WindowError.no_monitor{ModeRefusal{mode: mode, part: MonitorPart.monitor{}}}; }
+    ret WindowError.no_monitor{ModeRefusal{mode: mode, part: MonitorPart.video_mode{}}};
 }
 
 # windowed client bounds in screen coordinates
@@ -94,6 +149,7 @@ pub rec WindowBounds {
 # windowed_maximized: whether ordinary mode restores through the compositor
 # min_width:          client limit applied when restoring windowed mode
 # min_height:         client limit applied when restoring windowed mode
+# renderers:          how many renderers hold a surface on this window
 pub rec Window {
     handle:             opt[glfw.Window];
     width:              i32;
@@ -104,6 +160,7 @@ pub rec Window {
     windowed_maximized: bool;
     min_width:          i32;
     min_height:         i32;
+    renderers:          usize;
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -325,7 +382,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     if (!sel mode.windowed) {
         if (!sel video.some) {
             glfw.terminate();
-            ret res[Window, WindowError].err{WindowError.no_monitor{}};
+            ret res[Window, WindowError].err{mode_refusal(mode, sel monitor.some)};
         }
         open_width  = video.some.width;
         open_height = video.some.height;
@@ -356,7 +413,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         open_width, open_height, title, attached, opt[glfw.Window].none{});
     if (sel created.err) {
         glfw.terminate();
-        ret res[Window, WindowError].err{WindowError.create{created.err}};
+        ret res[Window, WindowError].err{WindowError.create{ModeCreate{mode: mode, cause: created.err}}};
     }
     val win: glfw.Window = created.ok;
 
@@ -387,7 +444,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     ret res[Window, WindowError].ok{Window{
         handle:    opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
         monitor:   monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width: 1, min_height: 1
+        min_width: 1, min_height: 1, renderers: 0
     }};
 }
 
@@ -431,10 +488,10 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) err[WindowError] {
     }
 
     val found: opt[glfw.Monitor] = monitor_for_window(w, handle);
-    if (!sel found.some) { ret err[WindowError].err{WindowError.no_monitor{}}; }
+    if (!sel found.some) { ret err[WindowError].err{mode_refusal(mode, false)}; }
     val monitor:    glfw.Monitor  = found.some;
     val mode_video: opt[*Vidmode] = glfw.get_video_mode(monitor);
-    if (!sel mode_video.some) { ret err[WindowError].err{WindowError.no_monitor{}}; }
+    if (!sel mode_video.some) { ret err[WindowError].err{mode_refusal(mode, true)}; }
     val video: *Vidmode = mode_video.some;
 
     var mx: i32 = 0;
@@ -625,9 +682,16 @@ pub fun window_poll() {
 }
 
 # destroy the window and shut down GLFW
+#
+# Refused while a renderer holds a surface on the window: that surface is
+# destroyed by renderer_dnit, and destroying the window first pulls the
+# platform layer out from under it. Tear down resources, then the renderer,
+# then the window.
 # ---
-# w: window to close; closing a closed window does nothing
-pub fun window_close(w: *Window) {
+# w:   window to close; closing a closed window does nothing
+# ret: ok, or in_use with how many renderers still hold the window
+pub fun window_close(w: *Window) err[WindowError] {
+    if (w.renderers != 0) { ret err[WindowError].err{WindowError.in_use{w.renderers}}; }
     if (sel w.handle.some) {
         glfw.set_window_user_pointer(w.handle.some, nil);
         glfw.destroy_window(w.handle.some);
@@ -636,6 +700,7 @@ pub fun window_close(w: *Window) {
     w.handle = opt[glfw.Window].none{};
     w.width  = 0;
     w.height = 0;
+    ret err[WindowError].ok{};
 }
 
 fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds {
@@ -939,5 +1004,34 @@ test "window: a window that was never opened is closed" {
     val h: opt[glfw.Window] = window_handle(?w);
     if (sel h.some) { ret 7; }
     window_close(?w);
+    ret 0;
+}
+
+test "window: a refused mode names what was asked and what was missing" {
+    val no_mon: WindowError = mode_refusal(WindowMode.fullscreen{}, false);
+    val no_vid: WindowError = mode_refusal(WindowMode.borderless{}, true);
+    if (!sel no_mon.no_monitor) { ret 1; }
+    if (!sel no_vid.no_monitor) { ret 2; }
+    val a: ModeRefusal = no_mon.no_monitor;
+    val b: ModeRefusal = no_vid.no_monitor;
+    if (!sel a.mode.fullscreen || !sel a.part.monitor)    { ret 3; }
+    if (!sel b.mode.borderless || !sel b.part.video_mode) { ret 4; }
+    # the message says both, so a log line is enough to act on
+    if (!str_equals(window_error_message(no_mon), "fullscreen needs a monitor and none was found"))              { ret 5; }
+    if (!str_equals(window_error_message(no_vid), "borderless needs a video mode and the monitor reports none")) { ret 6; }
+    ret 0;
+}
+
+test "window: a window refuses to close while a renderer holds it" {
+    # a zeroed window has no handle, so closing it destroys nothing
+    var w: Window;
+    w.renderers = 2;
+    val held: err[WindowError] = window_close(?w);
+    if (!sel held.err)        { ret 1; }
+    if (!sel held.err.in_use) { ret 2; }
+    if (held.err.in_use != 2) { ret 3; }
+    w.renderers = 0;
+    val freed: err[WindowError] = window_close(?w);
+    if (!sel freed.ok) { ret 4; }
     ret 0;
 }

@@ -24,6 +24,7 @@ use boom.graphics.error.Error;
 use boom.graphics.error.content.TextError;
 use boom.graphics.text.typeface.Typeface;
 use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.typeface_glyph_bounds;
 use boom.graphics.text.typeface.typeface_hhea;
 use font.error.FontError;
 use fglyf: font.glyf;
@@ -250,7 +251,7 @@ fun read_glyph(f: *FontFace, cp: u32) GlyphMetrics {
         m.bearing_x = pixel_round(m.bearing_x);
     }
 
-    val info: res[opt[fglyf.GlyphInfo], FontError] = finfo.glyph_info(?t.face, m.glyph);
+    val info: res[opt[fglyf.Bounds], FontError] = typeface_glyph_bounds(t, m.glyph);
     if (sel info.err) {
         m.readable = false;
         m.empty    = true;

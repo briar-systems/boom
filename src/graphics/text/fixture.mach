@@ -50,8 +50,8 @@ val DEJAVU: [_]u8;
 # the subset's design-unit line span, ascent minus descent
 val SPAN: f32 = 2384.0;
 
-fun dejavu() res[Typeface, Error] {
-    ret typeface_from_static(?DEJAVU[0], $length_of(DEJAVU));
+fun dejavu(a: *allo.Allocator) res[Typeface, Error] {
+    ret typeface_from_static(a, ?DEJAVU[0], $length_of(DEJAVU));
 }
 
 fun units(advance: f32, pixels: f32) f32 {
@@ -64,7 +64,9 @@ fun pages(a: *allo.Allocator) bool {
 }
 
 test "fixture: a typeface parses from embedded bytes without a device" {
-    val made: res[Typeface, Error] = dejavu();
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 1; }
     var t: Typeface = made.ok;
     if (!t.valid)     { ret 2; }
@@ -77,7 +79,7 @@ test "fixture: a typeface parses from embedded bytes without a device" {
 test "fixture: a face reports the typeface's own metrics" {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu();
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 2; }
     var t:     Typeface             = made.ok;
     val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
@@ -119,7 +121,7 @@ test "fixture: a face reports the typeface's own metrics" {
 test "fixture: layout measures real advances and caches them" {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu();
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 2; }
     var t:     Typeface             = made.ok;
     val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());
@@ -155,7 +157,7 @@ test "fixture: layout measures real advances and caches them" {
 test "fixture: pixel faces measure in whole pixels" {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu();
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 2; }
     var t:     Typeface             = made.ok;
     val faced: res[FontFace, Error] = face_init(?a, ?t, 11.0, font_pixel_options());
@@ -174,7 +176,7 @@ test "fixture: pixel faces measure in whole pixels" {
 test "fixture: one typeface serves several faces and outlives them" {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu();
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 2; }
     var t: Typeface = made.ok;
 
@@ -219,7 +221,7 @@ test "fixture: a copied typeface outlives the caller's bytes" {
 test "fixture: measuring a font never admits a glyph to its atlas" {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu();
+    val made: res[Typeface, Error] = dejavu(?a);
     if (!sel made.ok) { ret 2; }
     var t:     Typeface             = made.ok;
     val faced: res[FontFace, Error] = face_init(?a, ?t, 16.0, font_options());

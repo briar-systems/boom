@@ -280,6 +280,7 @@ rec PendingMeshUpload {
 # Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:          glfw.Window;
+    owner:           *Window;
     vk:              Vk;
     dev:             Device;
     swap:            Swapchain;
@@ -383,6 +384,10 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
     r.ready_vk = true;
+    # The surface now exists, and it is created from the window's platform
+    # handle. The window refuses to close until renderer_dnit releases it.
+    r.owner          = window;
+    window.renderers = window.renderers + 1;
 
     val dr: err[Error] = device_init(?r.dev, ?r.vk);
     if (sel dr.err) {
@@ -1303,6 +1308,12 @@ pub fun renderer_culled(r: *Renderer) usize {
 }
 
 # release everything the renderer owns
+#
+# Every resource created against this renderer's device (textures, meshes,
+# models, fonts, targets, shaders) must be deleted before this, since their
+# delete waits on a device that no longer exists afterwards. The window is
+# closed after this, never before: it counts the renderers holding a surface
+# on it and refuses to close while this one does.
 # ---
 # r: renderer to shut down; must not be used afterward
 pub fun renderer_dnit(r: *Renderer) {
@@ -1370,6 +1381,9 @@ fun renderer_rollback(r: *Renderer) {
     if (r.ready_vk) {
         vk_dnit(?r.vk);
         r.ready_vk = false;
+        # The surface is gone, so the window may close.
+        if (r.owner != nil) { r.owner.renderers = r.owner.renderers - 1; }
+        r.owner = nil;
     }
     r.drawing = false;
 }
@@ -1671,6 +1685,21 @@ fun depth_clear_value(depth: DepthConvention) f32 {
     ret 1.0;
 }
 
+# The colour the window loads with when its first pass of the frame begins:
+# the pass's clear, or black when it asks for none.
+#
+# THE DEPTH IS NOT OPTIONAL THE WAY THE COLOUR IS. A window pass that asks for
+# no clear is keeping what earlier passes drew, and the first pass of a frame
+# has nothing to keep: the load clears regardless, and black is what "none"
+# has always meant for the colour. Depth has no such default. It is cleared to
+# the far value of whichever convention the pass draws with, because a
+# reversed pass tested against a forward far plane of 1.0 rejects every
+# fragment and draws nothing, silently. That was #162.
+fun window_load_colour(clear: opt[Vec4]) Vec4 {
+    if (sel clear.some) { ret clear.some; }
+    ret vec4(0.0, 0.0, 0.0, 1.0);
+}
+
 # begin a pass
 #
 # resolves the viewport from the target (or the window) and builds the view
@@ -1711,12 +1740,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     if (sel d.target.none) {
         val step: WindowStep = window_step(r.frame.window, sel d.clear.some);
         if (sel step.begin) {
-            var colour: Vec4 = vec4(0.0, 0.0, 0.0, 1.0);
-            var depth:  f32  = 1.0;
-            if (sel d.clear.some) {
-                colour = d.clear.some;
-                depth  = depth_clear_value(p.depth);
-            }
+            val colour: Vec4 = window_load_colour(d.clear);
+            val depth:  f32  = depth_clear_value(p.depth);
             frame_begin_pass(?r.frame, ?r.swap, colour[0], colour[1], colour[2], colour[3], depth);
         }
         or (sel step.clear) {
@@ -3074,6 +3099,23 @@ test "renderer: pass descriptions differ in what they clear and project" {
     if (!sel s.clear.some) { ret 3; }
     if (!sel o.clear.none) { ret 4; }
     if (!sel w.clear.none) { ret 6; }
+    ret 0;
+}
+
+test "renderer: the window loads black when its first pass asks for no clear" {
+    val none: Vec4 = window_load_colour(opt[Vec4].none{});
+    val some: Vec4 = window_load_colour(opt[Vec4].some{vec4(0.2, 0.4, 0.6, 1.0)});
+    if (none[0] != 0.0 || none[1] != 0.0 || none[2] != 0.0 || none[3] != 1.0) { ret 1; }
+    if (some[0] != 0.2 || some[1] != 0.4 || some[2] != 0.6 || some[3] != 1.0) { ret 2; }
+    ret 0;
+}
+
+test "renderer: the window loads depth at the pass convention's far value" {
+    # A reversed pass tests GREATER, so a far plane of 1.0 rejects everything.
+    # The far value depends on the convention alone, never on whether the pass
+    # asked for a colour clear (#162).
+    if (depth_clear_value(DepthConvention.forward{}) != 1.0)  { ret 1; }
+    if (depth_clear_value(DepthConvention.reversed{}) != 0.0) { ret 2; }
     ret 0;
 }
 

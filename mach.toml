@@ -1,6 +1,6 @@
 [project]
 id = "boom"
-version = "0.27.0"
+version = "0.28.0"
 mach = "^5.3"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -113,11 +113,7 @@ ref = "tag/v0.4.1"
 
 [dep.font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "tag/v0.4.1"
-
-[dep.phys]
-git = "https://github.com/briar-systems/mach-phys"
-ref = "tag/v0.3.1"
+ref = "tag/v0.5.0"
 
 [dep.vk]
 git = "https://github.com/briar-systems/mach-vk"

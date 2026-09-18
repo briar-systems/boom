@@ -340,6 +340,8 @@ pub fun texture_view(t: *Texture) vk.ImageView {
 }
 
 # release the GPU image backing a handle
+#
+# Call before renderer_dnit: the delete waits on the device, which is gone after.
 # ---
 # d: the upload context the texture was created against
 # t: texture to delete; the handle must not be used afterward

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-18
+
+### Removed
+- physics: **breaking.** `boom.physics` is gone: `Physics`, `physics_new`,
+  `physics_add`, `physics_remove`, `physics_set_velocity`, `physics_velocity`,
+  `physics_set_restitution`, `physics_step`, `physics_contact_count`,
+  `physics_contact`, `Contact`, `BodyId`, `PhysicsError` and `MAX_BODIES`, and
+  with it `Event.collision` and `CollisionEvent`, which nothing raised, and the
+  `phys` dependency (#170). mach-phys is the family's physics axis and nothing
+  consumed boom's AABB solver. Migration: use
+  [mach-phys](https://github.com/briar-systems/mach-phys) directly (its 2D
+  rigid-body roadmap is mach-phys#5). What the wrapper added, writing a body's
+  position back into a `Transform` and reporting contacts as `Vec3`, is a few
+  lines in the game that owns the world.
+- graphics: **breaking.** `boom.graphics.assets` is gone: `CAPACITY`, `Handle`,
+  `Assets`, `assets_new`, `assets_texture`, `assets_texture_get`,
+  `assets_release`, `assets_live_count`, and `Capacity.assets` (#156). The store
+  was the one piece of boom that owned resource state and policy, it covered
+  textures only, and nothing in boom or its consumers used it. Migration:
+  `assets_texture(s, d, path)` becomes `texture_load(d, path)` plus whatever
+  caching the game wants, `assets_texture_get` is the `*Texture` the game
+  already holds, and `assets_release` is `texture_delete`. Shared ownership,
+  generation-checked handles and hot reload belong in a library beside boom.
+  `boom.vfs` and the vpath loaders (`texture_load*`, `mesh_load`, `model_load`,
+  `font_load*`, `typeface_load`, `sound_load`) stay, as stateless conveniences
+  over the byte constructors.
+
+### Fixed
+- graphics: a reversed-depth window pass that asks for no clear now draws.
+  The first window pass of a frame loads depth at the far value of its own
+  convention rather than a fixed 1.0, which a GREATER test could never pass
+  (#162). The colour still loads black when the pass asks for none.
+
+### Changed
+- text: mach-font is v0.5.0, whose `glyph_info` measures a glyph's resolved
+  outline rather than reading the glyf header, so a font whose stored boxes are
+  stale or zero now places correctly. For every shipped font the numbers are
+  identical, checked by the device-free fixture against DejaVu. A `Typeface`
+  now owns the outline scratch its faces measure through, sized from the
+  face's maxima, so `typeface_from_static` takes an allocator for it.
+### Changed
+- lifecycle: **breaking.** `context_shutdown` returns `err[ContextError]` and
+  refuses with `ContextError.window{WindowError.in_use{n}}` while `n` renderers
+  still hold a surface on the window, leaving it open (#157). Teardown order is
+  resources, then the renderer, then the context: a renderer's surface is
+  created from the window, and every resource is released against the
+  renderer's device, so the reverse of creation is the only order in which
+  nothing dangles. `window_close` returns the same result. Migration: tear the
+  renderer down before `context_shutdown` (an `f_dnit` hook already runs before
+  `run` returns), and handle the result. Deleting a resource after
+  `renderer_dnit` is documented on every `*_delete` and not enforced.
+- window: **breaking.** A refused mode says what was asked and what was
+  missing (#157). `WindowError.no_monitor` carries `ModeRefusal{mode, part}`,
+  with `part` either `monitor` or `video_mode`, and `WindowError.create`
+  carries `ModeCreate{mode, cause}`. `window_error_message` names both. A
+  caller can now fall back to windowed only when a monitor-attached mode was
+  refused, rather than retrying every failure.
+### Changed
+- ci: release runs are serialized per tag, so a tag push GitHub delivers twice
+  publishes once (#166).
+
 ## [0.27.0] - 2026-09-17
 
 ### Changed

@@ -13,9 +13,6 @@
 [submodule "dep/font"]
 	path = dep/font
 	url = https://github.com/briar-systems/mach-font
-[submodule "dep/phys"]
-	path = dep/phys
-	url = https://github.com/briar-systems/mach-phys
 [submodule "dep/vk"]
 	path = dep/vk
 	url = https://github.com/briar-systems/mach-vk
