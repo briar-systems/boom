@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Removed
+- physics: **breaking.** `boom.physics` is gone: `Physics`, `physics_new`,
+  `physics_add`, `physics_remove`, `physics_set_velocity`, `physics_velocity`,
+  `physics_set_restitution`, `physics_step`, `physics_contact_count`,
+  `physics_contact`, `Contact`, `BodyId`, `PhysicsError` and `MAX_BODIES`, and
+  with it `Event.collision` and `CollisionEvent`, which nothing raised, and the
+  `phys` dependency (#170). mach-phys is the family's physics axis and nothing
+  consumed boom's AABB solver. Migration: use
+  [mach-phys](https://github.com/briar-systems/mach-phys) directly (its 2D
+  rigid-body roadmap is mach-phys#5). What the wrapper added, writing a body's
+  position back into a `Transform` and reporting contacts as `Vec3`, is a few
+  lines in the game that owns the world.
 - graphics: **breaking.** `boom.graphics.assets` is gone: `CAPACITY`, `Handle`,
   `Assets`, `assets_new`, `assets_texture`, `assets_texture_get`,
   `assets_release`, `assets_live_count`, and `Capacity.assets` (#156). The store

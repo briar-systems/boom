@@ -1,8 +1,9 @@
 # boom's shared math
 
 # a small, self-contained math layer that every subsystem shares. vectors,
-# quaternions, and matrix columns use native SIMD values; graphics, physics,
-# and audio therefore exchange the same representations without adapters.
+# quaternions, and matrix columns use native SIMD values; graphics, audio and
+# a game's own simulation therefore exchange the same representations without
+# adapters.
 
 use boom.math.mat;
 use boom.math.quat;

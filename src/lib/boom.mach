@@ -2,7 +2,7 @@
 #
 # re-exports the engine modules a game consumes: the app hooks, the
 # context and its lifecycle, the run loop, timing and input utilities,
-# shared math, physics, audio, and the graphics renderer.
+# shared math, audio, and the graphics renderer.
 # consumers import this as `use boom;`, or reach a subsystem directly,
 # e.g. `use boom.graphics;` or `use boom.math;`.
 
@@ -16,7 +16,6 @@ fwd boom.timestep;
 fwd boom.event;
 fwd boom.input;
 fwd boom.vfs;
-fwd boom.physics;
 fwd boom.audio;
 fwd boom.window;
 fwd boom.math;

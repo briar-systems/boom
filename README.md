@@ -2,7 +2,7 @@
 
 A game engine written in [mach](https://github.com/briar-systems/mach): 2D-first, 3D-capable.
 
-boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.com/briar-systems/mach-glfw) (windowing/input), [mach-vk](https://github.com/briar-systems/mach-vk) (graphics), [mach-audio](https://github.com/briar-systems/mach-audio), [mach-image](https://github.com/briar-systems/mach-image), [mach-font](https://github.com/briar-systems/mach-font), [mach-gltf](https://github.com/briar-systems/mach-gltf), [mach-phys](https://github.com/briar-systems/mach-phys), and [blit](https://github.com/briar-systems/blit) (UI).
+boom composes the briar-systems ecosystem libraries: [mach-glfw](https://github.com/briar-systems/mach-glfw) (windowing/input), [mach-vk](https://github.com/briar-systems/mach-vk) (graphics), [mach-audio](https://github.com/briar-systems/mach-audio), [mach-image](https://github.com/briar-systems/mach-image), [mach-font](https://github.com/briar-systems/mach-font), [mach-gltf](https://github.com/briar-systems/mach-gltf), and [blit](https://github.com/briar-systems/blit) (UI).
 
 ## Status
 
@@ -72,16 +72,8 @@ Window-manager close requests stop the loop. Escape is otherwise an ordinary
 `KEY_ESCAPE` input owned by the application, so it can open a pause menu, act as
 Back, or call `context_stop` when the application chooses to quit.
 `context_fail` stops immediately and records a non-zero status for `run` to
-return. Physics worlds are application-owned and advanced explicitly from a
-fixed tick, so pausing one simulation never requires changing the core loop.
-
-## Physics
-
-`boom.physics.Physics` wraps mach-phys without placing a world in the engine
-context. Create the worlds the application needs, call `physics_step` from a
-fixed tick with `timestep_dt_seconds(?ctx.step)`, and inspect the resulting
-contacts with `physics_contact_count` and `physics_contact`. Contacts retain
-boom body ids and math types; they are not mixed into the window input queue.
+return. A simulation is application-owned and advanced from the fixed tick, so
+pausing one never requires changing the core loop.
 
 ## Graphics
 
