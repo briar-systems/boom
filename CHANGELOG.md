@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- graphics: **breaking.** `boom.graphics.assets` is gone: `CAPACITY`, `Handle`,
+  `Assets`, `assets_new`, `assets_texture`, `assets_texture_get`,
+  `assets_release`, `assets_live_count`, and `Capacity.assets` (#156). The store
+  was the one piece of boom that owned resource state and policy, it covered
+  textures only, and nothing in boom or its consumers used it. Migration:
+  `assets_texture(s, d, path)` becomes `texture_load(d, path)` plus whatever
+  caching the game wants, `assets_texture_get` is the `*Texture` the game
+  already holds, and `assets_release` is `texture_delete`. Shared ownership,
+  generation-checked handles and hot reload belong in a library beside boom.
+  `boom.vfs` and the vpath loaders (`texture_load*`, `mesh_load`, `model_load`,
+  `font_load*`, `typeface_load`, `sound_load`) stay, as stateless conveniences
+  over the byte constructors.
+
 ### Changed
 - ci: release runs are serialized per tag, so a tag push GitHub delivers twice
   publishes once (#166).

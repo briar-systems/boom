@@ -142,8 +142,7 @@ rec Voice {
 # A handle to a playing voice
 #
 # Carries the generation the slot held when it started, so stopping a voice
-# that already finished cannot silence whatever took its place. the same
-# reasoning as the asset store's handles, and the same bug avoided. generations
+# that already finished cannot silence whatever took its place. generations
 # start at one, so a zeroed id names no voice.
 # ---
 # slot: index into the voice table
@@ -379,7 +378,7 @@ pub fun sound_from_bytes(s: *Audio, data: *u8, len: usize) res[Sound, AudioError
 # Copy a decoded clip into a device-conformed Sound.
 #
 # The source is borrowed only for this call. The returned Sound owns an
-# independent copy, so an asset store may release or reload its decoded buffer
+# independent copy, so the game may release or reload its decoded buffer
 # without affecting playback. A source with no channels is refused by the
 # buffer it would be copied into.
 # ---

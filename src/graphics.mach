@@ -360,15 +360,6 @@ fwd boom.graphics.renderer.renderer_storage_used;
 fwd boom.graphics.renderer.renderer_storage_buffers;
 fwd boom.graphics.renderer.renderer_storage_refused;
 
-fwd boom.graphics.assets.CAPACITY;
-fwd boom.graphics.assets.Handle;
-fwd boom.graphics.assets.Assets;
-fwd boom.graphics.assets.assets_new;
-fwd boom.graphics.assets.assets_texture;
-fwd boom.graphics.assets.assets_texture_get;
-fwd boom.graphics.assets.assets_release;
-fwd boom.graphics.assets.assets_live_count;
-
 fwd boom.graphics.text.typeface.Typeface;
 fwd boom.graphics.text.typeface.typeface_from_bytes;
 fwd boom.graphics.text.typeface.typeface_from_static;
