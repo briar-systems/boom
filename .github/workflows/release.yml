@@ -13,6 +13,13 @@ on:
 permissions:
   contents: read
 
+# one run per tag: GitHub can deliver a tag push twice, and two runs reaching
+# publish leaves an orphan draft. the second waits, finds the release, and ends
+# green. never cancel, since that could abort a publish part way
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     uses: briar-systems/.github/.github/workflows/mach-release.yml@main
