@@ -202,6 +202,12 @@ for. A pass targeting an offscreen `RenderTarget` suspends the window's render
 pass and resumes it afterwards without erasing what the frame has drawn, so a
 later pass can sample that target as a texture.
 
+**The window's background is the clear of its first pass.** The window's render
+pass begins with the first pass drawn to it, so that pass's `PassDesc.clear` is
+the clear on load and costs nothing. When it asks for none, the window clears
+to black. A later window pass that clears erases what the frame has drawn so
+far, which is recorded as a clear in place.
+
 The default target constructors use the window's format. A
 `RenderTargetDesc` can instead choose sRGB RGBA8, linear RGBA8, or floating-point
 RGBA16 independently for each attachment. Materials sample nearest by default;

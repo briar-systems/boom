@@ -112,7 +112,9 @@ use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.frame.FrameLoop;
+use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
+use boom.graphics.frame.frame_begin_pass;
 use boom.graphics.frame.frame_dnit;
 use boom.graphics.frame.frame_end;
 use boom.graphics.frame.frame_init;
@@ -120,6 +122,7 @@ use boom.graphics.frame.frame_rebuild_targets;
 use boom.graphics.frame.frame_release_targets;
 use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_suspend_pass;
+use boom.graphics.frame.window_step;
 use boom.graphics.image.ColorSpace;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.image.sampler_init;
@@ -1566,6 +1569,12 @@ pub rec Pass {
     frustum: Frustum;
     visible: Rect;
 
+    # Whether this offscreen pass suspended the window's render pass, and so
+    # must resume it when it ends. False for a window pass, and for an
+    # excursion taken before any window pass began, which leaves the window
+    # idle for the first window pass to begin with its own clear.
+    resumes: bool;
+
     # The render pass draws are recorded into: the window's, or an offscreen
     # target's. Kept here because a game shader builds its pipelines against
     # whichever pass it is actually drawn in, and that is only known once the
@@ -1587,9 +1596,9 @@ pub rec Pass {
 # in the same frame put in these attachments. Erasing them is what asking to
 # clear means, but which of the two is being paid for is worth knowing.
 #
-# The window's render pass begins in frame_begin and is only ever suspended for
-# an offscreen excursion, so by the time any pass opens, the load-time clear is
-# spent. For a window pass this is the only way left to honour one.
+# The first window pass of a frame begins the window's render pass and clears on
+# load, so this is only reached by a later window pass, when the load-time clear
+# is spent and erasing in place is the only way left to honour one.
 fun clear_mid_pass(p: *Pass, color: Vec4) {
     # Four colours and a depth, which is as many attachments as any pass boom
     # builds has.
@@ -1674,12 +1683,16 @@ fun depth_clear_value(depth: DepthConvention) f32 {
 # resumes the window's through its load variant, so the excursion does not
 # erase what the frame has already drawn.
 #
-# a window pass clears through vkCmdClearAttachments, because the frame's
-# render pass has been recording since frame_begin and its one load-time clear
-# is already spent. that is not free the way a clear on load is, and it erases
-# what earlier passes in the same frame drew, which is what asking a pass to
-# clear means. an offscreen target still clears on load, since it begins a
-# render pass of its own.
+# the first window pass of a frame begins the window's render pass, so its
+# clear is the clear on load and costs nothing. that is how a game sets the
+# window's background: it is the clear of the first pass drawn to the window,
+# and black when that pass asks for none. a later window pass that clears does
+# so through vkCmdClearAttachments, because the load is spent by then. that is
+# not free, and it erases what earlier passes in the same frame drew, which is
+# what asking a pass to clear means. both leave the same pixels as clearing on
+# load would, so one field says both and there is no second source to rank
+# against it. an offscreen target clears on load, since it begins a render pass
+# of its own.
 #
 # the request used to be ignored here: a window pass read clear_color, dropped
 # it, and left the frame's own clear to black standing. of honouring a request,
@@ -1693,6 +1706,71 @@ fun depth_clear_value(depth: DepthConvention) f32 {
 # d:   the pass description
 # ret: the open pass, passed to draw calls and pass_end
 pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
+    var p: Pass = pass_resolve(r, d);
+
+    if (sel d.target.none) {
+        val step: WindowStep = window_step(r.frame.window, sel d.clear.some);
+        if (sel step.begin) {
+            var colour: Vec4 = vec4(0.0, 0.0, 0.0, 1.0);
+            var depth:  f32  = 1.0;
+            if (sel d.clear.some) {
+                colour = d.clear.some;
+                depth  = depth_clear_value(p.depth);
+            }
+            frame_begin_pass(?r.frame, ?r.swap, colour[0], colour[1], colour[2], colour[3], depth);
+        }
+        or (sel step.clear) {
+            # window_step only chooses clear for a pass whose clear is set
+            if (sel d.clear.some) { clear_mid_pass(?p, d.clear.some); }
+        }
+        ret p;
+    }
+
+    val target: *RenderTarget = d.target.some;
+    p.resumes = frame_suspend_pass(?r.frame);
+
+    var rbi: vk.RenderPassBeginInfo;
+    rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rbi.pNext                    = nil;
+    rbi.renderPass               = p.pass;
+    rbi.framebuffer              = target.framebuffer;
+    rbi.renderArea.offset.x      = 0;
+    rbi.renderArea.offset.y      = 0;
+    rbi.renderArea.extent.width  = target.width::u32;
+    rbi.renderArea.extent.height = target.height::u32;
+    # A loading pass declares no clear, and passing values for one is both
+    # meaningless and a validation error.
+    rbi.clearValueCount = 0;
+    rbi.pClearValues    = nil;
+
+    # ONE CLEAR VALUE PER ATTACHMENT, and depth last, matching the order
+    # pass_create declared. A short array here is read past its end by the
+    # driver for every attachment beyond the second.
+    var clears: [5]vk.ClearValue;
+    if (sel d.clear.some) {
+        val colour: Vec4  = d.clear.some;
+        var cvi:    usize = 0;
+        for (cvi < p.targets) {
+            clears[cvi].color.float32[0] = colour[0];
+            clears[cvi].color.float32[1] = colour[1];
+            clears[cvi].color.float32[2] = colour[2];
+            clears[cvi].color.float32[3] = colour[3];
+            cvi                          = cvi + 1;
+        }
+        # depth clears to the far value of the pass convention
+        clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
+        clears[p.targets].depthStencil.stencil = 0;
+        rbi.clearValueCount                    = (p.targets + 1)::u32;
+        rbi.pClearValues                       = ?clears[0];
+    }
+    vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
+    ret p;
+}
+
+# Resolve a pass description into its target, extent, matrices and what it can
+# see, recording nothing. That is what lets the projections be tested without a
+# device.
+fun pass_resolve(r: *Renderer, d: *PassDesc) Pass {
     var p: Pass;
     p.renderer = r;
     p.cmd      = r.frame.frames[r.frame_index].command;
@@ -1726,14 +1804,8 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
         p.pass          = r.frame.pass;
         p.targets       = 1;
         p.compatibility = pass_compatibility_one(r.vk.color_format);
-
-        # The frame's render pass has been recording since frame_begin, so the
-        # one chance to clear on load is already spent and what is left is to
-        # clear the attachments in place. clear_mid_pass says what that costs.
-        if (sel d.clear.some) {
-            clear_mid_pass(?p, d.clear.some);
-        }
     }
+    p.resumes = false;
 
     p.region_width  = p.width;
     p.region_height = p.height;
@@ -1761,47 +1833,6 @@ pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     # projection.
     var vp: Mat4 = mat4_mul(?p.projection, ?p.view);
     p.frustum = frustum_from_matrix(?vp);
-
-    if (sel d.target.some) {
-        val target: *RenderTarget = d.target.some;
-        frame_suspend_pass(?r.frame);
-
-        var rbi: vk.RenderPassBeginInfo;
-        rbi.sType                    = vk.STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rbi.pNext                    = nil;
-        rbi.renderPass               = p.pass;
-        rbi.framebuffer              = target.framebuffer;
-        rbi.renderArea.offset.x      = 0;
-        rbi.renderArea.offset.y      = 0;
-        rbi.renderArea.extent.width  = target.width::u32;
-        rbi.renderArea.extent.height = target.height::u32;
-        # A loading pass declares no clear, and passing values for one is both
-        # meaningless and a validation error.
-        rbi.clearValueCount = 0;
-        rbi.pClearValues    = nil;
-
-        # ONE CLEAR VALUE PER ATTACHMENT, and depth last, matching the order
-        # pass_create declared. A short array here is read past its end by the
-        # driver for every attachment beyond the second.
-        var clears: [5]vk.ClearValue;
-        if (sel d.clear.some) {
-            val colour: Vec4  = d.clear.some;
-            var cvi:    usize = 0;
-            for (cvi < p.targets) {
-                clears[cvi].color.float32[0] = colour[0];
-                clears[cvi].color.float32[1] = colour[1];
-                clears[cvi].color.float32[2] = colour[2];
-                clears[cvi].color.float32[3] = colour[3];
-                cvi                          = cvi + 1;
-            }
-            # depth clears to the far value of the pass convention
-            clears[p.targets].depthStencil.depth   = depth_clear_value(p.depth);
-            clears[p.targets].depthStencil.stencil = 0;
-            rbi.clearValueCount                    = (p.targets + 1)::u32;
-            rbi.pClearValues                       = ?clears[0];
-        }
-        vk.vkCmdBeginRenderPass(p.cmd, ?rbi, vk.SUBPASS_CONTENTS_INLINE);
-    }
     ret p;
 }
 
@@ -1839,7 +1870,7 @@ pub fun pass_end(p: *Pass) {
 
     if (sel p.target.none) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
-    frame_resume_pass(?p.renderer.frame, ?p.renderer.swap);
+    if (p.resumes) { frame_resume_pass(?p.renderer.frame, ?p.renderer.swap); }
 }
 
 # The world-space box a skinned mesh actually occupies this frame.
@@ -2967,7 +2998,7 @@ test "renderer: an overlay pass maps pixels to clip space" {
     r.width  = 800;
     r.height = 600;
     var d: PassDesc = pass_overlay();
-    var p: Pass     = pass_begin(?r, ?d);
+    var p: Pass     = pass_resolve(?r, ?d);
 
     # (0, 0) is the top-left corner, which is what a 2D game means by an
     # origin, and in Vulkan the top of the window is clip -1. The mapping is
@@ -3001,14 +3032,10 @@ test "renderer: a scene pass takes its matrices from the camera" {
     c.target   = vec3(0.0, 0.0, 0.0);
     c.up       = vec3(0.0, 1.0, 0.0);
 
-    # Driven for its matrices, which is as much as a Renderer with no device
-    # can answer. The clear is turned off because a clearing window pass
-    # records into the frame's command buffer and this one has never had one:
-    # the alternative is pass_begin carrying a nil check that exists for a test
-    # which never opened a frame, and the engine does not answer to that.
+    # Resolved rather than begun: a Renderer with no device can answer for its
+    # matrices and has no command buffer to record into.
     var d: PassDesc = pass_scene(?c);
-    d.clear = opt[Vec4].none{};
-    var p: Pass = pass_begin(?r, ?d);
+    var p: Pass     = pass_resolve(?r, ?d);
     # An identity view would mean the camera position was ignored, which
     # draws the scene from the origin no matter where the camera is.
     if (p.view.m[3][2] == 0.0) { ret 1; }
@@ -3025,8 +3052,7 @@ test "renderer: a reversed camera carries its depth convention into the pass" {
     var d: PassDesc = pass_scene(?c);
     if (!sel d.depth.reversed) { ret 1; }
 
-    d.clear = opt[Vec4].none{};
-    var p: Pass = pass_begin(?r, ?d);
+    var p: Pass = pass_resolve(?r, ?d);
     if (!sel p.depth.reversed) { ret 2; }
 
     val zn: f32 = (p.projection.m[2][2] * (0.0 - c.near)
