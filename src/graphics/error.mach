@@ -122,7 +122,6 @@ pub tag Stage: u8 {
 
 # a fixed table with no free entry
 # ---
-# assets:          the asset store
 # pipelines:       the pipeline cache
 # descriptor_sets: the per-frame descriptor slot blocks
 # palettes:        the per-frame joint palette blocks
@@ -132,7 +131,6 @@ pub tag Stage: u8 {
 # retired_meshes:  the meshes waiting for a frame fence to release them
 # glyph_pages:     a face's glyph atlas pages
 pub tag Capacity: u8 {
-    assets;
     pipelines;
     descriptor_sets;
     palettes;
@@ -385,7 +383,6 @@ fun stage_message(e: Stage) str {
 }
 
 fun capacity_message(e: Capacity) str {
-    if (sel e.assets)         { ret "asset store is full"; }
     if (sel e.pipelines)      { ret "the pipeline cache is full"; }
     if (sel e.palettes)       { ret "the joint palette ring is full"; }
     if (sel e.storage)        { ret "the frame storage buffer cannot grow further"; }
