@@ -26,10 +26,9 @@ use boom.graphics.batch.sprite_expand;
 use gm: boom.math;
 use std.chrono.duration.Duration;
 use std.chrono.duration.duration_usec;
-use std.chrono.time.Clock;
-use std.chrono.time.Time;
-use std.chrono.time.monotonic;
-use std.chrono.time.time_sub;
+use std.chrono.time.InstantClock;
+use std.chrono.time.instant;
+use std.chrono.time.instant_sub;
 use std.print;
 use std.runtime;
 use std.types.bool.bool;
@@ -224,28 +223,28 @@ fun run_case(label: str, grid: *u16, frames: *gfx.Rect, layer: *gfx.TileLayer,
         ret false;
     }
 
-    var sink: usize = 0;
-    val t0:   Clock = monotonic();
+    var sink: usize        = 0;
+    val t0:   InstantClock = instant();
     if (sel t0.err) { ret clock_failed(); }
     var k: i64 = 0;
     for (k < REPS) {
         sink = sink + naive_draw(grid, frames, view, out, ?naive_cells);
         k    = k + 1;
     }
-    val naive_end: Clock = monotonic();
+    val naive_end: InstantClock = instant();
     if (sel naive_end.err) { ret clock_failed(); }
-    val naive_us: i64 = duration_usec(time_sub(naive_end.ok, t0.ok));
+    val naive_us: i64 = duration_usec(instant_sub(naive_end.ok, t0.ok));
 
-    val t1: Clock = monotonic();
+    val t1: InstantClock = instant();
     if (sel t1.err) { ret clock_failed(); }
     k = 0;
     for (k < REPS) {
         sink = sink + tilemap_draw(layer, sheet, view, out, ?tile_cells);
         k    = k + 1;
     }
-    val tile_end: Clock = monotonic();
+    val tile_end: InstantClock = instant();
     if (sel tile_end.err) { ret clock_failed(); }
-    val tile_us: i64 = duration_usec(time_sub(tile_end.ok, t1.ok));
+    val tile_us: i64 = duration_usec(instant_sub(tile_end.ok, t1.ok));
 
     print.printlnf("naive           {} us per frame", naive_us::f64 / REPS::f64);
     print.printlnf("tilemap         {} us per frame", tile_us::f64 / REPS::f64);

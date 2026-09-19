@@ -399,7 +399,7 @@ morph-target channels are future work.
 ## Consuming boom
 
 boom builds on several ecosystem libraries: `std`, `glfw`, `vk`, `audio`,
-`image`, `font`, `gltf`, `phys` and `shader`. A consumer declares only boom, and
+`image`, `font`, `gltf` and `shader`. A consumer declares only boom, and
 anything else its own source imports directly, under the project id:
 
 ```toml

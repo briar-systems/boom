@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# the checks the unit suite cannot make: the embedded SPIR-V, and finite
-# examples driving Vulkan under xvfb
+# the checks the unit suite cannot make: the embedded SPIR-V, finite examples
+# driving Vulkan under xvfb, and a fresh root project that depends on boom
 set -euo pipefail
+
+# a game is a fresh root that depends on boom, and that root's std wins over
+# every pin beneath it. boom's own examples pin std themselves, so they never
+# see the std a fresh `mach init` selects; boom#184 was exactly that shape
+# failing. the root takes whatever std mach init picks today, on purpose.
+root=$(mktemp -d)
+"$MACH_COMPILER" init "$root"
+cp examples/cube/src/main.mach "$root/src/root.mach"
+"$MACH_COMPILER" dep add "$root" boom --path "$PWD"
+grep -A2 '^\[dep\.std\]' "$root/mach.toml"
+"$MACH_COMPILER" build "$root"
+echo "a fresh root builds against boom with the std mach init selected"
 
 # a uniform block is a contract between two separately compiled programs and
 # nothing at runtime checks it. boom.graphics.spirv reads the modules it embeds

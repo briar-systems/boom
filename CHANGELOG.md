@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **breaking.** boom builds against std 5.7 and requires mach 5.7 (#184). std 5
+  split the monotonic clock from wall-clock time: `time.monotonic()` is
+  `time.instant()` and returns an `Instant`, so `Clock.start`, `Clock.last`,
+  `clock_at(base)` and `clock_sample(c, now)` take `std.chrono.time.Instant`
+  where they took `Time`. A fresh `mach init` root that depends on boom takes
+  the std mach selects, which overrides every pin beneath it, and that is now
+  what CI builds (`.github/ci/verify.sh`) so the consumer's shape is covered.
+  Migration: move the root project's std to 5.7 and mach to 5.7, and anything
+  that anchored a `Clock` or sampled it by hand passes an `Instant` from
+  `instant()`. The family libraries boom depends on move to std 5.7 in the
+  same release.
+
 ## [0.29.0] - 2026-09-19
 
 ### Added
