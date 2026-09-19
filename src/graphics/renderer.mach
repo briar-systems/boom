@@ -115,6 +115,7 @@ use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
 use boom.graphics.frame.frame_begin_pass;
+use boom.graphics.frame.frame_capture;
 use boom.graphics.frame.frame_dnit;
 use boom.graphics.frame.frame_end;
 use boom.graphics.frame.frame_init;
@@ -124,6 +125,7 @@ use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_suspend_pass;
 use boom.graphics.frame.window_step;
 use boom.graphics.image.ColorSpace;
+use boom.graphics.image.image_bytes;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.image.sampler_init;
 use boom.graphics.live.Live;
@@ -1216,6 +1218,60 @@ pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
 }
 
+# read the window back: arm a copy of this frame's image into out
+#
+# The bytes land in out during renderer_end_frame, after the frame's last pass
+# and before it is presented, so what comes back is exactly the frame the game
+# just drew, and out must stay valid until renderer_end_frame returns. A
+# presented image belongs to the presentation engine and cannot be read, which
+# is why the read is of the frame in hand rather than of the last one shown.
+#
+# The pixels are renderer_window_bytes long in the swapchain's packed format,
+# and renderer_window_bgra says whether they come blue first. Unlike a render
+# target the window is not sRGB-decoded on the way out: the bytes are what the
+# display receives.
+#
+# Waiting for the copy costs the frame its overlap with the next, so this is
+# for tooling and tests, not for something a game does every frame. A surface
+# that did not offer TRANSFER_SRC cannot be read at all; ask
+# renderer_window_readable before relying on it.
+# ---
+# r:   the renderer, with a frame open
+# out: destination for renderer_window_bytes bytes
+# len: size of out in bytes
+# ret: ok, or no_frame outside a frame, window_readback when the surface does
+#      not offer the copy, readback_short when out is too small
+pub fun renderer_capture(r: *Renderer, out: *u8, len: usize) err[Error] {
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    ret frame_capture(?r.frame, ?r.swap, out, len);
+}
+
+# whether the window can be read back on this surface
+#
+# False when the surface did not offer TRANSFER_SRC on its images, which a
+# driver is free to withhold. It is never assumed.
+pub fun renderer_window_readable(r: *Renderer) bool {
+    if (!r.swap.ready) { ret false; }
+    ret r.swap.readable;
+}
+
+# how many bytes a window readback fills: width * height * 4
+pub fun renderer_window_bytes(r: *Renderer) usize {
+    if (!r.swap.ready) { ret 0; }
+    ret image_bytes(r.swap.width, r.swap.height);
+}
+
+# whether the window's pixels come back blue-green-red-alpha rather than RGBA
+#
+# The order follows the surface format, which is the surface's choice and not
+# boom's. Exposed rather than assumed, because a caller that guesses gets a
+# picture with red and blue swapped and no diagnostic.
+pub fun renderer_window_bgra(r: *Renderer) bool {
+    if (!r.swap.ready) { ret false; }
+    ret r.swap.format == vk.FORMAT_B8G8R8A8_SRGB
+        || r.swap.format == vk.FORMAT_B8G8R8A8_UNORM;
+}
+
 # retire a mesh when this frame's fence next proves its last use complete
 #
 # refused, leaving the mesh as it was, when the renderer never came up or too
@@ -1440,6 +1496,36 @@ test "renderer: teardown is refused while the game holds a texture, and names it
     r.ready_vk         = false;
     val freed: err[Error] = renderer_dnit(?r);
     if (!sel freed.ok) { ret 6; }
+    ret 0;
+}
+
+test "renderer: a window readback needs an open frame" {
+    var r: Renderer;
+    r.drawing = false;
+    var out: [4]u8;
+    val e:   err[Error] = renderer_capture(?r, ?out[0], 4);
+    if (!sel e.err)                   { ret 1; }
+    if (!sel e.err.renderer)          { ret 2; }
+    if (!sel e.err.renderer.no_frame) { ret 3; }
+    ret 0;
+}
+
+test "renderer: the window's readback size and order follow the swapchain" {
+    var r: Renderer;
+    r.swap.ready = false;
+    if (renderer_window_bytes(?r) != 0) { ret 1; }
+    if (renderer_window_readable(?r))   { ret 2; }
+    if (renderer_window_bgra(?r))       { ret 3; }
+    r.swap.ready    = true;
+    r.swap.width    = 320;
+    r.swap.height   = 200;
+    r.swap.readable = true;
+    r.swap.format   = vk.FORMAT_B8G8R8A8_SRGB;
+    if (renderer_window_bytes(?r) != 320 * 200 * 4) { ret 4; }
+    if (!renderer_window_readable(?r))              { ret 5; }
+    if (!renderer_window_bgra(?r))                  { ret 6; }
+    r.swap.format = vk.FORMAT_R8G8B8A8_SRGB;
+    if (renderer_window_bgra(?r)) { ret 7; }
     ret 0;
 }
 

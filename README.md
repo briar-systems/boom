@@ -238,6 +238,18 @@ when the current one's draws are the point. `renderer_wait_idle` performs the
 same drain on its own, for tooling that reads several targets in a row or times
 work that would otherwise still be in flight.
 
+**The window is read on its way to the screen, not from it.** A presented image
+belongs to the presentation engine, so there is no reading back what was shown.
+`renderer_capture` instead arms a copy of the frame being drawn, taken between
+its last pass and the present, and `renderer_end_frame` delivers it into the
+caller's buffer of `renderer_window_bytes` bytes in the swapchain's packed
+format (`renderer_window_bgra` gives the order, and unlike a target the bytes
+are what the display receives, not decoded). It waits for that frame, so it
+costs the overlap with the next. A surface may withhold `TRANSFER_SRC` on its
+images and then the window cannot be read at all: `renderer_window_readable`
+says so, and the capture is refused with `RendererError.window_readback`. boom
+requests the usage only when the surface offers it and never assumes it.
+
 `renderer_begin_frame` returns `res[bool, Error]`, and the `bool` says whether a
 frame was actually opened. A `false` there is a swapchain that went out of date
 and was rebuilt, which every window resize causes, or a minimized window; the

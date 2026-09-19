@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- graphics: the window can be read back. `renderer_capture(r, out, len)` arms
+  a copy of the frame being drawn, taken between its last pass and the present
+  and delivered into `out` by `renderer_end_frame`; a presented image belongs
+  to the presentation engine and cannot be read, so the read is of the frame
+  in hand (#53). `renderer_window_readable` says whether the surface offered
+  `TRANSFER_SRC` on its images (it is requested only when offered, never
+  assumed), `renderer_window_bytes` is `width * height * 4`, and
+  `renderer_window_bgra` gives the channel order. Refused with
+  `RendererError.no_frame` outside a frame, the new
+  `RendererError.window_readback` when the surface cannot be read, and
+  `ImageError.readback_short` when `out` is too small. examples/vulkan checks
+  the window's pixels against the frame's geometry, skips when the surface
+  cannot be read, and fails on that skip under `--require-readback`, which is
+  how CI runs it.
+
 ### Changed
 - graphics: **breaking.** `renderer_dnit` returns `err[Error]` and refuses with
   `Error.in_use{Live}` while the game still holds a texture, mesh, model,
