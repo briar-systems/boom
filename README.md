@@ -71,8 +71,11 @@ fun main(argc: i64, argv: **u8) i64 {
 released against the renderer's device, so the reverse of creation is the only
 order in which nothing dangles. Delete textures, meshes, models, fonts, targets
 and shaders (usually in `f_dnit`), then `renderer_dnit`, then
-`context_shutdown`. The context refuses to shut down while a renderer still
-holds its window, and says how many do.
+`context_shutdown`. Both steps are enforced: the device counts what the game
+holds by kind, and `renderer_dnit` refuses with those counts (`Error.in_use`)
+while any is live; the context refuses to shut down while a renderer still
+holds its window, and says how many do. `renderer_live` and `device_live`
+read the counts, which a game can assert at zero in its own teardown.
 
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.

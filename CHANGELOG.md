@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- graphics: **breaking.** `renderer_dnit` returns `err[Error]` and refuses with
+  `Error.in_use{Live}` while the game still holds a texture, mesh, model,
+  render target, font (or standalone atlas) or shader created against its
+  device, leaving the renderer as it was (#175). The device counts each kind at
+  the public boundary, every `*_delete` decrements, and `renderer_retire_mesh`
+  hands a mesh's count to the renderer. `renderer_live` and `device_live` read
+  the counts. Migration: handle the result of `renderer_dnit`, and if it
+  refuses, the payload says what was never deleted. A `Shader` counts once it
+  has built a pipeline.
+
 ## [0.28.0] - 2026-09-18
 
 ### Removed

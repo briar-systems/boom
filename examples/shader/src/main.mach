@@ -183,6 +183,16 @@ rec Game {
     drawn:     usize;
 }
 
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     g.ready  = 0;
@@ -548,7 +558,7 @@ fun on_dnit(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     if (!g.renderer_ok) { ret; }
     if (g.ready == 0) {
-        release(g);
+        release(ctx, g);
         ret;
     }
 
@@ -642,11 +652,11 @@ fun on_dnit(ctx: *Context) {
         }
     }
 
-    release(g);
+    release(ctx, g);
 }
 
 # release whatever startup built, in reverse, the renderer last
-fun release(g: *Game) {
+fun release(ctx: *Context, g: *Game) {
     val d: *gfx.Device = gfx.renderer_device(?g.renderer);
     if (g.lit_ok)     { gfx.render_target_delete(d, ?g.lit_probe); }
     if (g.hdr_ok)     { gfx.render_target_delete(d, ?g.hdr_probe); }
@@ -655,7 +665,7 @@ fun release(g: *Game) {
     if (g.shader_ok)  { gfx.shader_delete(?g.shader, d); }
     if (g.mesh_ok)    { gfx.mesh_delete(d, ?g.mesh); }
     if (g.texture_ok) { gfx.texture_delete(d, ?g.texture); }
-    gfx.renderer_dnit(?g.renderer);
+    renderer_down(ctx, ?g.renderer);
 }
 
 # Decimal digits to a count, stopping at the first character that is not one.

@@ -401,6 +401,16 @@ fun piece(g: *Game, i: usize, x: f32, y: f32, w: f32, h: f32, atlas: usize) {
     g.pieces[i].atlas = atlas;
 }
 
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     g.ready     = 0;
@@ -1190,7 +1200,7 @@ fun on_dnit(ctx: *Context) {
         di = di + 1;
     }
     gfx.mesh_delete(d, ?g.quad);
-    gfx.renderer_dnit(?g.renderer);
+    renderer_down(ctx, ?g.renderer);
 }
 
 fun parse_usize(s: str) usize {
