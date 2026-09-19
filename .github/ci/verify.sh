@@ -7,7 +7,8 @@ set -euo pipefail
 # every pin beneath it. boom's own examples pin std themselves, so they never
 # see the std a fresh `mach init` selects; boom#184 was exactly that shape
 # failing. the root takes whatever std mach init picks today, on purpose.
-root=$(mktemp -d)
+root=$(mktemp -d)/game
+mkdir "$root"
 "$MACH_COMPILER" init "$root"
 cp examples/cube/src/main.mach "$root/src/root.mach"
 "$MACH_COMPILER" dep add "$root" boom --path "$PWD"
