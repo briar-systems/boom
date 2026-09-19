@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-19
+
 ### Changed
 - **breaking.** boom builds against std 5.7 and requires mach 5.7 (#184). std 5
   split the monotonic clock from wall-clock time: `time.monotonic()` is
