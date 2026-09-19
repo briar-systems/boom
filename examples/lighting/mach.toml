@@ -125,7 +125,7 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v5.7.1"
+version = "^5.7.1"
 
 [dep.shader]
 git = "https://github.com/briar-systems/mach-shader"
