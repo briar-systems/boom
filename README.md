@@ -71,8 +71,11 @@ fun main(argc: i64, argv: **u8) i64 {
 released against the renderer's device, so the reverse of creation is the only
 order in which nothing dangles. Delete textures, meshes, models, fonts, targets
 and shaders (usually in `f_dnit`), then `renderer_dnit`, then
-`context_shutdown`. The context refuses to shut down while a renderer still
-holds its window, and says how many do.
+`context_shutdown`. Both steps are enforced: the device counts what the game
+holds by kind, and `renderer_dnit` refuses with those counts (`Error.in_use`)
+while any is live; the context refuses to shut down while a renderer still
+holds its window, and says how many do. `renderer_live` and `device_live`
+read the counts, which a game can assert at zero in its own teardown.
 
 Every `App` hook is optional; leave one `nil` (cast to the hook type) and the
 loop skips it.
@@ -234,6 +237,18 @@ previous frame complete rather than the one being recorded; end the frame first
 when the current one's draws are the point. `renderer_wait_idle` performs the
 same drain on its own, for tooling that reads several targets in a row or times
 work that would otherwise still be in flight.
+
+**The window is read on its way to the screen, not from it.** A presented image
+belongs to the presentation engine, so there is no reading back what was shown.
+`renderer_capture` instead arms a copy of the frame being drawn, taken between
+its last pass and the present, and `renderer_end_frame` delivers it into the
+caller's buffer of `renderer_window_bytes` bytes in the swapchain's packed
+format (`renderer_window_bgra` gives the order, and unlike a target the bytes
+are what the display receives, not decoded). It waits for that frame, so it
+costs the overlap with the next. A surface may withhold `TRANSFER_SRC` on its
+images and then the window cannot be read at all: `renderer_window_readable`
+says so, and the capture is refused with `RendererError.window_readback`. boom
+requests the usage only when the surface offers it and never assumes it.
 
 `renderer_begin_frame` returns `res[bool, Error]`, and the `bool` says whether a
 frame was actually opened. A `false` there is a swapchain that went out of date

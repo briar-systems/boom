@@ -76,6 +76,16 @@ rec Game {
     paused:    bool;
 }
 
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     g.ready  = 0;
@@ -99,7 +109,7 @@ fun on_init(ctx: *Context) {
     val loaded: res[gfx.Mesh, gfx.Error] = gfx.mesh_load(d, "assets/cube.glb");
     if (sel loaded.err) {
         print.eprintlnf("mesh load error: {}", gfx.error_message(loaded.err));
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -109,7 +119,7 @@ fun on_init(ctx: *Context) {
     if (sel tex.err) {
         print.eprintlnf("texture load error: {}", gfx.error_message(tex.err));
         gfx.mesh_delete(d, ?g.mesh);
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -121,7 +131,7 @@ fun on_init(ctx: *Context) {
         print.eprintlnf("material error: {}", gfx.material_error_message(added.err));
         gfx.texture_delete(d, ?g.texture);
         gfx.mesh_delete(d, ?g.mesh);
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -131,7 +141,7 @@ fun on_init(ctx: *Context) {
         print.eprintlnf("render target error: {}", gfx.error_message(st.err));
         gfx.texture_delete(d, ?g.texture);
         gfx.mesh_delete(d, ?g.mesh);
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -254,7 +264,7 @@ fun on_dnit(ctx: *Context) {
     gfx.mesh_delete(d, ?g.mesh);
     gfx.texture_delete(d, ?g.texture);
     # The renderer owns the device, so it goes last.
-    gfx.renderer_dnit(?g.renderer);
+    renderer_down(ctx, ?g.renderer);
 }
 
 #[symbol("main")]

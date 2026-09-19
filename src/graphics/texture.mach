@@ -87,6 +87,14 @@ rec Decoded {
 # space:  what the bytes mean; ColorSpace.srgb for anything authored to be looked at
 # ret:    the uploaded Texture handle, or an allocation/upload error
 pub fun texture(d: *Device, pixels: *u8, width: i32, height: i32, space: ColorSpace) res[Texture, Error] {
+    val made: res[Texture, Error] = texture_owned(d, pixels, width, height, space);
+    if (sel made.ok) { d.vk.live.textures = d.vk.live.textures + 1; }
+    ret made;
+}
+
+# The same upload, uncounted, for a texture boom itself owns: the renderer's
+# white texel and an atlas's pages. A game's own textures go through texture.
+pub fun texture_owned(d: *Device, pixels: *u8, width: i32, height: i32, space: ColorSpace) res[Texture, Error] {
     if (!d.ready) {
         ret res[Texture, Error].err{Error.uninitialized{Stage.upload{}}};
     }
@@ -341,11 +349,17 @@ pub fun texture_view(t: *Texture) vk.ImageView {
 
 # release the GPU image backing a handle
 #
-# Call before renderer_dnit: the delete waits on the device, which is gone after.
+# Call before renderer_dnit, which refuses while this is still live.
 # ---
 # d: the upload context the texture was created against
 # t: texture to delete; the handle must not be used afterward
 pub fun texture_delete(d: *Device, t: *Texture) {
+    texture_release_owned(d, t);
+    if (d.vk.live.textures > 0) { d.vk.live.textures = d.vk.live.textures - 1; }
+}
+
+# The same release, uncounted, for a texture made by texture_owned.
+pub fun texture_release_owned(d: *Device, t: *Texture) {
     # A resource may still be referenced by a command buffer the GPU has not
     # finished. See vk_wait_idle.
     vk_wait_idle(d.vk);

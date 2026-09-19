@@ -192,6 +192,8 @@ pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
     s.built[n].depth         = depth;
     s.built[n].live          = true;
     s.count                  = n + 1;
+    # the first pipeline is what binds the shader to a device
+    if (n == 0) { v.live.shaders = v.live.shaders + 1; }
     ret res[*Pipeline, Error].ok{?s.built[n].pipeline};
 }
 
@@ -212,7 +214,7 @@ pub fun shader_pipelines(s: *Shader) usize {
 #
 # The SPIR-V is not freed: it was borrowed.
 #
-# Call before renderer_dnit: the delete waits on the device, which is gone after.
+# Call before renderer_dnit, which refuses while this is still live.
 pub fun shader_delete(s: *Shader, d: *Device) {
     if (d == nil || !d.ready) { ret; }
     val v: *Vk = d.vk;
@@ -221,6 +223,7 @@ pub fun shader_delete(s: *Shader, d: *Device) {
     # "after the last draw" is not after the last use. Every public delete waits
     # first; see vk_wait_idle.
     vk_wait_idle(v);
+    if (s.count > 0 && v.live.shaders > 0) { v.live.shaders = v.live.shaders - 1; }
     var i: usize = 0;
     for (i < s.count) {
         if (s.built[i].live) {

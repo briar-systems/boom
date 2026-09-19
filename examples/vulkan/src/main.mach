@@ -72,8 +72,10 @@ use boom.window.window_open;
 use boom.window.window_poll;
 use boom.window.window_refresh_size;
 use boom.window.window_should_close;
-use img: image;
-use p:   std.print;
+use img:  image;
+use allo: std.allocator;
+use std.allocator.page;
+use p: std.print;
 use std.runtime;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -83,6 +85,7 @@ use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_equals;
 
 val WIDTH:  i32 = 640;
 val HEIGHT: i32 = 360;
@@ -111,6 +114,85 @@ val CLEAR_B: f32 = 0.5;
 # exactly zero red, so any floor above sampling noise works; this one is far
 # above the darkest texel's contribution and far below the lightest.
 val COVERED_R: u8 = 16;
+
+# The top-left sprite's edge, its size, and the floors that separate the
+# checker's two texels once they have been through the pipeline. 40 and 220
+# are authored sRGB bytes and come back close to that; the floors sit far
+# from both so the bilinear edge between two cells cannot land on either side
+# by mistake.
+val SPRITE_EDGE: usize = 8;
+val SPRITE_SIZE: usize = 64;
+val LIGHT_R:     u8    = 160;
+val DARK_R:      u8    = 100;
+
+# One channel of one pixel of a packed readback.
+fun channel(shot: *u8, width: usize, x: usize, y: usize, c: usize) u8 {
+    ret shot[(y * width + x) * 4 + c];
+}
+
+# Check the window's own pixels against the geometry that was drawn into it.
+#
+# The frame composites the scene target over the whole window and puts the
+# checker sprite at the top-left, so three places have known contents: a
+# corner of the composite is the scene's clear, its centre is the cube (the
+# origin the camera looks at projects there and lies inside the cube), and
+# the sprite is the checker with both texels present. None of it is measured
+# from a prior run; every expectation follows from what the frame draws.
+# ---
+# shot: the readback, sw * sh * 4 bytes in the swapchain's order
+# sw:   swapchain width in pixels
+# sh:   swapchain height in pixels
+# bgra: whether the bytes come blue first
+# ret:  whether the window shows the frame
+fun window_matches(shot: *u8, sw: usize, sh: usize, bgra: bool) bool {
+    var red:  usize = 0;
+    var blue: usize = 2;
+    if (bgra) {
+        red  = 2;
+        blue = 0;
+    }
+    # the composite covers min(WIDTH, sw) by min(HEIGHT, sh); a framebuffer
+    # scaled beyond the logical size leaves the rest to the window clear
+    var cw: usize = WIDTH::usize;
+    var ch: usize = HEIGHT::usize;
+    if (sw < cw) { cw = sw; }
+    if (sh < ch) { ch = sh; }
+    if (cw <= SPRITE_EDGE + SPRITE_SIZE || ch <= SPRITE_EDGE + SPRITE_SIZE) {
+        p.printlnf("FAIL window: the swapchain is {} by {}, too small to hold the frame", sw, sh);
+        ret false;
+    }
+
+    val corner_r: u8 = channel(shot, sw, cw - 2, ch - 2, red);
+    val corner_b: u8 = channel(shot, sw, cw - 2, ch - 2, blue);
+    if (corner_r > COVERED_R || corner_b <= COVERED_R) {
+        p.printlnf("FAIL window: the composite's corner is r {} b {}, not the scene clear", corner_r, corner_b);
+        ret false;
+    }
+    val centre_r: u8 = channel(shot, sw, cw / 2, ch / 2, red);
+    if (centre_r <= COVERED_R) {
+        p.printlnf("FAIL window: the composite's centre is r {}; the cube is not there", centre_r);
+        ret false;
+    }
+
+    var light: usize = 0;
+    var dark:  usize = 0;
+    var y:     usize = SPRITE_EDGE;
+    for (y < SPRITE_EDGE + SPRITE_SIZE) {
+        var x: usize = SPRITE_EDGE;
+        for (x < SPRITE_EDGE + SPRITE_SIZE) {
+            val v: u8 = channel(shot, sw, x, y, red);
+            if (v >= LIGHT_R) { light = light + 1; }
+            if (v <= DARK_R)  { dark = dark + 1; }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    if (light == 0 || dark == 0) {
+        p.printlnf("FAIL window: the sprite has {} light and {} dark texels; the checker is not there", light, dark);
+        ret false;
+    }
+    ret true;
+}
 
 # How many frames to present before declaring success.
 #
@@ -512,6 +594,23 @@ fun fabs(x: f32) f32 {
 
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
+    # --require-readback turns the window readback's skip into a failure. CI
+    # runs under lavapipe, which offers the copy, so a skip there means the
+    # surface decision went wrong rather than that the driver withheld it.
+    var require_readback: bool = false;
+    var argi:             i64  = 1;
+    for (argi < argc) {
+        if (str_equals(argv[argi]:~str, "--require-readback")) { require_readback = true; }
+        argi = argi + 1;
+    }
+
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) {
+        p.println("FAIL allocator: could not make the page allocator");
+        ret 1;
+    }
+
     val opened_window: res[Window, WindowError] = window_open(WIDTH, HEIGHT, "boom renderer smoke");
     if (sel opened_window.err) {
         p.printlnf("FAIL window_open: {}", window_error_message(opened_window.err));
@@ -669,6 +768,74 @@ fun main(argc: i64, argv: **u8) i64 {
     if (fail("renderer_set_present_mode", gfx.renderer_set_present_mode(?r, gfx.PresentMode.immediate{}))) { ret 1; }
     p.printlnf("ok   present mode changed with the renderer live: {} in use",
         present_name(gfx.renderer_present_mode(?r)));
+
+    # ------------------------------------------------------- what was shown
+    #
+    # The target readbacks below prove what a pass rendered. This proves what
+    # reached the window: the frame's own image, copied on its way to present.
+    # A surface that does not offer the copy cannot be read, which is a skip
+    # on a real driver and a failure under --require-readback.
+    if (!gfx.renderer_window_readable(?r)) {
+        if (require_readback) {
+            p.println("FAIL window readback: the surface does not offer TRANSFER_SRC, and --require-readback was given");
+            ret 1;
+        }
+        p.println("skip window readback: the surface does not offer TRANSFER_SRC");
+    }
+    or {
+        # The steady frame once more, still, with the scene clear the target
+        # checks use so the corner is told from the cube by hue.
+        xf.rotation = gm.quat_identity();
+        var shown:  bool  = false;
+        var wtries: usize = 0;
+        for (wtries < 8 && !shown) {
+            window_poll();
+            window_refresh_size(?w);
+            val began: opt[bool] = begin(?r);
+            if (sel began.none) { ret 1; }
+            if (began.some) {
+                var scene: gfx.PassDesc = gfx.pass_scene(?cam);
+                scene.target = opt[*gfx.RenderTarget].some{?target};
+                scene.clear  = opt[gm.Vec4].some{gm.vec4(CLEAR_R, CLEAR_G, CLEAR_B, 1.0)};
+                var sp: gfx.Pass = gfx.pass_begin(?r, ?scene);
+                gfx.pass_draw_material(?sp, ?mesh, ?mat, ?xf);
+                gfx.pass_end(?sp);
+
+                var over: gfx.PassDesc = gfx.pass_overlay();
+                var op:   gfx.Pass     = gfx.pass_begin(?r, ?over);
+                gfx.pass_draw_sprite(?op, opt[*gfx.Texture].some{gfx.render_target_texture(?target)},
+                    gfx.rect(0.0, 0.0, WIDTH::f32, HEIGHT::f32),
+                    gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gfx.pass_draw_sprite(?op, opt[*gfx.Texture].some{?tex}, gfx.rect(8.0, 8.0, 64.0, 64.0),
+                    gm.vec4(1.0, 1.0, 1.0, 1.0));
+                gfx.pass_end(?op);
+
+                # sized from the swapchain in hand, since a rebuild between
+                # tries may have changed it
+                val bytes: usize                = gfx.renderer_window_bytes(?r);
+                val br:    res[*u8, allo.Error] = allo.allocate[u8](?a, bytes);
+                if (sel br.err) {
+                    p.println("FAIL window readback: could not allocate the readback buffer");
+                    ret 1;
+                }
+                val shot_w: *u8   = br.ok;
+                val sw:     usize = gfx.renderer_width(?r)::usize;
+                val sh:     usize = gfx.renderer_height(?r)::usize;
+                if (fail("renderer_capture", gfx.renderer_capture(?r, shot_w, bytes))) { ret 1; }
+                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r)))            { ret 1; }
+                val matched: bool = window_matches(shot_w, sw, sh, gfx.renderer_window_bgra(?r));
+                allo.deallocate[u8](?a, shot_w, bytes);
+                if (!matched) { ret 1; }
+                p.printlnf("ok   window readback: {} by {} pixels show the frame", sw, sh);
+                shown = true;
+            }
+            wtries = wtries + 1;
+        }
+        if (!shown) {
+            p.println("FAIL window readback: the swapchain never came back to draw the frame");
+            ret 1;
+        }
+    }
 
     # ------------------------------------------------------- what was drawn
     #
@@ -1282,7 +1449,13 @@ fun main(argc: i64, argv: **u8) i64 {
     gfx.texture_delete(d, ?linear_tex);
     gfx.texture_delete(d, ?tex);
     gfx.mesh_delete(d, ?mesh);
-    gfx.renderer_dnit(?r);
+    # the device counts what this program still holds, so a teardown that
+    # succeeds here proves every delete above ran
+    val down: err[gfx.Error] = gfx.renderer_dnit(?r);
+    if (sel down.err) {
+        p.printlnf("FAIL: renderer refused to shut down: {}", gfx.error_message(down.err));
+        ret 1;
+    }
     # the window counts the renderers holding a surface on it and refuses to
     # close while one does, so a close that succeeds here proves the order
     val closed: err[WindowError] = window_close(?w);

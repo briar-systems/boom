@@ -63,6 +63,16 @@ rec Game {
 # The fixed update step in seconds, matching the 60 Hz config below.
 val DT: f32 = 0.0166667;
 
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
     g.ready = 0;
@@ -82,7 +92,7 @@ fun on_init(ctx: *Context) {
     val loaded: res[gfx.Model, gfx.Error] = gfx.model_load(d, "assets/bar.glb");
     if (sel loaded.err) {
         print.eprintlnf("model load error: {}", gfx.error_message(loaded.err));
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -92,7 +102,7 @@ fun on_init(ctx: *Context) {
     if (sel pl.err) {
         print.eprintlnf("model player error: {}", gfx.error_message(pl.err));
         gfx.model_delete(d, ?g.model);
-        gfx.renderer_dnit(?g.renderer);
+        renderer_down(ctx, ?g.renderer);
         context_fail(ctx, 1);
         ret;
     }
@@ -180,7 +190,7 @@ fun on_dnit(ctx: *Context) {
         print.eprintln("the model's clips could not be released");
         context_fail(ctx, 1);
     }
-    gfx.renderer_dnit(?g.renderer);
+    renderer_down(ctx, ?g.renderer);
 }
 
 #[symbol("main")]

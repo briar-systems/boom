@@ -16,6 +16,7 @@ use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.live.Live;
 use boom.graphics.vk.Vk;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -59,6 +60,11 @@ pub fun device_init(d: *Device, v: *Vk) err[Error] {
     }
     d.ready = true;
     ret err[Error].ok{};
+}
+
+# What the game still holds against the device, by kind.
+pub fun device_live(d: *Device) Live {
+    ret d.vk.live;
 }
 
 # Destroy the upload pool.

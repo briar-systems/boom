@@ -34,9 +34,9 @@ use boom.graphics.mesh.Floats;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.MeshData;
 use boom.graphics.mesh.extract_loaded;
-use boom.graphics.mesh.mesh;
 use boom.graphics.mesh.mesh_data_max_joint;
-use boom.graphics.mesh.mesh_delete;
+use boom.graphics.mesh.mesh_owned;
+use boom.graphics.mesh.mesh_release_owned;
 use boom.graphics.mesh.read_floats;
 use boom.graphics.skeleton.MAX_JOINTS;
 use boom.graphics.skeleton.Skeleton;
@@ -382,7 +382,7 @@ fun build_animations(loaded: *gp.Loaded, skin: *gd.Skin, pa: *allo.Allocator) re
 # release a failed model build, the primary failure winning over any release refusal
 fun abandon(d: *Device, model: *Model, parse: *arena.Arena, persistent: bool) {
     if (persistent) { arena.dnit(?model.arena); }
-    mesh_delete(d, ?model.mesh);
+    mesh_release_owned(d, ?model.mesh);
     arena.dnit(parse);
 }
 
@@ -424,7 +424,7 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     var md: MeshData = er.ok;
 
     var model: Model;
-    val mr:    res[Mesh, Error] = mesh(d, md.vertices::ptr, md.vertex_count, ?md.format,
+    val mr:    res[Mesh, Error] = mesh_owned(d, md.vertices::ptr, md.vertex_count, ?md.format,
         md.indices, md.index_count);
     if (sel mr.err) {
         arena.dnit(?tar);
@@ -486,9 +486,10 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     val released: err[allo.Error] = arena.dnit(?tar);
     if (sel released.err) {
         arena.dnit(?model.arena);
-        mesh_delete(d, ?model.mesh);
+        mesh_release_owned(d, ?model.mesh);
         ret res[Model, Error].err{Error.alloc{released.err}};
     }
+    d.vk.live.models = d.vk.live.models + 1;
     ret res[Model, Error].ok{model};
 }
 
@@ -584,13 +585,14 @@ pub fun model_joint(model: *Model, name: str) res[usize, Error] {
 # storage leaves the arena owning it, and the model's names and clips are cleared
 # either way.
 #
-# Call before renderer_dnit: the delete waits on the device, which is gone after.
+# Call before renderer_dnit, which refuses while this is still live.
 # ---
 # d:   the upload context the model was created against
 # m:   model to delete; the handle must not be used afterward
 # ret: ok, or the allocator's refusal to release the clip storage
 pub fun model_delete(d: *Device, m: *Model) err[allo.Error] {
-    mesh_delete(d, ?m.mesh);
+    mesh_release_owned(d, ?m.mesh);
+    if (d.vk.live.models > 0) { d.vk.live.models = d.vk.live.models - 1; }
     val released: err[allo.Error] = arena.dnit(?m.arena);
     m.clips      = nil;
     m.clip_count = 0;

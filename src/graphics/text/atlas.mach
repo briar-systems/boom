@@ -47,9 +47,10 @@ use boom.graphics.text.face.text_next;
 use boom.graphics.text.typeface.font_failed;
 use boom.graphics.text.typeface.outline_scratch_sizes;
 use boom.graphics.texture.Texture;
-use boom.graphics.texture.texture;
-use boom.graphics.texture.texture_delete;
+use boom.graphics.texture.texture_owned;
+use boom.graphics.texture.texture_release_owned;
 use boom.graphics.texture.texture_upload_region;
+use boom.graphics.vk.Vk;
 use boom.math.vec.Vec4;
 use font.error.FontError;
 use fglyf:   font.glyf;
@@ -280,8 +281,9 @@ pub fun atlas_init(a: *allo.Allocator, d: *Device, f: *FontFace) res[GlyphAtlas,
         release(?g);
         ret res[GlyphAtlas, Error].err{paged.err};
     }
-    g.valid   = true;
-    f.atlases = f.atlases + 1;
+    g.valid         = true;
+    f.atlases       = f.atlases + 1;
+    d.vk.live.fonts = d.vk.live.fonts + 1;
     ret res[GlyphAtlas, Error].ok{g};
 }
 
@@ -289,7 +291,7 @@ pub fun atlas_init(a: *allo.Allocator, d: *Device, f: *FontFace) res[GlyphAtlas,
 fun release(g: *GlyphAtlas) {
     var i: usize = 0;
     for (i < g.page_count) {
-        texture_delete(g.d, ?g.pages[i]);
+        texture_release_owned(g.d, ?g.pages[i]);
         i = i + 1;
     }
     g.page_count = 0;
@@ -313,7 +315,8 @@ fun release(g: *GlyphAtlas) {
 pub fun atlas_delete(d: *Device, g: *GlyphAtlas) {
     if (!g.valid) { ret; }
     g.valid = false;
-    g.d     = d;
+    if (d.vk.live.fonts > 0) { d.vk.live.fonts = d.vk.live.fonts - 1; }
+    g.d = d;
     release(g);
     if (g.face != nil && g.face.atlases > 0) { g.face.atlases = g.face.atlases - 1; }
 }
@@ -341,7 +344,7 @@ fun page_add(g: *GlyphAtlas) err[Error] {
 
     # sRGB. RGB is white and coverage is alpha, and Vulkan's sRGB formats leave
     # alpha linear, so coverage reaches the shader exactly as rasterized
-    val tr: res[Texture, Error] = texture(g.d, br.ok, g.page_side::i32,
+    val tr: res[Texture, Error] = texture_owned(g.d, br.ok, g.page_side::i32,
         g.page_side::i32, ColorSpace.srgb{});
     val freed: err[allo.Error] = allo.deallocate[u8](g.a, br.ok, texels * 4);
     if (sel tr.err) { ret err[Error].err{tr.err}; }
@@ -724,9 +727,14 @@ test "atlas: deleting uncounts the atlas on its face" {
     var g: GlyphAtlas;
     g.valid = true;
     g.face  = ?f;
+    # a device over a zeroed Vk, so the font count has somewhere to go
+    var v: Vk;
     var d: Device;
+    d.vk         = ?v;
+    v.live.fonts = 1;
     atlas_delete(?d, ?g);
-    if (f.atlases != 0) { ret 1; }
-    if (g.valid)        { ret 2; }
+    if (f.atlases != 0)    { ret 1; }
+    if (v.live.fonts != 0) { ret 3; }
+    if (g.valid)           { ret 2; }
     ret 0;
 }

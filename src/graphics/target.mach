@@ -349,7 +349,8 @@ pub fun render_target_create(d: *Device, width: i32, height: i32,
         ret res[RenderTarget, Error].err{vk_failed(VkCall.create_framebuffer{}, framed)};
     }
 
-    t.ready = true;
+    t.ready           = true;
+    d.vk.live.targets = d.vk.live.targets + 1;
     ret res[RenderTarget, Error].ok{t};
 }
 
@@ -467,12 +468,13 @@ pub fun render_target_bgra(t: *RenderTarget) bool {
 
 # release the target's images, render pass, and framebuffer
 #
-# Call before renderer_dnit: the delete waits on the device, which is gone after.
+# Call before renderer_dnit, which refuses while this is still live.
 # ---
 # d: the upload context the target was created against
 # t: target to delete; the handle must not be used afterward
 pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     val v: *Vk = d.vk;
+    if (t.ready && v.live.targets > 0) { v.live.targets = v.live.targets - 1; }
     vk_wait_idle(v);
     if (t.framebuffer != nil) {
         vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil);

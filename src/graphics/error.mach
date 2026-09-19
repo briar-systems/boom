@@ -14,6 +14,7 @@ use boom.graphics.error.content.text_error_message;
 use boom.graphics.error.content.texture_error_message;
 use boom.graphics.error.mesh.mesh_error_message;
 use boom.graphics.error.mesh.model_error_message;
+use boom.graphics.live.Live;
 use boom.vfs;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
@@ -204,15 +205,17 @@ pub tag TargetError: u8 {
 
 # why a renderer operation was refused
 # ---
-# no_mesh_upload: renderer_mesh_end with no open reservation
-# region:         a pass region outside the pass's extent
-# user_block:     a game uniform block empty or larger than USER_BYTES; carries its length
-# no_frame:       an operation that needs an open frame outside one
+# no_mesh_upload:  renderer_mesh_end with no open reservation
+# region:          a pass region outside the pass's extent
+# user_block:      a game uniform block empty or larger than USER_BYTES; carries its length
+# no_frame:        an operation that needs an open frame outside one
+# window_readback: the window's images cannot be copied from on this surface
 pub tag RendererError: u8 {
     no_mesh_upload;
     region;
     user_block: usize;
     no_frame;
+    window_readback;
 }
 
 # a graphics failure
@@ -252,6 +255,7 @@ pub tag Error: u8 {
     model:         ModelError;
     texture:       TextureError;
     text:          TextError;
+    in_use:        Live;
 }
 
 # the Error for a failed Vulkan call
@@ -288,6 +292,7 @@ pub fun error_message(e: Error) str {
     if (sel e.model)         { ret model_error_message(e.model); }
     if (sel e.texture)       { ret texture_error_message(e.texture); }
     if (sel e.text)          { ret text_error_message(e.text); }
+    if (sel e.in_use)        { ret "resources are still live; delete them before the renderer"; }
     ret "graphics failure";
 }
 
@@ -430,7 +435,8 @@ fun renderer_message(e: RendererError) str {
     if (sel e.no_mesh_upload) { ret "there is no mesh upload to finish"; }
     if (sel e.region)         { ret "the pass region lies outside the pass"; }
     if (sel e.user_block)     { ret "the uniform block is empty or larger than a slot's user region"; }
-    ret "no frame is open";
+    if (sel e.no_frame)       { ret "no frame is open"; }
+    ret "the surface does not offer TRANSFER_SRC, so the window cannot be read back";
 }
 
 test "error: a Vulkan failure keeps its call and result" {

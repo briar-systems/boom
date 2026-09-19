@@ -115,6 +115,7 @@ use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
 use boom.graphics.frame.frame_begin_pass;
+use boom.graphics.frame.frame_capture;
 use boom.graphics.frame.frame_dnit;
 use boom.graphics.frame.frame_end;
 use boom.graphics.frame.frame_init;
@@ -124,8 +125,11 @@ use boom.graphics.frame.frame_resume_pass;
 use boom.graphics.frame.frame_suspend_pass;
 use boom.graphics.frame.window_step;
 use boom.graphics.image.ColorSpace;
+use boom.graphics.image.image_bytes;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.image.sampler_init;
+use boom.graphics.live.Live;
+use boom.graphics.live.live_any;
 use boom.graphics.material.Material;
 use boom.graphics.material.MaterialError;
 use boom.graphics.material.material_add_texture;
@@ -177,8 +181,8 @@ use boom.graphics.swapchain.swapchain_rebuild;
 use boom.graphics.target.RenderTarget;
 use boom.graphics.target.render_target_count;
 use boom.graphics.texture.Texture;
-use boom.graphics.texture.texture;
-use boom.graphics.texture.texture_delete;
+use boom.graphics.texture.texture_owned;
+use boom.graphics.texture.texture_release_owned;
 use boom.graphics.texture.texture_view;
 use boom.graphics.tilemap.TILEMAP_CHUNK;
 use boom.graphics.tilemap.TileCursor;
@@ -469,7 +473,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     # sRGB, so it decodes to exactly 1.0 and multiplying by it is the identity.
     # A linear white would also be 1.0 today, but naming the space keeps this
     # correct if the fallback ever becomes something other than pure white.
-    val wr: res[Texture, Error] = texture(?r.dev, ?white_px[0], 1, 1, ColorSpace.srgb{});
+    val wr: res[Texture, Error] = texture_owned(?r.dev, ?white_px[0], 1, 1, ColorSpace.srgb{});
     if (sel wr.err) {
         renderer_rollback(r);
         ret err[Error].err{wr.err};
@@ -873,6 +877,7 @@ pub fun renderer_mesh_end(r: *Renderer, upload: *MeshUpload,
 
     r.uploads[r.upload_count] = pending;
     r.upload_count            = r.upload_count + 1;
+    r.vk.live.meshes          = r.vk.live.meshes + 1;
     ret res[Mesh, Error].ok{mesh_out};
 }
 
@@ -1213,6 +1218,60 @@ pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
 }
 
+# read the window back: arm a copy of this frame's image into out
+#
+# The bytes land in out during renderer_end_frame, after the frame's last pass
+# and before it is presented, so what comes back is exactly the frame the game
+# just drew, and out must stay valid until renderer_end_frame returns. A
+# presented image belongs to the presentation engine and cannot be read, which
+# is why the read is of the frame in hand rather than of the last one shown.
+#
+# The pixels are renderer_window_bytes long in the swapchain's packed format,
+# and renderer_window_bgra says whether they come blue first. Unlike a render
+# target the window is not sRGB-decoded on the way out: the bytes are what the
+# display receives.
+#
+# Waiting for the copy costs the frame its overlap with the next, so this is
+# for tooling and tests, not for something a game does every frame. A surface
+# that did not offer TRANSFER_SRC cannot be read at all; ask
+# renderer_window_readable before relying on it.
+# ---
+# r:   the renderer, with a frame open
+# out: destination for renderer_window_bytes bytes
+# len: size of out in bytes
+# ret: ok, or no_frame outside a frame, window_readback when the surface does
+#      not offer the copy, readback_short when out is too small
+pub fun renderer_capture(r: *Renderer, out: *u8, len: usize) err[Error] {
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    ret frame_capture(?r.frame, ?r.swap, out, len);
+}
+
+# whether the window can be read back on this surface
+#
+# False when the surface did not offer TRANSFER_SRC on its images, which a
+# driver is free to withhold. It is never assumed.
+pub fun renderer_window_readable(r: *Renderer) bool {
+    if (!r.swap.ready) { ret false; }
+    ret r.swap.readable;
+}
+
+# how many bytes a window readback fills: width * height * 4
+pub fun renderer_window_bytes(r: *Renderer) usize {
+    if (!r.swap.ready) { ret 0; }
+    ret image_bytes(r.swap.width, r.swap.height);
+}
+
+# whether the window's pixels come back blue-green-red-alpha rather than RGBA
+#
+# The order follows the surface format, which is the surface's choice and not
+# boom's. Exposed rather than assumed, because a caller that guesses gets a
+# picture with red and blue swapped and no diagnostic.
+pub fun renderer_window_bgra(r: *Renderer) bool {
+    if (!r.swap.ready) { ret false; }
+    ret r.swap.format == vk.FORMAT_B8G8R8A8_SRGB
+        || r.swap.format == vk.FORMAT_B8G8R8A8_UNORM;
+}
+
 # retire a mesh when this frame's fence next proves its last use complete
 #
 # refused, leaving the mesh as it was, when the renderer never came up or too
@@ -1224,15 +1283,17 @@ pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) err[Error] {
     if (count >= MAX_RETIRED_MESHES) { ret err[Error].err{Error.full{Capacity.retired_meshes{}}}; }
     r.retired[frame].meshes[count] = @m;
     r.retired[frame].count         = count + 1;
-    m.vertices.handle              = nil;
-    m.vertices.memory              = nil;
-    m.vertices.size                = 0;
-    m.vertices.mapped              = nil;
-    m.indices.handle               = nil;
-    m.indices.memory               = nil;
-    m.indices.size                 = 0;
-    m.indices.mapped               = nil;
-    m.index_count                  = 0;
+    # ownership passes to the renderer, which releases it on the fence
+    if (r.vk.live.meshes > 0) { r.vk.live.meshes = r.vk.live.meshes - 1; }
+    m.vertices.handle = nil;
+    m.vertices.memory = nil;
+    m.vertices.size   = 0;
+    m.vertices.mapped = nil;
+    m.indices.handle  = nil;
+    m.indices.memory  = nil;
+    m.indices.size    = 0;
+    m.indices.mapped  = nil;
+    m.index_count     = 0;
     ret err[Error].ok{};
 }
 
@@ -1309,15 +1370,25 @@ pub fun renderer_culled(r: *Renderer) usize {
 
 # release everything the renderer owns
 #
-# Every resource created against this renderer's device (textures, meshes,
-# models, fonts, targets, shaders) must be deleted before this, since their
-# delete waits on a device that no longer exists afterwards. The window is
+# REFUSED WHILE THE GAME STILL HOLDS A RESOURCE. Every texture, mesh, model,
+# font, target and shader is created against this renderer's device and its
+# delete waits on that device, so after this they would wait on nothing and
+# free against nothing. The device counts what the game holds by kind, and the
+# refusal carries those counts, leaving the renderer as it was. The window is
 # closed after this, never before: it counts the renderers holding a surface
-# on it and refuses to close while this one does.
+# on it and refuses the same way.
 # ---
-# r: renderer to shut down; must not be used afterward
-pub fun renderer_dnit(r: *Renderer) {
+# r:   renderer to shut down; must not be used after a successful return
+# ret: ok, or in_use with what the game still holds
+pub fun renderer_dnit(r: *Renderer) err[Error] {
+    if (r.ready_vk && live_any(r.vk.live)) { ret err[Error].err{Error.in_use{r.vk.live}}; }
     renderer_rollback(r);
+    ret err[Error].ok{};
+}
+
+# what the game still holds against this renderer's device
+pub fun renderer_live(r: *Renderer) Live {
+    ret r.vk.live;
 }
 
 fun renderer_rollback(r: *Renderer) {
@@ -1347,7 +1418,7 @@ fun renderer_rollback(r: *Renderer) {
         r.ready_stream = false;
     }
     if (r.ready_white) {
-        texture_delete(?r.dev, ?r.white);
+        texture_release_owned(?r.dev, ?r.white);
         r.ready_white = false;
     }
     if (r.ready_desc) {
@@ -1391,9 +1462,83 @@ fun renderer_rollback(r: *Renderer) {
 test "renderer: zero state teardown is idempotent" {
     var r: Renderer;
     r.drawing = true;
-    renderer_dnit(?r);
-    renderer_dnit(?r);
-    if (r.drawing) { ret 1; }
+    val first:  err[Error] = renderer_dnit(?r);
+    val second: err[Error] = renderer_dnit(?r);
+    if (!sel first.ok || !sel second.ok) { ret 2; }
+    if (r.drawing)                       { ret 1; }
+    ret 0;
+}
+
+# The delete side is what a device-free test can drive: the count moves the way
+# texture and texture_delete move it, and the refusal reads the count. The
+# teardown itself is left alone, since a zeroed renderer has nothing to roll
+# back; that its guard is ready_vk is what makes the refusal reachable only on
+# a renderer that came up.
+test "renderer: teardown is refused while the game holds a texture, and names it" {
+    var r: Renderer;
+    r.ready_vk = true;
+    var d: Device;
+    d.vk = ?r.vk;
+    # what texture does on success
+    d.vk.live.textures = d.vk.live.textures + 1;
+
+    val held: err[Error] = renderer_dnit(?r);
+    if (!sel held.err)        { ret 1; }
+    if (!sel held.err.in_use) { ret 2; }
+    val l: Live = held.err.in_use;
+    if (l.textures != 1)                                                                    { ret 3; }
+    if (l.meshes != 0 || l.models != 0 || l.targets != 0 || l.fonts != 0 || l.shaders != 0) { ret 4; }
+    # the refusal left the renderer as it was
+    if (!r.ready_vk) { ret 5; }
+
+    # what texture_delete does
+    d.vk.live.textures = d.vk.live.textures - 1;
+    r.ready_vk         = false;
+    val freed: err[Error] = renderer_dnit(?r);
+    if (!sel freed.ok) { ret 6; }
+    ret 0;
+}
+
+test "renderer: a window readback needs an open frame" {
+    var r: Renderer;
+    r.drawing = false;
+    var out: [4]u8;
+    val e:   err[Error] = renderer_capture(?r, ?out[0], 4);
+    if (!sel e.err)                   { ret 1; }
+    if (!sel e.err.renderer)          { ret 2; }
+    if (!sel e.err.renderer.no_frame) { ret 3; }
+    ret 0;
+}
+
+test "renderer: the window's readback size and order follow the swapchain" {
+    var r: Renderer;
+    r.swap.ready = false;
+    if (renderer_window_bytes(?r) != 0) { ret 1; }
+    if (renderer_window_readable(?r))   { ret 2; }
+    if (renderer_window_bgra(?r))       { ret 3; }
+    r.swap.ready    = true;
+    r.swap.width    = 320;
+    r.swap.height   = 200;
+    r.swap.readable = true;
+    r.swap.format   = vk.FORMAT_B8G8R8A8_SRGB;
+    if (renderer_window_bytes(?r) != 320 * 200 * 4) { ret 4; }
+    if (!renderer_window_readable(?r))              { ret 5; }
+    if (!renderer_window_bgra(?r))                  { ret 6; }
+    r.swap.format = vk.FORMAT_R8G8B8A8_SRGB;
+    if (renderer_window_bgra(?r)) { ret 7; }
+    ret 0;
+}
+
+test "renderer: retiring a mesh hands its count to the renderer" {
+    var r: Renderer;
+    r.ready_dev      = true;
+    r.frame_index    = 0;
+    r.vk.live.meshes = 1;
+    var m:       Mesh;
+    val retired: err[Error] = renderer_retire_mesh(?r, ?m);
+    if (!sel retired.ok)                  { ret 1; }
+    if (r.vk.live.meshes != 0)            { ret 2; }
+    if (renderer_retired_meshes(?r) != 1) { ret 3; }
     ret 0;
 }
 

@@ -140,6 +140,16 @@ fun abort(ctx: *Context, msg: str, e: gfx.Error) {
     context_fail(ctx, 1);
 }
 
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
 fun on_init(ctx: *Context) {
     val c: *Check = context_user(ctx)::*Check;
     c.renderer_ok = false;
@@ -606,7 +616,7 @@ fun on_dnit(ctx: *Context) {
         gfx.font_delete(d, ?c.font);
         c.font_ok = false;
     }
-    gfx.renderer_dnit(?c.renderer);
+    renderer_down(ctx, ?c.renderer);
     c.renderer_ok = false;
 }
 

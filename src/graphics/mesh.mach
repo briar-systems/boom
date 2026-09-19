@@ -217,6 +217,14 @@ fun read_u16_at(src: *u8, off: usize) u16 {
 # index_count:  number of indices
 # ret:          the drawable Mesh handle, or an allocation/upload error
 pub fun mesh(d: *Device, vertices: ptr, vertex_count: i32, format: *VertexFormat, indices: *u32, index_count: i32) res[Mesh, Error] {
+    val made: res[Mesh, Error] = mesh_owned(d, vertices, vertex_count, format, indices, index_count);
+    if (sel made.ok) { d.vk.live.meshes = d.vk.live.meshes + 1; }
+    ret made;
+}
+
+# The same upload, uncounted, for a mesh boom itself owns: a model's. A game's
+# own meshes go through mesh.
+pub fun mesh_owned(d: *Device, vertices: ptr, vertex_count: i32, format: *VertexFormat, indices: *u32, index_count: i32) res[Mesh, Error] {
     if (!d.ready) {
         ret res[Mesh, Error].err{Error.uninitialized{Stage.upload{}}};
     }
@@ -769,11 +777,17 @@ pub fun mesh_load(d: *Device, path: str) res[Mesh, Error] {
 
 # release the GPU buffers backing a mesh
 #
-# Call before renderer_dnit: the delete waits on the device, which is gone after.
+# Call before renderer_dnit, which refuses while this is still live.
 # ---
 # d: the upload context the mesh was created against
 # m: mesh to delete; the handle must not be used afterward
 pub fun mesh_delete(d: *Device, m: *Mesh) {
+    mesh_release_owned(d, m);
+    if (d.vk.live.meshes > 0) { d.vk.live.meshes = d.vk.live.meshes - 1; }
+}
+
+# The same release, uncounted, for a mesh made by mesh_owned.
+pub fun mesh_release_owned(d: *Device, m: *Mesh) {
     # A resource may still be referenced by a command buffer the GPU has not
     # finished. See vk_wait_idle.
     vk_wait_idle(d.vk);

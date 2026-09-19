@@ -309,6 +309,27 @@ pub fun transition_masks(old: i32, new: i32) opt[TransitionMasks] {
         ret masks(vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
             vk.ACCESS_SHADER_READ_BIT, vk.ACCESS_TRANSFER_READ_BIT);
     }
+    if (old == vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && new == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        # Reading the window's image back after its last pass has ended and
+        # before it is presented. The colour writes must land before the copy
+        # reads them.
+        ret masks(vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+            vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT);
+    }
+    if (old == vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL && new == vk.IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        # The frame's last pass has ended and the image goes to the
+        # presentation engine. A present is not a memory access the barrier
+        # names; the semaphore the submit signals is what orders it, so the
+        # destination is the end of the pipe with no access, as the spec asks.
+        ret masks(vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0);
+    }
+    if (old == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new == vk.IMAGE_LAYOUT_PRESENT_SRC_KHR) {
+        # And on to the presentation engine after a readback copy, with the
+        # same hand-off as above but ordered after the transfer read.
+        ret masks(vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            vk.ACCESS_TRANSFER_READ_BIT, 0);
+    }
     if (old == vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && new == vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
         # And back, so the target is left in the layout its descriptor claims.
         # Without this a read would leave every later sample reading an image in
@@ -428,7 +449,7 @@ pub fun image_transition(i: *Image, v: *Vk, pool: vk.CommandPool, old: i32, new:
 }
 
 # Record a transition this module performs into a command buffer.
-fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) {
+pub fun transition(cmd: vk.CommandBuffer, image: vk.Image, old: i32, new: i32) {
     val m: opt[TransitionMasks] = transition_masks(old, new);
     if (sel m.some) { record_barrier(cmd, image, old, new, m.some); }
 }
@@ -879,6 +900,36 @@ test "image: a live image can be written into and left readable" {
     val back: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (!sel back.some) { ret 6; }
+    ret 0;
+}
+
+test "image: the window's image is read after its colour writes and handed on to present" {
+    # A window readback copies the swapchain image between the last pass and
+    # the present. The copy must wait for the colour attachment writes, and the
+    # hand-off to the presentation engine names no access, exactly as the
+    # barrier frame_end records when nothing is captured.
+    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    if (!sel m.some)                                                       { ret 1; }
+    if (m.some.src_stage != vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) { ret 2; }
+    if (m.some.dst_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)                { ret 3; }
+    if (m.some.src_access != vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)         { ret 4; }
+    if (m.some.dst_access != vk.ACCESS_TRANSFER_READ_BIT)                  { ret 5; }
+    val on: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (!sel on.some)                                              { ret 6; }
+    if (on.some.src_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)       { ret 7; }
+    if (on.some.dst_stage != vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) { ret 8; }
+    if (on.some.src_access != vk.ACCESS_TRANSFER_READ_BIT)         { ret 9; }
+    if (on.some.dst_access != 0)                                   { ret 10; }
+    # and the plain hand-off every uncaptured frame takes
+    val plain: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (!sel plain.some)                                                       { ret 11; }
+    if (plain.some.src_stage != vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) { ret 12; }
+    if (plain.some.dst_stage != vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)          { ret 13; }
+    if (plain.some.src_access != vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)         { ret 14; }
+    if (plain.some.dst_access != 0)                                            { ret 15; }
     ret 0;
 }
 
