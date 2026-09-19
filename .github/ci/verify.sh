@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# the checks the unit suite cannot make: the embedded SPIR-V, and one finite
-# example driving Vulkan under xvfb
+# the checks the unit suite cannot make: the embedded SPIR-V, and finite
+# examples driving Vulkan under xvfb
 set -euo pipefail
 
 # a uniform block is a contract between two separately compiled programs and
@@ -32,3 +32,10 @@ for font in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
     ./examples/text/out/linux-x86_64/debug/bin/text --font "$font"
   echo "text example passed with $font"
 done
+
+# the renderer example reads the window itself back and checks it against the
+# frame's geometry. lavapipe offers TRANSFER_SRC on its swapchain images, so a
+# skip here means the surface decision went wrong and the flag makes it fail.
+timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
+  ./examples/vulkan/out/linux-x86_64/debug/bin/vulkan --require-readback
+echo "vulkan example passed with the window read back"

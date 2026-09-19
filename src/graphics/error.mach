@@ -209,11 +209,13 @@ pub tag TargetError: u8 {
 # region:         a pass region outside the pass's extent
 # user_block:     a game uniform block empty or larger than USER_BYTES; carries its length
 # no_frame:       an operation that needs an open frame outside one
+# window_readback: the window's images cannot be copied from on this surface
 pub tag RendererError: u8 {
     no_mesh_upload;
     region;
     user_block: usize;
     no_frame;
+    window_readback;
 }
 
 # a graphics failure
@@ -433,7 +435,8 @@ fun renderer_message(e: RendererError) str {
     if (sel e.no_mesh_upload) { ret "there is no mesh upload to finish"; }
     if (sel e.region)         { ret "the pass region lies outside the pass"; }
     if (sel e.user_block)     { ret "the uniform block is empty or larger than a slot's user region"; }
-    ret "no frame is open";
+    if (sel e.no_frame)       { ret "no frame is open"; }
+    ret "the surface does not offer TRANSFER_SRC, so the window cannot be read back";
 }
 
 test "error: a Vulkan failure keeps its call and result" {

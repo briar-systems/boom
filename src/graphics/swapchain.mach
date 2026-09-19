@@ -172,7 +172,29 @@ pub rec Swapchain {
     present: PresentMode;
     width:   u32;
     height:  u32;
-    ready:   bool;
+    # whether the images may be copied from, so the window can be read back.
+    # only true when the surface offered TRANSFER_SRC; it is never assumed
+    readable: bool;
+    ready:    bool;
+}
+
+# The usage a swapchain image is created with.
+#
+# Colour attachment always. TRANSFER_SRC only when the surface reports it in
+# supportedUsageFlags: creating a swapchain with a usage the surface did not
+# offer is invalid, and some drivers honour it anyway, which is the shape of
+# bug that shows up on someone else's machine. The second value says whether
+# the window can be read back.
+# ---
+# supported: VkSurfaceCapabilitiesKHR.supportedUsageFlags
+# ret:       the usage to request, and whether it includes TRANSFER_SRC
+pub fun image_usage_for(supported: u32) [2]u32 {
+    var usage: u32 = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if ((supported & vk.IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) {
+        usage = usage | vk.IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ret [2]u32{usage, 1};
+    }
+    ret [2]u32{usage, 0};
 }
 
 # Clamp a requested extent into what the surface allows.
@@ -201,9 +223,10 @@ fun clamp_extent(caps: *vk.SurfaceCapabilitiesKHR, w: *u32, h: *u32) {
 # what was taken.
 pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
     present: PresentMode) err[Error] {
-    s.ready  = false;
-    s.count  = 0;
-    s.handle = nil;
+    s.ready    = false;
+    s.readable = false;
+    s.count    = 0;
+    s.handle   = nil;
     # Set before any early return, so a failed creation still reports a mode
     # the swapchain could be in.
     s.present = PresentMode.vsync{};
@@ -248,9 +271,11 @@ pub fun swapchain_init(s: *Swapchain, v: *Vk, width: u32, height: u32,
     ci.imageExtent.width  = w;
     ci.imageExtent.height = h;
     ci.imageArrayLayers   = 1;
-    ci.imageUsage         = vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    ci.preTransform       = caps.currentTransform;
-    ci.compositeAlpha     = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
+    val usage: [2]u32 = image_usage_for(caps.supportedUsageFlags);
+    ci.imageUsage     = usage[0];
+    s.readable        = usage[1] != 0;
+    ci.preTransform   = caps.currentTransform;
+    ci.compositeAlpha = vk.COMPOSITE_ALPHA_OPAQUE_BIT_KHR::i32;
     # FIFO is the only present mode required to be supported, so every other one
     # is a query and a fallback rather than a request. Creating a swapchain with
     # a mode the surface did not report is invalid usage that some drivers
@@ -473,5 +498,19 @@ test "swapchain: a mode the surface will not do falls back to vsync" {
     if (!sel immediate.vsync) { ret 2; }
     val vsync: PresentMode = pick_present_mode(?v, PresentMode.vsync{});
     if (!sel vsync.vsync) { ret 3; }
+    ret 0;
+}
+
+test "swapchain: images may be copied from only when the surface offers it" {
+    val offered: [2]u32 = image_usage_for(vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+        | vk.IMAGE_USAGE_TRANSFER_SRC_BIT | vk.IMAGE_USAGE_TRANSFER_DST_BIT);
+    if ((offered[0] & vk.IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)     { ret 1; }
+    if ((offered[0] & vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0) { ret 2; }
+    if (offered[1] != 1)                                         { ret 3; }
+    # nothing the surface did not offer is requested
+    if ((offered[0] & vk.IMAGE_USAGE_TRANSFER_DST_BIT) != 0) { ret 4; }
+    val refused: [2]u32 = image_usage_for(vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+    if ((refused[0] & vk.IMAGE_USAGE_TRANSFER_SRC_BIT) != 0) { ret 5; }
+    if (refused[1] != 0)                                     { ret 6; }
     ret 0;
 }

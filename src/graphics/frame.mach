@@ -28,13 +28,22 @@
 # is a real race: the second wait may observe the first signal. Per image, the
 # acquire that returns the image is itself the proof its last present retired.
 
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_unmap;
 use boom.graphics.error.Error;
+use boom.graphics.error.ImageError;
+use boom.graphics.error.RendererError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.depth_attachment_dnit;
 use boom.graphics.image.depth_attachment_init;
+use boom.graphics.image.image_bytes;
+use boom.graphics.image.transition;
 use boom.graphics.pass.PassOptions;
 use boom.graphics.pass.pass_clearing;
 use boom.graphics.pass.pass_create;
@@ -46,6 +55,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use vk;
@@ -118,6 +128,17 @@ rec Frame {
     in_flight: vk.Fence;
 }
 
+# A window readback armed for the frame being recorded.
+#
+# The copy is recorded by frame_end, between the last pass and the present,
+# and the bytes land in `out` before frame_end returns. Nothing else can read
+# the window: a presented image belongs to the presentation engine, and the
+# frame's command buffer is the only place the image is still boom's to copy.
+pub rec Capture {
+    out: *u8;
+    len: usize;
+}
+
 # The frame loop's resources.
 # ---
 # pass:         Render pass: a colour attachment and a depth attachment, both
@@ -136,6 +157,7 @@ rec Frame {
 # current:      Which in-flight frame is next.
 # image_index:  Swapchain image acquired this frame.
 # window:       Where the window's render pass is in the frame being recorded.
+# capture:      A window readback armed for this frame, fulfilled by frame_end.
 # ready:        Whether creation completed.
 pub rec FrameLoop {
     pass:         vk.RenderPass;
@@ -149,6 +171,7 @@ pub rec FrameLoop {
     current:      usize;
     image_index:  u32;
     window:       WindowPass;
+    capture:      opt[Capture];
     ready:        bool;
 }
 
@@ -157,6 +180,7 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
     f.ready   = false;
     f.current = 0;
     f.window  = WindowPass.idle{};
+    f.capture = opt[Capture].none{};
 
     if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
     if (!s.ready) { ret err[Error].err{Error.uninitialized{Stage.swapchain{}}}; }
@@ -428,6 +452,20 @@ pub fun frame_resume_pass(f: *FrameLoop, s: *Swapchain) {
     f.window = WindowPass.open{};
 }
 
+# Arm a readback of the window for the frame being recorded.
+#
+# Refused when the surface did not offer TRANSFER_SRC (window_readback) or when
+# `out` is smaller than width * height * 4 (readback_short, carrying the size).
+# The bytes are the swapchain's packed format, so consult the swapchain for
+# the channel order. `out` must stay valid until frame_end returns.
+pub fun frame_capture(f: *FrameLoop, s: *Swapchain, out: *u8, len: usize) err[Error] {
+    if (!s.readable) { ret err[Error].err{Error.renderer{RendererError.window_readback{}}}; }
+    val need: usize = image_bytes(s.width, s.height);
+    if (len < need) { ret err[Error].err{Error.image{ImageError.readback_short{need}}}; }
+    f.capture = opt[Capture].some{Capture{out: out, len: len}};
+    ret err[Error].ok{};
+}
+
 # End the render pass, submit, and present.
 #
 # False when the swapchain needs rebuilding.
@@ -445,30 +483,50 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     # is one pass, or three when the game renders into an offscreen target part
     # way through, and no pass knows whether it is the last. This is the point
     # that does.
-    var b: vk.ImageMemoryBarrier;
-    b.sType         = vk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.pNext         = nil;
-    b.srcAccessMask = vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    # A present is not a memory read the barrier has to name; the semaphore the
-    # submit signals is what orders it. Zero here is what the spec asks for.
-    b.dstAccessMask                   = 0;
-    b.oldLayout                       = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    b.newLayout                       = vk.IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    b.srcQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex             = vk.QUEUE_FAMILY_IGNORED;
-    b.image                           = s.images[f.image_index];
-    b.subresourceRange.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseMipLevel   = 0;
-    b.subresourceRange.levelCount     = 1;
-    b.subresourceRange.baseArrayLayer = 0;
-    b.subresourceRange.layerCount     = 1;
-    vk.vkCmdPipelineBarrier(f.frames[i].command,
-        vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0, 0, nil, 0, nil, 1, ?b);
+    #
+    # It is also the only point a window readback can happen. Once presented
+    # the image belongs to the presentation engine, so an armed capture copies
+    # it here, on the way from the last pass to the present, and the barrier
+    # to PRESENT_SRC is taken from the copy instead of from the pass.
+    var staging:   Buffer;
+    val armed:     bool = sel f.capture.some;
+    var capturing: bool = false;
+    var from:      i32  = vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (armed) {
+        val size: usize      = image_bytes(s.width, s.height);
+        val sr:   err[Error] = buffer_init(?staging, v, size::u64,
+            vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (sel sr.err) {
+            capture_drop(f, v, ?staging, false);
+            ret res[bool, Error].err{sr.err};
+        }
+        capturing = true;
+        from      = vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        transition(f.frames[i].command, s.images[f.image_index],
+            vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        var region: vk.BufferImageCopy;
+        region.bufferOffset                    = 0;
+        region.bufferRowLength                 = 0;
+        region.bufferImageHeight               = 0;
+        region.imageSubresource.aspectMask     = vk.IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset.x                   = 0;
+        region.imageOffset.y                   = 0;
+        region.imageOffset.z                   = 0;
+        region.imageExtent.width               = s.width;
+        region.imageExtent.height              = s.height;
+        region.imageExtent.depth               = 1;
+        vk.vkCmdCopyImageToBuffer(f.frames[i].command, s.images[f.image_index],
+            vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.handle, 1, ?region);
+    }
+    transition(f.frames[i].command, s.images[f.image_index], from, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     val ended: i32 = vk.vkEndCommandBuffer(f.frames[i].command);
     if (ended != vk.SUCCESS) {
+        capture_drop(f, v, ?staging, capturing);
         ret res[bool, Error].err{vk_failed(VkCall.end_command_buffer{}, ended)};
     }
 
@@ -486,6 +544,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
 
     val submitted: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight);
     if (submitted != vk.SUCCESS) {
+        capture_drop(f, v, ?staging, capturing);
         ret res[bool, Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
     }
 
@@ -507,6 +566,14 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     # frames sharing one set of synchronization objects.
     f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
 
+    # The copy was submitted with the frame, whatever the present said, so the
+    # fence is what says the bytes have landed. Waiting here costs the overlap
+    # of one frame, which is the price of a readback and only paid when armed.
+    if (capturing) {
+        val cr: err[Error] = capture_fulfil(f, v, ?staging, i, image_bytes(s.width, s.height));
+        if (sel cr.err) { ret res[bool, Error].err{cr.err}; }
+    }
+
     if (prr == vk.ERROR_OUT_OF_DATE_KHR || prr == vk.SUBOPTIMAL_KHR) {
         ret res[bool, Error].ok{false};
     }
@@ -514,6 +581,38 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
         ret res[bool, Error].err{vk_failed(VkCall.queue_present{}, prr)};
     }
     ret res[bool, Error].ok{true};
+}
+
+# Wait for an armed capture's frame to retire and copy its bytes out.
+fun capture_fulfil(f: *FrameLoop, v: *Vk, staging: *Buffer, i: usize, size: usize) err[Error] {
+    val waited: i32 = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
+    if (waited != vk.SUCCESS) {
+        capture_drop(f, v, staging, true);
+        ret err[Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
+    }
+    val mapped: res[ptr, Error] = buffer_map(staging, v);
+    if (sel mapped.err) {
+        capture_drop(f, v, staging, true);
+        ret err[Error].err{mapped.err};
+    }
+    if (sel f.capture.some) {
+        val src: *u8   = mapped.ok:~*u8;
+        val out: *u8   = f.capture.some.out;
+        var k:   usize = 0;
+        for (k < size) {
+            out[k] = src[k];
+            k      = k + 1;
+        }
+    }
+    buffer_unmap(staging, v);
+    capture_drop(f, v, staging, true);
+    ret err[Error].ok{};
+}
+
+# Disarm the capture and release its staging buffer when one was made.
+fun capture_drop(f: *FrameLoop, v: *Vk, staging: *Buffer, made: bool) {
+    f.capture = opt[Capture].none{};
+    if (made) { buffer_dnit(staging, v); }
 }
 
 # Destroy the framebuffers and render pass, keeping the pool and frames.
@@ -688,5 +787,42 @@ test "frame: no sequence of passes begins a window pass while it is suspended" {
         if (sel state.suspended) { ret 4; }
         code = code + 1;
     }
+    ret 0;
+}
+
+test "frame: a window readback is refused when the surface does not offer the copy" {
+    var f: FrameLoop;
+    f.capture = opt[Capture].none{};
+    var s: Swapchain;
+    s.readable = false;
+    s.width    = 8;
+    s.height   = 8;
+    var out: [256]u8;
+    val e: err[Error] = frame_capture(?f, ?s, ?out[0], 256);
+    if (!sel e.err)                          { ret 1; }
+    if (!sel e.err.renderer)                 { ret 2; }
+    if (!sel e.err.renderer.window_readback) { ret 3; }
+    if (sel f.capture.some)                  { ret 4; }
+    ret 0;
+}
+
+test "frame: a window readback names the bytes it needs and arms when given them" {
+    var f: FrameLoop;
+    f.capture = opt[Capture].none{};
+    var s: Swapchain;
+    s.readable = true;
+    s.width    = 8;
+    s.height   = 8;
+    var out: [256]u8;
+    val short: err[Error] = frame_capture(?f, ?s, ?out[0], 255);
+    if (!sel short.err)                      { ret 1; }
+    if (!sel short.err.image)                { ret 2; }
+    if (!sel short.err.image.readback_short) { ret 3; }
+    if (short.err.image.readback_short != 256) { ret 4; }
+    if (sel f.capture.some)                  { ret 5; }
+    val ok: err[Error] = frame_capture(?f, ?s, ?out[0], 256);
+    if (!sel ok.ok)             { ret 6; }
+    if (!sel f.capture.some)    { ret 7; }
+    if (f.capture.some.len != 256) { ret 8; }
     ret 0;
 }
