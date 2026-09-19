@@ -189,7 +189,7 @@ pub fun face_init(a: *allo.Allocator, t: *Typeface, pixels: f32, options: FontOp
     val hhea: fhhea.Hhea = typeface_hhea(t);
     f.a          = a;
     f.typeface   = t;
-    f.metrics    = gmap.init[u32, GlyphMetrics](a, gmap.hash_u32, gmap.eq_u32);
+    f.metrics    = gmap.init[u32, GlyphMetrics](a);
     f.scale      = scaled.ok;
     f.span       = (hhea.ascent::i32 - hhea.descent::i32)::f32 * f.scale;
     f.height     = f.span;
@@ -385,7 +385,7 @@ pub fun face_height(f: *FontFace, s: str) f32 {
 fun seeded_face(a: *allo.Allocator, advance: f32) FontFace {
     var f: FontFace;
     f.a       = a;
-    f.metrics = gmap.init[u32, GlyphMetrics](a, gmap.hash_u32, gmap.eq_u32);
+    f.metrics = gmap.init[u32, GlyphMetrics](a);
     f.height  = 12.0;
     f.valid   = true;
     var cp: u32 = 32;
