@@ -263,7 +263,7 @@ pub fun atlas_init(a: *allo.Allocator, d: *Device, f: *FontFace) res[GlyphAtlas,
     g.a              = a;
     g.d              = d;
     g.face           = f;
-    g.cells          = gmap.init[u32, Cell](a, gmap.hash_u32, gmap.eq_u32);
+    g.cells          = gmap.init[u32, Cell](a);
     g.cell           = cell;
     g.page_side      = side.ok;
     g.cols           = g.page_side / (cell + GUTTER * 2);

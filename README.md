@@ -409,8 +409,10 @@ ref = "tag/v0.30.0"
 ```
 
 `mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.30.0`
-writes that stanza and realizes boom's whole closure one level deep under the
-consumer's `dep/`. The root's declarations win over every pin beneath them, so a
+writes that stanza (`--version ^0.30` declares boom by range instead) and
+realizes boom's whole closure one level deep under the consumer's `dep/`. boom
+declares each library by version range, pinned by its gitlink, and mach 5.9
+seeds those transitive ranges from boom's pins. The root's declarations win over every pin beneath them, so a
 root that also declares `std` (every `mach init` root does, by range) decides
 the std the whole closure builds against. boom declares `std` by range for
 that reason, and a root pinning `std` to a release older than boom's range is
@@ -426,6 +428,11 @@ mach dep pull .
 mach build .
 mach test .
 ```
+
+boom's own `dep/` is pinned by gitlinks, so `mach dep pull .` lands on the
+committed closure. An example is an untracked root that declares boom by path
+and carries no pin of its own, so it resolves with
+`cd examples/cube && mach dep update . --all` before `mach build .`.
 
 The built-in shaders are the `shader-*` artifacts on the `spirv` target, which
 `mach build .` produces before the library that embeds them. To build or
