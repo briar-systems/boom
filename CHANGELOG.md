@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-19
+
+### Changed
+- boom builds against std 6.0 and requires mach 5.9 (#186). The glyph metrics
+  and atlas cell maps key by `u32` and now use `std.collections.map`'s natural
+  hash and equality (std 6 dropped the `hash_u32`/`eq_u32` helpers). Nothing
+  boom exports changes shape. A consumer's root std moves to 6.0 with it, and
+  its own std 6 migration is `dep/std/MIGRATION.md`.
+- The seven library dependencies (glfw 0.7, audio 0.8, image 0.6, font 0.7,
+  vk 0.5, gltf 0.6, shader 0.3) are declared by version range and pinned by
+  their gitlinks, as std has been since 0.30.0 (#186). mach 5.9 seeds a
+  transitive range from the declaring dependency's own pin, so a fresh
+  `mach init` root that adds boom by path or by git realizes the whole
+  closure. boom's examples are untracked roots with no pin of their own, so
+  they resolve with `mach dep update . --all` rather than `mach dep pull .`.
+
 ## [0.30.0] - 2026-09-19
 
 ### Changed

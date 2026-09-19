@@ -1,7 +1,7 @@
 [project]
 id = "boom"
-version = "0.30.0"
-mach = "^5.7"
+version = "0.31.0"
+mach = "^5.9"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -97,32 +97,32 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^5.7.1"
+version = "^6.0"
 
 [dep.glfw]
 git = "https://github.com/briar-systems/mach-glfw"
-ref = "tag/v0.6.0"
+version = "^0.7"
 
 [dep.audio]
 git = "https://github.com/briar-systems/mach-audio"
-ref = "tag/v0.7.0"
+version = "^0.8"
 
 [dep.image]
 git = "https://github.com/briar-systems/mach-image"
-ref = "tag/v0.5.0"
+version = "^0.6"
 
 [dep.font]
 git = "https://github.com/briar-systems/mach-font"
-ref = "tag/v0.6.1"
+version = "^0.7"
 
 [dep.vk]
 git = "https://github.com/briar-systems/mach-vk"
-ref = "tag/v0.4.0"
+version = "^0.5"
 
 [dep.gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-ref = "tag/v0.5.0"
+version = "^0.6"
 
 [dep.shader]
 git = "https://github.com/briar-systems/mach-shader"
-ref = "tag/v0.3.0"
+version = "^0.3"
