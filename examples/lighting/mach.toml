@@ -122,11 +122,3 @@ need = []
 
 [dep.boom]
 path = "../.."
-
-[dep.std]
-git = "https://github.com/briar-systems/mach-std"
-version = "^5.7.1"
-
-[dep.shader]
-git = "https://github.com/briar-systems/mach-shader"
-ref = "tag/v0.3.0"

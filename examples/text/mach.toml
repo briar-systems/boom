@@ -46,7 +46,3 @@ need = []
 
 [dep.boom]
 path = "../.."
-
-[dep.std]
-git = "https://github.com/briar-systems/mach-std"
-version = "^5.7.1"
