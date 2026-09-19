@@ -205,10 +205,10 @@ pub tag TargetError: u8 {
 
 # why a renderer operation was refused
 # ---
-# no_mesh_upload: renderer_mesh_end with no open reservation
-# region:         a pass region outside the pass's extent
-# user_block:     a game uniform block empty or larger than USER_BYTES; carries its length
-# no_frame:       an operation that needs an open frame outside one
+# no_mesh_upload:  renderer_mesh_end with no open reservation
+# region:          a pass region outside the pass's extent
+# user_block:      a game uniform block empty or larger than USER_BYTES; carries its length
+# no_frame:        an operation that needs an open frame outside one
 # window_readback: the window's images cannot be copied from on this surface
 pub tag RendererError: u8 {
     no_mesh_upload;

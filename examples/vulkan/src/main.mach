@@ -72,10 +72,10 @@ use boom.window.window_open;
 use boom.window.window_poll;
 use boom.window.window_refresh_size;
 use boom.window.window_should_close;
-use img: image;
+use img:  image;
 use allo: std.allocator;
 use std.allocator.page;
-use p:   std.print;
+use p: std.print;
 use std.runtime;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -139,11 +139,11 @@ fun channel(shot: *u8, width: usize, x: usize, y: usize, c: usize) u8 {
 # the sprite is the checker with both texels present. None of it is measured
 # from a prior run; every expectation follows from what the frame draws.
 # ---
-# shot:  the readback, sw * sh * 4 bytes in the swapchain's order
-# sw:    swapchain width in pixels
-# sh:    swapchain height in pixels
-# bgra:  whether the bytes come blue first
-# ret:   whether the window shows the frame
+# shot: the readback, sw * sh * 4 bytes in the swapchain's order
+# sw:   swapchain width in pixels
+# sh:   swapchain height in pixels
+# bgra: whether the bytes come blue first
+# ret:  whether the window shows the frame
 fun window_matches(shot: *u8, sw: usize, sh: usize, bgra: bool) bool {
     var red:  usize = 0;
     var blue: usize = 2;
@@ -598,7 +598,7 @@ fun main(argc: i64, argv: **u8) i64 {
     # runs under lavapipe, which offers the copy, so a skip there means the
     # surface decision went wrong rather than that the driver withheld it.
     var require_readback: bool = false;
-    var argi: i64 = 1;
+    var argi:             i64  = 1;
     for (argi < argc) {
         if (str_equals(argv[argi]:~str, "--require-readback")) { require_readback = true; }
         argi = argi + 1;
@@ -786,8 +786,8 @@ fun main(argc: i64, argv: **u8) i64 {
         # The steady frame once more, still, with the scene clear the target
         # checks use so the corner is told from the cube by hue.
         xf.rotation = gm.quat_identity();
-        var shown:   bool  = false;
-        var wtries:  usize = 0;
+        var shown:  bool  = false;
+        var wtries: usize = 0;
         for (wtries < 8 && !shown) {
             window_poll();
             window_refresh_size(?w);
@@ -812,7 +812,7 @@ fun main(argc: i64, argv: **u8) i64 {
 
                 # sized from the swapchain in hand, since a rebuild between
                 # tries may have changed it
-                val bytes: usize            = gfx.renderer_window_bytes(?r);
+                val bytes: usize                = gfx.renderer_window_bytes(?r);
                 val br:    res[*u8, allo.Error] = allo.allocate[u8](?a, bytes);
                 if (sel br.err) {
                     p.println("FAIL window readback: could not allocate the readback buffer");
@@ -822,7 +822,7 @@ fun main(argc: i64, argv: **u8) i64 {
                 val sw:     usize = gfx.renderer_width(?r)::usize;
                 val sh:     usize = gfx.renderer_height(?r)::usize;
                 if (fail("renderer_capture", gfx.renderer_capture(?r, shot_w, bytes))) { ret 1; }
-                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+                if (fail("renderer_end_frame", gfx.renderer_end_frame(?r)))            { ret 1; }
                 val matched: bool = window_matches(shot_w, sw, sh, gfx.renderer_window_bgra(?r));
                 allo.deallocate[u8](?a, shot_w, bytes);
                 if (!matched) { ret 1; }

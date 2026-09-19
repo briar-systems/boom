@@ -1503,7 +1503,7 @@ test "renderer: a window readback needs an open frame" {
     var r: Renderer;
     r.drawing = false;
     var out: [4]u8;
-    val e: err[Error] = renderer_capture(?r, ?out[0], 4);
+    val e:   err[Error] = renderer_capture(?r, ?out[0], 4);
     if (!sel e.err)                   { ret 1; }
     if (!sel e.err.renderer)          { ret 2; }
     if (!sel e.err.renderer.no_frame) { ret 3; }
@@ -1513,9 +1513,9 @@ test "renderer: a window readback needs an open frame" {
 test "renderer: the window's readback size and order follow the swapchain" {
     var r: Renderer;
     r.swap.ready = false;
-    if (renderer_window_bytes(?r) != 0)  { ret 1; }
-    if (renderer_window_readable(?r))    { ret 2; }
-    if (renderer_window_bgra(?r))        { ret 3; }
+    if (renderer_window_bytes(?r) != 0) { ret 1; }
+    if (renderer_window_readable(?r))   { ret 2; }
+    if (renderer_window_bgra(?r))       { ret 3; }
     r.swap.ready    = true;
     r.swap.width    = 320;
     r.swap.height   = 200;

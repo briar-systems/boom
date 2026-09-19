@@ -798,7 +798,7 @@ test "frame: a window readback is refused when the surface does not offer the co
     s.width    = 8;
     s.height   = 8;
     var out: [256]u8;
-    val e: err[Error] = frame_capture(?f, ?s, ?out[0], 256);
+    val e:   err[Error] = frame_capture(?f, ?s, ?out[0], 256);
     if (!sel e.err)                          { ret 1; }
     if (!sel e.err.renderer)                 { ret 2; }
     if (!sel e.err.renderer.window_readback) { ret 3; }
@@ -813,16 +813,16 @@ test "frame: a window readback names the bytes it needs and arms when given them
     s.readable = true;
     s.width    = 8;
     s.height   = 8;
-    var out: [256]u8;
+    var out:   [256]u8;
     val short: err[Error] = frame_capture(?f, ?s, ?out[0], 255);
-    if (!sel short.err)                      { ret 1; }
-    if (!sel short.err.image)                { ret 2; }
-    if (!sel short.err.image.readback_short) { ret 3; }
+    if (!sel short.err)                        { ret 1; }
+    if (!sel short.err.image)                  { ret 2; }
+    if (!sel short.err.image.readback_short)   { ret 3; }
     if (short.err.image.readback_short != 256) { ret 4; }
-    if (sel f.capture.some)                  { ret 5; }
+    if (sel f.capture.some)                    { ret 5; }
     val ok: err[Error] = frame_capture(?f, ?s, ?out[0], 256);
-    if (!sel ok.ok)             { ret 6; }
-    if (!sel f.capture.some)    { ret 7; }
+    if (!sel ok.ok)                { ret 6; }
+    if (!sel f.capture.some)       { ret 7; }
     if (f.capture.some.len != 256) { ret 8; }
     ret 0;
 }
