@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-19
+
 ### Changed
 - boom builds against std 6.0 and requires mach 5.9 (#186). The glyph metrics
   and atlas cell maps key by `u32` and now use `std.collections.map`'s natural
