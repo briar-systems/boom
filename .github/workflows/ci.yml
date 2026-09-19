@@ -42,7 +42,10 @@ jobs:
       # the examples are the only check on the shape of the public API: nothing
       # inside boom calls it the way a game does. each resolves boom by path, so
       # its pull copies this branch, and the glob covers a new example unedited.
-      subprojects: '[{"path": "examples/*", "build": true, "test": false}]'
+      # they are consumer-shaped roots, so their dependencies resolve as a fresh
+      # `mach init` root's would (update), floating to the newest release each
+      # range admits; a family minor that breaks them is the early signal.
+      subprojects: '[{"path": "examples/*", "deps": "update", "build": true, "test": false}]'
 
   gate:
     if: always()

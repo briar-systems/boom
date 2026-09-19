@@ -17,8 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what CI builds (`.github/ci/verify.sh`) so the consumer's shape is covered.
   Migration: move the root project's std to 5.7 and mach to 5.7, and anything
   that anchored a `Clock` or sampled it by hand passes an `Instant` from
-  `instant()`. The family libraries boom depends on move to std 5.7 in the
-  same release.
+  `instant()`. boom now declares std by version range (`^5.7.1`), so a
+  consumer's `mach init` root and boom agree on the newest std the range
+  admits instead of colliding on an exact tag, and takes the family releases
+  built on std 5.7: glfw 0.6.0, audio 0.7.0, image 0.5.0, font 0.6.1, vk
+  0.4.0, gltf 0.5.0, shader 0.3.0. Those stay exact tags until mach resolves a
+  transitive range from the dependency's own pin (mach#3689, #186).
 
 ## [0.29.0] - 2026-09-19
 
