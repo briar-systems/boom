@@ -1,7 +1,7 @@
 [project]
 id = "vulkan"
 version = "0.3.1"
-mach = "^5.3"
+mach = "^5.7"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -49,8 +49,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v4.0.0"
-
-[dep.image]
-git = "https://github.com/briar-systems/mach-image"
-ref = "tag/v0.4.1"
+ref = "tag/v5.7.1"

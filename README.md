@@ -399,20 +399,22 @@ morph-target channels are future work.
 ## Consuming boom
 
 boom builds on several ecosystem libraries: `std`, `glfw`, `vk`, `audio`,
-`image`, `font`, `gltf`, `phys` and `shader`. A consumer declares only boom, and
+`image`, `font`, `gltf` and `shader`. A consumer declares only boom, and
 anything else its own source imports directly, under the project id:
 
 ```toml
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
-ref = "branch/dev"
+ref = "tag/v0.30.0"
 ```
 
-`mach dep add . boom --git https://github.com/briar-systems/boom --ref branch/dev`
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.30.0`
 writes that stanza and realizes boom's whole closure one level deep under the
-consumer's `dep/`, pinned by gitlinks. A project the consumer also imports
-directly, such as `std`, is declared at the selector boom uses, since one
-identity resolves to one commit per build.
+consumer's `dep/`. The root's declarations win over every pin beneath them, so a
+root that also declares `std` (every `mach init` root does, by range) decides
+the std the whole closure builds against. boom declares `std` by range for
+that reason, and a root pinning `std` to a release older than boom's range is
+how a build fails inside `dep/boom` (#184).
 
 boom's library artifact is the default, so `use boom;` binds `boom.lib.boom`,
 and a subsystem is reached directly as `use gfx: boom.graphics;`.
