@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-19
+
 ### Added
 - graphics: the window can be read back. `renderer_capture(r, out, len)` arms
   a copy of the frame being drawn, taken between its last pass and the present
