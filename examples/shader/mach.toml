@@ -3,7 +3,7 @@
 [project]
 id = "game"
 version = "0.3.1"
-mach = "^5.3"
+mach = "^5.7"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -77,8 +77,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v4.0.0"
-
-[dep.shader]
-git = "https://github.com/briar-systems/mach-shader"
-ref = "tag/v0.3.0"
+ref = "tag/v5.7.1"
