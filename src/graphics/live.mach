@@ -1,0 +1,34 @@
+# What a game still holds against a device, by kind.
+
+use std.types.bool.bool;
+use std.types.size.usize;
+
+# How many resources of each kind a game holds against the device.
+#
+# Counted at the public boundary: what the game created and has not deleted.
+# boom's own resources (the renderer's white texel, an atlas's pages, a model's
+# mesh) go through the uncounted cores, so a game that deleted everything it
+# made reads zero everywhere. renderer_dnit refuses while any count is not
+# zero, the way a window refuses to close while a renderer holds it: a delete
+# after the device is gone waits on nothing and frees against nothing.
+# ---
+# textures: Texture handles
+# meshes:   Mesh handles, including those the renderer uploaded
+# models:   Model handles
+# targets:  RenderTarget handles
+# fonts:    Font handles, and a GlyphAtlas made without a Font
+# shaders:  Shader handles that have built a pipeline
+pub rec Live {
+    textures: usize;
+    meshes:   usize;
+    models:   usize;
+    targets:  usize;
+    fonts:    usize;
+    shaders:  usize;
+}
+
+# whether any resource is still held
+pub fun live_any(l: Live) bool {
+    ret l.textures != 0 || l.meshes != 0 || l.models != 0
+        || l.targets != 0 || l.fonts != 0 || l.shaders != 0;
+}

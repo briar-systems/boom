@@ -102,6 +102,7 @@ fwd boom.graphics.depth.depth_convention_same;
 fwd boom.graphics.device.Device;
 fwd boom.graphics.device.device_init;
 fwd boom.graphics.device.device_dnit;
+fwd boom.graphics.device.device_live;
 
 fwd boom.graphics.vertex.MAX_ATTRIBUTES;
 fwd boom.graphics.vertex.Semantic;
@@ -240,6 +241,7 @@ fwd boom.graphics.renderer.renderer_resize;
 fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
+fwd boom.graphics.renderer.renderer_live;
 fwd boom.graphics.renderer.renderer_device;
 fwd boom.graphics.renderer.renderer_mesh;
 # Two ways past the cost renderer_mesh pays on the caller's behalf. The
@@ -422,6 +424,9 @@ fwd boom.graphics.spirv.LIT_FRAG_SPV;
 fwd boom.graphics.spirv.MESH_VERT_SPV;
 fwd boom.graphics.spirv.VERTEX_ENTRY;
 fwd boom.graphics.spirv.FRAGMENT_ENTRY;
+
+fwd boom.graphics.live.Live;
+fwd boom.graphics.live.live_any;
 
 fwd boom.graphics.vk.Vk;
 fwd boom.graphics.vk.vk_init;

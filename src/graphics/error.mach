@@ -14,6 +14,7 @@ use boom.graphics.error.content.text_error_message;
 use boom.graphics.error.content.texture_error_message;
 use boom.graphics.error.mesh.mesh_error_message;
 use boom.graphics.error.mesh.model_error_message;
+use boom.graphics.live.Live;
 use boom.vfs;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
@@ -252,6 +253,7 @@ pub tag Error: u8 {
     model:         ModelError;
     texture:       TextureError;
     text:          TextError;
+    in_use:        Live;
 }
 
 # the Error for a failed Vulkan call
@@ -288,6 +290,7 @@ pub fun error_message(e: Error) str {
     if (sel e.model)         { ret model_error_message(e.model); }
     if (sel e.texture)       { ret texture_error_message(e.texture); }
     if (sel e.text)          { ret text_error_message(e.text); }
+    if (sel e.in_use)        { ret "resources are still live; delete them before the renderer"; }
     ret "graphics failure";
 }
 
