@@ -1,0 +1,6 @@
+# the modules whose tests the boom artifact does not reach
+# `mach test . --lib tests` runs them
+
+use std.runtime;
+
+use boom.graphics.text.fixture;

@@ -34,6 +34,12 @@ for m in $expected; do
   echo "$m.spv: valid"
 done
 
+# mach 5.12 tests one artifact's closure, so a module neither the library nor
+# the tests artifact reaches would drop its tests without a word. the guard
+# runs on this leg's target alone: listing darwin or windows builds glfw's C
+# step, and this leg has no cross toolchain for it (all-targets is off too)
+bash test/selections/verify.sh "$MACH_COMPILER" linux-x86_64
+
 # unit tests cover the UTF-8 walk and the atlas arithmetic without touching
 # Vulkan. this finite example releases the encoded font before any glyph is
 # rasterized, draws Han text and a line break into a target it reads back, and

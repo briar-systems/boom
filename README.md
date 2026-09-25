@@ -144,7 +144,7 @@ a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
 keeps them, keyed by that choice, the mesh's vertex layout, and the target's
 attachment formats, because Vulkan bakes both vertex input and render-pass
 compatibility into the pipeline. The shaders themselves live in
-`src/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
+`src/bin/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
 environment by the `shader-*` artifacts the library requires, then embedded
 from what those artifacts produce. A consumer builds them too, because a
 library artifact's requirements travel with the dependency.
@@ -369,7 +369,7 @@ gfx.pass_draw_skinned(?scene_pass, ?model.mesh, ?player.pose, ?transform);
 
 Passing a `Pose` is what selects the skinned pipeline. The renderer uploads the
 pose's joint matrices into a per-frame storage buffer that
-`src/shaders/skinned_vert.mach` reads, and that shader places each vertex by its
+`src/bin/shaders/skinned_vert.mach` reads, and that shader places each vertex by its
 four weighted joints before applying the model, view, and projection. A mesh
 whose vertex layout carries no joints or weights is drawn unskinned rather than
 through a program whose vertex inputs it cannot satisfy.
@@ -405,11 +405,11 @@ anything else its own source imports directly, under the project id:
 ```toml
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
-ref = "tag/v0.31.0"
+ref = "tag/v0.32.0"
 ```
 
-`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.31.0`
-writes that stanza (`--version ^0.31` declares boom by range instead) and
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.32.0`
+writes that stanza (`--version ^0.32` declares boom by range instead) and
 realizes boom's whole closure one level deep under the consumer's `dep/`. boom
 declares each library by version range, pinned by its gitlink, and mach 5.9
 seeds those transitive ranges from boom's pins. The root's declarations win over every pin beneath them, so a
@@ -427,7 +427,13 @@ and a subsystem is reached directly as `use gfx: boom.graphics;`.
 mach dep pull .
 mach build .
 mach test .
+mach test . --lib tests
 ```
+
+boom requires mach 5.12 and builds against std 8.1. mach 5.12 tests one
+artifact's closure, so the text fixture, which the library does not reach,
+runs under the test-only `tests` artifact. `test/selections/verify.sh` fails
+when a test declared under `src` is collected by neither run on any target.
 
 boom's own `dep/` is pinned by gitlinks, so `mach dep pull .` lands on the
 committed closure. An example is an untracked root that declares boom by path

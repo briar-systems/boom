@@ -28,6 +28,11 @@ jobs:
     uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
     with:
       heavy: ${{ inputs.heavy }}
+      # std 8 requires mach 5.12, ahead of the family pin (briar-systems/.github#103)
+      mach-version: v5.12.0
+      # mach 5.12 tests one artifact's closure, so the text fixture, which the
+      # library does not reach, runs under the test-only tests artifact
+      test-selections: '[["--lib", "tests"]]'
       # the windows and darwin targets need a C cross toolchain for glfw
       all-targets: false
       # mach-glfw builds GLFW from source with the host cc, the text example

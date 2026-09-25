@@ -1,7 +1,7 @@
 [project]
 id = "boom"
-version = "0.31.0"
-mach = "^5.9"
+version = "0.32.0"
+mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -55,9 +55,19 @@ targets = ["linux-x86_64", "windows", "darwin"]
 link = []
 need = ["artifact.shader-*"]
 
+# test-only: mach tests one artifact's closure, and nothing the library
+# exports reaches the text fixture, so `mach test . --lib tests` runs it
+[artifact.tests]
+kind = "static"
+entry = "lib/tests.mach"
+out = "lib/tests{artifact.suffix}"
+targets = ["linux-x86_64", "windows", "darwin"]
+link = []
+need = ["artifact.shader-*"]
+
 [artifact.shader-lit_frag]
 kind = "bin"
-entry = "shaders/lit_frag.mach"
+entry = "bin/shaders/lit_frag.mach"
 out = "spv/lit_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -65,7 +75,7 @@ need = []
 
 [artifact.shader-mesh_vert]
 kind = "bin"
-entry = "shaders/mesh_vert.mach"
+entry = "bin/shaders/mesh_vert.mach"
 out = "spv/mesh_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -73,7 +83,7 @@ need = []
 
 [artifact.shader-skinned_vert]
 kind = "bin"
-entry = "shaders/skinned_vert.mach"
+entry = "bin/shaders/skinned_vert.mach"
 out = "spv/skinned_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -81,7 +91,7 @@ need = []
 
 [artifact.shader-ui_vert]
 kind = "bin"
-entry = "shaders/ui_vert.mach"
+entry = "bin/shaders/ui_vert.mach"
 out = "spv/ui_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -89,7 +99,7 @@ need = []
 
 [artifact.shader-ui_frag]
 kind = "bin"
-entry = "shaders/ui_frag.mach"
+entry = "bin/shaders/ui_frag.mach"
 out = "spv/ui_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -97,31 +107,31 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^6.0"
+version = "^8.1"
 
 [dep.glfw]
 git = "https://github.com/briar-systems/mach-glfw"
-version = "^0.7"
+version = "^0.8"
 
 [dep.audio]
 git = "https://github.com/briar-systems/mach-audio"
-version = "^0.8"
+version = "^0.9"
 
 [dep.image]
 git = "https://github.com/briar-systems/mach-image"
-version = "^0.6"
+version = "^0.7"
 
 [dep.font]
 git = "https://github.com/briar-systems/mach-font"
-version = "^0.7"
+version = "^0.8"
 
 [dep.vk]
 git = "https://github.com/briar-systems/mach-vk"
-version = "^0.5"
+version = "^0.6"
 
 [dep.gltf]
 git = "https://github.com/briar-systems/mach-gltf"
-version = "^0.6"
+version = "^0.7"
 
 [dep.shader]
 git = "https://github.com/briar-systems/mach-shader"
