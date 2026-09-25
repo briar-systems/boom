@@ -1,8 +1,9 @@
 # Text tests against a real face, with no device.
 #
 # Nothing in the library imports this module, so the embedded font never
-# reaches a consumer's build. `mach test` collects it all the same. The face is
-# a DejaVu Sans subset; res/test/fonts/README.md says how it is regenerated.
+# reaches a consumer's build. The test-only `tests` artifact reaches it, so
+# `mach test . --lib tests` collects it. The face is a DejaVu Sans subset;
+# res/test/fonts/README.md says how it is regenerated.
 #
 # Expected metrics are the subset's own hmtx values, read with fontTools when
 # the subset was made: units per em 2048, ascent 1901, descent -483.

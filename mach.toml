@@ -55,6 +55,16 @@ targets = ["linux-x86_64", "windows", "darwin"]
 link = []
 need = ["artifact.shader-*"]
 
+# test-only: mach tests one artifact's closure, and nothing the library
+# exports reaches the text fixture, so `mach test . --lib tests` runs it
+[artifact.tests]
+kind = "static"
+entry = "lib/tests.mach"
+out = "lib/tests{artifact.suffix}"
+targets = ["linux-x86_64", "windows", "darwin"]
+link = []
+need = ["artifact.shader-*"]
+
 [artifact.shader-lit_frag]
 kind = "bin"
 entry = "shaders/lit_frag.mach"
