@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The examples move from `examples/<name>` to `demo/<name>` (#196), each still
+  its own project, and their artifact entries move under `src/bin/`:
+  `src/bin/main.mach` for each executable, and `src/bin/shaders/` for the
+  lighting and shader demos' shader artifacts. Nothing boom exports changes.
+
+### Fixed
+- The CI fresh-root check builds the cube demo's source (#196). It copied the
+  source beside the entry `mach init` scaffolds, where mach 5.12 never
+  compiled it, so the check built a hello world that never reached boom.
+
 ## [0.32.0] - 2026-09-25
 
 ### Changed
