@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# the checks the unit suite cannot make: the embedded SPIR-V, finite examples
+# the checks the unit suite cannot make: the embedded SPIR-V, finite demos
 # driving Vulkan under xvfb, and a fresh root project that depends on boom
 set -euo pipefail
 
 # a game is a fresh root that depends on boom, and that root's std wins over
-# every pin beneath it. boom's own examples pin std themselves, so they never
+# every pin beneath it. boom's own demos pin std themselves, so they never
 # see the std a fresh `mach init` selects; boom#184 was exactly that shape
 # failing. the root takes whatever std mach init picks today, on purpose.
 root=$(mktemp -d)/game
 mkdir "$root"
 "$MACH_COMPILER" init "$root"
-cp examples/cube/src/main.mach "$root/src/root.mach"
+# the cube source replaces the entry mach init scaffolded; a module beside it
+# is outside the build's closure and would never be compiled
+entry=$(sed -n 's/^entry *= *"\(.*\)"$/\1/p' "$root/mach.toml")
+[ "$(echo "$entry" | wc -l)" = 1 ] && [ -f "$root/src/$entry" ] || {
+  echo "::error::mach init scaffolded no single entry this check can replace"
+  exit 1
+}
+cp demo/cube/src/bin/main.mach "$root/src/$entry"
 "$MACH_COMPILER" dep add "$root" boom --path "$PWD"
 grep -A2 '^\[dep\.std\]' "$root/mach.toml"
 "$MACH_COMPILER" build "$root"
@@ -48,7 +55,7 @@ bash test/selections/verify.sh "$MACH_COMPILER" linux-x86_64
 for font in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
             /usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf; do
   timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
-    ./examples/text/out/linux-x86_64/debug/bin/text --font "$font"
+    ./demo/text/out/linux-x86_64/debug/bin/text --font "$font"
   echo "text example passed with $font"
 done
 
@@ -56,5 +63,5 @@ done
 # frame's geometry. lavapipe offers TRANSFER_SRC on its swapchain images, so a
 # skip here means the surface decision went wrong and the flag makes it fail.
 timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
-  ./examples/vulkan/out/linux-x86_64/debug/bin/vulkan --require-readback
+  ./demo/vulkan/out/linux-x86_64/debug/bin/vulkan --require-readback
 echo "vulkan example passed with the window read back"

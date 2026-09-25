@@ -29,7 +29,7 @@
 # boom.graphics.shader instead, which is the supported way to do lighting:
 # boom ships one lit program as a default and does not intend to grow a
 # lighting system, since how a surface responds to light is the game's
-# decision. See examples/shader. The shaders are Mach, compiled to SPIR-V as
+# decision. See demo/shader. The shaders are Mach, compiled to SPIR-V as
 # boom's shader-* artifacts and embedded by boom.graphics.spirv; they live in
 # src/bin/shaders/.
 #

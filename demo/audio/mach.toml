@@ -1,5 +1,5 @@
 [project]
-id = "animation"
+id = "audio-smoke"
 version = "0.3.1"
 mach = "^5.12"
 src = "src"
@@ -36,11 +36,11 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
-[artifact.animation]
+[artifact.audio]
 default = true
 kind = "bin"
-entry = "main.mach"
-out = "bin/animation{artifact.suffix}"
+entry = "bin/main.mach"
+out = "bin/audio{artifact.suffix}"
 targets = ["linux-x86_64", "windows", "darwin"]
 link = []
 need = []

@@ -1,6 +1,6 @@
 [project]
-id = "audio-smoke"
-version = "0.3.1"
+id = "text"
+version = "0.1.0"
 mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -36,12 +36,11 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
-[artifact.audio]
-default = true
+[artifact.text]
 kind = "bin"
-entry = "main.mach"
-out = "bin/audio{artifact.suffix}"
-targets = ["linux-x86_64", "windows", "darwin"]
+entry = "bin/main.mach"
+out = "bin/text{artifact.suffix}"
+targets = ["*"]
 link = []
 need = []
 
