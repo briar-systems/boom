@@ -427,7 +427,13 @@ and a subsystem is reached directly as `use gfx: boom.graphics;`.
 mach dep pull .
 mach build .
 mach test .
+mach test . --lib tests
 ```
+
+boom requires mach 5.12 and builds against std 8.1. mach 5.12 tests one
+artifact's closure, so the text fixture, which the library does not reach,
+runs under the test-only `tests` artifact. `test/selections/verify.sh` fails
+when a test declared under `src` is collected by neither run on any target.
 
 boom's own `dep/` is pinned by gitlinks, so `mach dep pull .` lands on the
 committed closure. An example is an untracked root that declares boom by path

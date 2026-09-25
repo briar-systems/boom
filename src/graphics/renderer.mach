@@ -226,7 +226,7 @@ use boom.math.vec.Vec4;
 use boom.math.vec.vec3;
 use boom.math.vec.vec4;
 use boom.window.Window;
-use glfw.glfw;
+use glfw;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
