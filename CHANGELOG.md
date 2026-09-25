@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the CI verify hook, fails when a test declared under `src` is collected by
   neither run on any target. CI seeds mach v5.12.0 until the family pin moves
   (briar-systems/.github#103), and the examples pin std v8.1.1.
+- The five `shader-*` artifact entries move from `src/shaders/` to
+  `src/bin/shaders/` (#193), so every artifact entry sits under `src/lib/` or
+  `src/bin/`. The modules' paths change from `boom.shaders.*` to
+  `boom.bin.shaders.*`, which nothing imports: they are SPIR-V entry points
+  the library embeds through `{artifact.shader-*.out}`, and that output path
+  is unchanged. The built modules are byte-identical.
 
 ## [0.31.0] - 2026-09-19
 

@@ -144,7 +144,7 @@ a mesh, a skinned mesh, or a sprite. The renderer builds them on demand and
 keeps them, keyed by that choice, the mesh's vertex layout, and the target's
 attachment formats, because Vulkan bakes both vertex input and render-pass
 compatibility into the pipeline. The shaders themselves live in
-`src/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
+`src/bin/shaders/` as Mach source and are compiled for the `vulkan1.0` SPIR-V
 environment by the `shader-*` artifacts the library requires, then embedded
 from what those artifacts produce. A consumer builds them too, because a
 library artifact's requirements travel with the dependency.
@@ -369,7 +369,7 @@ gfx.pass_draw_skinned(?scene_pass, ?model.mesh, ?player.pose, ?transform);
 
 Passing a `Pose` is what selects the skinned pipeline. The renderer uploads the
 pose's joint matrices into a per-frame storage buffer that
-`src/shaders/skinned_vert.mach` reads, and that shader places each vertex by its
+`src/bin/shaders/skinned_vert.mach` reads, and that shader places each vertex by its
 four weighted joints before applying the model, view, and projection. A mesh
 whose vertex layout carries no joints or weights is drawn unskinned rather than
 through a program whose vertex inputs it cannot satisfy.

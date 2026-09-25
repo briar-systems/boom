@@ -67,7 +67,7 @@ need = ["artifact.shader-*"]
 
 [artifact.shader-lit_frag]
 kind = "bin"
-entry = "shaders/lit_frag.mach"
+entry = "bin/shaders/lit_frag.mach"
 out = "spv/lit_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -75,7 +75,7 @@ need = []
 
 [artifact.shader-mesh_vert]
 kind = "bin"
-entry = "shaders/mesh_vert.mach"
+entry = "bin/shaders/mesh_vert.mach"
 out = "spv/mesh_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -83,7 +83,7 @@ need = []
 
 [artifact.shader-skinned_vert]
 kind = "bin"
-entry = "shaders/skinned_vert.mach"
+entry = "bin/shaders/skinned_vert.mach"
 out = "spv/skinned_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -91,7 +91,7 @@ need = []
 
 [artifact.shader-ui_vert]
 kind = "bin"
-entry = "shaders/ui_vert.mach"
+entry = "bin/shaders/ui_vert.mach"
 out = "spv/ui_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -99,7 +99,7 @@ need = []
 
 [artifact.shader-ui_frag]
 kind = "bin"
-entry = "shaders/ui_frag.mach"
+entry = "bin/shaders/ui_frag.mach"
 out = "spv/ui_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
