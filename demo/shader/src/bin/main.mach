@@ -13,7 +13,7 @@
 # game keeps. Identical cubes would mean the game's fragment stage was not the
 # one that ran.
 #
-# THE SHADERS ARE THIS EXAMPLE'S OWN, in src/shaders/, compiled to SPIR-V as the
+# THE SHADERS ARE THIS EXAMPLE'S OWN, in src/bin/shaders/, compiled to SPIR-V as the
 # shader-* artifacts in mach.toml and embedded below. boom does not compile them
 # and does not know what is in them. That is the whole arrangement being
 # demonstrated: a game builds its stages as artifacts of its own, and the engine
@@ -36,7 +36,7 @@
 #     times what the block could carry, and the reason the buffer exists.
 #
 # The probe below checks the second of those by reading an entry back rather
-# than by looking at it. See PROBE MODE in src/shaders/game_frag.mach.
+# than by looking at it. See PROBE MODE in src/bin/shaders/game_frag.mach.
 #
 # The assets are the cube example's, referenced rather than copied: two binary
 # files duplicated in a repository is two files to keep in step. Run it from this
@@ -86,7 +86,7 @@ val GAME_FRAG_SPV: [_]u8;
 # them. The only rule is that it fits in gfx.USER_BYTES and matches what the
 # shader declares, and the usual std140 rules apply, which is why the direction
 # is a vec4 rather than a vec3. The matching declaration is `rec Params` in
-# src/shaders/game_frag.mach, and nothing checks that the two agree: a mismatch
+# src/bin/shaders/game_frag.mach, and nothing checks that the two agree: a mismatch
 # reads the colour out of the direction's padding and still draws.
 rec Params {
     direction: gm.Vec4;
@@ -320,7 +320,7 @@ fun on_init(ctx: *Context) {
 
     # RESERVE WHAT THE SHADER DECLARES, ONCE. The descriptor's range is the
     # buffer's whole capacity, so it is also the largest storage block a shader
-    # may legally declare: `rec Lights` in src/shaders/game_frag.mach is 128
+    # may legally declare: `rec Lights` in src/bin/shaders/game_frag.mach is 128
     # f32x4, and a range shorter than that is invalid usage the layers report
     # and a driver may honour anyway. The starting capacity is already larger,
     # so this changes nothing today and keeps being true if either number moves.

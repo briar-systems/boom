@@ -50,7 +50,7 @@ float_reassoc = false
 [artifact.lighting]
 default = true
 kind = "bin"
-entry = "main.mach"
+entry = "bin/main.mach"
 out = "bin/lighting{artifact.suffix}"
 targets = ["linux-x86_64", "windows", "darwin"]
 link = []
@@ -58,7 +58,7 @@ need = ["artifact.shader-*"]
 
 [artifact.shader-quad_vert]
 kind = "bin"
-entry = "shaders/quad_vert.mach"
+entry = "bin/shaders/quad_vert.mach"
 out = "spv/quad_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -66,7 +66,7 @@ need = []
 
 [artifact.shader-sprite_vert]
 kind = "bin"
-entry = "shaders/sprite_vert.mach"
+entry = "bin/shaders/sprite_vert.mach"
 out = "spv/sprite_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -74,7 +74,7 @@ need = []
 
 [artifact.shader-gbuf_frag]
 kind = "bin"
-entry = "shaders/gbuf_frag.mach"
+entry = "bin/shaders/gbuf_frag.mach"
 out = "spv/gbuf_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -82,7 +82,7 @@ need = []
 
 [artifact.shader-light_frag]
 kind = "bin"
-entry = "shaders/light_frag.mach"
+entry = "bin/shaders/light_frag.mach"
 out = "spv/light_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -90,7 +90,7 @@ need = []
 
 [artifact.shader-fwd_frag]
 kind = "bin"
-entry = "shaders/fwd_frag.mach"
+entry = "bin/shaders/fwd_frag.mach"
 out = "spv/fwd_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -98,7 +98,7 @@ need = []
 
 [artifact.shader-copy_frag]
 kind = "bin"
-entry = "shaders/copy_frag.mach"
+entry = "bin/shaders/copy_frag.mach"
 out = "spv/copy_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -106,7 +106,7 @@ need = []
 
 [artifact.shader-bloom_frag]
 kind = "bin"
-entry = "shaders/bloom_frag.mach"
+entry = "bin/shaders/bloom_frag.mach"
 out = "spv/bloom_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -114,7 +114,7 @@ need = []
 
 [artifact.shader-two_frag]
 kind = "bin"
-entry = "shaders/two_frag.mach"
+entry = "bin/shaders/two_frag.mach"
 out = "spv/two_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []

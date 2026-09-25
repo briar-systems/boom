@@ -34,7 +34,7 @@ use tex: shader.texture;
 
 # The game's block at binding 4. Field-per-light rather than arrays because the
 # block is small enough that a loop would buy nothing and the layout stays
-# obvious against what src/main.mach writes.
+# obvious against what src/bin/main.mach writes.
 rec Scene {
     view:    f32x4;
     ambient: f32x4;

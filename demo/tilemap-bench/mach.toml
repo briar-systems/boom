@@ -1,6 +1,6 @@
 [project]
-id = "cube"
-version = "0.3.1"
+id = "tilemap-bench"
+version = "0.1.0"
 mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -36,11 +36,11 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
-[artifact.cube]
+[artifact.tilemap-bench]
 default = true
 kind = "bin"
-entry = "main.mach"
-out = "bin/cube{artifact.suffix}"
+entry = "bin/main.mach"
+out = "bin/tilemap-bench{artifact.suffix}"
 targets = ["linux-x86_64", "windows", "darwin"]
 link = []
 need = []

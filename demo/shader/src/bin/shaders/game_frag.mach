@@ -22,7 +22,7 @@
 use sh:  shader.math;
 use tex: shader.texture;
 
-# What the game sets per pass, matching the `Params` record in src/main.mach.
+# What the game sets per pass, matching the `Params` record in src/bin/main.mach.
 #
 # std140 rounds a three-component vector up to four, so every member is f32x4
 # and the CPU side declares Vec4 for the same reason. Getting that wrong reads

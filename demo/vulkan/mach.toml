@@ -1,6 +1,6 @@
 [project]
-id = "text"
-version = "0.1.0"
+id = "vulkan"
+version = "0.3.1"
 mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -36,10 +36,10 @@ simd = "scalarize"
 vectorize = false
 float_reassoc = false
 
-[artifact.text]
+[artifact.vulkan]
 kind = "bin"
-entry = "main.mach"
-out = "bin/text{artifact.suffix}"
+entry = "bin/main.mach"
+out = "bin/vulkan{artifact.suffix}"
 targets = ["*"]
 link = []
 need = []

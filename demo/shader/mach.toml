@@ -50,7 +50,7 @@ float_reassoc = false
 [artifact.shader]
 default = true
 kind = "bin"
-entry = "main.mach"
+entry = "bin/main.mach"
 out = "bin/shader{artifact.suffix}"
 targets = ["linux-x86_64", "windows", "darwin"]
 link = []
@@ -58,7 +58,7 @@ need = ["artifact.shader-*"]
 
 [artifact.shader-game_vert]
 kind = "bin"
-entry = "shaders/game_vert.mach"
+entry = "bin/shaders/game_vert.mach"
 out = "spv/game_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
@@ -66,7 +66,7 @@ need = []
 
 [artifact.shader-game_frag]
 kind = "bin"
-entry = "shaders/game_frag.mach"
+entry = "bin/shaders/game_frag.mach"
 out = "spv/game_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
