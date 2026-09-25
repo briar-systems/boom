@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-25
+
 ### Changed
 - **Breaking.** boom builds against std 8.1 and requires mach 5.12 (#192).
   `[dep.std]` is `^8.1` and the graphics dependencies move to their std 8.1
