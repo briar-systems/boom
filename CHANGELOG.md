@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking.** boom builds against std 8.1 and requires mach 5.12 (#192).
+  `[dep.std]` is `^8.1` and the graphics dependencies move to their std 8.1
+  releases: glfw `^0.8`, audio `^0.9`, image `^0.7`, font `^0.8`, vk `^0.6`,
+  gltf `^0.7` and shader `^0.3`, each pinned by its gitlink (std 8.1.1, glfw
+  0.8.1, audio 0.9.1, image 0.7.1, font 0.8.1, vk 0.6.1, gltf 0.7.2, shader
+  0.3.2). Resolution is flat, so a consumer must move its root to std 8 and
+  mach 5.12 with this release, and rebuild anything that links std rather
+  than only recompiling it. 8.1 is the floor because std 7.5 through 8.0
+  overwrite the thread pointer the C runtime set, which crashes GLFW, the
+  Vulkan loader and miniaudio on linux (briar-systems/mach-std#915). Nothing
+  boom exports changes shape and no source changed for std: std 7 and 8
+  changed `io.runtime.make`, `data.toml.Value` and `buffers.SecretSource`,
+  which boom does not use, and made the page, testing and arena allocators
+  honour `align`, which only ever returns a block at least as aligned as
+  before from the page allocator boom uses.
+- boom imports GLFW by its bare name, `use glfw;`, since glfw 0.8.1 moves its
+  entry module to `glfw.lib.glfw` (#192). boom takes Vulkan's
+  `vkGetInstanceProcAddr` from GLFW, so vk 0.6.1 no longer declaring the
+  loader link changes nothing here.
+- The text fixture's tests run under `mach test . --lib tests` (#192). mach
+  5.12 tests only the selected artifact's closure (briar-systems/mach#3813),
+  and the library does not reach `src/graphics/text/fixture.mach`, so
+  `mach test .` alone dropped its 7 tests. The test-only `[artifact.tests]`
+  (`src/lib/tests.mach`) reaches it, and `test/selections/verify.sh`, run by
+  the CI verify hook, fails when a test declared under `src` is collected by
+  neither run on any target. CI seeds mach v5.12.0 until the family pin moves
+  (briar-systems/.github#103), and the examples pin std v8.1.1.
+
 ## [0.31.0] - 2026-09-19
 
 ### Changed
