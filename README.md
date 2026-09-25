@@ -180,7 +180,7 @@ through these two:
   buffer could not grow for, and `renderer_storage_capacity`,
   `renderer_storage_used` and `renderer_storage_buffers` report what it costs.
 
-`examples/shader` uses both in the same frame: thirty-two point lights in the
+`demo/shader` uses both in the same frame: thirty-two point lights in the
 storage buffer, the ambient term and the light count in the block, and a probe
 that renders one entry of the list back out into a float target and compares it
 against the bytes it wrote.
@@ -319,10 +319,10 @@ gfx.pass_end(?p2);
 val ended: err[gfx.Error] = gfx.renderer_end_frame(?renderer);   # submits and presents
 ```
 
-`examples/cube` is a complete, runnable consumer that proves passes compose: a
+`demo/cube` is a complete, runnable consumer that proves passes compose: a
 scene pass draws a glTF cube into an offscreen target, a second pass blits that
 target across the window, and a third draws a 2D HUD sprite, all in one frame.
-`examples/vulkan` is a smoke test of the same surface with no assets on disk,
+`demo/vulkan` is a smoke test of the same surface with no assets on disk,
 for checking the driver path on a machine with a GPU.
 
 ### Vertex format
@@ -383,7 +383,7 @@ is the loader. The shared math layer (`boom.math`: `Vec3`, `Mat4`, `Quat`,
 `Transform`, ...) uses native SIMD vectors throughout, including four
 column-major `f32x4` values for a matrix.
 
-`examples/animation` is a runnable consumer: it loads a two-bone bar
+`demo/animation` is a runnable consumer: it loads a two-bone bar
 (`assets/bar.glb`) and plays its bend clip, turning the model so the bend reads
 in 3D, all through boom handles.
 
@@ -436,9 +436,9 @@ runs under the test-only `tests` artifact. `test/selections/verify.sh` fails
 when a test declared under `src` is collected by neither run on any target.
 
 boom's own `dep/` is pinned by gitlinks, so `mach dep pull .` lands on the
-committed closure. An example is an untracked root that declares boom by path
+committed closure. A demo is an untracked root that declares boom by path
 and carries no pin of its own, so it resolves with
-`cd examples/cube && mach dep update . --all` before `mach build .`.
+`cd demo/cube && mach dep update . --all` before `mach build .`.
 
 The built-in shaders are the `shader-*` artifacts on the `spirv` target, which
 `mach build .` produces before the library that embeds them. To build or

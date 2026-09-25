@@ -2141,7 +2141,7 @@ pub fun batch_flush(p: *Pass) {
     # held. It is not a wrong picture that announces itself: a stage reading a
     # zeroed block still draws, still samples its textures, and still writes its
     # emissive, so what fails is only the part that depended on the block. In
-    # examples/lighting the composite went black while the lamp, the bloom and
+    # demo/lighting the composite went black while the lamp, the bloom and
     # the deferred light target all stayed correct, which is the shape of bug
     # that survives a look at the screen.
     if (p.user != nil) {
@@ -2324,7 +2324,7 @@ fun fill_views_mat(r: *Renderer, out: *vk.ImageView, mat: opt[*Material], fallba
 # arrive. Overriding it for such a run binds the renderer's white texel instead,
 # because white is what an untextured run has already been defaulted to, and a
 # shader sampling it reads 1.0 everywhere. That does not look like a missing
-# texture, it looks like a saturated frame: examples/lighting wrote a white
+# texture, it looks like a saturated frame: demo/lighting wrote a white
 # G-buffer and every check comparing two of its texels read 255.
 #
 # The run's texture stays optional to here, so an untextured run and a run that

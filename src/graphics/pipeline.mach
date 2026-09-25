@@ -141,7 +141,7 @@ fun rasterization_state(d: *PipelineDesc) vk.PipelineRasterizationStateCreateInf
     # it culled part of every closed mesh. Nothing reported that: a cube missing
     # some of its faces still draws, still presents, and still has the right
     # silhouette from the outside, because the faces behind the missing ones are
-    # drawn instead. examples/vulkan reads the render back and compares the
+    # drawn instead. demo/vulkan reads the render back and compares the
     # covered pixel count against the area of the projected hull, which is the
     # check that caught it.
     rs.frontFace       = vk.FRONT_FACE_COUNTER_CLOCKWISE;

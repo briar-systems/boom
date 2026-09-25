@@ -1,7 +1,7 @@
 name: CI
 
 # the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
-# one linux leg on a pull request into dev and into main. the examples are a
+# one linux leg on a pull request into dev and into main. the demos are a
 # glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
 # nothing runs on push. cd.yml calls this with heavy: all.
 
@@ -44,13 +44,13 @@ jobs:
                   "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
                   "mesa-vulkan-drivers",
                   "vulkan-tools", "xvfb", "spirv-tools"]}]
-      # the examples are the only check on the shape of the public API: nothing
+      # the demos are the only check on the shape of the public API: nothing
       # inside boom calls it the way a game does. each resolves boom by path, so
-      # its pull copies this branch, and the glob covers a new example unedited.
+      # its pull copies this branch, and the glob covers a new demo unedited.
       # they are consumer-shaped roots, so their dependencies resolve as a fresh
       # `mach init` root's would (update), floating to the newest release each
       # range admits; a family minor that breaks them is the early signal.
-      subprojects: '[{"path": "examples/*", "deps": "update", "build": true, "test": false}]'
+      subprojects: '[{"path": "demo/*", "deps": "update", "build": true, "test": false}]'
 
   gate:
     if: always()
