@@ -16,8 +16,8 @@
 # whatever the manufacturer put third. Those are reported as absent.
 
 use inp: boom.input;
+use glfw;
 use glfw.c;
-use glfw.glfw;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
