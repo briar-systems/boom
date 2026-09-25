@@ -1,7 +1,7 @@
 [project]
 id = "lighting"
 version = "0.1.0"
-mach = "^5.9"
+mach = "^5.12"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -125,4 +125,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v6.0.0"
+ref = "tag/v8.1.1"
