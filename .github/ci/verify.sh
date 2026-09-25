@@ -10,7 +10,14 @@ set -euo pipefail
 root=$(mktemp -d)/game
 mkdir "$root"
 "$MACH_COMPILER" init "$root"
-cp demo/cube/src/bin/main.mach "$root/src/root.mach"
+# the cube source replaces the entry mach init scaffolded; a module beside it
+# is outside the build's closure and would never be compiled
+entry=$(sed -n 's/^entry *= *"\(.*\)"$/\1/p' "$root/mach.toml")
+[ "$(echo "$entry" | wc -l)" = 1 ] && [ -f "$root/src/$entry" ] || {
+  echo "::error::mach init scaffolded no single entry this check can replace"
+  exit 1
+}
+cp demo/cube/src/bin/main.mach "$root/src/$entry"
 "$MACH_COMPILER" dep add "$root" boom --path "$PWD"
 grep -A2 '^\[dep\.std\]' "$root/mach.toml"
 "$MACH_COMPILER" build "$root"
