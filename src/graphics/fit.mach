@@ -26,8 +26,6 @@ use boom.graphics.sprite.rect;
 use boom.math.vec.Vec2;
 use boom.math.vec.vec2;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.option.opt;
 
 # How to resolve a mismatch between the source and destination shapes.

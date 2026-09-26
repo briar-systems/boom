@@ -24,7 +24,6 @@ use gfx: boom.graphics;
 use boom.graphics.batch.SPRITE_FLOATS;
 use boom.graphics.batch.sprite_expand;
 use gm: boom.math;
-use std.chrono.duration.Duration;
 use std.chrono.duration.duration_usec;
 use std.chrono.time.InstantClock;
 use std.chrono.time.instant;
@@ -35,7 +34,6 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.option.opt;
-use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 

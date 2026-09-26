@@ -22,10 +22,6 @@ use boom.graphics.sprite.Rect;
 use boom.math.mat.Mat4;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
-use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
-use std.types.size.usize;
 
 # The mesh vertex stage's uniform block, matching src/bin/shaders/mesh_vert.mach.
 # ---

@@ -16,14 +16,11 @@ use boom.math.mat.Mat4;
 use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_translation;
-use boom.math.quat.Quat;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_matrix;
-use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
 use std.types.option.opt;
 use std.types.size.usize;
-use std.types.string.str;
 
 # the most joints a skeleton and its skinning palette carry
 #

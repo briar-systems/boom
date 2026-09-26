@@ -29,7 +29,7 @@ jobs:
     with:
       heavy: ${{ inputs.heavy }}
       # std 9 requires mach 6, ahead of the family pin (briar-systems/.github#103)
-      mach-version: v6.0.0
+      mach-version: v6.1.0
       # mach tests one artifact's closure, so the text fixture, which the
       # library does not reach, runs under the test-only tests artifact
       test-selections: '[["--lib", "tests"]]'

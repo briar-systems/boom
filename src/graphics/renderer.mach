@@ -82,7 +82,6 @@ use boom.graphics.depth.DepthConvention;
 use boom.graphics.descriptor.COLOUR_OFFSET;
 use boom.graphics.descriptor.Descriptors;
 use boom.graphics.descriptor.MAX_SAMPLERS;
-use boom.graphics.descriptor.MAX_SLOTS;
 use boom.graphics.descriptor.SLOTS_PER_BLOCK;
 use boom.graphics.descriptor.USER_BYTES;
 use boom.graphics.descriptor.USER_OFFSET;
