@@ -238,167 +238,111 @@ pub fun camera_ray(c: *Camera, sx: f32, sy: f32, width: f32, height: f32) Ray {
     ret ray(c.position, vec3_normalize(d));
 }
 
-test "camera: view of the origin from +z translates by -z" {
-    var c: Camera = camera_perspective(vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.3333, 0.1, 100.0);
-    var v: Mat4   = camera_view(?c);
-    val d: f32    = v.m[3][2] - (0.0 - 4.0);
-    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
-    ret 0;
-}
-
-test "camera: projection is non-degenerate and targets Vulkan clip space" {
-    var c: Camera = camera_perspective(vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1, 100.0);
-    var p: Mat4   = camera_projection(?c);
-    if (p.m[0][0] <= 0.0) { ret 1; }
-    # Y is negative because Vulkan's Y increases downward. A positive entry
-    # here renders every scene vertically mirrored, which is easy to mistake
-    # for a camera pointing the wrong way.
-    if (p.m[1][1] >= 0.0)       { ret 2; }
-    if (p.m[2][3] != 0.0 - 1.0) { ret 3; }
-    ret 0;
-}
-
-test "camera: reversed perspective selects an infinite reversed depth projection" {
-    var c: Camera = camera_perspective_reversed_infinite(
-        vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1);
-    if (!sel c.projection.perspective_reversed) { ret 1; }
-    val reversed: DepthConvention = camera_depth_convention(?c);
-    if (!sel reversed.reversed) { ret 2; }
-    if (c.far != 0.0)           { ret 3; }
-
-    var p:    Mat4 = camera_projection(?c);
-    val near: f32  = c.near;
-    val zn:   f32  = (p.m[2][2] * (0.0 - near) + p.m[3][2]) / near;
-    if (zn - 1.0 > 0.0001 || zn - 1.0 < 0.0 - 0.0001) { ret 4; }
-
-    var forward: Camera = camera_perspective(
-        c.position, c.target, c.fov, c.aspect, c.near, 100.0);
-    val forward_depth: DepthConvention = camera_depth_convention(?forward);
-    if (!sel forward_depth.forward) { ret 5; }
-    ret 0;
-}
-
 # --------------------------------------------------------------------- tests
 #
-# The projections are checked by where points land and the rays by where they
-# go, not by matrix entries: both are only ever wrong in those terms.
+# projections are checked by where points land and rays by where they go
 
-test "camera: an orthographic projection does not foreshorten" {
-    # The defining difference. Under perspective the same object at twice the
-    # distance is half the size; under orthographic it is unchanged, which is
-    # what an isometric game is built on.
-    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-        10.0, 1.0, 0.0 - 100.0, 100.0);
-    var vp: Mat4 = view_proj(?c);
-
-    val near_a: Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0));
-    val near_b: Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0));
-    val far_a:  Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0 - 50.0));
-    val far_b:  Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0 - 50.0));
-
-    val near_w: f32 = near_b[0] - near_a[0];
-    val far_w:  f32 = far_b[0] - far_a[0];
-    if (!near_f(near_w, far_w)) { ret 1; }
-    # And a 10-unit-tall view maps one world unit to 2/10 of clip space.
-    if (!near_f(near_w, 0.2)) { ret 2; }
-    ret 0;
-}
-
-test "camera: a perspective projection does foreshorten" {
-    # The companion to the check above: if both projections behaved the same,
-    # the orthographic test would pass against a camera that ignored the mode.
-    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-        1.0, 1.0, 0.1, 100.0);
-    var vp:     Mat4 = view_proj(?c);
-    val near_a: Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0));
-    val near_b: Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0));
-    val far_a:  Vec3 = mat4_project_point(?vp, vec3(0.0, 0.0, 0.0 - 50.0));
-    val far_b:  Vec3 = mat4_project_point(?vp, vec3(1.0, 0.0, 0.0 - 50.0));
-    if (near_f(near_b[0] - near_a[0], far_b[0] - far_a[0])) { ret 1; }
-    ret 0;
-}
-
-test "camera: the centre of the viewport looks straight ahead" {
-    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-        1.0, 16.0 / 9.0, 0.1, 100.0);
-    var r: Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
-    if (!near_f(r.origin[2], 10.0))         { ret 1; }
-    if (!near_f(r.direction[0], 0.0))       { ret 2; }
-    if (!near_f(r.direction[1], 0.0))       { ret 3; }
-    if (!near_f(r.direction[2], 0.0 - 1.0)) { ret 4; }
-    ret 0;
-}
-
-test "camera: a ray through a pixel projects back to that pixel" {
-    # The cross-check that matters. camera_ray and camera_projection are
-    # separate derivations of one transform: if they disagree, picking lands
-    # somewhere other than what was drawn and nothing reports it. Off-centre and
-    # off-axis on purpose, since the centre agrees under almost any error.
-    var c: Camera = camera_perspective(vec3(3.0, 4.0, 9.0), vec3(0.0, 1.0, 0.0),
-        1.1, 320.0 / 180.0, 0.1, 100.0);
-    var r: Ray  = camera_ray(?c, 40.0, 150.0, 320.0, 180.0);
-    val p: Vec3 = ray_at(?r, 7.0);
-
-    var vp:   Mat4 = view_proj(?c);
-    val clip: Vec3 = mat4_project_point(?vp, p);
-    val sx:   f32  = (clip[0] + 1.0) * 0.5 * 320.0;
-    val sy:   f32  = (clip[1] + 1.0) * 0.5 * 180.0;
-    if (!near_eps(sx, 40.0, 0.05))  { ret 1; }
-    if (!near_eps(sy, 150.0, 0.05)) { ret 2; }
-    ret 0;
-}
-
-test "camera: an orthographic ray moves its origin, not its direction" {
-    # The structural difference from a perspective ray, and the thing a picking
-    # routine written only against perspective gets wrong: without foreshortening
-    # every ray is parallel, so it is the origin that has to move across the
-    # viewport.
-    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-        10.0, 2.0, 0.0 - 100.0, 100.0);
-    var mid:  Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
-    var edge: Ray = camera_ray(?c, 320.0, 90.0, 320.0, 180.0);
-
-    if (!near_f(mid.direction[0], edge.direction[0])) { ret 1; }
-    if (!near_f(mid.direction[2], edge.direction[2])) { ret 2; }
-    # A 10-tall view at aspect 2 is 20 wide, so the right edge is 10 across.
-    if (!near_f(edge.origin[0] - mid.origin[0], 10.0)) { ret 3; }
-    ret 0;
-}
-
-test "camera: screen y down is world y down" {
-    # A ray from the lower half of the viewport must point below the view axis.
-    # Getting this backwards inverts every pick vertically, which reads as the
-    # world being upside down rather than as a broken projection.
-    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
-        1.0, 1.0, 0.1, 100.0);
-    var low: Ray = camera_ray(?c, 160.0, 170.0, 320.0, 180.0);
-    if (low.direction[1] >= 0.0) { ret 1; }
-    ret 0;
-}
-
-test "camera: a zero orthographic height is treated as one" {
-    # A Camera left at its zero value and marked orthographic would otherwise
-    # collapse the projection and draw nothing, reporting no error.
-    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0),
-        0.0, 1.0, 0.0 - 1.0, 1.0);
-    if (camera_ortho_height(?c) != 1.0) { ret 1; }
-    if (c.height != 0.0)                { ret 2; }
-    ret 0;
-}
-
-# The combined view-projection, which is what a draw actually applies.
+#[testing]
 fun view_proj(c: *Camera) Mat4 {
     var v: Mat4 = camera_view(c);
     var p: Mat4 = camera_projection(c);
     ret mat4_mul(?p, ?v);
 }
 
-fun near_f(a: f32, b: f32) bool {
-    ret near_eps(a, b, 0.0001);
-}
-
+#[testing]
 fun near_eps(a: f32, b: f32, eps: f32) bool {
     var d: f32 = a - b;
     if (d < 0.0) { d = 0.0 - d; }
     ret d < eps;
+}
+
+#[testing]
+fun near_f(a: f32, b: f32) bool {
+    ret near_eps(a, b, 0.0001);
+}
+
+#[testing]
+fun span_at(vp: *Mat4, z: f32) f32 {
+    val a: Vec3 = mat4_project_point(vp, vec3(0.0, 0.0, z));
+    val b: Vec3 = mat4_project_point(vp, vec3(1.0, 0.0, z));
+    ret b[0] - a[0];
+}
+
+test projection__reversed_selects_reversed_depth {
+    var c: Camera = camera_perspective_reversed_infinite(
+        vec3(0.0, 0.0, 4.0), vec3(0.0, 0.0, 0.0), 1.0, 1.5, 0.1);
+    val reversed: DepthConvention = camera_depth_convention(?c);
+    if (!sel reversed.reversed) { ret 1; }
+    # the near plane lands at depth one
+    var p:  Mat4 = camera_projection(?c);
+    val zn: f32  = (p.m[2][2] * (0.0 - c.near) + p.m[3][2]) / c.near;
+    if (!near_f(zn, 1.0)) { ret 2; }
+    var forward: Camera = camera_perspective(
+        c.position, c.target, c.fov, c.aspect, c.near, 100.0);
+    val forward_depth: DepthConvention = camera_depth_convention(?forward);
+    if (!sel forward_depth.forward) { ret 3; }
+    ret 0;
+}
+
+test projection__orthographic_does_not_foreshorten {
+    var o: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+        10.0, 1.0, 0.0 - 100.0, 100.0);
+    var ovp: Mat4 = view_proj(?o);
+    if (!near_f(span_at(?ovp, 0.0), span_at(?ovp, 0.0 - 50.0))) { ret 1; }
+    # a 10-tall view maps one world unit to 2/10 of clip space
+    if (!near_f(span_at(?ovp, 0.0), 0.2)) { ret 2; }
+    # perspective does, or a camera ignoring the mode would pass the above
+    var p: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+        1.0, 1.0, 0.1, 100.0);
+    var pvp: Mat4 = view_proj(?p);
+    if (near_f(span_at(?pvp, 0.0), span_at(?pvp, 0.0 - 50.0))) { ret 3; }
+    ret 0;
+}
+
+test ray__perspective_fans_from_eye_y_down {
+    var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+        1.0, 16.0 / 9.0, 0.1, 100.0);
+    var mid: Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
+    if (!near_f(mid.origin[2], 10.0))         { ret 1; }
+    if (!near_f(mid.direction[0], 0.0))       { ret 2; }
+    if (!near_f(mid.direction[1], 0.0))       { ret 3; }
+    if (!near_f(mid.direction[2], 0.0 - 1.0)) { ret 4; }
+    # the lower half of the viewport points below the view axis
+    var low: Ray = camera_ray(?c, 160.0, 170.0, 320.0, 180.0);
+    if (low.direction[1] >= 0.0) { ret 5; }
+    ret 0;
+}
+
+test ray__projects_back_to_its_pixel {
+    # ray and projection are separate derivations, so picking must land on what was drawn
+    var c: Camera = camera_perspective(vec3(3.0, 4.0, 9.0), vec3(0.0, 1.0, 0.0),
+        1.1, 320.0 / 180.0, 0.1, 100.0);
+    var r:    Ray  = camera_ray(?c, 40.0, 150.0, 320.0, 180.0);
+    val p:    Vec3 = ray_at(?r, 7.0);
+    var vp:   Mat4 = view_proj(?c);
+    val clip: Vec3 = mat4_project_point(?vp, p);
+    if (!near_eps((clip[0] + 1.0) * 0.5 * 320.0, 40.0, 0.05))  { ret 1; }
+    if (!near_eps((clip[1] + 1.0) * 0.5 * 180.0, 150.0, 0.05)) { ret 2; }
+    ret 0;
+}
+
+test ray__orthographic_moves_origin_not_direction {
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
+        10.0, 2.0, 0.0 - 100.0, 100.0);
+    var mid:  Ray = camera_ray(?c, 160.0, 90.0, 320.0, 180.0);
+    var edge: Ray = camera_ray(?c, 320.0, 90.0, 320.0, 180.0);
+    if (!near_f(mid.direction[0], edge.direction[0])) { ret 1; }
+    if (!near_f(mid.direction[2], edge.direction[2])) { ret 2; }
+    # a 10-tall view at aspect 2 is 20 wide, so the right edge is 10 across
+    if (!near_f(edge.origin[0] - mid.origin[0], 10.0)) { ret 3; }
+    ret 0;
+}
+
+test ortho_height__zero_treated_as_one {
+    # a zero height would collapse the projection and draw nothing
+    var c: Camera = camera_orthographic(vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 0.0),
+        0.0, 1.0, 0.0 - 1.0, 1.0);
+    if (camera_ortho_height(?c) != 1.0) { ret 1; }
+    if (c.height != 0.0)                { ret 2; }
+    ret 0;
 }

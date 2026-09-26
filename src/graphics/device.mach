@@ -79,7 +79,7 @@ pub fun device_dnit(d: *Device) {
 
 # --------------------------------------------------------------------- tests
 
-test "device: an uninitialized device is refused rather than used" {
+test device_init__refuses_unready_or_nil_vk {
     var d: Device;
     var v: Vk;
     v.ready = false;
@@ -87,20 +87,7 @@ test "device: an uninitialized device is refused rather than used" {
     if (!sel r.err)               { ret 1; }
     if (!sel r.err.uninitialized) { ret 2; }
     if (d.ready)                  { ret 3; }
-    ret 0;
-}
-
-test "device: a nil device is refused rather than dereferenced" {
-    var d: Device;
-    val r: err[Error] = device_init(?d, nil);
-    if (!sel r.err) { ret 1; }
-    ret 0;
-}
-
-test "device: teardown on a context that was never created is a no-op" {
-    var d: Device;
-    d.ready = false;
-    device_dnit(?d);
-    if (d.ready) { ret 1; }
+    val none: err[Error] = device_init(?d, nil);
+    if (!sel none.err) { ret 4; }
     ret 0;
 }

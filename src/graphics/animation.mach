@@ -267,7 +267,7 @@ pub fun animation_player_set_clip(pl: *AnimationPlayer, clip: opt[*Animation]) {
     animation_player_advance(pl, 0.0);
 }
 
-test "animation: rotation channel slerps between its keyframes" {
+test channel_quat__slerps_between_keyframes {
     var times: [2]f32;
     times[0] = 0.0;
     times[1] = 2.0;
@@ -301,7 +301,7 @@ test "animation: rotation channel slerps between its keyframes" {
     ret 0;
 }
 
-test "animation: translation channel interpolates and clamps at the ends" {
+test channel_vec3__lerps_and_clamps_at_ends {
     var times: [2]f32;
     times[0] = 0.0;
     times[1] = 1.0;
@@ -331,7 +331,7 @@ test "animation: translation channel interpolates and clamps at the ends" {
     ret 0;
 }
 
-test "animation: step interpolation holds the earlier keyframe" {
+test channel_vec3__step_holds_earlier_keyframe {
     var times: [2]f32;
     times[0] = 0.0;
     times[1] = 1.0;

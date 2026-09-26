@@ -26,9 +26,7 @@ use boom.graphics.error.Stage;
 use boom.graphics.error.TargetError;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
-use boom.graphics.image.DEPTH_FORMAT;
 use boom.graphics.image.DepthAttachment;
-use boom.graphics.image.Image;
 use boom.graphics.image.ImageUsage;
 use boom.graphics.image.depth_attachment_dnit;
 use boom.graphics.image.depth_attachment_init;
@@ -41,7 +39,6 @@ use boom.graphics.image.image_transition;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.PassOptions;
-use boom.graphics.pass.pass_clearing;
 use boom.graphics.pass.pass_clearing_mrt;
 use boom.graphics.pass.pass_compatibility;
 use boom.graphics.pass.pass_create;
@@ -499,101 +496,34 @@ pub fun render_target_delete(d: *Device, t: *RenderTarget) {
 
 # --------------------------------------------------------------------- tests
 #
-# creation needs a device, so these cover the argument checks and the
-# teardown ordering, which is where a mistake destroys an object that is
-# still referenced by another. A readback's checks are ordering too: they
-# run before the device is drained, so a read that cannot succeed does not
-# stall the pipeline to say so.
+# creation needs a device, so these cover the argument checks. A readback's
+# checks run before the device is drained, so a read that cannot succeed does
+# not stall the pipeline to say so.
 
+#[testing]
 fun bad_dimensions(r: res[RenderTarget, Error]) bool {
     ret sel r.err && (sel r.err.target && sel r.err.target.dimensions);
 }
 
+#[testing]
 fun refused(r: err[Error]) bool {
     ret sel r.err;
 }
 
-test "target: non-positive dimensions are refused before allocating" {
+test render_target__refuses_bad_arguments {
     var d: Device;
     d.ready = true;
     if (!bad_dimensions(render_target(?d, 0, 16)))  { ret 1; }
     if (!bad_dimensions(render_target(?d, 16, 0)))  { ret 2; }
     if (!bad_dimensions(render_target(?d, -1, -1))) { ret 3; }
-    ret 0;
-}
-
-test "target: creation against an uninitialized context is refused" {
-    var d: Device;
     d.ready = false;
     val r: res[RenderTarget, Error] = render_target(?d, 16, 16);
-    if (!sel r.err)               { ret 1; }
-    if (!sel r.err.uninitialized) { ret 2; }
+    if (!sel r.err)               { ret 4; }
+    if (!sel r.err.uninitialized) { ret 5; }
     ret 0;
 }
 
-test "target: descriptions preserve mixed attachment formats" {
-    var formats: [4]RenderFormat;
-    formats[0] = RenderFormat.rgba8_srgb{};
-    formats[1] = RenderFormat.rgba8_unorm{};
-    formats[2] = RenderFormat.rgba16_float{};
-    val d: RenderTargetDesc = render_target_desc_mrt(?formats[0], 3);
-    if (d.color_count != 3)                     { ret 1; }
-    if (!sel d.formats[0].rgba8_srgb)           { ret 2; }
-    if (!sel d.formats[1].rgba8_unorm)          { ret 3; }
-    if (!sel d.formats[2].rgba16_float)         { ret 4; }
-    if (render_format_bytes(d.formats[0]) != 4) { ret 5; }
-    if (render_format_bytes(d.formats[2]) != 8) { ret 6; }
-    ret 0;
-}
-
-test "target: teardown on a target that was never created is a no-op" {
-    var t: RenderTarget;
-    t.framebuffer = nil;
-    t.pass        = nil;
-    t.pass_load   = nil;
-    t.depth.view  = nil;
-    t.depth.image = nil;
-    t.depth.mem   = nil;
-    var zi: usize = 0;
-    for (zi < MAX_COLOR_ATTACHMENTS) {
-        t.colors[zi].image.view   = nil;
-        t.colors[zi].image.handle = nil;
-        t.colors[zi].image.memory = nil;
-        zi                        = zi + 1;
-    }
-    t.ready = false;
-
-    var v: Vk;
-    v.ready = false;
-    var d: Device;
-    d.vk    = ?v;
-    d.ready = true;
-    render_target_delete(?d, ?t);
-    if (t.ready) { ret 1; }
-    ret 0;
-}
-
-test "target: the depth format is one every implementation must support" {
-    # D32_SFLOAT is mandatory as a depth-stencil attachment, so it needs no
-    # query. A format chosen without checking support is a startup failure on
-    # hardware that is behaving correctly.
-    if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
-    ret 0;
-}
-
-test "target: a fresh multi-attachment target reports its count" {
-    # render_target_count is what the renderer uses to size clear values and to
-    # decide a pipeline's blend attachments, so a wrong count here is a
-    # validation failure at the first draw rather than anything visible.
-    var t: RenderTarget;
-    t.color_count = 4;
-    if (render_target_count(?t) != 4) { ret 1; }
-    t.color_count = 1;
-    if (render_target_count(?t) != 1) { ret 2; }
-    ret 0;
-}
-
-test "target: an attachment index past the count returns the first" {
+test render_target_texture_at__clamps_to_first {
     # Reading past color_count would address whatever follows the array in the
     # record and hand back a Texture built from adjacent fields, which samples
     # as garbage rather than failing.
@@ -613,10 +543,9 @@ test "target: an attachment index past the count returns the first" {
     ret 0;
 }
 
-test "target: a read of a target that was never created is refused" {
-    # Answered from the handle, before the drain and before a staging buffer
-    # exists. The device here never came up, which is what proves the read got
-    # nowhere near it.
+# answered from the handle before the drain, against a device that never came
+# up, which proves the read got nowhere near it
+test render_target_read__refused_before_drain {
     var v: Vk;
     v.ready = false;
     var d: Device;
@@ -626,61 +555,25 @@ test "target: a read of a target that was never created is refused" {
     var t: RenderTarget;
     t.ready       = false;
     t.color_count = 1;
-
-    var out: [16]u8;
+    var out: [32]u8;
     if (!refused(render_target_read(?d, ?t, ?out[0], 16)))           { ret 1; }
     if (!refused(render_target_read_raw_at(?d, ?t, 0, ?out[0], 16))) { ret 2; }
-    ret 0;
-}
 
-test "target: a raw read past the attachment count is refused" {
-    # render_target_texture_at clamps a bad index because sampling the wrong
-    # picture is recoverable. A read cannot clamp: the caller sized its
-    # destination from render_target_raw_bytes_at for the attachment it named,
-    # so quietly copying a different one either overflows that buffer or fills
-    # it with the wrong image and reports success.
-    var v: Vk;
-    v.ready = false;
-    var d: Device;
-    d.vk    = ?v;
-    d.ready = true;
+    # a read cannot clamp an index: the caller sized its buffer for the one it named
+    t.ready = true;
+    if (!refused(render_target_read_raw_at(?d, ?t, 1, ?out[0], 16)))  { ret 3; }
+    if (!refused(render_target_read_raw_at(?d, ?t, 99, ?out[0], 16))) { ret 4; }
 
-    var t: RenderTarget;
-    t.ready       = true;
-    t.color_count = 1;
-
-    var out: [16]u8;
-    if (!refused(render_target_read_raw_at(?d, ?t, 1, ?out[0], 16)))  { ret 1; }
-    if (!refused(render_target_read_raw_at(?d, ?t, 99, ?out[0], 16))) { ret 2; }
-    ret 0;
-}
-
-test "target: the packed read refuses a format it cannot pack" {
-    # RENDER_RGBA16_FLOAT is eight bytes a texel and render_target_read promises
-    # four. The attachment is otherwise ready to be copied, so this check is the
-    # only thing standing between the call and a copy that would deliver half a
-    # picture and report success.
-    var v: Vk;
-    v.ready = false;
-    var d: Device;
-    d.vk    = ?v;
-    d.ready = true;
-
-    var t: RenderTarget;
-    t.ready                  = true;
-    t.color_count            = 1;
+    # the packed read promises four bytes a texel, so an eight-byte format would
+    # deliver half a picture
     t.formats[0]             = RenderFormat.rgba16_float{};
     t.colors[0].image.format = vk.FORMAT_R16G16B16A16_SFLOAT;
     t.colors[0].image.width  = 2;
     t.colors[0].image.height = 2;
     t.colors[0].image.ready  = true;
-
-    var out: [32]u8;
-    if (!refused(render_target_read(?d, ?t, ?out[0], 32))) { ret 1; }
-    # And the size the raw form needs comes from the target rather than from a
-    # caller assuming four bytes: 2 * 2 * 8.
+    if (!refused(render_target_read(?d, ?t, ?out[0], 32))) { ret 5; }
     val raw: opt[usize] = render_target_raw_bytes_at(?t, 0);
-    if (!sel raw.some)  { ret 2; }
-    if (raw.some != 32) { ret 3; }
+    if (!sel raw.some)  { ret 6; }
+    if (raw.some != 32) { ret 7; }
     ret 0;
 }

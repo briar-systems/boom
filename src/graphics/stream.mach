@@ -388,33 +388,22 @@ pub fun stream_dnit(s: *VertexStream, v: *Vk) {
 # schedule and the bump arithmetic, which is where an error silently overwrites
 # geometry the GPU is about to read.
 
-test "stream: blocks double from the base size and then hold at the cap" {
-    # The schedule is what keeps a large frame to a handful of blocks, and so a
-    # handful of draws. A schedule that stopped doubling early would split one
-    # run into many draws; one that never capped would reserve hundreds of
-    # megabytes for a single heavy frame.
+test block_size_for__doubles_to_cap_or_fits_push {
+    # stopping early splits a run into many draws, never capping reserves
+    # hundreds of megabytes for one heavy frame
     if (block_size_for(0, 0) != STREAM_BLOCK_BYTES)      { ret 1; }
     if (block_size_for(1, 0) != STREAM_BLOCK_BYTES * 2)  { ret 2; }
     if (block_size_for(2, 0) != STREAM_BLOCK_BYTES * 4)  { ret 3; }
     if (block_size_for(15, 0) != STREAM_MAX_BLOCK_BYTES) { ret 4; }
-    ret 0;
-}
-
-test "stream: a push larger than the schedule gets a block sized to it" {
-    # Otherwise a single draw list bigger than the next block size could never
-    # be satisfied: every block added would be too small and the push would be
-    # refused forever while the arena kept growing.
+    # a push bigger than the schedule gets a block its size, or it is refused forever
     val huge: usize = STREAM_BLOCK_BYTES * 3;
-    if (block_size_for(0, huge) != huge) { ret 1; }
-    # And it never shrinks a block below the schedule.
-    if (block_size_for(2, 16) != STREAM_BLOCK_BYTES * 4) { ret 2; }
+    if (block_size_for(0, huge) != huge)                 { ret 5; }
+    if (block_size_for(2, 16) != STREAM_BLOCK_BYTES * 4) { ret 6; }
     ret 0;
 }
 
-test "stream: the bump offset is rounded up to a whole vertex" {
-    # firstVertex names a vertex, not a byte. An unaligned offset would make it
-    # name geometry straddling two pushes, which draws a recognisable shape
-    # built from the wrong vertices.
+test align_up__rounds_to_whole_vertex {
+    # firstVertex names a vertex, so an unaligned offset draws from the wrong vertices
     if (align_up(0, 32) != 0)   { ret 1; }
     if (align_up(1, 32) != 32)  { ret 2; }
     if (align_up(32, 32) != 32) { ret 3; }
@@ -422,66 +411,46 @@ test "stream: the bump offset is rounded up to a whole vertex" {
     ret 0;
 }
 
-test "stream: a length that is not a whole number of vertices is refused" {
+test stream_push__malformed_refused {
     var s: VertexStream;
     var v: Vk;
     s.ready     = true;
     s.dropped   = 0;
     s.count[0]  = 0;
     s.active[0] = 0;
-    var bytes:  [64]u8;
-    val pushed: opt[StreamSpan] = stream_push(?s, ?v, 0, ?bytes[0], 48, 32);
-    if (!sel pushed.none) { ret 1; }
+    var bytes: [64]u8;
+    # not a whole number of vertices
+    val partial: opt[StreamSpan] = stream_push(?s, ?v, 0, ?bytes[0], 48, 32);
+    if (!sel partial.none) { ret 1; }
+    # a frame out of range is refused rather than indexed
+    val frame: opt[StreamSpan] = stream_push(?s, ?v, MAX_FRAMES_IN_FLIGHT, ?bytes[0], 32, 32);
+    if (!sel frame.none)                                   { ret 2; }
+    if (stream_buffer(?s, MAX_FRAMES_IN_FLIGHT, 0) != nil) { ret 3; }
     ret 0;
 }
 
-test "stream: an out-of-range frame is refused rather than indexing past the ring" {
-    var s: VertexStream;
-    var v: Vk;
-    s.ready = true;
-    var bytes:  [32]u8;
-    val pushed: opt[StreamSpan] = stream_push(?s, ?v, MAX_FRAMES_IN_FLIGHT, ?bytes[0], 32, 32);
-    if (!sel pushed.none)                                  { ret 1; }
-    if (stream_buffer(?s, MAX_FRAMES_IN_FLIGHT, 0) != nil) { ret 2; }
-    ret 0;
-}
-
-test "stream: a frame's arena is independent of the other's" {
-    # Two frames are in flight, so the CPU writes one arena while the GPU reads
-    # the other. Sharing a used counter would let this frame's geometry land in
-    # the middle of what the GPU is still reading for the last one.
-    var s: VertexStream;
-    s.ready             = true;
-    s.count[0]          = 1;
-    s.count[1]          = 1;
-    s.blocks[0][0].used = 0;
-    s.blocks[1][0].used = 4096;
-    stream_begin(?s, 0);
-    if (s.blocks[0][0].used != 0)    { ret 1; }
-    if (s.blocks[1][0].used != 4096) { ret 2; }
-    ret 0;
-}
-
-test "stream: opening a frame rewinds every block and starts at the first" {
-    # A frame that needed four blocks last time must start again at block zero,
-    # or the arena grows without bound as each frame begins where the last
-    # ended.
+test stream_begin__rewinds_only_its_frame {
+    # the frame starts again at block zero, or the arena grows without bound, and
+    # the other frame's arena, which the gpu may be reading, is untouched
     var s: VertexStream;
     s.ready             = true;
     s.count[0]          = 3;
+    s.count[1]          = 1;
     s.blocks[0][0].used = 900;
     s.blocks[0][1].used = 800;
     s.blocks[0][2].used = 700;
+    s.blocks[1][0].used = 4096;
     s.active[0]         = 2;
     stream_begin(?s, 0);
-    if (s.blocks[0][0].used != 0) { ret 1; }
-    if (s.blocks[0][1].used != 0) { ret 2; }
-    if (s.blocks[0][2].used != 0) { ret 3; }
-    if (s.active[0] != 0)         { ret 4; }
+    if (s.blocks[0][0].used != 0)    { ret 1; }
+    if (s.blocks[0][1].used != 0)    { ret 2; }
+    if (s.blocks[0][2].used != 0)    { ret 3; }
+    if (s.active[0] != 0)            { ret 4; }
+    if (s.blocks[1][0].used != 4096) { ret 5; }
     ret 0;
 }
 
-test "stream: a full block sends the push to an existing block with room" {
+test stream_push__full_block_moves_to_existing {
     # Reusing a block the frame already has is what stops a frame whose
     # geometry shrank from allocating a new block every frame forever.
     var s:   VertexStream;

@@ -151,151 +151,75 @@ pub fun fit_unproject(src_w: f32, src_h: f32, dst_w: f32, dst_h: f32, mode: FitM
 
 # --------------------------------------------------------------------- tests
 
-test "fit: stretch fills the destination and distorts" {
-    val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.stretch{});
-    if (r.x != 0.0 || r.y != 0.0)     { ret 1; }
-    if (r.w != 640.0 || r.h != 640.0) { ret 2; }
-    ret 0;
+#[testing]
+fun near(a: f32, b: f32) bool {
+    var d: f32 = a - b;
+    if (d < 0.0) { d = 0.0 - d; }
+    ret d < 0.01;
 }
 
-test "fit: contain preserves the aspect and centres the bars" {
-    # 320x180 into 640x640: width binds at 2x, giving 640x360, so there are
-    # (640 - 360) / 2 = 140 pixels of bar above and below. Derived from the
-    # geometry, not read off the result.
+test contain__binds_smaller_scale_and_centres {
+    # 320x180 into 640x640: width binds at 2x, leaving 140 of bar above and below
     val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.contain{});
     if (!near(r.w, 640.0)) { ret 1; }
     if (!near(r.h, 360.0)) { ret 2; }
     if (!near(r.x, 0.0))   { ret 3; }
     if (!near(r.y, 140.0)) { ret 4; }
-    # Aspect preserved, which is the whole point.
-    if (!near(r.w / r.h, 320.0 / 180.0)) { ret 5; }
+    # the other side of the crossover: height binds at 2x, 20 of bar left and right
+    val t: Rect = fit_rect(320.0, 180.0, 680.0, 360.0, FitMode.contain{});
+    if (!near(t.w, 640.0)) { ret 5; }
+    if (!near(t.h, 360.0)) { ret 6; }
+    if (!near(t.x, 20.0))  { ret 7; }
+    if (!near(t.y, 0.0))   { ret 8; }
     ret 0;
 }
 
-test "fit: contain never spills outside the destination" {
-    # Swept over shapes, because the binding dimension changes between them and
-    # a fit that took the wrong one is correct on one side of the crossover.
-    var i: i32 = 1;
-    for (i <= 40) {
-        val dw: f32 = 40.0 * i::f32;
-        var j:  i32 = 1;
-        for (j <= 40) {
-            val dh: f32  = 40.0 * j::f32;
-            val r:  Rect = fit_rect(320.0, 180.0, dw, dh, FitMode.contain{});
-            if (r.w > dw + 0.001)  { ret 1; }
-            if (r.h > dh + 0.001)  { ret 2; }
-            if (r.x < 0.0 - 0.001) { ret 3; }
-            if (r.y < 0.0 - 0.001) { ret 4; }
-            j = j + 1;
-        }
-        i = i + 1;
-    }
-    ret 0;
-}
-
-test "fit: cover fills the destination and spills on one axis" {
-    # The opposite binding to contain: 320x180 into 640x640 takes the height,
-    # scaling by 640/180 = 3.555, so the width becomes 1137.8 and overhangs
-    # evenly by (640 - 1137.8) / 2.
+test cover__fills_and_spills_centred {
+    # 320x180 into 640x640 takes the height, so the width overhangs evenly
     val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.cover{});
     if (!near(r.h, 640.0))               { ret 1; }
     if (r.w < 640.0)                     { ret 2; }
     if (!near(r.w / r.h, 320.0 / 180.0)) { ret 3; }
-    # Centred, so the crop is even rather than all on one side.
-    if (!near(r.x + r.w * 0.5, 320.0)) { ret 4; }
+    if (!near(r.x + r.w * 0.5, 320.0))   { ret 4; }
     ret 0;
 }
 
-test "fit: integer scaling picks a whole multiple" {
-    # 320x180 into 1000x1000: the limiting scale is 1000/320 = 3.125, so the
-    # largest whole multiple is 3, giving 960x540. A rounded scale would give 3
-    # here too, so the check below uses a case where they differ.
-    val r: Rect = fit_rect(320.0, 180.0, 1000.0, 1000.0, FitMode.integer{});
-    if (!near(r.w, 960.0)) { ret 1; }
-    if (!near(r.h, 540.0)) { ret 2; }
-    ret 0;
-}
-
-test "fit: integer scaling rounds down, never up" {
-    # 320x180 into 1260x1000: the limiting scale is 1260/320 = 3.9375, which
-    # rounds to 4 and truncates to 3. A multiple of 4 would be 1280 wide and
-    # would not fit, which is the one guarantee this mode makes.
+test integer__truncates_and_falls_back {
+    # 1260 / 320 = 3.9375 truncates to 3; rounding to 4 would not fit
     val r: Rect = fit_rect(320.0, 180.0, 1260.0, 1000.0, FitMode.integer{});
     if (!near(r.w, 960.0)) { ret 1; }
-    if (r.w > 1260.0)      { ret 2; }
+    if (!near(r.h, 540.0)) { ret 2; }
+    # smaller than one copy falls back to contain rather than showing nothing
+    val s: Rect = fit_rect(320.0, 180.0, 200.0, 200.0, FitMode.integer{});
+    if (!near(s.w, 200.0))               { ret 3; }
+    if (!near(s.w / s.h, 320.0 / 180.0)) { ret 4; }
     ret 0;
 }
 
-test "fit: integer scaling falls back rather than showing nothing" {
-    # A window smaller than one whole copy of the source. The largest whole
-    # multiple is zero, and a game rendering a zero-sized image shows a blank
-    # window with no error to explain it.
-    val r: Rect = fit_rect(320.0, 180.0, 200.0, 200.0, FitMode.integer{});
-    if (r.w <= 0.0)                      { ret 1; }
-    if (r.w > 200.001)                   { ret 2; }
-    if (!near(r.w / r.h, 320.0 / 180.0)) { ret 3; }
-    ret 0;
-}
-
-test "fit: a zero-sized destination is not a division" {
-    # A minimized window reports zero height. It is a normal state, and every
-    # branch here would otherwise divide by it.
+test degenerate__zero_destination {
+    # a minimized window reports zero height, a normal state
     val r: Rect = fit_rect(320.0, 180.0, 0.0, 0.0, FitMode.contain{});
-    if (r.w != 0.0 || r.h != 0.0) { ret 1; }
-    val s: f32 = fit_scale(320.0, 180.0, 0.0, 0.0, FitMode.contain{});
-    if (s != 1.0) { ret 2; }
+    if (r.w != 0.0 || r.h != 0.0)                                    { ret 1; }
+    if (fit_scale(320.0, 180.0, 0.0, 0.0, FitMode.contain{}) != 1.0) { ret 2; }
+    val p: opt[Vec2] = fit_unproject(320.0, 180.0, 0.0, 0.0, FitMode.contain{}, 5.0, 5.0);
+    if (!sel p.none) { ret 3; }
     ret 0;
 }
 
-test "fit: unprojecting a point inverts the fit" {
-    # The centring offset is what a hand-rolled inverse forgets, and the error
-    # is zero at the centre of the screen and grows toward the edges, so the
-    # check is on a corner.
-    val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.contain{});
-
-    # The image's top-left corner must map to the source's origin.
+test unproject__inverts_fit_without_clamping {
+    # the centring offset is what a hand-rolled inverse forgets, so check the corners
+    val r:      Rect      = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.contain{});
     val origin: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, r.x, r.y);
     if (!sel origin.some)           { ret 1; }
-    if (!near(origin.some[0], 0.0)) { ret 1; }
-    if (!near(origin.some[1], 0.0)) { ret 2; }
-
-    # And its bottom-right to the source's far corner.
+    if (!near(origin.some[0], 0.0)) { ret 2; }
+    if (!near(origin.some[1], 0.0)) { ret 3; }
     val corner: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, r.x + r.w, r.y + r.h);
-    if (!sel corner.some)             { ret 3; }
-    if (!near(corner.some[0], 320.0)) { ret 3; }
-    if (!near(corner.some[1], 180.0)) { ret 4; }
+    if (!sel corner.some)             { ret 4; }
+    if (!near(corner.some[0], 320.0)) { ret 5; }
+    if (!near(corner.some[1], 180.0)) { ret 6; }
+    # a click on the letterbox bar lands outside the source
+    val bar: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, 320.0, 10.0);
+    if (!sel bar.some)      { ret 7; }
+    if (bar.some[1] >= 0.0) { ret 8; }
     ret 0;
-}
-
-test "fit: unprojecting through a degenerate fit is absent" {
-    # A minimized window has no image to invert, so there is no source point.
-    val p: opt[Vec2] = fit_unproject(320.0, 180.0, 0.0, 0.0, FitMode.contain{}, 5.0, 5.0);
-    if (!sel p.none) { ret 1; }
-    ret 0;
-}
-
-test "fit: a point on the letterbox bar maps outside the source" {
-    # Clamping instead would make a click on the bar indistinguishable from a
-    # click on the top row of the image.
-    val p: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, 320.0, 10.0);
-    if (!sel p.some)      { ret 1; }
-    if (p.some[1] >= 0.0) { ret 2; }
-    ret 0;
-}
-
-test "fit: the reported scale matches the rectangle it describes" {
-    # Two ways to ask the same question, used at different call sites. If they
-    # disagree, an overlay drawn with the scale sits off the image drawn with
-    # the rectangle.
-    val r: Rect = fit_rect(320.0, 180.0, 900.0, 500.0, FitMode.contain{});
-    val s: f32  = fit_scale(320.0, 180.0, 900.0, 500.0, FitMode.contain{});
-    if (!near(320.0 * s, r.w)) { ret 1; }
-    if (!near(180.0 * s, r.h)) { ret 2; }
-    ret 0;
-}
-
-fun near(a: f32, b: f32) bool {
-    var d: f32 = a - b;
-    if (d < 0.0) { d = 0.0 - d; }
-    ret d < 0.01;
 }

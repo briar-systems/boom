@@ -804,6 +804,7 @@ pub fun mesh_release_retired(d: *Device, m: *Mesh) {
 }
 
 # write a little-endian u32 into a byte buffer at off
+#[testing]
 fun put_u32(b: *u8, off: usize, v: u32) {
     b[off]     = (v & 0xFF)::u8;
     b[off + 1] = ((v >> 8) & 0xFF)::u8;
@@ -812,22 +813,26 @@ fun put_u32(b: *u8, off: usize, v: u32) {
 }
 
 # write a little-endian u16 into a byte buffer at off
+#[testing]
 fun put_u16(b: *u8, off: usize, v: u16) {
     b[off]     = (v & 0xFF)::u8;
     b[off + 1] = ((v >> 8) & 0xFF)::u8;
 }
 
 # write an f32 (little-endian IEEE-754) into a byte buffer at off
+#[testing]
 fun put_f32(b: *u8, off: usize, f: f32) {
     put_u32(b, off, f:~u32);
 }
 
 # whether an allocator operation succeeded
+#[testing]
 fun ok_alloc(r: err[allo.Error]) bool {
     ret sel r.ok;
 }
 
 # assemble a minimal indexed-triangle .glb into out, returning its length
+#[testing]
 fun fixture_triangle_glb(out: *u8) usize {
     val json: str   = "{\"asset\":{\"version\":\"2.0\"},\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1,\"mode\":4}]}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":6}],\"buffers\":[{\"byteLength\":42}]}";
     val jlen: usize = str_len(json);
@@ -884,7 +889,7 @@ fun fixture_triangle_glb(out: *u8) usize {
     ret total;
 }
 
-test "mesh: a POSITION-only primitive is conformed to the standard layout" {
+test extract_glb__conforms_position_only {
     # The asset carries one attribute; the shaders declare three. Mirroring the
     # asset would give the pipeline no attribute behind in_normal and in_uv,
     # which is invalid vertex input rather than a mesh that draws untextured.
@@ -961,11 +966,19 @@ test "mesh: a POSITION-only primitive is conformed to the standard layout" {
         arena.dnit(?ar);
         ret 13;
     }
+    # zero is a valid joint index, so a mesh with no joints reports none rather
+    # than 0, or a static mesh would be refused against a jointless skeleton.
+    val most: opt[usize] = mesh_data_max_joint(?md);
+    if (!sel most.none) {
+        arena.dnit(?ar);
+        ret 14;
+    }
     if (!ok_alloc(arena.dnit(?ar))) { ret 99; }
     ret 0;
 }
 
 # assemble a minimal skinned .glb: POSITION, JOINTS_0 (u16), WEIGHTS_0
+#[testing]
 fun fixture_skinned_glb(out: *u8) usize {
     val json: str   = "{\"asset\":{\"version\":\"2.0\"},\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2},\"indices\":3,\"mode\":4}]}],\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},{\"bufferView\":3,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}],\"bufferViews\":[{\"buffer\":0,\"byteOffset\":0,\"byteLength\":36},{\"buffer\":0,\"byteOffset\":36,\"byteLength\":24},{\"buffer\":0,\"byteOffset\":60,\"byteLength\":48},{\"buffer\":0,\"byteOffset\":108,\"byteLength\":6}],\"buffers\":[{\"byteLength\":114}]}";
     val jlen: usize = str_len(json);
@@ -1050,75 +1063,7 @@ fun fixture_skinned_glb(out: *u8) usize {
     ret total;
 }
 
-test "mesh: the highest joint index is found across every vertex and lane" {
-    # The fixture's joint indices run 0..11 across three vertices. Scanning only
-    # the first vertex, or only the first lane, would report 3 or 8 and let a
-    # model through whose later vertices index outside the palette.
-    var glb: [1024]u8;
-    val n:   usize = fixture_skinned_glb(?glb[0]);
-
-    var pa: allo.Allocator;
-    if (!ok_alloc(page.make(?pa))) { ret 90; }
-    var ar: arena.Arena;
-    if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
-    var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) {
-        arena.dnit(?ar);
-        ret 92;
-    }
-
-    val r: res[MeshData, Error] = extract_glb(?glb[0], n, ?aa);
-    if (sel r.err) {
-        arena.dnit(?ar);
-        ret 1;
-    }
-    val md:   MeshData   = r.ok;
-    val most: opt[usize] = mesh_data_max_joint(?md);
-    if (!sel most.some) {
-        arena.dnit(?ar);
-        ret 2;
-    }
-    if (most.some != 11) {
-        arena.dnit(?ar);
-        ret 3;
-    }
-    if (!ok_alloc(arena.dnit(?ar))) { ret 99; }
-    ret 0;
-}
-
-test "mesh: an unskinned layout reports no joints rather than zero" {
-    # Zero is a valid joint index, so a mesh with no joints at all has to be
-    # distinguishable from one that only ever references joint 0. Otherwise a
-    # static mesh would be rejected against a skeleton with no joints.
-    var glb: [512]u8;
-    val n:   usize = fixture_triangle_glb(?glb[0]);
-
-    var pa: allo.Allocator;
-    if (!ok_alloc(page.make(?pa))) { ret 90; }
-    var ar: arena.Arena;
-    if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
-    var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) {
-        arena.dnit(?ar);
-        ret 92;
-    }
-
-    val r: res[MeshData, Error] = extract_glb(?glb[0], n, ?aa);
-    if (sel r.err) {
-        arena.dnit(?ar);
-        ret 1;
-    }
-    val md:   MeshData   = r.ok;
-    val most: opt[usize] = mesh_data_max_joint(?md);
-    if (!sel most.none) {
-        arena.dnit(?ar);
-        ret 2;
-    }
-    if (!ok_alloc(arena.dnit(?ar))) { ret 99; }
-    ret 0;
-}
-
-test "mesh: a skinned primitive is conformed to the skinned layout" {
+test extract_glb__conforms_skinned {
     var glb: [1024]u8;
     val n:   usize = fixture_skinned_glb(?glb[0]);
 
@@ -1197,11 +1142,23 @@ test "mesh: a skinned primitive is conformed to the skinned layout" {
         arena.dnit(?ar);
         ret 13;
     }
+    # the fixture's joint indices run 0..11 across three vertices. scanning
+    # only the first vertex or lane would report 3 or 8 and let a model through
+    # whose later vertices index outside the palette.
+    val most: opt[usize] = mesh_data_max_joint(?md);
+    if (!sel most.some) {
+        arena.dnit(?ar);
+        ret 14;
+    }
+    if (most.some != 11) {
+        arena.dnit(?ar);
+        ret 15;
+    }
     if (!ok_alloc(arena.dnit(?ar))) { ret 99; }
     ret 0;
 }
 
-test "mesh: bounds come from the POSITION attribute, wherever it sits" {
+test mesh_bounds_of__reads_position_attribute {
     # A format is free to order its attributes, and reading the wrong one gives
     # a box built from normals: a unit cube around the origin, which looks
     # entirely plausible and culls the mesh as soon as it moves.
@@ -1234,37 +1191,20 @@ test "mesh: bounds come from the POSITION attribute, wherever it sits" {
     if (b.max[1] != 20.0)      { ret 6; }
     if (b.min[2] != 7.0)       { ret 7; }
     if (b.max[2] != 30.0)      { ret 8; }
-    ret 0;
-}
 
-test "mesh: a two-component position gives a flat box, not an empty one" {
-    # The 2D formats carry vec2 positions. Refusing them would leave every
-    # sprite mesh with an empty box, which culls it entirely.
-    var f: VertexFormat = vertex_format();
-    if (!vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0)) { ret 1; }
-    var v: [4]f32;
-    v[0] = 1.0;
-    v[1] = 2.0;
-    v[2] = 3.0;
-    v[3] = 4.0;
-    val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?f);
-    if (aabb_is_empty(?b))                  { ret 2; }
-    if (b.min[0] != 1.0 || b.max[0] != 3.0) { ret 3; }
-    if (b.min[2] != 0.0 || b.max[2] != 0.0) { ret 4; }
-    ret 0;
-}
+    # the 2D formats carry vec2 positions, which give a flat box rather than
+    # an empty one that culls every sprite mesh.
+    var flat: VertexFormat = vertex_format();
+    if (!vertex_format_add(?flat, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0)) { ret 9; }
+    val fb: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?flat);
+    if (aabb_is_empty(?fb))                    { ret 10; }
+    if (fb.min[1] != 1.0 || fb.max[1] != 10.0) { ret 11; }
+    if (fb.min[2] != 0.0 || fb.max[2] != 0.0)  { ret 12; }
 
-test "mesh: a format with no position has no bounds" {
-    # Rather than a box built from whatever the first attribute happens to be.
-    # An empty box culls the mesh, which is the safe answer for geometry this
-    # renderer cannot place.
-    var f: VertexFormat = vertex_format();
-    if (!vertex_format_add(?f, SEMANTIC_NORMAL, 0, COMP_F32, 3, 0, 0)) { ret 1; }
-    var v: [3]f32;
-    v[0] = 1.0;
-    v[1] = 2.0;
-    v[2] = 3.0;
-    val b: Aabb = mesh_bounds_of((?v[0]):~*u8, 1, ?f);
-    if (!aabb_is_empty(?b)) { ret 2; }
+    # no position at all is an empty box, not one built from another attribute
+    var normals: VertexFormat = vertex_format();
+    if (!vertex_format_add(?normals, SEMANTIC_NORMAL, 0, COMP_F32, 3, 0, 0)) { ret 13; }
+    val nb: Aabb = mesh_bounds_of((?v[0]):~*u8, 1, ?normals);
+    if (!aabb_is_empty(?nb)) { ret 14; }
     ret 0;
 }
