@@ -199,7 +199,7 @@ test integer__truncates_and_falls_back {
 test degenerate__zero_destination {
     # a minimized window reports zero height, a normal state
     val r: Rect = fit_rect(320.0, 180.0, 0.0, 0.0, FitMode.contain{});
-    if (r.w != 0.0 || r.h != 0.0) { ret 1; }
+    if (r.w != 0.0 || r.h != 0.0)                                    { ret 1; }
     if (fit_scale(320.0, 180.0, 0.0, 0.0, FitMode.contain{}) != 1.0) { ret 2; }
     val p: opt[Vec2] = fit_unproject(320.0, 180.0, 0.0, 0.0, FitMode.contain{}, 5.0, 5.0);
     if (!sel p.none) { ret 3; }
@@ -208,7 +208,7 @@ test degenerate__zero_destination {
 
 test unproject__inverts_fit_without_clamping {
     # the centring offset is what a hand-rolled inverse forgets, so check the corners
-    val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.contain{});
+    val r:      Rect      = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.contain{});
     val origin: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, r.x, r.y);
     if (!sel origin.some)           { ret 1; }
     if (!near(origin.some[0], 0.0)) { ret 2; }

@@ -544,9 +544,9 @@ test vfs_resolve__joins_root {
     res_root  = saved_res;
     user_root = saved_user;
 
-    if (!resolves_to(plain, "assets/art/hero.qoi"))       { ret 1; }
-    if (!resolves_to(slash, "assets/hero.qoi"))           { ret 2; }
-    if (!resolves_to(top, "/hero.qoi"))                   { ret 3; }
+    if (!resolves_to(plain, "assets/art/hero.qoi"))      { ret 1; }
+    if (!resolves_to(slash, "assets/hero.qoi"))          { ret 2; }
+    if (!resolves_to(top, "/hero.qoi"))                  { ret 3; }
     if (!resolves_to(user, "/tmp/game-state/save1.dat")) { ret 4; }
     ret 0;
 }

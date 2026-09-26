@@ -873,9 +873,9 @@ test slot_layout__blocks_fit_and_align {
     if (SLOT_BYTES < $size_of(ScreenUniforms))  { ret 3; }
     if ((SLOT_BYTES % UNIFORM_ALIGN) != 0)      { ret 4; }
     # the colour sits after the transform block, or it lands in the matrices
-    if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0)      { ret 5; }
-    if (COLOUR_OFFSET < $size_of(SkinnedUniforms)) { ret 6; }
-    if (COLOUR_OFFSET < $size_of(MeshUniforms))    { ret 7; }
+    if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0)                { ret 5; }
+    if (COLOUR_OFFSET < $size_of(SkinnedUniforms))           { ret 6; }
+    if (COLOUR_OFFSET < $size_of(MeshUniforms))              { ret 7; }
     if (COLOUR_OFFSET + $size_of(TintUniforms) > SLOT_BYTES) { ret 8; }
     # the game's block sits after the colour and a full one fits the slot
     if ((USER_OFFSET % UNIFORM_ALIGN) != 0)    { ret 9; }

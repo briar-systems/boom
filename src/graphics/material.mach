@@ -201,11 +201,11 @@ test material_texture__lookup_by_slot_and_name {
     var m:      Material = material();
     # none rather than a dangling first entry, so the renderer writes the
     # uniform binding alone instead of a sampler pointing at nothing.
-    if (!names(material_texture(?m), nil)) { ret 7; }
-    if (!bound(material_add_texture(?m, "albedo", ?albedo))) { ret 1; }
+    if (!names(material_texture(?m), nil))                                                    { ret 7; }
+    if (!bound(material_add_texture(?m, "albedo", ?albedo)))                                  { ret 1; }
     if (!bound(material_add_texture_filtered(?m, "normal", ?normal, TextureFilter.linear{}))) { ret 2; }
-    if (!sel m.textures[0].filter.nearest) { ret 8; }
-    if (!sel m.textures[1].filter.linear)  { ret 9; }
+    if (!sel m.textures[0].filter.nearest)                                                    { ret 8; }
+    if (!sel m.textures[1].filter.linear)                                                     { ret 9; }
 
     if (!names(material_texture_named(?m, "albedo"), ?albedo)) { ret 3; }
     if (!names(material_texture_named(?m, "normal"), ?normal)) { ret 4; }

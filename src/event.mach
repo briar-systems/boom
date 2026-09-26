@@ -213,9 +213,9 @@ fun popped_key(q: *EventQueue) i64 {
 }
 
 test queue__fifo {
-    var q: EventQueue = queue_new();
+    var q:    EventQueue = queue_new();
     val none: opt[Event] = queue_pop(?q);
-    if (!sel none.none) { ret 1; }
+    if (!sel none.none)      { ret 1; }
     if (!pushed(?q, key(1))) { ret 2; }
     if (!pushed(?q, key(2))) { ret 3; }
     if (popped_key(?q) != 1) { ret 4; }

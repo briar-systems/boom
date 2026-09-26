@@ -825,6 +825,7 @@ test render__frees_stopping_voice {
     if (atomic.load(?s.voices[v].state) != FREE) { ret 4; }
     ret 0;
 }
+
 test render__silences_output_first {
     var a: allo.Allocator;
     page.make(?a);
@@ -849,6 +850,7 @@ test render__silences_output_first {
     }
     ret 0;
 }
+
 test voice_id__stale_generation_refused {
     var a: allo.Allocator;
     page.make(?a);
@@ -1078,6 +1080,7 @@ test sound_free__retires_borrowing_voice {
     if (!released(allo.deallocate[f32](?a, s.scratch, s.frames * s.chans))) { ret 5; }
     ret 0;
 }
+
 test conform__device_format_passes_through {
     var a: allo.Allocator;
     page.make(?a);
@@ -1097,9 +1100,9 @@ test conform__device_format_passes_through {
     var vals: [4]f32                               = [4]f32{0.25, 0.5, 0.75, 1.0};
     val sr:   res[audio.Buffer, audio.BufferError] = conform_source(?a, 48000, 2, 2, ?vals[0]);
     if (sel sr.err) { ret 2; }
-    var src:    audio.Buffer = sr.ok;
-    val before: *f32         = src.samples;
-    val cr: res[audio.Buffer, AudioError] = conform(?s, ?src);
+    var src:    audio.Buffer                  = sr.ok;
+    val before: *f32                          = src.samples;
+    val cr:     res[audio.Buffer, AudioError] = conform(?s, ?src);
     if (sel cr.err) { ret 3; }
     var out: audio.Buffer = cr.ok;
     if (out.samples != before || out.frames != 2) { ret 4; }
@@ -1132,6 +1135,7 @@ test conform__mono_fans_out_to_stereo {
     if (!released(audio.dnit(?out)))                              { ret 8; }
     ret 0;
 }
+
 test conform__stereo_averages_to_mono {
     var a: allo.Allocator;
     page.make(?a);
@@ -1154,6 +1158,7 @@ test conform__stereo_averages_to_mono {
     if (!released(audio.dnit(?out))) { ret 7; }
     ret 0;
 }
+
 test conform__resample_up_interpolates {
     # mach-audio's pull ignores sample rate, so a mismatch plays at the wrong
     # pitch and nothing below this layer notices
@@ -1181,6 +1186,7 @@ test conform__resample_up_interpolates {
     if (!released(audio.dnit(?out)))     { ret 8; }
     ret 0;
 }
+
 test conform__resample_down_drops_frames {
     var a: allo.Allocator;
     page.make(?a);
@@ -1202,13 +1208,14 @@ test conform__resample_down_drops_frames {
     if (!released(audio.dnit(?out))) { ret 6; }
     ret 0;
 }
+
 test pan_gains__constant_power_clamped {
     # a linear pan dips at centre; constant power keeps l*l + r*r at 1
     var l: f32 = 0.0;
     var r: f32 = 0.0;
     pan_gains(0.0, ?l, ?r);
     var p: f32 = l * l + r * r;
-    if (p < 0.999 || p > 1.001)          { ret 1; }
+    if (p < 0.999 || p > 1.001)           { ret 1; }
     if (l != r || l > 0.708 || l < 0.706) { ret 2; }
     pan_gains(0.35, ?l, ?r);
     p = l * l + r * r;

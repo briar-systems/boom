@@ -305,7 +305,7 @@ test pick_memory_type__mask_and_flags {
     # a type carrying half the request is refused: host-visible memory that is
     # not coherent needs explicit flushing, and every write silently fails to
     # reach the GPU.
-    val want: u32 = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    val want:    u32      = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
     val partial: opt[u32] = pick_memory_type(?p, 0b11, want);
     if (!sel partial.none) { ret 3; }
     p.memoryTypes[1].propertyFlags = want;

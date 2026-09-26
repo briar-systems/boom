@@ -851,12 +851,12 @@ test vertex_attributes__all_or_nothing {
     var f: VertexFormat = vertex_format();
     vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0);
     vertex_format_add(?f, SEMANTIC_COLOR_0, 1, COMP_U32, 4, 1, 0);
-    var out: [8]vk.VertexInputAttributeDescription;
+    var out:       [8]vk.VertexInputAttributeDescription;
     val described: opt[u32] = vertex_attributes(?f, ?out[0], 8);
     if (!sel described.none) { ret 1; }
 
-    var s: VertexFormat = vertex_format_standard();
-    val short: opt[u32] = vertex_attributes(?s, ?out[0], 2);
+    var s:     VertexFormat = vertex_format_standard();
+    val short: opt[u32]     = vertex_attributes(?s, ?out[0], 2);
     if (!sel short.none) { ret 2; }
     ret 0;
 }

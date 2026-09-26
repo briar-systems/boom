@@ -1508,7 +1508,7 @@ test renderer__frame_calls_refused_without_frame {
     r.frame_index = 0;
     r.store.ready = true;
     var bytes: [64]u8;
-    val e: err[Error] = renderer_capture(?r, ?bytes[0], 4);
+    val e:     err[Error] = renderer_capture(?r, ?bytes[0], 4);
     if (!sel e.err)                   { ret 1; }
     if (!sel e.err.renderer)          { ret 2; }
     if (!sel e.err.renderer.no_frame) { ret 3; }
@@ -1570,7 +1570,7 @@ test renderer__present_mode_requested_vs_in_use {
     r.present    = PresentMode.vsync{};
     # recording a request with no swapchain would claim a mode never presented
     val set: err[Error] = renderer_set_present_mode(?r, PresentMode.mailbox{});
-    if (!sel set.err)         { ret 1; }
+    if (!sel set.err) { ret 1; }
     val kept: PresentMode = r.present;
     if (!sel kept.vsync) { ret 2; }
 

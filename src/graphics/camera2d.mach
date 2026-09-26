@@ -270,9 +270,9 @@ fun near(a: f32, b: f32) bool {
 
 test matrix__identity_maps_target_to_clip {
     # the identity camera reproduces the pixel-space pass, y down
-    var c: Camera2D = camera2d_identity(320.0, 180.0);
-    var m: Mat4     = camera2d_matrix(?c, 320.0, 180.0);
-    val tl: Vec3 = apply(?m, 0.0, 0.0);
+    var c:  Camera2D = camera2d_identity(320.0, 180.0);
+    var m:  Mat4     = camera2d_matrix(?c, 320.0, 180.0);
+    val tl: Vec3     = apply(?m, 0.0, 0.0);
     if (!near(tl[0], 0.0 - 1.0)) { ret 1; }
     if (!near(tl[1], 0.0 - 1.0)) { ret 2; }
     val br: Vec3 = apply(?m, 320.0, 180.0);
@@ -283,16 +283,16 @@ test matrix__identity_maps_target_to_clip {
 
 test matrix__zoom_scales_extent {
     # a hand-rolled camera that scales positions but not extents is right only at zoom one
-    var c2: Camera2D = camera2d(vec2(160.0, 90.0), 2.0);
-    var m2: Mat4     = camera2d_matrix(?c2, 320.0, 180.0);
-    var c1: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
-    var m1: Mat4     = camera2d_matrix(?c1, 320.0, 180.0);
-    val a2: Vec3 = apply(?m2, 160.0, 90.0);
-    val b2: Vec3 = apply(?m2, 176.0, 90.0);
-    val a1: Vec3 = apply(?m1, 160.0, 90.0);
-    val b1: Vec3 = apply(?m1, 176.0, 90.0);
-    val at_2x: f32 = b2[0] - a2[0];
-    val at_1x: f32 = b1[0] - a1[0];
+    var c2:    Camera2D = camera2d(vec2(160.0, 90.0), 2.0);
+    var m2:    Mat4     = camera2d_matrix(?c2, 320.0, 180.0);
+    var c1:    Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
+    var m1:    Mat4     = camera2d_matrix(?c1, 320.0, 180.0);
+    val a2:    Vec3     = apply(?m2, 160.0, 90.0);
+    val b2:    Vec3     = apply(?m2, 176.0, 90.0);
+    val a1:    Vec3     = apply(?m1, 160.0, 90.0);
+    val b1:    Vec3     = apply(?m1, 176.0, 90.0);
+    val at_2x: f32      = b2[0] - a2[0];
+    val at_1x: f32      = b1[0] - a1[0];
     if (!near(at_2x, at_1x * 2.0)) { ret 1; }
     ret 0;
 }
@@ -301,7 +301,7 @@ test matrix__rotation_turns_about_camera_centre {
     # a clockwise quarter roll swings a point 40 right of centre to 40 above it
     var c: Camera2D = camera2d(vec2(160.0, 90.0), 1.0);
     c.rotation = 1.5707963;
-    var m: Mat4 = camera2d_matrix(?c, 320.0, 180.0);
+    var m:      Mat4 = camera2d_matrix(?c, 320.0, 180.0);
     val centre: Vec3 = apply(?m, 160.0, 90.0);
     if (!near(centre[0], 0.0)) { ret 1; }
     if (!near(centre[1], 0.0)) { ret 2; }
@@ -317,7 +317,7 @@ test scale__degenerate_fields_fall_back {
     if (camera2d_zoom(?c) != 1.0) { ret 1; }
     c.zoom = 0.0 - 2.0;
     if (camera2d_zoom(?c) != 1.0) { ret 2; }
-    if (c.zoom != 0.0 - 2.0) { ret 3; }
+    if (c.zoom != 0.0 - 2.0)      { ret 3; }
     # zero view height means zoom drives the scale
     c.zoom = 2.0;
     if (camera2d_scale(?c, 320.0, 180.0) != 2.0) { ret 4; }
@@ -342,7 +342,7 @@ test screen_to_world__agrees_with_matrix {
     # separate derivations of one transform, so picking lands on what was drawn
     var c: Camera2D = camera2d(vec2(120.0, 70.0), 1.75);
     c.rotation = 0.4;
-    val w: Vec2 = camera2d_screen_to_world(?c, vec2(40.0, 150.0), 320.0, 180.0);
+    val w:    Vec2 = camera2d_screen_to_world(?c, vec2(40.0, 150.0), 320.0, 180.0);
     var m:    Mat4 = camera2d_matrix(?c, 320.0, 180.0);
     val clip: Vec3 = apply(?m, w[0], w[1]);
     if (!near((clip[0] + 1.0) * 0.5 * 320.0, 40.0))  { ret 1; }
@@ -359,8 +359,8 @@ test visible__grows_as_camera_zooms_out {
     if (!near(at1.y, 0.0))   { ret 4; }
     c.zoom = 0.5;
     val out: Rect = camera2d_visible(?c, 320.0, 180.0);
-    if (!near(out.w, 640.0)) { ret 5; }
-    if (!near(out.h, 360.0)) { ret 6; }
+    if (!near(out.w, 640.0))               { ret 5; }
+    if (!near(out.h, 360.0))               { ret 6; }
     if (!near(out.x + out.w * 0.5, 160.0)) { ret 7; }
     ret 0;
 }

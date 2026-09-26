@@ -524,4 +524,3 @@ test at__row_major_absent_outside_grid {
     if (!sel below.none) { ret 6; }
     ret 0;
 }
-

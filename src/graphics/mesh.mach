@@ -1197,9 +1197,9 @@ test mesh_bounds_of__reads_position_attribute {
     var flat: VertexFormat = vertex_format();
     if (!vertex_format_add(?flat, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0)) { ret 9; }
     val fb: Aabb = mesh_bounds_of((?v[0]):~*u8, 2, ?flat);
-    if (aabb_is_empty(?fb))                   { ret 10; }
+    if (aabb_is_empty(?fb))                    { ret 10; }
     if (fb.min[1] != 1.0 || fb.max[1] != 10.0) { ret 11; }
-    if (fb.min[2] != 0.0 || fb.max[2] != 0.0) { ret 12; }
+    if (fb.min[2] != 0.0 || fb.max[2] != 0.0)  { ret 12; }
 
     # no position at all is an empty box, not one built from another attribute
     var normals: VertexFormat = vertex_format();

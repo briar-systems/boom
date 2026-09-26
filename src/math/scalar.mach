@@ -206,8 +206,8 @@ test sqrt64__values_and_domain {
 test sin_cos__cardinal_angles {
     # cos(0) and sin(0) are exact: a cos(0) above one makes rotations
     # non-orthonormal and puts acos outside its domain
-    if (cos64(0.0) != 1.0 || cosf(0.0) != 1.0) { ret 1; }
-    if (sin64(0.0) != 0.0 || sinf(0.0) != 0.0) { ret 2; }
+    if (cos64(0.0) != 1.0 || cosf(0.0) != 1.0)            { ret 1; }
+    if (sin64(0.0) != 0.0 || sinf(0.0) != 0.0)            { ret 2; }
     if (!close(sin64(HALF_PI), 1.0, 0.00001))             { ret 3; }
     if (!close(sin64(PI), 0.0, 0.00001))                  { ret 4; }
     if (!close(sin64(0.0 - HALF_PI), 0.0 - 1.0, 0.00001)) { ret 5; }
@@ -227,9 +227,9 @@ test sin_cos__bounded_and_consistent_across_range {
         val x: f64 = (0.0 - 25.0) + i::f64 * 0.125;
         val s: f64 = sin64(x);
         val c: f64 = cos64(x);
-        if (s > 1.0 || s < 0.0 - 1.0) { ret 1; }
-        if (c > 1.0 || c < 0.0 - 1.0) { ret 2; }
-        if (!close(s * s + c * c, 1.0, 0.000001)) { ret 3; }
+        if (s > 1.0 || s < 0.0 - 1.0)               { ret 1; }
+        if (c > 1.0 || c < 0.0 - 1.0)               { ret 2; }
+        if (!close(s * s + c * c, 1.0, 0.000001))   { ret 3; }
         if (!close(c, sin64(x + HALF_PI), 0.00001)) { ret 4; }
         i = i + 1;
     }

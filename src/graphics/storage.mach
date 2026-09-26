@@ -445,7 +445,7 @@ test size_for__doubles_within_ceiling {
     if (!sized(storage_size_for(STORAGE_BYTES * 8, 16), STORAGE_BYTES * 8)) { ret 4; }
     # past the ceiling is refused rather than clamped to a partial payload
     val past: opt[usize] = storage_size_for(0, STORAGE_MAX_BYTES + 1);
-    if (!sel past.none) { ret 5; }
+    if (!sel past.none)                                                    { ret 5; }
     if (!sized(storage_size_for(0, STORAGE_MAX_BYTES), STORAGE_MAX_BYTES)) { ret 6; }
     ret 0;
 }
@@ -467,8 +467,8 @@ test size_for__ceiling_reached_by_doubling {
 
 test write__refused_outside_live_frame {
     # refused rather than copied into a nil mapping or past the ring
-    var s: FrameStorage;
-    var v: Vk;
+    var s:     FrameStorage;
+    var v:     Vk;
     var bytes: [16]u8;
     s.ready   = false;
     s.refused = 0;
@@ -516,7 +516,7 @@ test write__overrun_refused_whole {
     var s:       FrameStorage;
     var v:       Vk;
     var backing: [64]u8;
-    v.ready = false;
+    v.ready             = false;
     s.ready             = true;
     s.refused           = 0;
     s.count[0]          = 1;

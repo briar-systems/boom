@@ -418,9 +418,9 @@ test decode__png_round_trips {
         255, 0, 0, 255, 0, 255, 0, 255,
         0, 0, 255, 255, 255, 255, 0, 255,
     };
-    var srcimg: img.Image = source_image(?src_px[0], 2, 2);
-    var enc: [1024]u8;
-    val n: res[usize, img.EncodeError] = img.png_encode(?srcimg, ?enc[0], 1024);
+    var srcimg: img.Image                   = source_image(?src_px[0], 2, 2);
+    var enc:    [1024]u8;
+    val n:      res[usize, img.EncodeError] = img.png_encode(?srcimg, ?enc[0], 1024);
     if (!sel n.ok) { ret 1; }
 
     var pa:   allo.Allocator;
@@ -439,10 +439,10 @@ test decode__png_round_trips {
 }
 
 test decode__qoi_retains_linear_space {
-    var src_px: [4]u8     = [4]u8{128, 64, 32, 255};
-    var srcimg: img.Image = source_image(?src_px[0], 1, 1);
-    var enc: [64]u8;
-    val n: res[usize, img.EncodeError] = img.qoi_encode(?srcimg, ?enc[0], 64);
+    var src_px: [4]u8                       = [4]u8{128, 64, 32, 255};
+    var srcimg: img.Image                   = source_image(?src_px[0], 1, 1);
+    var enc:    [64]u8;
+    val n:      res[usize, img.EncodeError] = img.qoi_encode(?srcimg, ?enc[0], 64);
     if (!sel n.ok) { ret 1; }
 
     var pa:   allo.Allocator;
@@ -463,20 +463,20 @@ test decode__unsupported_format_named {
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
     if (sel made.err) { ret 1; }
-    var junk: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
-    val u: res[Decoded, Error] = decode(?junk[0], 8, ColorSpace.srgb{}, ?pa);
-    if (!sel u.err)                         { ret 2; }
-    if (!sel u.err.texture)                 { ret 2; }
-    if (!sel u.err.texture.format)            { ret 3; }
-    if (!sel u.err.texture.format.none)       { ret 4; }
+    var junk: [8]u8               = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    val u:    res[Decoded, Error] = decode(?junk[0], 8, ColorSpace.srgb{}, ?pa);
+    if (!sel u.err)                     { ret 2; }
+    if (!sel u.err.texture)             { ret 2; }
+    if (!sel u.err.texture.format)      { ret 3; }
+    if (!sel u.err.texture.format.none) { ret 4; }
     # a detected jpeg names itself rather than reading as junk
-    var jpeg: [8]u8 = [8]u8{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F'};
-    val j: res[Decoded, Error] = decode(?jpeg[0], 8, ColorSpace.srgb{}, ?pa);
-    if (!sel j.err)                         { ret 5; }
-    if (!sel j.err.texture)                 { ret 5; }
-    if (!sel j.err.texture.format)            { ret 6; }
-    if (!sel j.err.texture.format.some)       { ret 7; }
-    if (!sel j.err.texture.format.some.jpeg)  { ret 8; }
+    var jpeg: [8]u8               = [8]u8{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F'};
+    val j:    res[Decoded, Error] = decode(?jpeg[0], 8, ColorSpace.srgb{}, ?pa);
+    if (!sel j.err)                          { ret 5; }
+    if (!sel j.err.texture)                  { ret 5; }
+    if (!sel j.err.texture.format)           { ret 6; }
+    if (!sel j.err.texture.format.some)      { ret 7; }
+    if (!sel j.err.texture.format.some.jpeg) { ret 8; }
     ret 0;
 }
 

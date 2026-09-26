@@ -422,8 +422,8 @@ test clamp_extent__fixed_or_clamped {
     caps.minImageExtent.height = 480;
     caps.maxImageExtent.width  = 1280;
     caps.maxImageExtent.height = 720;
-    w = 1920;
-    h = 1080;
+    w                          = 1920;
+    h                          = 1080;
     clamp_extent(?caps, ?w, ?h);
     if (w != 1280 || h != 720) { ret 2; }
     w = 100;
@@ -441,7 +441,7 @@ test present_mode__zero_is_vsync_and_maps_by_name {
     # both enumerations start at zero and disagree about which mode that is, so
     # a cast would turn vsync into the mode that tears
     var mode: PresentMode;
-    if (!sel mode.vsync) { ret 1; }
+    if (!sel mode.vsync)                                                           { ret 1; }
     if (present_mode_vk(PresentMode.vsync{}) != vk.PRESENT_MODE_FIFO_KHR)          { ret 2; }
     if (present_mode_vk(PresentMode.mailbox{}) != vk.PRESENT_MODE_MAILBOX_KHR)     { ret 3; }
     if (present_mode_vk(PresentMode.immediate{}) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 4; }

@@ -298,10 +298,10 @@ test vertex_format_ui__matches_blit_layout {
 
 test vertex_format_add__appends_after_standard {
     var f: VertexFormat = vertex_format_standard();
-    if (f.count != 3)                 { ret 7; }
-    if (f.attributes[1].offset != 12) { ret 8; }
-    if (f.attributes[2].offset != 24) { ret 9; }
-    if (f.stride != 32)               { ret 10; }
+    if (f.count != 3)                                                     { ret 7; }
+    if (f.attributes[1].offset != 12)                                     { ret 8; }
+    if (f.attributes[2].offset != 24)                                     { ret 9; }
+    if (f.stride != 32)                                                   { ret 10; }
     if (!vertex_format_add(?f, SEMANTIC_JOINTS_0, 3, COMP_U16, 4, 0, 1))  { ret 1; }
     if (!vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 4, COMP_F32, 4, 0, 0)) { ret 2; }
     val joints: *VertexAttribute = ?f.attributes[3];
