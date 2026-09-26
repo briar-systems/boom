@@ -133,7 +133,7 @@ fun stop_on_tick(ctx: *Context) {
     context_stop(ctx);
 }
 
-test "engine: stopping a tick leaves catch-up work pending" {
+test engine__stopping_tick_leaves_catch_up_work {
     var ticks: i64 = 0;
     var ctx:   Context;
     ctx.running = true;

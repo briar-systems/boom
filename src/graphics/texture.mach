@@ -384,14 +384,14 @@ fun source_image(px: *u8, w: u32, h: u32) img.Image {
     ret srcimg;
 }
 
-test "texture: a fresh handle carries no image" {
+test texture__fresh_handle_carries_no_image {
     var t: Texture;
     t.image.view = nil;
     if (texture_view(?t) != nil) { ret 1; }
     ret 0;
 }
 
-test "texture: creation against an uninitialized context is refused" {
+test texture__creation_against_uninitialized_context_refused {
     var d: Device;
     d.ready = false;
     var px: [4]u8               = [4]u8{255, 255, 255, 255};
@@ -401,7 +401,7 @@ test "texture: creation against an uninitialized context is refused" {
     ret 0;
 }
 
-test "texture: non-positive dimensions are refused before allocating" {
+test texture__non_positive_dimensions_refused_before_allocating {
     var d: Device;
     d.ready = true;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
@@ -410,7 +410,7 @@ test "texture: non-positive dimensions are refused before allocating" {
     ret 0;
 }
 
-test "texture: a region write validates before touching the device" {
+test texture__region_write_validates_before_touching_device {
     var d:  Device;
     var t:  Texture;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
@@ -425,7 +425,7 @@ test "texture: a region write validates before touching the device" {
     ret 0;
 }
 
-test "texture: decode round-trips a qoi image" {
+test texture__decode_round_trips_qoi_image {
     var src_px: [16]u8 = [16]u8{
         255, 0, 0, 255, 0, 255, 0, 255,
         0, 0, 255, 255, 255, 255, 0, 255,
@@ -452,7 +452,7 @@ test "texture: decode round-trips a qoi image" {
     ret 0;
 }
 
-test "texture: decoded data retains an explicit linear colour space" {
+test texture__decoded_data_retains_explicit_linear_colour {
     var src_px: [4]u8     = [4]u8{128, 64, 32, 255};
     var srcimg: img.Image = source_image(?src_px[0], 1, 1);
 
@@ -475,7 +475,7 @@ test "texture: decoded data retains an explicit linear colour space" {
     ret 0;
 }
 
-test "texture: decode round-trips a png image" {
+test texture__decode_round_trips_png_image {
     # PNG is the format the art is authored in, and it was the one the dispatch
     # refused: mach-image grew a decoder and this module never called it, so a
     # .png reported "unsupported image format" with the decoder sitting right
@@ -511,7 +511,7 @@ test "texture: decode round-trips a png image" {
     ret 0;
 }
 
-test "texture: unsupported format reports cleanly" {
+test texture__unsupported_format_reports_cleanly {
     var junk: [8]u8           = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
@@ -524,7 +524,7 @@ test "texture: unsupported format reports cleanly" {
     ret 0;
 }
 
-test "texture: a detected jpeg is refused with the format it named" {
+test texture__detected_jpeg_refused_format_named {
     var jpeg: [8]u8           = [8]u8{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F'};
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
@@ -538,7 +538,7 @@ test "texture: a detected jpeg is refused with the format it named" {
     ret 0;
 }
 
-test "texture: a load path is resolved through the vfs" {
+test texture__load_path_resolved_through_vfs {
     # The loaders that read files must agree on what a path means. This one took
     # a raw filesystem path while sound_load and font_load resolved `res://`, so
     # `res://art/x.qoi` loaded a sound and failed for a texture.
@@ -561,7 +561,7 @@ test "texture: a load path is resolved through the vfs" {
     ret 0;
 }
 
-test "texture: a missing asset reports the load, not a decode" {
+test texture__missing_asset_reports_load_not_decode {
     var d: Device;
     d.ready = true;
     val r: res[Texture, Error] = texture_load(?d, "/nonexistent/boom/texture.qoi");

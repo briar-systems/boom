@@ -396,7 +396,7 @@ pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32,
 # Creation needs a device and a surface, so these cover the extent clamp, which
 # is pure and is where a wrong answer produces a swapchain the driver rejects.
 
-test "swapchain: both sRGB surface formats are recognized" {
+test swapchain__both_srgb_surface_formats_recognized {
     # Textures are sampled through sRGB image formats, so the shader works in
     # linear light and the surface is what encodes on write. Recognizing only
     # one of the two variants would silently pick a UNORM format on a driver
@@ -408,7 +408,7 @@ test "swapchain: both sRGB surface formats are recognized" {
     ret 0;
 }
 
-test "swapchain: a surface with a fixed extent overrides the request" {
+test swapchain__surface_fixed_extent_overrides_request {
     var caps: vk.SurfaceCapabilitiesKHR;
     caps.currentExtent.width  = 800;
     caps.currentExtent.height = 600;
@@ -420,7 +420,7 @@ test "swapchain: a surface with a fixed extent overrides the request" {
     ret 0;
 }
 
-test "swapchain: the sentinel extent clamps the request into range" {
+test swapchain__sentinel_extent_clamps_request_range {
     var caps: vk.SurfaceCapabilitiesKHR;
     caps.currentExtent.width   = 0xFFFFFFFF;
     caps.currentExtent.height  = 0xFFFFFFFF;
@@ -446,7 +446,7 @@ test "swapchain: the sentinel extent clamps the request into range" {
     ret 0;
 }
 
-test "swapchain: teardown on an uninitialized handle is a no-op" {
+test swapchain__teardown_uninitialized_handle_no_op {
     var s: Swapchain;
     s.ready = false;
     var v: Vk;
@@ -456,7 +456,7 @@ test "swapchain: teardown on an uninitialized handle is a no-op" {
     ret 0;
 }
 
-test "swapchain: each present mode maps to the Vulkan constant it names" {
+test swapchain__present_mode_maps_vulkan_constant_names {
     # Both enumerations start at zero and disagree about which mode that is, so
     # a mapping written as a cast turns vsync into the mode that tears. Nothing
     # catches that: the swapchain is created, it presents, and the only symptom
@@ -467,13 +467,13 @@ test "swapchain: each present mode maps to the Vulkan constant it names" {
     ret 0;
 }
 
-test "swapchain: a zeroed present mode is vsync, the one every surface offers" {
+test swapchain__zeroed_present_mode_vsync_surface_offers {
     var mode: PresentMode;
     if (!sel mode.vsync) { ret 1; }
     ret 0;
 }
 
-test "swapchain: vsync needs no device to be known supported" {
+test swapchain__vsync_needs_no_device_known_supported {
     # Required of every implementation, so the answer is available before
     # bring-up, which is what lets a menu assembled during start-up list what it
     # can offer. The optional two cannot be answered without a surface and must
@@ -486,7 +486,7 @@ test "swapchain: vsync needs no device to be known supported" {
     ret 0;
 }
 
-test "swapchain: a mode the surface will not do falls back to vsync" {
+test swapchain__mode_surface_will_not_do_falls {
     # Not to the other optional mode. MAILBOX and IMMEDIATE differ in whether
     # the image tears, so substituting one for the other would change what the
     # player sees on hardware they never asked about.
@@ -501,7 +501,7 @@ test "swapchain: a mode the surface will not do falls back to vsync" {
     ret 0;
 }
 
-test "swapchain: images may be copied from only when the surface offers it" {
+test swapchain__images_may_copied_surface_offers {
     val offered: [2]u32 = image_usage_for(vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT
         | vk.IMAGE_USAGE_TRANSFER_SRC_BIT | vk.IMAGE_USAGE_TRANSFER_DST_BIT);
     if ((offered[0] & vk.IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)     { ret 1; }

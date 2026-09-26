@@ -283,7 +283,7 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     ret atlas_draw(p, f.atlas, s, x, y, tint);
 }
 
-test "text: an invalid font measures and draws nothing" {
+test text__invalid_font_measures_draws_nothing {
     var f: Font;
     f.valid = false;
     if (text_measure(?f, "abc") != 0.0) { ret 1; }
@@ -295,7 +295,7 @@ test "text: an invalid font measures and draws nothing" {
     ret 0;
 }
 
-test "text: bytes that are not a font fail before any device work" {
+test text__bytes_not_font_fail_before_device {
     var a:     allo.Allocator;
     var d:     Device;
     var bytes: [4]u8            = [4]u8{0, 1, 2, 3};

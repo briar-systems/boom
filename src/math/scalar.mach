@@ -194,7 +194,7 @@ fun close(a: f64, b: f64, eps: f64) bool {
     ret d <= eps;
 }
 
-test "scalar: sqrt of a perfect square" {
+test scalar__sqrt_perfect_square {
     if (!close(sqrt64(16.0), 4.0, 0.00001))       { ret 1; }
     if (!close(sqrt64(2.0), 1.41421356, 0.00001)) { ret 2; }
     if (sqrt64(0.0) != 0.0)                       { ret 3; }
@@ -202,7 +202,7 @@ test "scalar: sqrt of a perfect square" {
     ret 0;
 }
 
-test "scalar: sine at cardinal angles" {
+test scalar__sine_cardinal_angles {
     if (!close(sin64(0.0), 0.0, 0.00001))                 { ret 1; }
     if (!close(sin64(HALF_PI), 1.0, 0.00001))             { ret 2; }
     if (!close(sin64(PI), 0.0, 0.00001))                  { ret 3; }
@@ -210,32 +210,32 @@ test "scalar: sine at cardinal angles" {
     ret 0;
 }
 
-test "scalar: cosine at cardinal angles" {
+test scalar__cosine_cardinal_angles {
     if (!close(cos64(0.0), 1.0, 0.00001))      { ret 1; }
     if (!close(cos64(HALF_PI), 0.0, 0.00001))  { ret 2; }
     if (!close(cos64(PI), 0.0 - 1.0, 0.00001)) { ret 3; }
     ret 0;
 }
 
-test "scalar: sine survives range reduction" {
+test scalar__sine_survives_range_reduction {
     if (!close(sin64(TWO_PI + HALF_PI), 1.0, 0.00001)) { ret 1; }
     if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001))     { ret 2; }
     ret 0;
 }
 
-test "scalar: tangent of an eighth turn" {
+test scalar__tangent_eighth_turn {
     if (!close(tan64(PI / 4.0), 1.0, 0.00001)) { ret 1; }
     ret 0;
 }
 
-test "scalar: radians converts degrees" {
+test scalar__radians_converts_degrees {
     val r: f32 = radians(180.0);
     val d: f64 = r::f64 - PI;
     if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
     ret 0;
 }
 
-test "scalar: arccosine at cardinal values" {
+test scalar__arccosine_cardinal_values {
     if (!close(acos64(1.0), 0.0, 0.0001))      { ret 1; }
     if (!close(acos64(0.0), HALF_PI, 0.0001))  { ret 2; }
     if (!close(acos64(0.0 - 1.0), PI, 0.0001)) { ret 3; }
@@ -243,13 +243,13 @@ test "scalar: arccosine at cardinal values" {
     ret 0;
 }
 
-test "scalar: arccosine clamps out-of-range input" {
+test scalar__arccosine_clamps_out_range_input {
     if (!close(acos64(1.5), 0.0, 0.0001))      { ret 1; }
     if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 2; }
     ret 0;
 }
 
-test "scalar: cosine of zero is exactly one" {
+test scalar__cosine_zero_exactly {
     # The defect this guards. cos was sin(x + pi/2), which evaluated sine's
     # series at the far end of its reduced range, so cos(0) returned 1.0000035:
     # not merely imprecise but greater than one. A rotation matrix built from it
@@ -261,7 +261,7 @@ test "scalar: cosine of zero is exactly one" {
     ret 0;
 }
 
-test "scalar: sine and cosine never leave [-1, 1]" {
+test scalar__sine_cosine_never_leave_1_1 {
     # A value outside the range is what makes downstream code fail rather than
     # merely drift: acos rejects it and a normalize divides by more than it
     # should. Swept rather than spot-checked, since the old error was worst at
@@ -276,7 +276,7 @@ test "scalar: sine and cosine never leave [-1, 1]" {
     ret 0;
 }
 
-test "scalar: sine and cosine satisfy the pythagorean identity" {
+test scalar__sine_cosine_satisfy_pythagorean_identity {
     # Derived rather than recorded: whatever the series does, sin^2 + cos^2 must
     # be one at every angle. This is what catches a range reduction that drifts
     # or a series truncated too early, without pinning either to a table of
@@ -296,7 +296,7 @@ test "scalar: sine and cosine satisfy the pythagorean identity" {
     ret 0;
 }
 
-test "scalar: cosine leads sine by a quarter turn" {
+test scalar__cosine_leads_sine_quarter_turn {
     # The identity the old implementation was built on, now checked rather than
     # assumed. If the two ever disagree, one of the reductions is wrong.
     var i: i32 = 0;

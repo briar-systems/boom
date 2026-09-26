@@ -70,7 +70,7 @@ pub val VERTEX_ENTRY: str = "vert_main";
 # The entry point name every boom fragment stage uses.
 pub val FRAGMENT_ENTRY: str = "frag_main";
 
-test "spirv: every embedded module is a SPIR-V module of whole words" {
+test spirv__embedded_module_spir_v_module_whole {
     # The magic number, little-endian. #[embed] carries whatever the artifact
     # produced without complaint, so the bytes are checked rather than assumed.
     var mods: [5]*u8;
@@ -101,7 +101,7 @@ test "spirv: every embedded module is a SPIR-V module of whole words" {
     ret 0;
 }
 
-test "spirv: the 2D modules are distinct from the mesh ones" {
+test spirv__2d_modules_distinct_mesh_ones {
     # A copy-paste in the embed paths would silently make the 2D pipeline draw
     # with the mesh shader, which fails at pipeline creation with a vertex input
     # mismatch rather than saying the path was wrong.
@@ -117,7 +117,7 @@ test "spirv: the 2D modules are distinct from the mesh ones" {
 # right here, so the agreement between the CPU and the shader is a test like any
 # other. See boom.graphics.spirvread for the reader and for what it does not do.
 
-test "spirv: no module declares a capability but Shader" {
+test spirv__no_module_declares_capability_but_shader {
     # A capability past Shader is a device feature that has to be enabled, and
     # therefore a set of devices boom no longer runs on. Two shipped in 0.3.0
     # undetected and neither was asked for by a shader: both came out of
@@ -148,7 +148,7 @@ test "spirv: no module declares a capability but Shader" {
     ret 0;
 }
 
-test "spirv: each stage declares exactly the bindings the CPU binds for it" {
+test spirv__stage_declares_exactly_bindings_cpu_binds {
     # A binding the set layout does not declare is a descriptor the shader reads
     # and nothing wrote. This is the check that caught the layout stopping at
     # binding 1 while a fragment stage declared a tint at binding 2.
@@ -168,7 +168,7 @@ test "spirv: each stage declares exactly the bindings the CPU binds for it" {
     ret 0;
 }
 
-test "spirv: the frame storage binding is left to a game's own shaders" {
+test spirv__frame_storage_binding_left_game_s {
     # Binding 8 is in every set layout and is written on every draw, so a
     # built-in module could declare it and read a buffer boom never intended it
     # to. None of them do, and the whole binding belongs to whatever a game puts
@@ -195,7 +195,7 @@ test "spirv: the frame storage binding is left to a game's own shaders" {
     ret 0;
 }
 
-test "spirv: the joint palette is a storage buffer with a 16-byte stride" {
+test spirv__joint_palette_storage_buffer_16_byte {
     # As a uniform block the palette's array of columns would fall under std140,
     # which pads an array element to 16 bytes only by coincidence of this
     # element being 16 wide; boom uploads a Mat4 palette as a straight copy on
@@ -213,7 +213,7 @@ test "spirv: the joint palette is a storage buffer with a 16-byte stride" {
     ret 0;
 }
 
-test "spirv: the palette is decorated NonWritable" {
+test spirv__palette_decorated_nonwritable {
     # A storage buffer a vertex stage might write requires
     # vertexPipelineStoresAndAtomics, an optional device feature. The decoration
     # is what says it is only read, and it is why boom asks for no features.
@@ -225,7 +225,7 @@ test "spirv: the palette is decorated NonWritable" {
     ret 0;
 }
 
-test "spirv: each uniform block has the members its CPU record has" {
+test spirv__uniform_block_has_members_cpu_record {
     # A block whose members moved is read as whatever is at that address, so the
     # geometry lands somewhere else and no layer reports anything. The last
     # member's offset plus its width is the block's size, and every member here

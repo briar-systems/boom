@@ -1459,7 +1459,7 @@ fun renderer_rollback(r: *Renderer) {
     r.drawing = false;
 }
 
-test "renderer: zero state teardown is idempotent" {
+test renderer__zero_state_teardown_idempotent {
     var r: Renderer;
     r.drawing = true;
     val first:  err[Error] = renderer_dnit(?r);
@@ -1474,7 +1474,7 @@ test "renderer: zero state teardown is idempotent" {
 # teardown itself is left alone, since a zeroed renderer has nothing to roll
 # back; that its guard is ready_vk is what makes the refusal reachable only on
 # a renderer that came up.
-test "renderer: teardown is refused while the game holds a texture, and names it" {
+test renderer__teardown_refused_while_game_holds_texture {
     var r: Renderer;
     r.ready_vk = true;
     var d: Device;
@@ -1499,7 +1499,7 @@ test "renderer: teardown is refused while the game holds a texture, and names it
     ret 0;
 }
 
-test "renderer: a window readback needs an open frame" {
+test renderer__window_readback_needs_open_frame {
     var r: Renderer;
     r.drawing = false;
     var out: [4]u8;
@@ -1510,7 +1510,7 @@ test "renderer: a window readback needs an open frame" {
     ret 0;
 }
 
-test "renderer: the window's readback size and order follow the swapchain" {
+test renderer__window_s_readback_size_order_follow {
     var r: Renderer;
     r.swap.ready = false;
     if (renderer_window_bytes(?r) != 0) { ret 1; }
@@ -1529,7 +1529,7 @@ test "renderer: the window's readback size and order follow the swapchain" {
     ret 0;
 }
 
-test "renderer: retiring a mesh hands its count to the renderer" {
+test renderer__retiring_mesh_hands_count_renderer {
     var r: Renderer;
     r.ready_dev      = true;
     r.frame_index    = 0;
@@ -1542,7 +1542,7 @@ test "renderer: retiring a mesh hands its count to the renderer" {
     ret 0;
 }
 
-test "renderer: failed target rebuild remains retryable" {
+test renderer__failed_target_rebuild_remains_retryable {
     var r: Renderer;
     r.width  = 1280;
     r.height = 720;
@@ -1555,7 +1555,7 @@ test "renderer: failed target rebuild remains retryable" {
     ret 0;
 }
 
-test "renderer: a present mode cannot be set before there is a swapchain" {
+test renderer__present_mode_cannot_set_before_there {
     var r: Renderer;
     r.ready_swap = false;
     r.present    = PresentMode.vsync{};
@@ -1567,7 +1567,7 @@ test "renderer: a present mode cannot be set before there is a swapchain" {
     ret 0;
 }
 
-test "renderer: the requested present mode outlives the surface refusing it" {
+test renderer__requested_present_mode_outlives_surface_refusing {
     var r: Renderer;
     r.present      = PresentMode.mailbox{};
     r.swap.present = PresentMode.vsync{};
@@ -2624,7 +2624,7 @@ fun shaded_batch_valid(meshes: **Mesh, mesh_count: usize, mat: *Material,
     ret true;
 }
 
-test "renderer: a shaded mesh batch has one vertex layout" {
+test renderer__shaded_mesh_batch_has_vertex_layout {
     var a: Mesh;
     var b: Mesh;
     a.format = vertex_format_standard();
@@ -3163,7 +3163,7 @@ pub fun renderer_storage_refused(r: *Renderer) usize {
 
 use boom.graphics.vertex.VertexFormat;
 
-test "renderer: an overlay pass maps pixels to clip space" {
+test renderer__overlay_pass_maps_pixels_clip_space {
     var r: Renderer;
     r.width  = 800;
     r.height = 600;
@@ -3189,7 +3189,7 @@ test "renderer: an overlay pass maps pixels to clip space" {
     ret 0;
 }
 
-test "renderer: a scene pass takes its matrices from the camera" {
+test renderer__scene_pass_takes_matrices_camera {
     var r: Renderer;
     r.width  = 640;
     r.height = 480;
@@ -3212,7 +3212,7 @@ test "renderer: a scene pass takes its matrices from the camera" {
     ret 0;
 }
 
-test "renderer: a reversed camera carries its depth convention into the pass" {
+test renderer__reversed_camera_carries_depth_convention_pass {
     var r: Renderer;
     r.width  = 640;
     r.height = 480;
@@ -3231,7 +3231,7 @@ test "renderer: a reversed camera carries its depth convention into the pass" {
     ret 0;
 }
 
-test "renderer: pass descriptions differ in what they clear and project" {
+test renderer__pass_descriptions_differ_they_clear_project {
     var c:  Camera;
     var c2: Camera2D;
     val s:  PassDesc = pass_scene(?c);
@@ -3247,7 +3247,7 @@ test "renderer: pass descriptions differ in what they clear and project" {
     ret 0;
 }
 
-test "renderer: the window loads black when its first pass asks for no clear" {
+test renderer__window_loads_black_first_pass_asks {
     val none: Vec4 = window_load_colour(opt[Vec4].none{});
     val some: Vec4 = window_load_colour(opt[Vec4].some{vec4(0.2, 0.4, 0.6, 1.0)});
     if (none[0] != 0.0 || none[1] != 0.0 || none[2] != 0.0 || none[3] != 1.0) { ret 1; }
@@ -3255,7 +3255,7 @@ test "renderer: the window loads black when its first pass asks for no clear" {
     ret 0;
 }
 
-test "renderer: the window loads depth at the pass convention's far value" {
+test renderer__window_loads_depth_pass_convention_s {
     # A reversed pass tests GREATER, so a far plane of 1.0 rejects everything.
     # The far value depends on the convention alone, never on whether the pass
     # asked for a colour clear (#162).
@@ -3264,7 +3264,7 @@ test "renderer: the window loads depth at the pass convention's far value" {
     ret 0;
 }
 
-test "renderer: a mid-pass clear names every attachment and no aspect it lacks" {
+test renderer__mid_pass_clear_names_attachment_no {
     var atts: [5]vk.ClearAttachment;
 
     val one: usize = clear_attachments(1, vec4(0.25, 0.5, 0.75, 1.0),
@@ -3290,7 +3290,7 @@ test "renderer: a mid-pass clear names every attachment and no aspect it lacks" 
     ret 0;
 }
 
-test "renderer: reversed depth clears to zero" {
+test renderer__reversed_depth_clears_zero {
     var atts: [2]vk.ClearAttachment;
     if (clear_attachments(1, vec4(0.0, 0.0, 0.0, 1.0),
         DepthConvention.reversed{}, ?atts[0]) != 2) { ret 1; }
@@ -3299,7 +3299,7 @@ test "renderer: reversed depth clears to zero" {
     ret 0;
 }
 
-test "renderer: a full uniform ring drops draws and counts them" {
+test renderer__full_uniform_ring_drops_draws_counts {
     # Slots grow a block at a time, so exhaustion now means the block ceiling is
     # reached or the device cannot supply one. Here there is no device, which is
     # the case that must still count rather than crash or wrap.
@@ -3320,7 +3320,7 @@ test "renderer: a full uniform ring drops draws and counts them" {
     ret 0;
 }
 
-test "renderer: invalid dynamic 3D triangles are counted as dropped draws" {
+test renderer__invalid_dynamic_3d_triangles_counted_dropped {
     var r: Renderer;
     var p: Pass;
     p.renderer = ?r;
@@ -3358,7 +3358,7 @@ test "renderer: invalid dynamic 3D triangles are counted as dropped draws" {
     ret 0;
 }
 
-test "renderer: dynamic 3D bounds are transformed before culling" {
+test renderer__dynamic_3d_bounds_transformed_before_culling {
     var c: Camera;
     c.position = vec3(0.0, 0.0, 5.0);
     c.target   = vec3(0.0, 0.0, 0.0);
@@ -3392,7 +3392,7 @@ test "renderer: dynamic 3D bounds are transformed before culling" {
     ret 0;
 }
 
-test "renderer: a game block larger than a slot's region is refused, not truncated" {
+test renderer__game_block_larger_slot_s_region {
     # Truncating would hand the shader a struct whose tail is whatever the last
     # draw left there, which shades wrongly rather than not at all, and does it
     # only for the fields past the cut. Refusing leaves the previous block in
@@ -3427,7 +3427,7 @@ test "renderer: a game block larger than a slot's region is refused, not truncat
     ret 0;
 }
 
-test "renderer: a storage write outside an open frame is refused" {
+test renderer__storage_write_outside_open_frame_refused {
     # Between frames the GPU may still be reading the buffer this write would
     # land in, and the fence that proves otherwise is waited on inside
     # renderer_begin_frame. Allowing it would make a payload written from a
@@ -3445,7 +3445,7 @@ test "renderer: a storage write outside an open frame is refused" {
     ret 0;
 }
 
-test "renderer: reserving before the storage exists is refused, not a fault" {
+test renderer__reserving_before_storage_exists_refused_not {
     # A game may reserve at start-up, and start-up is also where a renderer that
     # failed to come up is still zeroed. Reaching for a device through it would
     # be a fault rather than an answer.
@@ -3456,7 +3456,7 @@ test "renderer: reserving before the storage exists is refused, not a fault" {
     ret 0;
 }
 
-test "renderer: a material owns binding 1 only for an untextured run" {
+test renderer__material_owns_binding_1_untextured_run {
     # The case that shipped broken, and it shipped because nothing here ever
     # chose a binding. A run pushed with nil takes its atlas from the pass
     # material, so binding the run's own texture over it binds the white texel
@@ -3506,7 +3506,7 @@ test "renderer: a material owns binding 1 only for an untextured run" {
     ret 0;
 }
 
-test "renderer: draining a renderer that never came up is a no-op" {
+test renderer__draining_renderer_never_came_up_no {
     # A game drains before a readback, and start-up is allowed to have failed
     # before it gets there. vkDeviceWaitIdle on a device that was never created
     # is a call through a loader that was never resolved, so the guard is the
@@ -3517,7 +3517,7 @@ test "renderer: draining a renderer that never came up is a no-op" {
     ret 0;
 }
 
-test "renderer: an open mesh reservation is charged against the pending budget" {
+test renderer__open_mesh_reservation_charged_against_pending {
     if (!mesh_upload_fits(0, 0))                            { ret 1; }
     if (!mesh_upload_fits(MAX_PENDING_MESH_UPLOADS - 1, 0)) { ret 2; }
     # A reservation holds staging and a slot from begin until end, so counting
@@ -3527,7 +3527,7 @@ test "renderer: an open mesh reservation is charged against the pending budget" 
     ret 0;
 }
 
-test "renderer: mesh upload staging is sized from the format's stride" {
+test renderer__mesh_upload_staging_sized_format_s {
     var f: VertexFormat = vertex_format_standard();
     var u: MeshUpload;
     mesh_upload_sizes(?u, ?f, 4, 6);
@@ -3540,7 +3540,7 @@ test "renderer: mesh upload staging is sized from the format's stride" {
     ret 0;
 }
 
-test "renderer: a mesh upload copies whole arrays through its own pointers" {
+test renderer__mesh_upload_copies_whole_arrays_through {
     var f: VertexFormat = vertex_format_standard();
     var u: MeshUpload;
     mesh_upload_sizes(?u, ?f, 2, 3);
@@ -3573,7 +3573,7 @@ test "renderer: a mesh upload copies whole arrays through its own pointers" {
     ret 0;
 }
 
-test "renderer: caller-supplied mesh bounds reach the mesh exactly as given" {
+test renderer__caller_supplied_mesh_bounds_reach_mesh {
     var f: VertexFormat = vertex_format_standard();
     var u: MeshUpload;
     mesh_upload_sizes(?u, ?f, 3, 3);
@@ -3595,7 +3595,7 @@ test "renderer: caller-supplied mesh bounds reach the mesh exactly as given" {
     ret 0;
 }
 
-test "renderer: the walked bounds a mesh gets are the ones the vertices hold" {
+test renderer__walked_bounds_mesh_gets_ones_vertices {
     var f: VertexFormat = vertex_format_standard();
     # Two standard vertices: position, normal, texcoord, eight floats each.
     var v: [16]f32;
@@ -3627,7 +3627,7 @@ test "renderer: the walked bounds a mesh gets are the ones the vertices hold" {
     ret 0;
 }
 
-test "renderer: a mesh upload begun before the device is refused, not a fault" {
+test renderer__mesh_upload_begun_before_device_refused {
     var r: Renderer;
     r.ready_dev       = false;
     r.upload_count    = 0;
@@ -3650,7 +3650,7 @@ test "renderer: a mesh upload begun before the device is refused, not a fault" {
     ret 0;
 }
 
-test "renderer: pass regions bound viewport and scissor without changing projection" {
+test renderer__pass_regions_bound_viewport_scissor_without {
     var renderer: Renderer;
     var pass:     Pass;
     pass.renderer   = ?renderer;

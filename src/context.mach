@@ -236,7 +236,7 @@ pub fun context_shutdown(ctx: *Context) err[ContextError] {
     ret err[ContextError].ok{};
 }
 
-test "context: shutdown is refused while a renderer holds the window" {
+test context__shutdown_refused_while_renderer_holds_window {
     # a zeroed window has no handle, so closing it destroys nothing
     var ctx: Context;
     ctx.window.renderers = 1;
@@ -254,7 +254,7 @@ test "context: shutdown is refused while a renderer holds the window" {
     ret 0;
 }
 
-test "context: user pointer round-trips" {
+test context__user_pointer_round_trips {
     var ctx:   Context;
     var state: i64 = 42;
     if (context_user(?ctx) != nil) { ret 1; }
@@ -264,7 +264,7 @@ test "context: user pointer round-trips" {
     ret 0;
 }
 
-test "context: user pointer clears to nil" {
+test context__user_pointer_clears_nil {
     var ctx:   Context;
     var state: i64 = 7;
     context_set_user(?ctx, (?state)::ptr);
@@ -273,7 +273,7 @@ test "context: user pointer clears to nil" {
     ret 0;
 }
 
-test "context: failure stops the loop and records a status" {
+test context__failure_stops_loop_records_status {
     var ctx: Context;
     ctx.running = true;
     context_fail(?ctx, 7);
@@ -282,7 +282,7 @@ test "context: failure stops the loop and records a status" {
     ret 0;
 }
 
-test "context: failure cannot report success" {
+test context__failure_cannot_report_success {
     var ctx: Context;
     ctx.running = true;
     context_fail(?ctx, 0);
@@ -290,7 +290,7 @@ test "context: failure cannot report success" {
     ret 0;
 }
 
-test "context: timing configuration rejects invalid loops" {
+test context__timing_configuration_rejects_invalid_loops {
     val base: Config = Config{
         width:     1,
         height:    1,

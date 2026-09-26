@@ -366,7 +366,7 @@ pub fun spv_max_array_stride(m: *u8, len: usize) u32 {
 
 # --------------------------------------------------------------------- tests
 
-test "spirvread: a word is read little-endian" {
+test spirvread__word_read_little_endian {
     # The magic number is the one word whose value is known independently, so it
     # is what says the reader agrees with the format about byte order. Reading
     # big-endian would make every offset and binding in every check nonsense.
@@ -385,7 +385,7 @@ test "spirvread: a word is read little-endian" {
     ret 0;
 }
 
-test "spirvread: an instruction's length comes from its high half-word" {
+test spirvread__instruction_s_length_comes_high_half {
     # Stepping by anything else walks into the middle of an instruction and
     # reads operands as opcodes, which is how a partial reader silently reports
     # whatever it happens to land on.
@@ -400,7 +400,7 @@ test "spirvread: an instruction's length comes from its high half-word" {
     ret 0;
 }
 
-test "spirvread: bytes that are not a module are refused" {
+test spirvread__bytes_not_module_refused {
     # Every reader below returns an empty answer for a non-module, so a check
     # that was handed rubbish would otherwise pass by finding nothing.
     var bytes: [32]u8;

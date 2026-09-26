@@ -103,14 +103,14 @@ pub fun quat_slerp(a: Quat, b: Quat, t: f32) Quat {
     ret a * f32x4{s0, s0, s0, s0} + end * f32x4{s1, s1, s1, s1};
 }
 
-test "quat: identity is the multiplicative unit" {
+test quat__identity_multiplicative_unit {
     val q: Quat = quat_from_axis_angle(f32x4{0.0, 1.0, 0.0, 0.0}, 1.0);
     val r: Quat = quat_mul(q, quat_identity());
     if (r[0] != q[0] || r[1] != q[1] || r[2] != q[2] || r[3] != q[3]) { ret 1; }
     ret 0;
 }
 
-test "quat: axis-angle produces a unit quaternion" {
+test quat__axis_angle_produces_unit_quaternion {
     val q:   Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 2.0, 0.0}, 1.5);
     val len: f32  = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     val d:   f32  = len - 1.0;
@@ -118,7 +118,7 @@ test "quat: axis-angle produces a unit quaternion" {
     ret 0;
 }
 
-test "quat: slerp returns the endpoints at t = 0 and t = 1" {
+test quat__slerp_returns_endpoints_t_0_t {
     val a:  Quat = quat_identity();
     val b:  Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 1.5707963);
     val r0: Quat = quat_slerp(a, b, 0.0);
@@ -129,7 +129,7 @@ test "quat: slerp returns the endpoints at t = 0 and t = 1" {
     ret 0;
 }
 
-test "quat: slerp midpoint bisects a quarter turn" {
+test quat__slerp_midpoint_bisects_quarter_turn {
     val a:      Quat = quat_identity();
     val b:      Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 1.5707963);
     val mid:    Quat = quat_slerp(a, b, 0.5);
@@ -139,7 +139,7 @@ test "quat: slerp midpoint bisects a quarter turn" {
     ret 0;
 }
 
-test "quat: slerp takes the shortest arc across the hemisphere" {
+test quat__slerp_takes_shortest_arc_across_hemisphere {
     val a:   Quat = quat_identity();
     val b:   Quat = f32x4{0.0, 0.0, 0.0, 0.0 - 1.0};
     val mid: Quat = quat_slerp(a, b, 0.5);

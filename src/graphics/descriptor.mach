@@ -836,7 +836,7 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
 # uniform range, which appears as one-frame flicker under load and not at all
 # when the GPU keeps up.
 
-test "descriptor: each slot and frame gets a distinct set" {
+test descriptor__slot_frame_gets_distinct_set {
     var seen: [1024]bool;
     var i:    usize = 0;
     for (i < 1024) {
@@ -864,7 +864,7 @@ test "descriptor: each slot and frame gets a distinct set" {
     ret 0;
 }
 
-test "descriptor: the two frames of one slot do not share a set" {
+test descriptor__two_frames_slot_do_not_share {
     # Sharing one means frame N overwrites the uniforms frame N-1 is executing.
     if (set_index(0, 0) == set_index(0, 1)) { ret 1; }
     if (set_index(7, 0) != 14)              { ret 2; }
@@ -872,7 +872,7 @@ test "descriptor: the two frames of one slot do not share a set" {
     ret 0;
 }
 
-test "descriptor: slot offsets do not overlap and are 256-aligned" {
+test descriptor__slot_offsets_do_not_overlap_256 {
     # 256 is the largest minUniformBufferOffsetAlignment any implementation
     # reports. An offset that is not a multiple of it is rejected on the
     # hardware that asks for it and accepted everywhere else.
@@ -888,7 +888,7 @@ test "descriptor: slot offsets do not overlap and are 256-aligned" {
     ret 0;
 }
 
-test "descriptor: a slot is wide enough for the widest uniform block" {
+test descriptor__slot_wide_enough_widest_uniform_block {
     # Written against the blocks themselves rather than a literal, because the
     # widest one has already changed once and a number left behind outlives the
     # reason for it. A slot narrower than the block would make a draw's uniforms
@@ -899,7 +899,7 @@ test "descriptor: a slot is wide enough for the widest uniform block" {
     ret 0;
 }
 
-test "descriptor: both uniform ranges in a slot are correctly aligned" {
+test descriptor__both_uniform_ranges_slot_correctly_aligned {
     # A uniform descriptor's buffer offset must be a multiple of
     # minUniformBufferOffsetAlignment, which is up to 256. This applies to the
     # colour block at COLOUR_OFFSET as much as to the slot itself: an offset of
@@ -914,7 +914,7 @@ test "descriptor: both uniform ranges in a slot are correctly aligned" {
     ret 0;
 }
 
-test "descriptor: the game's own block is aligned and fits inside a slot" {
+test descriptor__game_s_block_aligned_fits_inside {
     # The same alignment rule as the colour, and the same failure mode: an
     # unaligned offset is accepted on hardware reporting 16 and rejected on
     # hardware reporting 256, so it works wherever it was written and fails on
@@ -928,7 +928,7 @@ test "descriptor: the game's own block is aligned and fits inside a slot" {
     ret 0;
 }
 
-test "descriptor: the transform block fits before the colour" {
+test descriptor__transform_block_fits_before_colour {
     # A colour offset below the transform block would place the fragment stage's
     # colour inside the vertex stage's matrices, which draws the geometry
     # somewhere else entirely while the colour still looks right.
@@ -937,7 +937,7 @@ test "descriptor: the transform block fits before the colour" {
     ret 0;
 }
 
-test "descriptor: slots run out rather than wrapping onto live draws" {
+test descriptor__slots_run_out_rather_wrapping_onto {
     # No device, so no block can be created: this is the ceiling case, where
     # growth is unavailable and exhaustion must still be reportable. Wrapping to
     # 0 would silently give a later draw the same uniform range as the first.
@@ -965,7 +965,7 @@ fun took(slot: opt[usize], expected: usize) bool {
     ret sel slot.some && slot.some == expected;
 }
 
-test "descriptor: a slot maps to its own block and offset" {
+test descriptor__slot_maps_block_offset {
     # The arithmetic that sends a write into the right ring. A mistake here puts
     # one block's draw into another block's memory, which is invisible at the
     # call site and looks like a corrupted uniform much later.
@@ -990,7 +990,7 @@ test "descriptor: a slot maps to its own block and offset" {
     ret 0;
 }
 
-test "descriptor: a block larger than a slot is refused, not truncated" {
+test descriptor__block_larger_slot_refused_not_truncated {
     var d: Descriptors;
     d.ready = true;
     var bytes: [8]u8;
@@ -1000,7 +1000,7 @@ test "descriptor: a block larger than a slot is refused, not truncated" {
     ret 0;
 }
 
-test "descriptor: an offset write must fit inside its slot" {
+test descriptor__offset_write_must_fit_inside_slot {
     var d: Descriptors;
     d.ready = true;
     var bytes: [8]u8;
@@ -1011,7 +1011,7 @@ test "descriptor: an offset write must fit inside its slot" {
     ret 0;
 }
 
-test "descriptor: a slot holds a transform block and its tint together" {
+test descriptor__slot_holds_transform_block_tint_together {
     # The transform block at offset 0 and TintUniforms at COLOUR_OFFSET. If they
     # did not both fit, the tint would need a slot of its own and the two would
     # drift.
@@ -1019,7 +1019,7 @@ test "descriptor: a slot holds a transform block and its tint together" {
     ret 0;
 }
 
-test "descriptor: a nil image view is refused rather than left unwritten" {
+test descriptor__nil_image_view_refused_rather_left {
     # Every fragment stage samples, so a set bound with binding 1 unwritten has
     # the shader read a descriptor that was never filled. Silently skipping the
     # write is what made that possible.
@@ -1031,7 +1031,7 @@ test "descriptor: a nil image view is refused rather than left unwritten" {
     ret 0;
 }
 
-test "descriptor: a set is not bound without a frame storage buffer" {
+test descriptor__set_not_bound_without_frame_storage {
     # Binding 8 is in every layout, so a set bound with it unwritten is
     # undefined behaviour even under a shader that never reads it, and the
     # layers report it as a use-after-free far from the draw. The renderer
@@ -1056,7 +1056,7 @@ test "descriptor: a set is not bound without a frame storage buffer" {
     ret 0;
 }
 
-test "descriptor: an uninitialized pool refuses everything" {
+test descriptor__uninitialized_pool_refuses_everything {
     var d: Descriptors;
     d.ready  = false;
     d.used   = 0;
@@ -1077,7 +1077,7 @@ test "descriptor: an uninitialized pool refuses everything" {
     ret 0;
 }
 
-test "descriptor: a palette slot holds a full joint palette" {
+test descriptor__palette_slot_holds_full_joint_palette {
     # MAX_JOINTS 4x4 float matrices. A slot narrower than the storage block the
     # shader declares makes the vertex stage read the next draw's palette for
     # its last joints, which bends part of a character by another's pose.
@@ -1085,7 +1085,7 @@ test "descriptor: a palette slot holds a full joint palette" {
     ret 0;
 }
 
-test "descriptor: a palette slot names a block and an offset within it" {
+test descriptor__palette_slot_names_block_offset_within {
     # The two have to agree. An index that disagrees with the offset binds the
     # right buffer at the wrong place, or the wrong buffer at a plausible one,
     # and either draws a recognisable character in another character's pose.
@@ -1112,7 +1112,7 @@ test "descriptor: a palette slot names a block and an offset within it" {
     ret 0;
 }
 
-test "descriptor: palette slots are handed out in order and reset each frame" {
+test descriptor__palette_slots_handed_out_order_reset {
     var d: Descriptors;
     var v: Vk;
     d.ready = true;
@@ -1138,7 +1138,7 @@ test "descriptor: palette slots are handed out in order and reset each frame" {
     ret 0;
 }
 
-test "descriptor: the palette ring holds more than one block of skinned draws" {
+test descriptor__palette_ring_holds_more_block_skinned {
     # The defect this replaces: the ring was a flat 32, so the thirty-third
     # skinned draw in a frame was refused. Refusal is in submission order, so a
     # crowd lost whichever characters were submitted last, and said nothing.
@@ -1147,7 +1147,7 @@ test "descriptor: the palette ring holds more than one block of skinned draws" {
     ret 0;
 }
 
-test "descriptor: a palette larger than a slot is refused" {
+test descriptor__palette_larger_slot_refused {
     var d: Descriptors;
     d.ready = true;
     var bytes: [8]u8;
@@ -1155,7 +1155,7 @@ test "descriptor: a palette larger than a slot is refused" {
     ret 0;
 }
 
-test "descriptor: beginning a frame frees the palette ring too" {
+test descriptor__beginning_frame_frees_palette_ring_too {
     # Resetting only the uniform ring leaks palette slots across frames, so a
     # scene with a few skinned characters stops animating after 32 frames.
     var d: Descriptors;

@@ -209,7 +209,7 @@ fun popped_key(q: *EventQueue) i64 {
     ret -1;
 }
 
-test "event: fresh queue is empty" {
+test event__fresh_queue_empty {
     var q: EventQueue = queue_new();
     if (!queue_is_empty(?q)) { ret 1; }
     if (queue_len(?q) != 0)  { ret 2; }
@@ -217,7 +217,7 @@ test "event: fresh queue is empty" {
     ret 0;
 }
 
-test "event: push then pop returns the event" {
+test event__push_pop_returns_event {
     var q: EventQueue = queue_new();
     val e: Event      = Event.key{KeyEvent{key: 65, action: KeyAction.release{}, mods: 0}};
     if (!pushed(?q, e))     { ret 1; }
@@ -231,14 +231,14 @@ test "event: push then pop returns the event" {
     ret 0;
 }
 
-test "event: pop on empty queue returns none" {
+test event__pop_empty_queue_returns_none {
     var q:   EventQueue = queue_new();
     val got: opt[Event] = queue_pop(?q);
     if (!sel got.none) { ret 1; }
     ret 0;
 }
 
-test "event: events dequeue in fifo order" {
+test event__events_dequeue_fifo_order {
     var q: EventQueue = queue_new();
     if (!pushed(?q, key(1))) { ret 1; }
     if (!pushed(?q, key(2))) { ret 2; }
@@ -249,7 +249,7 @@ test "event: events dequeue in fifo order" {
     ret 0;
 }
 
-test "event: push refuses events beyond capacity" {
+test event__push_refuses_events_beyond_capacity {
     var q: EventQueue = queue_new();
     var i: usize      = 0;
     for (i < CAPACITY) {
@@ -264,7 +264,7 @@ test "event: push refuses events beyond capacity" {
     ret 0;
 }
 
-test "event: ring wraps around the backing store" {
+test event__ring_wraps_around_backing_store {
     var q: EventQueue = queue_new();
     # fill, drain most, then push past the physical end of the ring
     var i: usize = 0;
@@ -291,7 +291,7 @@ test "event: ring wraps around the backing store" {
     ret 0;
 }
 
-test "event: clear empties the queue" {
+test event__clear_empties_queue {
     var q: EventQueue = queue_new();
     if (!pushed(?q, Event.close{})) { ret 1; }
     if (!pushed(?q, Event.close{})) { ret 2; }

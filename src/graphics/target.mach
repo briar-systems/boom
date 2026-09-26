@@ -513,7 +513,7 @@ fun refused(r: err[Error]) bool {
     ret sel r.err;
 }
 
-test "target: non-positive dimensions are refused before allocating" {
+test target__non_positive_dimensions_refused_before_allocating {
     var d: Device;
     d.ready = true;
     if (!bad_dimensions(render_target(?d, 0, 16)))  { ret 1; }
@@ -522,7 +522,7 @@ test "target: non-positive dimensions are refused before allocating" {
     ret 0;
 }
 
-test "target: creation against an uninitialized context is refused" {
+test target__creation_against_uninitialized_context_refused {
     var d: Device;
     d.ready = false;
     val r: res[RenderTarget, Error] = render_target(?d, 16, 16);
@@ -531,7 +531,7 @@ test "target: creation against an uninitialized context is refused" {
     ret 0;
 }
 
-test "target: descriptions preserve mixed attachment formats" {
+test target__descriptions_preserve_mixed_attachment_formats {
     var formats: [4]RenderFormat;
     formats[0] = RenderFormat.rgba8_srgb{};
     formats[1] = RenderFormat.rgba8_unorm{};
@@ -546,7 +546,7 @@ test "target: descriptions preserve mixed attachment formats" {
     ret 0;
 }
 
-test "target: teardown on a target that was never created is a no-op" {
+test target__teardown_target_never_created_no_op {
     var t: RenderTarget;
     t.framebuffer = nil;
     t.pass        = nil;
@@ -573,7 +573,7 @@ test "target: teardown on a target that was never created is a no-op" {
     ret 0;
 }
 
-test "target: the depth format is one every implementation must support" {
+test target__depth_format_implementation_must_support {
     # D32_SFLOAT is mandatory as a depth-stencil attachment, so it needs no
     # query. A format chosen without checking support is a startup failure on
     # hardware that is behaving correctly.
@@ -581,7 +581,7 @@ test "target: the depth format is one every implementation must support" {
     ret 0;
 }
 
-test "target: a fresh multi-attachment target reports its count" {
+test target__fresh_multi_attachment_target_reports_count {
     # render_target_count is what the renderer uses to size clear values and to
     # decide a pipeline's blend attachments, so a wrong count here is a
     # validation failure at the first draw rather than anything visible.
@@ -593,7 +593,7 @@ test "target: a fresh multi-attachment target reports its count" {
     ret 0;
 }
 
-test "target: an attachment index past the count returns the first" {
+test target__attachment_index_past_count_returns_first {
     # Reading past color_count would address whatever follows the array in the
     # record and hand back a Texture built from adjacent fields, which samples
     # as garbage rather than failing.
@@ -613,7 +613,7 @@ test "target: an attachment index past the count returns the first" {
     ret 0;
 }
 
-test "target: a read of a target that was never created is refused" {
+test target__read_target_never_created_refused {
     # Answered from the handle, before the drain and before a staging buffer
     # exists. The device here never came up, which is what proves the read got
     # nowhere near it.
@@ -633,7 +633,7 @@ test "target: a read of a target that was never created is refused" {
     ret 0;
 }
 
-test "target: a raw read past the attachment count is refused" {
+test target__raw_read_past_attachment_count_refused {
     # render_target_texture_at clamps a bad index because sampling the wrong
     # picture is recoverable. A read cannot clamp: the caller sized its
     # destination from render_target_raw_bytes_at for the attachment it named,
@@ -655,7 +655,7 @@ test "target: a raw read past the attachment count is refused" {
     ret 0;
 }
 
-test "target: the packed read refuses a format it cannot pack" {
+test target__packed_read_refuses_format_cannot_pack {
     # RENDER_RGBA16_FLOAT is eight bytes a texel and render_target_read promises
     # four. The attachment is otherwise ready to be copied, so this check is the
     # only thing standing between the call and a copy that would deliver half a

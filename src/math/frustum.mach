@@ -175,14 +175,14 @@ fun box_at(x: f32, y: f32, z: f32, r: f32) Aabb {
     ret b;
 }
 
-test "frustum: a box at the point the camera looks at is visible" {
+test frustum__box_point_camera_looks_visible {
     var f: Frustum = test_frustum();
     var b: Aabb    = box_at(0.0, 0.0, 0.0, 1.0);
     if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
     ret 0;
 }
 
-test "frustum: a box behind the camera is rejected" {
+test frustum__box_behind_camera_rejected {
     # The case that matters most: without a near plane, geometry behind the eye
     # projects back onto the screen mirrored, so failing to reject it draws
     # things that are not there.
@@ -192,7 +192,7 @@ test "frustum: a box behind the camera is rejected" {
     ret 0;
 }
 
-test "frustum: a box beyond the far plane is rejected" {
+test frustum__box_beyond_far_plane_rejected {
     # The camera sits at z = 10 with a far plane 100 away, so anything past
     # z = -90 is outside it.
     var f: Frustum = test_frustum();
@@ -201,7 +201,7 @@ test "frustum: a box beyond the far plane is rejected" {
     ret 0;
 }
 
-test "frustum: reversed infinite perspective clips near and has no far limit" {
+test frustum__reversed_infinite_perspective_clips_near_has {
     var p: Mat4    = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
     var f: Frustum = frustum_from_matrix(?p);
 
@@ -216,7 +216,7 @@ test "frustum: reversed infinite perspective clips near and has no far limit" {
     ret 0;
 }
 
-test "frustum: a box off to the side is rejected" {
+test frustum__box_off_side_rejected {
     # At 90 degrees vertical the half-extent at the origin equals the distance,
     # which is 10, so a small box at x = 100 is far outside.
     var f: Frustum = test_frustum();
@@ -227,7 +227,7 @@ test "frustum: a box off to the side is rejected" {
     ret 0;
 }
 
-test "frustum: a box straddling an edge is kept" {
+test frustum__box_straddling_edge_kept {
     # Conservative in the direction that matters. A box mostly off screen but
     # partly on it must be drawn, or things vanish as they leave the view
     # instead of sliding off it.
@@ -241,7 +241,7 @@ test "frustum: a box straddling an edge is kept" {
     ret 0;
 }
 
-test "frustum: a huge box containing the camera is kept" {
+test frustum__huge_box_containing_camera_kept {
     # Its centre is outside several planes at once while the box itself fills
     # the view. A test that rejected on the centre alone would cull the ground.
     var f: Frustum = test_frustum();
@@ -250,7 +250,7 @@ test "frustum: a huge box containing the camera is kept" {
     ret 0;
 }
 
-test "frustum: an empty box is not visible" {
+test frustum__empty_box_not_visible {
     # A mesh with no geometry has nothing to draw, and the sentinel corners an
     # empty box carries would otherwise be tested as real coordinates.
     var f: Frustum = test_frustum();
@@ -259,7 +259,7 @@ test "frustum: an empty box is not visible" {
     ret 0;
 }
 
-test "frustum: the planes agree with the projection they came from" {
+test frustum__planes_agree_projection_they_came {
     # The cross-check. A point is inside the frustum exactly when the matrix
     # maps it into the clip volume, and those are two separate derivations: if
     # they disagree, culling removes things that would have been drawn and
@@ -304,7 +304,7 @@ test "frustum: the planes agree with the projection they came from" {
     ret 0;
 }
 
-test "frustum: an orthographic projection culls the same way" {
+test frustum__orthographic_projection_culls_same_way {
     # Orthographic has no eye point, so its side planes are parallel rather
     # than fanning. A frustum built only against perspective would have the
     # side planes right by accident and the near plane wrong.
@@ -327,7 +327,7 @@ test "frustum: an orthographic projection culls the same way" {
     ret 0;
 }
 
-test "frustum: the near plane is Vulkan's, not OpenGL's" {
+test frustum__near_plane_vulkan_s_not_opengl {
     # The depth conventions differ only between the eye and the near plane:
     # Vulkan clips at z_ndc < 0, OpenGL at z_ndc < -1. Everything beyond the
     # near plane agrees, so a sweep that does not sample that narrow band
@@ -347,7 +347,7 @@ test "frustum: the near plane is Vulkan's, not OpenGL's" {
     ret 0;
 }
 
-test "frustum: every plane normal is unit length" {
+test frustum__plane_normal_unit_length {
     # The box test compares a centre distance against a box reach, and both
     # scale with the plane, so it gives the same answer either way: nothing in
     # this module fails if the planes are left unnormalized. What breaks is a

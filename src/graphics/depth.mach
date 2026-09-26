@@ -18,13 +18,13 @@ pub fun depth_convention_same(a: DepthConvention, b: DepthConvention) bool {
     ret sel b.forward;
 }
 
-test "depth: the zero value preserves forward depth" {
+test depth__zero_value_preserves_forward_depth {
     var depth: DepthConvention;
     if (!sel depth.forward) { ret 1; }
     ret 0;
 }
 
-test "depth: conventions compare by case" {
+test depth__conventions_compare_case {
     if (!depth_convention_same(DepthConvention.forward{}, DepthConvention.forward{}))   { ret 1; }
     if (!depth_convention_same(DepthConvention.reversed{}, DepthConvention.reversed{})) { ret 2; }
     if (depth_convention_same(DepthConvention.forward{}, DepthConvention.reversed{}))   { ret 3; }

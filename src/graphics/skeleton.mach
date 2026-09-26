@@ -160,7 +160,7 @@ fun fixture_chain(sk: *Skeleton) {
     }
 }
 
-test "skeleton: composition propagates a parent transform to its child" {
+test skeleton__composition_propagates_parent_transform_child {
     var sk: Skeleton;
     fixture_chain(?sk);
 
@@ -180,7 +180,7 @@ test "skeleton: composition propagates a parent transform to its child" {
     ret 0;
 }
 
-test "skeleton: the palette tail is identity, not whatever was on the stack" {
+test skeleton__palette_tail_identity_not_whatever_stack {
     # A skinned draw uploads all MAX_JOINTS matrices, because that is the size
     # of the storage block the shader declares. A vertex referencing a joint
     # past `count` would otherwise be transformed by uninitialized floats and
@@ -211,7 +211,7 @@ test "skeleton: the palette tail is identity, not whatever was on the stack" {
     ret 0;
 }
 
-test "skeleton: the palette is exactly what the shader's storage block holds" {
+test skeleton__palette_exactly_shader_s_storage_block {
     # boom.graphics.renderer uploads $size_of(Mat4) * MAX_JOINTS bytes in one
     # copy. A palette narrower than that reads past the Pose; wider, and the
     # last joints come from the next draw's palette.
@@ -220,7 +220,7 @@ test "skeleton: the palette is exactly what the shader's storage block holds" {
     ret 0;
 }
 
-test "skeleton: the inverse bind matrix folds into the skinning matrix" {
+test skeleton__inverse_bind_matrix_folds_skinning_matrix {
     var sk: Skeleton;
     fixture_chain(?sk);
     sk.inverse_bind[1] = mat4_translation(vec3(0.0 - 3.0, 0.0, 0.0));
@@ -232,7 +232,7 @@ test "skeleton: the inverse bind matrix folds into the skinning matrix" {
     ret 0;
 }
 
-test "skeleton: socket globals retain parent rotation and translation before inverse bind" {
+test skeleton__socket_globals_retain_parent_rotation_translation {
     var sk: Skeleton;
     fixture_chain(?sk);
     sk.parents[0]       = opt[usize].some{1};

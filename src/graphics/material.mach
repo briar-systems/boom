@@ -173,14 +173,14 @@ fun names(found: opt[*Texture], expected: *Texture) bool {
     ret sel found.some && found.some == expected;
 }
 
-test "material: base color defaults to white" {
+test material__base_color_defaults_white {
     var m: Material = material();
     if (m.base_color[0] != 1.0 || m.base_color[3] != 1.0) { ret 1; }
     if (m.texture_count != 0)                             { ret 2; }
     ret 0;
 }
 
-test "material: texture bindings fill then reject overflow" {
+test material__texture_bindings_fill_reject_overflow {
     var t: Texture;
     var m: Material = material();
     var i: i32      = 0;
@@ -196,7 +196,7 @@ test "material: texture bindings fill then reject overflow" {
     ret 0;
 }
 
-test "material: texture bindings default to nearest and may request linear" {
+test material__texture_bindings_default_nearest_may_request {
     var a: Texture;
     var b: Texture;
     var m: Material = material();
@@ -207,7 +207,7 @@ test "material: texture bindings default to nearest and may request linear" {
     ret 0;
 }
 
-test "material: an untextured material names no texture" {
+test material__untextured_material_names_no_texture {
     var m: Material = material();
     # none rather than a dangling first entry, so the renderer writes the
     # uniform binding alone instead of a sampler pointing at nothing.
@@ -219,7 +219,7 @@ test "material: an untextured material names no texture" {
     ret 0;
 }
 
-test "material: a named lookup finds the binding it names" {
+test material__named_lookup_finds_binding_names {
     # The built-in programs read slot zero, so the other slots are only ever
     # reachable by name. A lookup that returned slot zero regardless would make
     # a custom pipeline bind the albedo as its normal map, which renders as a

@@ -151,14 +151,14 @@ pub fun fit_unproject(src_w: f32, src_h: f32, dst_w: f32, dst_h: f32, mode: FitM
 
 # --------------------------------------------------------------------- tests
 
-test "fit: stretch fills the destination and distorts" {
+test fit__stretch_fills_destination_distorts {
     val r: Rect = fit_rect(320.0, 180.0, 640.0, 640.0, FitMode.stretch{});
     if (r.x != 0.0 || r.y != 0.0)     { ret 1; }
     if (r.w != 640.0 || r.h != 640.0) { ret 2; }
     ret 0;
 }
 
-test "fit: contain preserves the aspect and centres the bars" {
+test fit__contain_preserves_aspect_centres_bars {
     # 320x180 into 640x640: width binds at 2x, giving 640x360, so there are
     # (640 - 360) / 2 = 140 pixels of bar above and below. Derived from the
     # geometry, not read off the result.
@@ -172,7 +172,7 @@ test "fit: contain preserves the aspect and centres the bars" {
     ret 0;
 }
 
-test "fit: contain never spills outside the destination" {
+test fit__contain_never_spills_outside_destination {
     # Swept over shapes, because the binding dimension changes between them and
     # a fit that took the wrong one is correct on one side of the crossover.
     var i: i32 = 1;
@@ -193,7 +193,7 @@ test "fit: contain never spills outside the destination" {
     ret 0;
 }
 
-test "fit: cover fills the destination and spills on one axis" {
+test fit__cover_fills_destination_spills_axis {
     # The opposite binding to contain: 320x180 into 640x640 takes the height,
     # scaling by 640/180 = 3.555, so the width becomes 1137.8 and overhangs
     # evenly by (640 - 1137.8) / 2.
@@ -206,7 +206,7 @@ test "fit: cover fills the destination and spills on one axis" {
     ret 0;
 }
 
-test "fit: integer scaling picks a whole multiple" {
+test fit__integer_scaling_picks_whole_multiple {
     # 320x180 into 1000x1000: the limiting scale is 1000/320 = 3.125, so the
     # largest whole multiple is 3, giving 960x540. A rounded scale would give 3
     # here too, so the check below uses a case where they differ.
@@ -216,7 +216,7 @@ test "fit: integer scaling picks a whole multiple" {
     ret 0;
 }
 
-test "fit: integer scaling rounds down, never up" {
+test fit__integer_scaling_rounds_down_never_up {
     # 320x180 into 1260x1000: the limiting scale is 1260/320 = 3.9375, which
     # rounds to 4 and truncates to 3. A multiple of 4 would be 1280 wide and
     # would not fit, which is the one guarantee this mode makes.
@@ -226,7 +226,7 @@ test "fit: integer scaling rounds down, never up" {
     ret 0;
 }
 
-test "fit: integer scaling falls back rather than showing nothing" {
+test fit__integer_scaling_falls_back_rather_showing {
     # A window smaller than one whole copy of the source. The largest whole
     # multiple is zero, and a game rendering a zero-sized image shows a blank
     # window with no error to explain it.
@@ -237,7 +237,7 @@ test "fit: integer scaling falls back rather than showing nothing" {
     ret 0;
 }
 
-test "fit: a zero-sized destination is not a division" {
+test fit__zero_sized_destination_not_division {
     # A minimized window reports zero height. It is a normal state, and every
     # branch here would otherwise divide by it.
     val r: Rect = fit_rect(320.0, 180.0, 0.0, 0.0, FitMode.contain{});
@@ -247,7 +247,7 @@ test "fit: a zero-sized destination is not a division" {
     ret 0;
 }
 
-test "fit: unprojecting a point inverts the fit" {
+test fit__unprojecting_point_inverts_fit {
     # The centring offset is what a hand-rolled inverse forgets, and the error
     # is zero at the centre of the screen and grows toward the edges, so the
     # check is on a corner.
@@ -267,14 +267,14 @@ test "fit: unprojecting a point inverts the fit" {
     ret 0;
 }
 
-test "fit: unprojecting through a degenerate fit is absent" {
+test fit__unprojecting_through_degenerate_fit_absent {
     # A minimized window has no image to invert, so there is no source point.
     val p: opt[Vec2] = fit_unproject(320.0, 180.0, 0.0, 0.0, FitMode.contain{}, 5.0, 5.0);
     if (!sel p.none) { ret 1; }
     ret 0;
 }
 
-test "fit: a point on the letterbox bar maps outside the source" {
+test fit__point_letterbox_bar_maps_outside_source {
     # Clamping instead would make a click on the bar indistinguishable from a
     # click on the top row of the image.
     val p: opt[Vec2] = fit_unproject(320.0, 180.0, 640.0, 640.0, FitMode.contain{}, 320.0, 10.0);
@@ -283,7 +283,7 @@ test "fit: a point on the letterbox bar maps outside the source" {
     ret 0;
 }
 
-test "fit: the reported scale matches the rectangle it describes" {
+test fit__reported_scale_matches_rectangle_describes {
     # Two ways to ask the same question, used at different call sites. If they
     # disagree, an overlay drawn with the scale sits off the image drawn with
     # the rectangle.

@@ -120,7 +120,7 @@ fun absf(x: f32) f32 {
 
 # --------------------------------------------------------------------- tests
 
-test "aabb: an empty box contains nothing and is grown by its first point" {
+test aabb__empty_box_contains_nothing_grown_first {
     # Starting at the origin instead would silently include it, inflating every
     # mesh that does not span the origin, which is most of them.
     var b: Aabb = aabb_empty();
@@ -134,7 +134,7 @@ test "aabb: an empty box contains nothing and is grown by its first point" {
     ret 0;
 }
 
-test "aabb: adding points grows the box to hold all of them" {
+test aabb__adding_points_grows_box_hold_all {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(1.0, 2.0, 3.0));
     aabb_add(?b, vec3(0.0 - 4.0, 8.0, 0.0));
@@ -147,7 +147,7 @@ test "aabb: adding points grows the box to hold all of them" {
     ret 0;
 }
 
-test "aabb: a union with an empty box changes nothing" {
+test aabb__union_empty_box_changes_nothing {
     # What makes a union over a list work without special-casing the first
     # entry. Treating an empty box as a real one would drag every union out to
     # the huge sentinel values it is built from.
@@ -161,7 +161,7 @@ test "aabb: a union with an empty box changes nothing" {
     ret 0;
 }
 
-test "aabb: a translation moves the box and does not resize it" {
+test aabb__translation_moves_box_does_not_resize {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0));
     aabb_add(?b, vec3(1.0, 1.0, 1.0));
@@ -174,7 +174,7 @@ test "aabb: a translation moves the box and does not resize it" {
     ret 0;
 }
 
-test "aabb: a rotation grows the box, conservatively" {
+test aabb__rotation_grows_box_conservatively {
     # A unit cube turned 45 degrees about z has a diagonal of sqrt(2) across
     # x and y, so the axis-aligned box around it is that wide. Derived from the
     # geometry: a transform that rotated the corners but kept the old extent
@@ -194,7 +194,7 @@ test "aabb: a rotation grows the box, conservatively" {
     ret 0;
 }
 
-test "aabb: a scale scales the box about its centre" {
+test aabb__scale_scales_box_about_centre {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(0.0, 0.0, 0.0));
     aabb_add(?b, vec3(2.0, 2.0, 2.0));
@@ -206,7 +206,7 @@ test "aabb: a scale scales the box about its centre" {
     ret 0;
 }
 
-test "aabb: transforming an empty box leaves it empty" {
+test aabb__transforming_empty_box_leaves_empty {
     # A mesh with no vertices has no bounds, and a box built from the huge
     # sentinels would otherwise transform into nonsense that contains
     # everything or nothing depending on the sign of the matrix.

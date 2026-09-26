@@ -696,7 +696,7 @@ pub fun pad_stick(i: *Input, pad: usize, s: PadStick) Vec2 {
 
 # --------------------------------------------------------------------- tests
 
-test "input: a press is observed by exactly one tick" {
+test input__press_observed_exactly_tick {
     var i: Input = input_new();
     input_key_event(?i, KEY_W, true);
 
@@ -712,7 +712,7 @@ test "input: a press is observed by exactly one tick" {
     ret 0;
 }
 
-test "input: a press during a frame that ticks zero times is not lost" {
+test input__press_during_frame_ticks_zero_times {
     var i: Input = input_new();
     input_key_event(?i, KEY_SPACE, true);
     # No tick ran this frame: the accumulator held less than one step.
@@ -722,7 +722,7 @@ test "input: a press during a frame that ticks zero times is not lost" {
     ret 0;
 }
 
-test "input: a tap faster than the tick reports both edges" {
+test input__tap_faster_tick_reports_both_edges {
     var i: Input = input_new();
     input_key_event(?i, KEY_SPACE, true);
     input_key_event(?i, KEY_SPACE, false);
@@ -737,7 +737,7 @@ test "input: a tap faster than the tick reports both edges" {
     ret 0;
 }
 
-test "input: edges clear but held state persists across ticks" {
+test input__edges_clear_but_held_state_persists {
     var i: Input = input_new();
     input_key_event(?i, KEY_A, true);
     input_begin_tick(?i);
@@ -753,7 +753,7 @@ test "input: edges clear but held state persists across ticks" {
     ret 0;
 }
 
-test "input: mouse delta accumulates over the whole tick, not the last event" {
+test input__mouse_delta_accumulates_over_whole_tick {
     var i: Input = input_new();
     input_mouse_event(?i, 10.0, 0.0);
     input_mouse_event(?i, 20.0, 0.0);
@@ -771,7 +771,7 @@ test "input: mouse delta accumulates over the whole tick, not the last event" {
     ret 0;
 }
 
-test "input: scroll accumulates per tick and resets" {
+test input__scroll_accumulates_per_tick_resets {
     var i: Input = input_new();
     input_scroll_event(?i, 0.0, 1.0);
     input_scroll_event(?i, 0.0, 2.0);
@@ -782,7 +782,7 @@ test "input: scroll accumulates per tick and resets" {
     ret 0;
 }
 
-test "input: an unmapped key is inert rather than aliasing" {
+test input__unmapped_key_inert_rather_aliasing {
     var i: Input = input_new();
     input_key_event(?i, KEY_UNKNOWN, true);
     input_begin_tick(?i);
@@ -793,7 +793,7 @@ test "input: an unmapped key is inert rather than aliasing" {
     ret 0;
 }
 
-test "input: axis is -1, 0, or 1 and opposites cancel" {
+test input__axis_1_0_or_1_opposites {
     var i: Input = input_new();
     if (axis(?i, KEY_A, KEY_D) != 0.0) { ret 1; }
 
@@ -829,7 +829,7 @@ fun pad_rest(buttons: *u8, axes: *f32) {
     axes[PAD_AXIS_RIGHT_TRIGGER::usize] = -1.0;
 }
 
-test "input: a pad press is observed by exactly one tick" {
+test input__pad_press_observed_exactly_tick {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -853,7 +853,7 @@ test "input: a pad press is observed by exactly one tick" {
     ret 0;
 }
 
-test "input: a disconnected pad releases what it was holding" {
+test input__disconnected_pad_releases_holding {
     # A cable kicked out mid-run must not latch the stick and the trigger on.
     # Without this a rig walks into a wall firing until the process ends.
     var i:       Input = input_new();
@@ -876,7 +876,7 @@ test "input: a disconnected pad releases what it was holding" {
     ret 0;
 }
 
-test "input: a trigger has hysteresis and does not chatter" {
+test input__trigger_has_hysteresis_does_not_chatter {
     # One threshold means a trigger resting on it emits a press every poll,
     # which turns a semi-automatic weapon into a continuous one.
     var i:       Input = input_new();
@@ -916,7 +916,7 @@ test "input: a trigger has hysteresis and does not chatter" {
     ret 0;
 }
 
-test "input: a trigger reads 0 at rest, not -1" {
+test input__trigger_reads_0_rest_not_1 {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -935,7 +935,7 @@ test "input: a trigger reads 0 at rest, not -1" {
     ret 0;
 }
 
-test "input: the stick deadzone is radial, not per axis" {
+test input__stick_deadzone_radial_not_per_axis {
     # A per-axis deadzone squares off the stick: a diagonal push clears both
     # thresholds at a lower magnitude than a straight one, so a rig moves
     # faster on the diagonal and the dead region is a cross rather than a disc.
@@ -963,7 +963,7 @@ test "input: the stick deadzone is radial, not per axis" {
     ret 0;
 }
 
-test "input: a stick leaves the deadzone from zero and clamps at one" {
+test input__stick_leaves_deadzone_zero_clamps {
     # Rescaling matters: without it the magnitude jumps straight to the
     # deadzone value the moment the stick moves, so a rig cannot walk slowly.
     var i:       Input = input_new();
@@ -996,7 +996,7 @@ test "input: a stick leaves the deadzone from zero and clamps at one" {
     ret 0;
 }
 
-test "input: pads are independent and join reports which one" {
+test input__pads_independent_join_reports {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -1018,7 +1018,7 @@ test "input: pads are independent and join reports which one" {
     ret 0;
 }
 
-test "input: an out-of-range pad is inert" {
+test input__out_range_pad_inert {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -1033,7 +1033,7 @@ test "input: an out-of-range pad is inert" {
     ret 0;
 }
 
-test "input: buttons carry the same edge semantics as keys" {
+test input__buttons_carry_same_edge_semantics_keys {
     var i: Input = input_new();
     input_button_event(?i, BUTTON_LEFT, true);
     input_begin_tick(?i);

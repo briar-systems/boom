@@ -49,7 +49,7 @@ pub fun transform_matrix(t: *Transform) Mat4 {
     ret mat4_mul(?tr, ?rs);
 }
 
-test "transform: identity maps a point to itself" {
+test transform__identity_maps_point_itself {
     var t: Transform = transform_identity();
     var m: Mat4      = transform_matrix(?t);
     if (m.m[0][0] != 1.0 || m.m[1][1] != 1.0 || m.m[2][2] != 1.0 || m.m[3][3] != 1.0) { ret 1; }
@@ -57,7 +57,7 @@ test "transform: identity maps a point to itself" {
     ret 0;
 }
 
-test "transform: translation and scale compose into the model matrix" {
+test transform__translation_scale_compose_model_matrix {
     var t: Transform = transform_identity();
     t.position = vec3(5.0, 0.0, 0.0);
     t.scale    = vec3(2.0, 2.0, 2.0);

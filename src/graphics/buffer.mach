@@ -291,7 +291,7 @@ pub fun buffer_upload(b: *Buffer, v: *Vk, pool: vk.CommandPool, src: *u8, len: u
 # Allocation needs a device, so these cover the memory type search, which is
 # pure and is the part that differs between machines.
 
-test "buffer: the search skips types the resource cannot use" {
+test buffer__search_skips_types_resource_cannot_use {
     var p: vk.PhysicalDeviceMemoryProperties;
     p.memoryTypeCount = 3;
     # Type 0 has the wanted flags but is not in the resource's mask.
@@ -306,7 +306,7 @@ test "buffer: the search skips types the resource cannot use" {
     ret 0;
 }
 
-test "buffer: a type must carry every wanted flag, not merely one" {
+test buffer__type_must_carry_wanted_flag_not {
     var p: vk.PhysicalDeviceMemoryProperties;
     p.memoryTypeCount              = 2;
     p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
@@ -321,7 +321,7 @@ test "buffer: a type must carry every wanted flag, not merely one" {
     ret 0;
 }
 
-test "buffer: extra properties on a type do not disqualify it" {
+test buffer__extra_properties_type_do_not_disqualify {
     var p: vk.PhysicalDeviceMemoryProperties;
     p.memoryTypeCount              = 1;
     p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT | vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -331,7 +331,7 @@ test "buffer: extra properties on a type do not disqualify it" {
     ret 0;
 }
 
-test "buffer: an unsatisfiable request reports no type" {
+test buffer__unsatisfiable_request_reports_no_type {
     var p: vk.PhysicalDeviceMemoryProperties;
     p.memoryTypeCount              = 2;
     p.memoryTypes[0].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT;
@@ -344,7 +344,7 @@ test "buffer: an unsatisfiable request reports no type" {
     ret 0;
 }
 
-test "buffer: an empty mask matches nothing" {
+test buffer__empty_mask_matches_nothing {
     var p: vk.PhysicalDeviceMemoryProperties;
     p.memoryTypeCount = 4;
     var i: u32 = 0;
@@ -357,7 +357,7 @@ test "buffer: an empty mask matches nothing" {
     ret 0;
 }
 
-test "buffer: teardown on a buffer that was never created is a no-op" {
+test buffer__teardown_buffer_never_created_no_op {
     var b: Buffer;
     b.handle = nil;
     var v: Vk;

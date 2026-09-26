@@ -242,7 +242,7 @@ pub fun shader_delete(s: *Shader, d: *Device) {
 # validation and the cache lookup, which is where a mistake either rejects a
 # valid shader or hands a draw a pipeline built for different geometry.
 
-test "shader: a module that is not a whole number of SPIR-V words is refused" {
+test shader__module_not_whole_number_spir_v {
     # Rejected here rather than inside pipeline creation, where it surfaces as
     # an unexplained driver failure a long way from the call that caused it.
     var s:     Shader;
@@ -276,7 +276,7 @@ fun hands_out(r: res[*Pipeline, Error], p: *Pipeline) bool {
     ret sel r.ok && r.ok == p;
 }
 
-test "shader: a missing module is refused rather than deferred" {
+test shader__missing_module_refused_rather_deferred {
     var s:     Shader;
     var bytes: [64]u8;
     if (!missing_stage(shader(?s, nil, 64, ?bytes[0], 64))) { ret 1; }
@@ -284,7 +284,7 @@ test "shader: a missing module is refused rather than deferred" {
     ret 0;
 }
 
-test "shader: a fresh shader has built nothing" {
+test shader__fresh_shader_has_built_nothing {
     # Creation records what the shader is and builds nothing, because a pipeline
     # needs a render pass and a vertex layout that are not known until a draw.
     var s:     Shader;
@@ -294,7 +294,7 @@ test "shader: a fresh shader has built nothing" {
     ret 0;
 }
 
-test "shader: a built pipeline is reused only for its own pass and layout" {
+test shader__built_pipeline_reused_pass_layout {
     # THE DEFECT THIS CATCHES. A pipeline bakes in both the render pass and the
     # vertex layout, so handing a draw the entry built for a different one is
     # not a slower picture, it is undefined behaviour that a driver may or may
@@ -350,7 +350,7 @@ test "shader: a built pipeline is reused only for its own pass and layout" {
     ret 0;
 }
 
-test "shader: a full shader refuses rather than evicting a live pipeline" {
+test shader__full_shader_refuses_rather_evicting_live {
     # Eviction would destroy a pipeline a command buffer may still be executing,
     # which is a use-after-free the driver reports at a distance if at all. So
     # the cache fills and stops, and the draw is dropped and counted.
@@ -387,7 +387,7 @@ test "shader: a full shader refuses rather than evicting a live pipeline" {
     ret 0;
 }
 
-test "shader: an unready shader builds nothing" {
+test shader__unready_shader_builds_nothing {
     # A Shader left at its zero value has no modules, and reaching the driver
     # with a null pointer and a zero length is a crash rather than an error.
     var s:             Shader;

@@ -785,7 +785,7 @@ fun claimed(c: opt[usize]) bool {
     ret sel c.some;
 }
 
-test "audio: a claimed voice is not handed out twice" {
+test audio__claimed_voice_not_handed_out_twice {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -799,7 +799,7 @@ test "audio: a claimed voice is not handed out twice" {
     ret 0;
 }
 
-test "audio: the table fills and then refuses rather than stealing" {
+test audio__table_fills_refuses_rather_stealing {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -816,7 +816,7 @@ test "audio: the table fills and then refuses rather than stealing" {
     ret 0;
 }
 
-test "audio: render releases a STOPPING voice and skips it" {
+test audio__render_releases_stopping_voice_skips {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -837,7 +837,7 @@ test "audio: render releases a STOPPING voice and skips it" {
     ret 0;
 }
 
-test "audio: render silences the output buffer before mixing" {
+test audio__render_silences_output_buffer_before_mixing {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -862,7 +862,7 @@ test "audio: render silences the output buffer before mixing" {
     ret 0;
 }
 
-test "audio: a stale voice id neither stops nor reports playing" {
+test audio__stale_voice_id_neither_stops_nor {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -888,7 +888,7 @@ test "audio: a stale voice id neither stops nor reports playing" {
     ret 0;
 }
 
-test "audio: a zeroed voice id is inert" {
+test audio__zeroed_voice_id_inert {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -900,7 +900,7 @@ test "audio: a zeroed voice id is inert" {
     ret 0;
 }
 
-test "audio: voice_count reflects only published voices" {
+test audio__voice_count_reflects_published_voices {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -950,7 +950,7 @@ fun thread_ok(r: thread.Operation) bool {
     ret sel r.ok;
 }
 
-test "audio: concurrent claims never hand the same voice to two callers" {
+test audio__concurrent_claims_never_hand_same_voice {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1076,7 +1076,7 @@ fun released(r: err[allo.Error]) bool {
     ret sel r.ok;
 }
 
-test "audio: borrowed WAV bytes decode and conform into an owned sound" {
+test audio__borrowed_wav_bytes_decode_conform_owned {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1117,7 +1117,7 @@ test "audio: borrowed WAV bytes decode and conform into an owned sound" {
     ret 0;
 }
 
-test "audio: undecodable bytes report the decoder's refusal" {
+test audio__undecodable_bytes_report_decoder_s_refusal {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1132,7 +1132,7 @@ test "audio: undecodable bytes report the decoder's refusal" {
     ret 0;
 }
 
-test "audio: a decoded asset becomes an independent sound" {
+test audio__decoded_asset_becomes_independent_sound {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1158,7 +1158,7 @@ test "audio: a decoded asset becomes an independent sound" {
     ret 0;
 }
 
-test "audio: a source with no channels is refused by its buffer" {
+test audio__source_no_channels_refused_buffer {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1174,7 +1174,7 @@ test "audio: a source with no channels is refused by its buffer" {
     ret 0;
 }
 
-test "audio: releasing a sound retires every borrowing voice" {
+test audio__releasing_sound_retires_borrowing_voice {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1196,7 +1196,7 @@ test "audio: releasing a sound retires every borrowing voice" {
     ret 0;
 }
 
-test "audio: a clip already in the device's format is passed through untouched" {
+test audio__clip_already_device_s_format_passed {
     # The common case must not allocate or copy. It is also the case where a
     # bug would be invisible, since the samples are right either way.
     var a: allo.Allocator;
@@ -1219,7 +1219,7 @@ test "audio: a clip already in the device's format is passed through untouched" 
     ret 0;
 }
 
-test "audio: a mono clip fans out to every channel of a stereo device" {
+test audio__mono_clip_fans_out_channel_stereo {
     # THE CASE THAT WAS BROKEN. mach-audio's pull emits silence and does not
     # advance its cursor when the channel counts differ, so a mono sound effect
     # against a stereo device was silent forever and its voice was never
@@ -1247,7 +1247,7 @@ test "audio: a mono clip fans out to every channel of a stereo device" {
     ret 0;
 }
 
-test "audio: a stereo clip is averaged down for a mono device" {
+test audio__stereo_clip_averaged_down_mono_device {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1270,7 +1270,7 @@ test "audio: a stereo clip is averaged down for a mono device" {
     ret 0;
 }
 
-test "audio: doubling the rate interpolates a sample between each pair" {
+test audio__doubling_rate_interpolates_sample_between_pair {
     # A rate mismatch does not silence a clip, it plays it at the wrong pitch,
     # which is the harder failure to attribute: it sounds like a bad asset.
     # mach-audio's pull does not look at sample rate at all, so nothing below
@@ -1300,7 +1300,7 @@ test "audio: doubling the rate interpolates a sample between each pair" {
     ret 0;
 }
 
-test "audio: halving the rate halves the frame count" {
+test audio__halving_rate_halves_frame_count {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1322,7 +1322,7 @@ test "audio: halving the rate halves the frame count" {
     ret 0;
 }
 
-test "audio: a clip with no rate is refused rather than divided by" {
+test audio__clip_no_rate_refused_rather_divided {
     var a: allo.Allocator;
     page.make(?a);
     var s: Audio;
@@ -1338,7 +1338,7 @@ test "audio: a clip with no rate is refused rather than divided by" {
     ret 0;
 }
 
-test "audio: the pan law holds power flat across the sweep" {
+test audio__pan_law_holds_power_flat_across {
     # A linear pan makes a source dip as it crosses centre, because the two
     # channels each sit at half amplitude and the summed power is halved.
     # Constant power means left squared plus right squared stays 1.
@@ -1365,7 +1365,7 @@ test "audio: the pan law holds power flat across the sweep" {
     ret 0;
 }
 
-test "audio: a pan past the ends is clamped, not wrapped" {
+test audio__pan_past_ends_clamped_not_wrapped {
     var l: f32 = 0.0;
     var r: f32 = 0.0;
     pan_gains(-9.0, ?l, ?r);
@@ -1375,7 +1375,7 @@ test "audio: a pan past the ends is clamped, not wrapped" {
     ret 0;
 }
 
-test "audio: a class budget refuses rather than filling the table" {
+test audio__class_budget_refuses_rather_filling_table {
     # The point of a budget is headroom. Without one, a screenful of impacts
     # takes all 32 slots and the weapon that caused them is what gets dropped.
     var s: Audio;
@@ -1409,7 +1409,7 @@ test "audio: a class budget refuses rather than filling the table" {
     ret 0;
 }
 
-test "audio: an out-of-range class is refused and does not corrupt a budget" {
+test audio__out_range_class_refused_does_not {
     var s: Audio;
     var c: usize = 0;
     for (c < MAX_CLASSES) {
@@ -1433,7 +1433,7 @@ test "audio: an out-of-range class is refused and does not corrupt a budget" {
     ret 0;
 }
 
-test "audio: a stale voice id does not retune whatever took the slot" {
+test audio__stale_voice_id_does_not_retune {
     var s: Audio;
     var v: usize = 0;
     for (v < MAX_VOICES) {
@@ -1461,7 +1461,7 @@ test "audio: a stale voice id does not retune whatever took the slot" {
     ret 0;
 }
 
-test "audio: an out-of-range voice id is refused everywhere" {
+test audio__out_range_voice_id_refused_everywhere {
     var s: Audio;
     var v: usize = 0;
     for (v < MAX_VOICES) {
@@ -1478,7 +1478,7 @@ test "audio: an out-of-range voice id is refused everywhere" {
     ret 0;
 }
 
-test "audio: a quiesced mixer refuses new voices" {
+test audio__quiesced_mixer_refuses_new_voices {
     var s: Audio;
     s.ready   = true;
     s.started = false;

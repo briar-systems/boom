@@ -524,7 +524,7 @@ fun refused_namespace(r: res[str, VfsError]) bool {
     ret sel r.err && sel r.err.invalid_namespace;
 }
 
-test "vfs: res:// resolves against res_root" {
+test vfs__res_resolves_against_res_root {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = res_root;
@@ -536,7 +536,7 @@ test "vfs: res:// resolves against res_root" {
     ret 0;
 }
 
-test "vfs: a root with a trailing slash does not double it" {
+test vfs__root_trailing_slash_does_not_double {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = res_root;
@@ -549,7 +549,7 @@ test "vfs: a root with a trailing slash does not double it" {
     ret 0;
 }
 
-test "vfs: an absolute root works, including one that is only a slash" {
+test vfs__absolute_root_works_including_slash {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = res_root;
@@ -568,7 +568,7 @@ test "vfs: an absolute root works, including one that is only a slash" {
     ret 0;
 }
 
-test "vfs: a bare path passes through unchanged" {
+test vfs__bare_path_passes_through_unchanged {
     var a: allo.Allocator;
     page.make(?a);
     val r: res[str, VfsError] = vfs_resolve(?a, "some/plain/path.txt");
@@ -577,7 +577,7 @@ test "vfs: a bare path passes through unchanged" {
     ret 0;
 }
 
-test "vfs: :// after a separator is a directory, not a scheme" {
+test vfs__after_separator_directory_not_scheme {
     # A path like `weird/a://b` names a directory that happens to contain the
     # characters. treating it as a scheme would silently redirect the lookup.
     if (vfs_has_scheme("weird/a://b")) { ret 1; }
@@ -588,7 +588,7 @@ test "vfs: :// after a separator is a directory, not a scheme" {
     ret 0;
 }
 
-test "vfs: an unknown scheme is an error, not a silent passthrough" {
+test vfs__unknown_scheme_error_not_silent_passthrough {
     var a: allo.Allocator;
     page.make(?a);
     # Passing it through would resolve `bogus://x` against the working
@@ -599,7 +599,7 @@ test "vfs: an unknown scheme is an error, not a silent passthrough" {
     ret 0;
 }
 
-test "vfs: a registered scheme resolves, and re-registering replaces it" {
+test vfs__registered_scheme_resolves_re_registering_replaces {
     var a: allo.Allocator;
     page.make(?a);
 
@@ -617,7 +617,7 @@ test "vfs: a registered scheme resolves, and re-registering replaces it" {
     ret 0;
 }
 
-test "vfs: user:// honours an explicit override" {
+test vfs__user_honours_explicit_override {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = user_root;
@@ -629,7 +629,7 @@ test "vfs: user:// honours an explicit override" {
     ret 0;
 }
 
-test "vfs: an explicit user root is already application scoped" {
+test vfs__explicit_user_root_already_application_scoped {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = user_root;
@@ -646,7 +646,7 @@ test "vfs: an explicit user root is already application scoped" {
     ret 0;
 }
 
-test "vfs: user data namespaces are single path components" {
+test vfs__user_data_namespaces_single_path_components {
     var a: allo.Allocator;
     page.make(?a);
     if (!refused_namespace(vfs_user_data_root(?a, "..", "ludus"))) { ret 1; }
@@ -672,7 +672,7 @@ test "vfs: user data namespaces are single path components" {
     ret 0;
 }
 
-test "vfs: user:// derives a root or reports missing platform state" {
+test vfs__user_derives_root_or_reports_missing {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = user_root;
@@ -687,7 +687,7 @@ test "vfs: user:// derives a root or reports missing platform state" {
     ret 0;
 }
 
-test "vfs: the built-in schemes are refused rather than silently ignored" {
+test vfs__built_schemes_refused_rather_silently_ignored {
     # An entry named res or user can never be consulted, because vfs_resolve
     # answers those from res_root and user_root first. Accepting one and
     # reporting success is worse than refusing: the caller believes it has
@@ -706,7 +706,7 @@ test "vfs: the built-in schemes are refused rather than silently ignored" {
     ret 0;
 }
 
-test "vfs: a missing file reports the read, not the path" {
+test vfs__missing_file_reports_read_not_path {
     var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
@@ -719,7 +719,7 @@ test "vfs: a missing file reports the read, not the path" {
     ret 0;
 }
 
-test "vfs: res_root is what redirects the res scheme" {
+test vfs__res_root_redirects_res_scheme {
     # The supported way to do what vfs_register("res", ...) looks like it does.
     val saved: str = res_root;
     res_root = "assets/packed";

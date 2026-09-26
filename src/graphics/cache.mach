@@ -233,7 +233,7 @@ pub fun cache_dnit(c: *PipelineCache, v: *Vk) {
 # matches the wrong entry hands a draw a pipeline built for another layout,
 # which reads every attribute past the first from the wrong offset.
 
-test "cache: an empty cache finds nothing" {
+test cache__empty_cache_finds_nothing {
     var c: PipelineCache;
     cache_init(?c);
     var f:             VertexFormat      = vertex_format_standard();
@@ -248,7 +248,7 @@ fun misses(found: opt[usize]) bool {
     ret sel found.none;
 }
 
-test "cache: an entry matches only its own program and format" {
+test cache__entry_matches_program_format {
     var c: PipelineCache;
     cache_init(?c);
     var compatibility: PassCompatibility = pass_compatibility_one(1);
@@ -287,7 +287,7 @@ test "cache: an entry matches only its own program and format" {
     ret 0;
 }
 
-test "cache: a dead entry is not matched" {
+test cache__dead_entry_not_matched {
     var c: PipelineCache;
     cache_init(?c);
     var compatibility: PassCompatibility = pass_compatibility_one(1);
@@ -303,7 +303,7 @@ test "cache: a dead entry is not matched" {
     ret 0;
 }
 
-test "cache: teardown clears the entries" {
+test cache__teardown_clears_entries {
     var c: PipelineCache;
     cache_init(?c);
     c.count = 0;

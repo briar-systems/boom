@@ -732,7 +732,7 @@ fun refused_joint_lookup(r: res[usize, Error], ambiguous: bool) bool {
     ret sel r.err.model.no_joint;
 }
 
-test "model: skeleton and animation extract from a skinned, animated glb" {
+test model__skeleton_animation_extract_skinned_animated_glb {
     var glb: [2048]u8;
     val n:   usize = fixture_animated_glb(?glb[0]);
 
@@ -897,7 +897,7 @@ fun fixture_named_model() res[Model, FixtureError] {
     ret res[Model, FixtureError].ok{model};
 }
 
-test "model: named joints follow skin ordering and own names beyond parsing and moves" {
+test model__named_joints_follow_skin_ordering_names {
     val built: res[Model, FixtureError] = fixture_named_model();
     if (sel built.err) { ret 1; }
     var model: Model = built.ok;
@@ -914,7 +914,7 @@ test "model: named joints follow skin ordering and own names beyond parsing and 
     ret 0;
 }
 
-test "model: named joint lookup distinguishes missing and ambiguous names" {
+test model__named_joint_lookup_distinguishes_missing_ambiguous {
     var model: Model;
     model.skeleton.count = 3;
     model.joint_names[0] = opt[str].some{"waist"};
@@ -930,7 +930,7 @@ test "model: named joint lookup distinguishes missing and ambiguous names" {
     ret 0;
 }
 
-test "model: optional unnamed joints remain legal and cannot match an empty query" {
+test model__optional_unnamed_joints_remain_legal_cannot {
     var nodes: [2]gd.Node;
     nodes[1].name = "";
     var joints: [2]usize = [2]usize{1, 0};
@@ -950,7 +950,7 @@ test "model: optional unnamed joints remain legal and cannot match an empty quer
     ret 0;
 }
 
-test "model: joint names reject invalid skin node references before allocation" {
+test model__joint_names_reject_invalid_skin_node {
     var joints: [1]usize = [1]usize{99};
     var skin:   gd.Skin;
     skin.joints = slice.make[usize](?joints[0], 1);

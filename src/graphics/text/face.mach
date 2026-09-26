@@ -416,7 +416,7 @@ fun test_alloc(a: *allo.Allocator) bool {
     ret sel made.ok;
 }
 
-test "face: a string is walked as codepoints, not as bytes" {
+test face__string_walked_codepoints_not_bytes {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -433,7 +433,7 @@ test "face: a string is walked as codepoints, not as bytes" {
     ret 0;
 }
 
-test "face: a control character contributes no advance" {
+test face__control_character_contributes_no_advance {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -445,7 +445,7 @@ test "face: a control character contributes no advance" {
     ret 0;
 }
 
-test "face: a line break measures the widest line" {
+test face__line_break_measures_widest_line {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -460,7 +460,7 @@ test "face: a line break measures the widest line" {
     ret 0;
 }
 
-test "face: text_next advances past malformed bytes one at a time" {
+test face__text_next_advances_past_malformed_bytes_time {
     var cp:   u32   = 0;
     var lone: [3]u8 = [3]u8{0x80, 0x61, 0};
     if (text_next(?lone[0], 0, 2, ?cp) != 1) { ret 1; }
@@ -473,7 +473,7 @@ test "face: text_next advances past malformed bytes one at a time" {
     ret 0;
 }
 
-test "face: a decode after an earlier decode reads its own bytes" {
+test face__decode_after_earlier_decode_reads_bytes {
     # the shape of a mach opt 2 miscompile fixed in 5.2.1: an indexed address
     # flowing into an inlined utf8.decode returned U+FFFD after a decode on
     # another stack array. meaningful under the release profile CI runs
@@ -486,7 +486,7 @@ test "face: a decode after an earlier decode reads its own bytes" {
     ret 0;
 }
 
-test "face: an invalid face measures zero" {
+test face__invalid_face_measures_zero {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -498,7 +498,7 @@ test "face: an invalid face measures zero" {
     ret 0;
 }
 
-test "face: an invalid size policy is refused with its case" {
+test face__invalid_size_policy_refused_case {
     val bad_height: opt[TextError] = options_refusal(0.0, font_options());
     if (!(sel bad_height.some && sel bad_height.some.pixel_height)) { ret 1; }
     var zero: FontOptions = font_options();
@@ -516,7 +516,7 @@ test "face: an invalid size policy is refused with its case" {
     ret 0;
 }
 
-test "face: pixel policy preserves an em-aligned design grid" {
+test face__pixel_policy_preserves_em_aligned_design {
     val options: FontOptions = font_pixel_options();
     if (!sel options.raster.pixel) { ret 1; }
     if (!sel options.size_mode.em) { ret 2; }
@@ -536,7 +536,7 @@ test "face: pixel policy preserves an em-aligned design grid" {
     ret 0;
 }
 
-test "face: a face with live atlases refuses to delete" {
+test face__face_live_atlases_refuses_delete {
     var t: Typeface;
     t.faces = 1;
     var f: FontFace;

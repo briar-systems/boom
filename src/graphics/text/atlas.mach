@@ -591,7 +591,7 @@ fun near(a: f32, b: f32) bool {
     ret d < 0.000001;
 }
 
-test "atlas: UVs leave a transparent gutter between cells" {
+test atlas__uvs_leave_transparent_gutter_between_cells {
     var g:    GlyphAtlas = grid_atlas();
     val side: f32        = g.page_side::f32;
     var c0:   Cell;
@@ -611,7 +611,7 @@ test "atlas: UVs leave a transparent gutter between cells" {
     ret 0;
 }
 
-test "atlas: the last cell of a page stays inside it" {
+test atlas__last_cell_page_stays_inside {
     var g:    GlyphAtlas = grid_atlas();
     var last: Cell;
     last.cell = g.cells_per_page - 1;
@@ -621,7 +621,7 @@ test "atlas: the last cell of a page stays inside it" {
     ret 0;
 }
 
-test "atlas: a page is derived from the cell" {
+test atlas__page_derived_cell {
     val small: res[usize, TextError] = page_side_for(22);
     if (!(sel small.ok && small.ok == ATLAS_PAGE)) { ret 1; }
     if (ATLAS_PAGE / (22 + GUTTER * 2) != 42)      { ret 2; }
@@ -635,7 +635,7 @@ test "atlas: a page is derived from the cell" {
     ret 0;
 }
 
-test "atlas: oversampling keeps the logical rectangle" {
+test atlas__oversampling_keeps_logical_rectangle {
     var g: GlyphAtlas = grid_atlas();
     var f: FontFace;
     g.face         = ?f;
@@ -649,7 +649,7 @@ test "atlas: oversampling keeps the logical rectangle" {
     ret 0;
 }
 
-test "atlas: pixel faces quantize placement" {
+test atlas__pixel_faces_quantize_placement {
     var g: GlyphAtlas = grid_atlas();
     var f: FontFace;
     f.pixel_snap = true;
@@ -663,7 +663,7 @@ test "atlas: pixel faces quantize placement" {
     ret 0;
 }
 
-test "atlas: cells keep one baseline across vertical bearings" {
+test atlas__cells_keep_baseline_across_vertical_bearings {
     val upper:     f32 = baseline_offset(9.0, 16.0, 0, 1.0);
     val descender: f32 = baseline_offset(9.0, 16.0, 0 - 3, 1.0);
     if (upper != 0.0 - 7.0 || descender != 0.0 - 4.0)   { ret 1; }
@@ -671,7 +671,7 @@ test "atlas: cells keep one baseline across vertical bearings" {
     ret 0;
 }
 
-test "atlas: coverage is staged as white with alpha" {
+test atlas__coverage_staged_white_alpha {
     var stage: [16]u8;
     var cov:   [4]u8 = [4]u8{32, 64, 128, 255};
     if (!stage_cell(?stage[0], ?cov[0], 2, FontRaster.smooth{})) { ret 1; }
@@ -687,7 +687,7 @@ test "atlas: coverage is staged as white with alpha" {
     ret 0;
 }
 
-test "atlas: a page clears to transparent white" {
+test atlas__page_clears_transparent_white {
     var rgba: [16]u8;
     clear_atlas(?rgba[0], 4);
     var i: usize = 0;
@@ -700,7 +700,7 @@ test "atlas: a page clears to transparent white" {
     ret 0;
 }
 
-test "atlas: the scratch is sized from the face and the curve" {
+test atlas__scratch_sized_face_curve {
     if (quad_segments(22) != 16)  { ret 1; }
     if (quad_segments(128) != 32) { ret 2; }
     if (quad_segments(512) != 64) { ret 3; }
@@ -721,7 +721,7 @@ test "atlas: the scratch is sized from the face and the curve" {
     ret 0;
 }
 
-test "atlas: deleting uncounts the atlas on its face" {
+test atlas__deleting_uncounts_atlas_face {
     var f: FontFace;
     f.atlases = 1;
     var g: GlyphAtlas;

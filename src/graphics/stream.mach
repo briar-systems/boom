@@ -388,7 +388,7 @@ pub fun stream_dnit(s: *VertexStream, v: *Vk) {
 # schedule and the bump arithmetic, which is where an error silently overwrites
 # geometry the GPU is about to read.
 
-test "stream: blocks double from the base size and then hold at the cap" {
+test stream__blocks_double_base_size_hold_cap {
     # The schedule is what keeps a large frame to a handful of blocks, and so a
     # handful of draws. A schedule that stopped doubling early would split one
     # run into many draws; one that never capped would reserve hundreds of
@@ -400,7 +400,7 @@ test "stream: blocks double from the base size and then hold at the cap" {
     ret 0;
 }
 
-test "stream: a push larger than the schedule gets a block sized to it" {
+test stream__push_larger_schedule_gets_block_sized {
     # Otherwise a single draw list bigger than the next block size could never
     # be satisfied: every block added would be too small and the push would be
     # refused forever while the arena kept growing.
@@ -411,7 +411,7 @@ test "stream: a push larger than the schedule gets a block sized to it" {
     ret 0;
 }
 
-test "stream: the bump offset is rounded up to a whole vertex" {
+test stream__bump_offset_rounded_up_whole_vertex {
     # firstVertex names a vertex, not a byte. An unaligned offset would make it
     # name geometry straddling two pushes, which draws a recognisable shape
     # built from the wrong vertices.
@@ -422,7 +422,7 @@ test "stream: the bump offset is rounded up to a whole vertex" {
     ret 0;
 }
 
-test "stream: a length that is not a whole number of vertices is refused" {
+test stream__length_not_whole_number_vertices_refused {
     var s: VertexStream;
     var v: Vk;
     s.ready     = true;
@@ -435,7 +435,7 @@ test "stream: a length that is not a whole number of vertices is refused" {
     ret 0;
 }
 
-test "stream: an out-of-range frame is refused rather than indexing past the ring" {
+test stream__out_range_frame_refused_rather_indexing {
     var s: VertexStream;
     var v: Vk;
     s.ready = true;
@@ -446,7 +446,7 @@ test "stream: an out-of-range frame is refused rather than indexing past the rin
     ret 0;
 }
 
-test "stream: a frame's arena is independent of the other's" {
+test stream__frame_s_arena_independent_other_s {
     # Two frames are in flight, so the CPU writes one arena while the GPU reads
     # the other. Sharing a used counter would let this frame's geometry land in
     # the middle of what the GPU is still reading for the last one.
@@ -462,7 +462,7 @@ test "stream: a frame's arena is independent of the other's" {
     ret 0;
 }
 
-test "stream: opening a frame rewinds every block and starts at the first" {
+test stream__opening_frame_rewinds_block_starts_first {
     # A frame that needed four blocks last time must start again at block zero,
     # or the arena grows without bound as each frame begins where the last
     # ended.
@@ -481,7 +481,7 @@ test "stream: opening a frame rewinds every block and starts at the first" {
     ret 0;
 }
 
-test "stream: a full block sends the push to an existing block with room" {
+test stream__full_block_sends_push_existing_block {
     # Reusing a block the frame already has is what stops a frame whose
     # geometry shrank from allocating a new block every frame forever.
     var s:   VertexStream;

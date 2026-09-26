@@ -663,7 +663,7 @@ pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
 # in CI. These cover the frame-index rotation, which is pure and is where an
 # error makes two frames share one set of synchronization objects.
 
-test "frame: the frame index rotates and wraps" {
+test frame__frame_index_rotates_wraps {
     var f: FrameLoop;
     f.current = 0;
     var seen: [4]usize;
@@ -680,7 +680,7 @@ test "frame: the frame index rotates and wraps" {
     ret 0;
 }
 
-test "frame: every in-flight frame has its own slot" {
+test frame__flight_frame_has_slot {
     # One command buffer, one acquire semaphore, and a fence per frame. Sharing
     # any of them across frames is the race this indexing exists to prevent.
     if (MAX_FRAMES_IN_FLIGHT < 2) { ret 1; }
@@ -693,7 +693,7 @@ test "frame: every in-flight frame has its own slot" {
     ret 0;
 }
 
-test "frame: there is a render-finished semaphore for every swapchain image" {
+test frame__there_render_finished_semaphore_swapchain_image {
     # Not MAX_FRAMES_IN_FLIGHT of them. The signal is waited on by the present of
     # one image and is only known to have retired when that image is acquired
     # again, so the count that matters is the swapchain's, and the two do not
@@ -709,7 +709,7 @@ test "frame: there is a render-finished semaphore for every swapchain image" {
     ret 0;
 }
 
-test "frame: teardown on an uninitialized loop is a no-op" {
+test frame__teardown_uninitialized_loop_no_op {
     var f: FrameLoop;
     f.ready = false;
     var v: Vk;
@@ -719,7 +719,7 @@ test "frame: teardown on an uninitialized loop is a no-op" {
     ret 0;
 }
 
-test "frame: a window pass begins an idle window and clears an open one in place" {
+test frame__window_pass_begins_idle_window_clears {
     val a: WindowStep = window_step(WindowPass.idle{}, true);
     val b: WindowStep = window_step(WindowPass.idle{}, false);
     val c: WindowStep = window_step(WindowPass.open{}, true);
@@ -733,7 +733,7 @@ test "frame: a window pass begins an idle window and clears an open one in place
     ret 0;
 }
 
-test "frame: an offscreen pass suspends only a window that is open" {
+test frame__offscreen_pass_suspends_window_open {
     val open: WindowPass = window_suspended(WindowPass.open{});
     val idle: WindowPass = window_suspended(WindowPass.idle{});
     if (!sel open.suspended) { ret 1; }
@@ -746,7 +746,7 @@ test "frame: an offscreen pass suspends only a window that is open" {
 # offscreen one, because pass_begin for the window records into whichever
 # render pass is open. So the suspended arm of window_step is unreachable, and
 # this is what keeps it so when the transitions change.
-test "frame: no sequence of passes begins a window pass while it is suspended" {
+test frame__no_sequence_passes_begins_window_pass {
     val ops:   u32 = 3;
     val depth: u32 = 6;
     var total: u32 = 1;
@@ -790,7 +790,7 @@ test "frame: no sequence of passes begins a window pass while it is suspended" {
     ret 0;
 }
 
-test "frame: a window readback is refused when the surface does not offer the copy" {
+test frame__window_readback_refused_surface_does_not {
     var f: FrameLoop;
     f.capture = opt[Capture].none{};
     var s: Swapchain;
@@ -806,7 +806,7 @@ test "frame: a window readback is refused when the surface does not offer the co
     ret 0;
 }
 
-test "frame: a window readback names the bytes it needs and arms when given them" {
+test frame__window_readback_names_bytes_needs_arms {
     var f: FrameLoop;
     f.capture = opt[Capture].none{};
     var s: Swapchain;

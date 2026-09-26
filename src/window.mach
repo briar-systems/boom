@@ -846,7 +846,7 @@ fun max_value(a: i32, b: i32) i32 {
     ret b;
 }
 
-test "window: Escape is delivered as application input" {
+test window__escape_delivered_application_input {
     var q:     EventQueue = queue_new();
     var input: inp.Input  = inp.input_new();
     var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
@@ -864,7 +864,7 @@ test "window: Escape is delivered as application input" {
     ret 0;
 }
 
-test "window: autorepeat is queued without an input edge" {
+test window__autorepeat_queued_without_input_edge {
     var q:     EventQueue = queue_new();
     var input: inp.Input  = inp.input_new();
     var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
@@ -879,7 +879,7 @@ test "window: autorepeat is queued without an input edge" {
     ret 0;
 }
 
-test "window: an unnamed mouse button is not delivered" {
+test window__unnamed_mouse_button_not_delivered {
     var q:     EventQueue = queue_new();
     var input: inp.Input  = inp.input_new();
     var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
@@ -897,7 +897,7 @@ test "window: an unnamed mouse button is not delivered" {
     ret 0;
 }
 
-test "window: framebuffer changes are delivered in pixels" {
+test window__framebuffer_changes_delivered_pixels {
     var q:     EventQueue = queue_new();
     var input: inp.Input  = inp.input_new();
     var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
@@ -909,7 +909,7 @@ test "window: framebuffer changes are delivered in pixels" {
     ret 0;
 }
 
-test "window: decorated client bounds stay inside the work area" {
+test window__decorated_client_bounds_stay_inside_work {
     val fitted: WindowBounds = clamp_bounds(
         WindowBounds{x: 0, y: 0, width: 1920, height: 1080},
         WindowBounds{x: 0, y: 0, width: 1920, height: 1080},
@@ -920,14 +920,14 @@ test "window: decorated client bounds stay inside the work area" {
     ret 0;
 }
 
-test "window: monitor overlap selects only visible pixels" {
+test window__monitor_overlap_selects_visible_pixels {
     if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000)     { ret 1; }
     if (overlap_area(1800, 100, 400, 400, 1920, 0, 1920, 1080) != 112000) { ret 2; }
     if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0)            { ret 3; }
     ret 0;
 }
 
-test "window: client bounds reaching a work area require compositor fitting" {
+test window__client_bounds_reaching_work_area_require {
     val area: WindowBounds = WindowBounds{x: 0, y: 0, width: 1280, height: 720};
     if (!bounds_reach_area(
         WindowBounds{x: 0, y: 0, width: 1280, height: 720}, area)) { ret 1; }
@@ -938,21 +938,21 @@ test "window: client bounds reaching a work area require compositor fitting" {
     ret 0;
 }
 
-test "window: wayland keeps its explicit monitor without global positions" {
+test window__wayland_keeps_explicit_monitor_without_global {
     if (!prefer_retained_monitor(true, WindowMode.windowed{}))    { ret 1; }
     if (!prefer_retained_monitor(false, WindowMode.borderless{})) { ret 2; }
     if (prefer_retained_monitor(false, WindowMode.windowed{}))    { ret 3; }
     ret 0;
 }
 
-test "window: modes compare by case" {
+test window__modes_compare_case {
     if (!same_mode(WindowMode.fullscreen{}, WindowMode.fullscreen{})) { ret 1; }
     if (same_mode(WindowMode.windowed{}, WindowMode.borderless{}))    { ret 2; }
     if (same_mode(WindowMode.borderless{}, WindowMode.fullscreen{}))  { ret 3; }
     ret 0;
 }
 
-test "window: cursor coordinates follow framebuffer scale" {
+test window__cursor_coordinates_follow_framebuffer_scale {
     var x: f64 = 0.0;
     var y: f64 = 0.0;
     cursor_pixels(125.5, 44.25, 800, 600, 800, 600, ?x, ?y);
@@ -966,7 +966,7 @@ test "window: cursor coordinates follow framebuffer scale" {
     ret 0;
 }
 
-test "window: content-scale changes do not become cursor motion" {
+test window__content_scale_changes_do_not_become {
     var q:     EventQueue = queue_new();
     var input: inp.Input  = inp.input_new();
     var sink:  Sink;
@@ -992,7 +992,7 @@ test "window: content-scale changes do not become cursor motion" {
     ret 0;
 }
 
-test "window: a window that was never opened is closed" {
+test window__window_never_opened_closed {
     var w: Window;
     if (window_is_valid(?w))                  { ret 1; }
     if (window_set_cursor_captured(?w, true)) { ret 2; }
@@ -1007,7 +1007,7 @@ test "window: a window that was never opened is closed" {
     ret 0;
 }
 
-test "window: a refused mode names what was asked and what was missing" {
+test window__refused_mode_names_asked_missing {
     val no_mon: WindowError = mode_refusal(WindowMode.fullscreen{}, false);
     val no_vid: WindowError = mode_refusal(WindowMode.borderless{}, true);
     if (!sel no_mon.no_monitor) { ret 1; }
@@ -1022,7 +1022,7 @@ test "window: a refused mode names what was asked and what was missing" {
     ret 0;
 }
 
-test "window: a window refuses to close while a renderer holds it" {
+test window__window_refuses_close_while_renderer_holds {
     # a zeroed window has no handle, so closing it destroys nothing
     var w: Window;
     w.renderers = 2;

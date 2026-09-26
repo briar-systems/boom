@@ -800,7 +800,7 @@ fun attributes_are(n: opt[u32], expected: u32) bool {
     ret sel n.some && n.some == expected;
 }
 
-test "pipeline: float attributes map by component count" {
+test pipeline__float_attributes_map_component_count {
     if (!format_is(attribute_format(COMP_F32, 1, 0, 0), vk.FORMAT_R32_SFLOAT))          { ret 1; }
     if (!format_is(attribute_format(COMP_F32, 2, 0, 0), vk.FORMAT_R32G32_SFLOAT))       { ret 2; }
     if (!format_is(attribute_format(COMP_F32, 3, 0, 0), vk.FORMAT_R32G32B32_SFLOAT))    { ret 3; }
@@ -808,7 +808,7 @@ test "pipeline: float attributes map by component count" {
     ret 0;
 }
 
-test "pipeline: normalized changes the format, not merely the flag" {
+test pipeline__normalized_changes_format_not_merely_flag {
     # A packed byte colour must arrive in the shader as a float in [0, 1]. UINT
     # here would deliver 0..255 and every colour would clamp to white.
     if (!format_is(attribute_format(COMP_U8, 4, 1, 0), vk.FORMAT_R8G8B8A8_UNORM)) { ret 1; }
@@ -818,14 +818,14 @@ test "pipeline: normalized changes the format, not merely the flag" {
     ret 0;
 }
 
-test "pipeline: joint indices map to an unsigned integer format" {
+test pipeline__joint_indices_map_unsigned_integer_format {
     # glTF JOINTS_0 is an unnormalized u16 vec4 and must reach the shader as
     # integers; a normalized format would make every joint index zero.
     if (!format_is(attribute_format(COMP_U16, 4, 0, 1), vk.FORMAT_R16G16B16A16_UINT)) { ret 1; }
     ret 0;
 }
 
-test "pipeline: an out-of-range component count is rejected" {
+test pipeline__out_range_component_count_rejected {
     val zero: opt[i32] = attribute_format(COMP_F32, 0, 0, 0);
     if (!sel zero.none) { ret 1; }
     val five: opt[i32] = attribute_format(COMP_F32, 5, 0, 0);
@@ -836,7 +836,7 @@ test "pipeline: an out-of-range component count is rejected" {
     ret 0;
 }
 
-test "pipeline: vertex input follows the format's locations and offsets" {
+test pipeline__vertex_input_follows_format_s_locations {
     var f:   VertexFormat = vertex_format_standard();
     var out: [8]vk.VertexInputAttributeDescription;
     if (!attributes_are(vertex_attributes(?f, ?out[0], 8), 3)) { ret 1; }
@@ -852,7 +852,7 @@ test "pipeline: vertex input follows the format's locations and offsets" {
     ret 0;
 }
 
-test "pipeline: a two-component attribute is described as a two-component format" {
+test pipeline__two_component_attribute_described_two_component {
     # A vec2 has to reach Vulkan as R32G32, not as the R32G32B32 a position
     # usually is. Getting the component count from the semantic rather than the
     # attribute would read a third float per vertex out of the next one's
@@ -867,7 +867,7 @@ test "pipeline: a two-component attribute is described as a two-component format
     ret 0;
 }
 
-test "pipeline: an unrepresentable attribute fails the whole format" {
+test pipeline__unrepresentable_attribute_fails_whole_format {
     var f: VertexFormat = vertex_format();
     vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0);
     vertex_format_add(?f, SEMANTIC_COLOR_0, 1, COMP_U32, 4, 1, 0);
@@ -879,7 +879,7 @@ test "pipeline: an unrepresentable attribute fails the whole format" {
     ret 0;
 }
 
-test "pipeline: a format larger than the output array is refused" {
+test pipeline__format_larger_output_array_refused {
     var f:         VertexFormat = vertex_format_standard();
     var out:       [8]vk.VertexInputAttributeDescription;
     val described: opt[u32]     = vertex_attributes(?f, ?out[0], 2);
@@ -887,7 +887,7 @@ test "pipeline: a format larger than the output array is refused" {
     ret 0;
 }
 
-test "pipeline: 2D and 3D descriptions differ where it matters" {
+test pipeline__2d_3d_descriptions_differ_where_matters {
     val a: PipelineDesc = pipeline_desc_3d();
     val b: PipelineDesc = pipeline_desc_2d();
     # Sprites and glyphs need blending and must not be culled or depth-tested;
@@ -901,7 +901,7 @@ test "pipeline: 2D and 3D descriptions differ where it matters" {
     ret 0;
 }
 
-test "pipeline: raster depth bias maps exactly to Vulkan state" {
+test pipeline__raster_depth_bias_maps_exactly_vulkan {
     var d: PipelineDesc = pipeline_desc_3d();
     d.depth_bias          = true;
     d.depth_bias_constant = 1.25;
@@ -916,13 +916,13 @@ test "pipeline: raster depth bias maps exactly to Vulkan state" {
     ret 0;
 }
 
-test "pipeline: depth convention selects the matching comparison" {
+test pipeline__depth_convention_selects_matching_comparison {
     if (depth_compare_op(DepthConvention.forward{}) != vk.COMPARE_OP_LESS)     { ret 1; }
     if (depth_compare_op(DepthConvention.reversed{}) != vk.COMPARE_OP_GREATER) { ret 2; }
     ret 0;
 }
 
-test "pipeline: blend modes map to exact attachment factors" {
+test pipeline__blend_modes_map_exact_attachment_factors {
     val opaque: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.opaque{});
     if (opaque.blendEnable != vk.FALSE
         || opaque.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
@@ -946,7 +946,7 @@ test "pipeline: blend modes map to exact attachment factors" {
     ret 0;
 }
 
-test "pipeline: teardown on a pipeline that was never created is a no-op" {
+test pipeline__teardown_pipeline_never_created_no_op {
     var p: Pipeline;
     p.handle     = nil;
     p.layout     = nil;
@@ -958,7 +958,7 @@ test "pipeline: teardown on a pipeline that was never created is a no-op" {
     ret 0;
 }
 
-test "pipeline: the full layout declares every binding a stage may read" {
+test pipeline__full_layout_declares_binding_stage_may {
     var l: SetLayout = set_layout_full();
     # The vertex stage's transforms at 0, a material's first texture at 1, the
     # tint at 2, the joint palette at 3, the game's own block at 4, a material's
@@ -980,14 +980,14 @@ test "pipeline: the full layout declares every binding a stage may read" {
     ret 0;
 }
 
-test "pipeline: the mesh layout declares only its one uniform" {
+test pipeline__mesh_layout_declares_uniform {
     var l: SetLayout = set_layout_mesh();
     if (l.count != 1)                  { ret 1; }
     if (l.kinds[0] != BINDING_UNIFORM) { ret 2; }
     ret 0;
 }
 
-test "pipeline: a layout counts descriptors per kind, not per set" {
+test pipeline__layout_counts_descriptors_per_kind_not {
     # What the pool has to be sized by. The full set holds three uniforms, four
     # samplers and two storage buffers, so a pool sized at one of each per set
     # runs out at the first draw. descriptor.mach's pool sizes are derived from
@@ -1003,7 +1003,7 @@ test "pipeline: a layout counts descriptors per kind, not per set" {
     ret 0;
 }
 
-test "pipeline: a gap in the bindings does not shift the later ones" {
+test pipeline__gap_bindings_does_not_shift_later {
     # A shader is free to leave a binding number unused. Packing the list would
     # silently move binding 3 to binding 1.
     var l: SetLayout = set_layout();
@@ -1017,14 +1017,14 @@ test "pipeline: a gap in the bindings does not shift the later ones" {
     ret 0;
 }
 
-test "pipeline: a binding past the table is refused" {
+test pipeline__binding_past_table_refused {
     var l: SetLayout = set_layout();
     if (set_layout_at(?l, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 1; }
     if (l.count != 0)                                          { ret 2; }
     ret 0;
 }
 
-test "pipeline: a material's texture index maps to its binding" {
+test pipeline__material_s_texture_index_maps_binding {
     # Index 0 stays at binding 1 because every shader boom ships declares it
     # there. The rest follow the uniform and storage bindings rather than
     # displacing them.

@@ -884,7 +884,7 @@ fun fixture_triangle_glb(out: *u8) usize {
     ret total;
 }
 
-test "mesh: a POSITION-only primitive is conformed to the standard layout" {
+test mesh__position_primitive_conformed_standard_layout {
     # The asset carries one attribute; the shaders declare three. Mirroring the
     # asset would give the pipeline no attribute behind in_normal and in_uv,
     # which is invalid vertex input rather than a mesh that draws untextured.
@@ -1050,7 +1050,7 @@ fun fixture_skinned_glb(out: *u8) usize {
     ret total;
 }
 
-test "mesh: the highest joint index is found across every vertex and lane" {
+test mesh__highest_joint_index_found_across_vertex {
     # The fixture's joint indices run 0..11 across three vertices. Scanning only
     # the first vertex, or only the first lane, would report 3 or 8 and let a
     # model through whose later vertices index outside the palette.
@@ -1086,7 +1086,7 @@ test "mesh: the highest joint index is found across every vertex and lane" {
     ret 0;
 }
 
-test "mesh: an unskinned layout reports no joints rather than zero" {
+test mesh__unskinned_layout_reports_no_joints_rather {
     # Zero is a valid joint index, so a mesh with no joints at all has to be
     # distinguishable from one that only ever references joint 0. Otherwise a
     # static mesh would be rejected against a skeleton with no joints.
@@ -1118,7 +1118,7 @@ test "mesh: an unskinned layout reports no joints rather than zero" {
     ret 0;
 }
 
-test "mesh: a skinned primitive is conformed to the skinned layout" {
+test mesh__skinned_primitive_conformed_skinned_layout {
     var glb: [1024]u8;
     val n:   usize = fixture_skinned_glb(?glb[0]);
 
@@ -1201,7 +1201,7 @@ test "mesh: a skinned primitive is conformed to the skinned layout" {
     ret 0;
 }
 
-test "mesh: bounds come from the POSITION attribute, wherever it sits" {
+test mesh__bounds_come_position_attribute_wherever_sits {
     # A format is free to order its attributes, and reading the wrong one gives
     # a box built from normals: a unit cube around the origin, which looks
     # entirely plausible and culls the mesh as soon as it moves.
@@ -1237,7 +1237,7 @@ test "mesh: bounds come from the POSITION attribute, wherever it sits" {
     ret 0;
 }
 
-test "mesh: a two-component position gives a flat box, not an empty one" {
+test mesh__two_component_position_gives_flat_box {
     # The 2D formats carry vec2 positions. Refusing them would leave every
     # sprite mesh with an empty box, which culls it entirely.
     var f: VertexFormat = vertex_format();
@@ -1254,7 +1254,7 @@ test "mesh: a two-component position gives a flat box, not an empty one" {
     ret 0;
 }
 
-test "mesh: a format with no position has no bounds" {
+test mesh__format_no_position_has_no_bounds {
     # Rather than a box built from whatever the first attribute happens to be.
     # An empty box culls the mesh, which is the safe answer for geometry this
     # renderer cannot place.

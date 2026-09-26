@@ -811,7 +811,7 @@ pub fun sampler_dnit(s: vk.Sampler, v: *Vk) {
 # masks: the two places where a wrong answer is accepted by Vulkan and shows up
 # as a black texture on some hardware and not others.
 
-test "image: byte size is width times height times four" {
+test image__byte_size_width_times_height_times {
     if (image_bytes(2, 3) != 24)  { ret 1; }
     if (image_bytes(1, 1) != 4)   { ret 2; }
     if (image_bytes(0, 100) != 0) { ret 3; }
@@ -823,7 +823,7 @@ fun raw_bytes_are(i: *Image, expected: usize) bool {
     ret sel raw.some && raw.some == expected;
 }
 
-test "image: raw byte size follows the image format" {
+test image__raw_byte_size_follows_image_format {
     var i: Image;
     i.width  = 2;
     i.height = 3;
@@ -837,7 +837,7 @@ test "image: raw byte size follows the image format" {
     ret 0;
 }
 
-test "image: a large texture does not overflow its size" {
+test image__large_texture_does_not_overflow_size {
     # 16384 x 16384 RGBA is 1 GiB, which wraps a 32-bit multiply to zero and
     # would allocate a staging buffer smaller than the copy that follows.
     val n: usize = image_bytes(16384, 16384);
@@ -845,7 +845,7 @@ test "image: a large texture does not overflow its size" {
     ret 0;
 }
 
-test "image: the receive transition waits for nothing and writes at transfer" {
+test image__receive_transition_waits_nothing_writes_transfer {
     val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
         vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (!sel m.some)                                           { ret 1; }
@@ -856,7 +856,7 @@ test "image: the receive transition waits for nothing and writes at transfer" {
     ret 0;
 }
 
-test "image: the read transition orders the copy before the fragment stage" {
+test image__read_transition_orders_copy_before_fragment {
     val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     if (!sel m.some) { ret 1; }
@@ -870,7 +870,7 @@ test "image: the read transition orders the copy before the fragment stage" {
     ret 0;
 }
 
-test "image: an unhandled transition is refused rather than zeroed" {
+test image__unhandled_transition_refused_rather_zeroed {
     # Emitting a barrier with zeroed masks synchronizes nothing while looking
     # like it did, so a pair the table does not carry must fail rather than be
     # recorded. These are arbitrary pairs nothing in boom performs. The point is
@@ -884,7 +884,7 @@ test "image: an unhandled transition is refused rather than zeroed" {
     ret 0;
 }
 
-test "image: a live image can be written into and left readable" {
+test image__live_image_can_written_left_readable {
     # The glyph atlas writes one cell of a page that is already being sampled.
     # Unlike a fresh upload the old layout is not UNDEFINED, so the barrier has
     # to order the write after any sampling still in flight rather than let the
@@ -903,7 +903,7 @@ test "image: a live image can be written into and left readable" {
     ret 0;
 }
 
-test "image: the window's image is read after its colour writes and handed on to present" {
+test image__window_s_image_read_after_colour {
     # A window readback copies the swapchain image between the last pass and
     # the present. The copy must wait for the colour attachment writes, and the
     # hand-off to the presentation engine names no access, exactly as the
@@ -933,7 +933,7 @@ test "image: the window's image is read after its colour writes and handed on to
     ret 0;
 }
 
-test "image: a region write refuses an image that was never created" {
+test image__region_write_refuses_image_never_created {
     var i:  Image;
     var v:  Vk;
     var px: [4]u8;
@@ -942,7 +942,7 @@ test "image: a region write refuses an image that was never created" {
     ret 0;
 }
 
-test "image: a region write refuses a rectangle outside the image" {
+test image__region_write_refuses_rectangle_outside_image {
     # the bounds are checked before anything touches the device, so a stub
     # image that claims to be ready is enough to reach them
     var i: Image;
@@ -961,7 +961,7 @@ test "image: a region write refuses a rectangle outside the image" {
     ret 0;
 }
 
-test "image: a target's colour image can be made readable before anything draws" {
+test image__target_s_colour_image_can_made {
     # A game may sample a render target before its first render. The image is
     # in UNDEFINED then, while the descriptor claims SHADER_READ_ONLY_OPTIMAL,
     # which is a lie about the layout rather than merely undefined contents.
@@ -977,7 +977,7 @@ test "image: a target's colour image can be made readable before anything draws"
     ret 0;
 }
 
-test "image: teardown on an image that was never created is a no-op" {
+test image__teardown_image_never_created_no_op {
     var i: Image;
     i.handle = nil;
     i.memory = nil;
@@ -1124,7 +1124,7 @@ pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
     }
 }
 
-test "image: a colour space maps to the format that applies its transfer function" {
+test image__colour_space_maps_format_applies_transfer {
     # An sRGB texture read through a UNORM image hands the shader raw bytes as
     # though they were linear. Every stage then does exactly what it was told
     # and the result is washed out, with no diagnostic anywhere.
@@ -1133,13 +1133,13 @@ test "image: a colour space maps to the format that applies its transfer functio
     ret 0;
 }
 
-test "image: a zeroed colour space is sRGB, the space textures are authored in" {
+test image__zeroed_colour_space_srgb_space_textures {
     var space: ColorSpace;
     if (!sel space.srgb) { ret 1; }
     ret 0;
 }
 
-test "image: the depth format is the one every implementation must support" {
+test image__depth_format_implementation_must_support {
     # A format chosen without a query has to be one the spec mandates. It is
     # also what makes the window pass and an offscreen target's compatible, so
     # changing it here without changing both breaks every pipeline.
@@ -1147,7 +1147,7 @@ test "image: the depth format is the one every implementation must support" {
     ret 0;
 }
 
-test "image: teardown of a never-created depth attachment is a no-op" {
+test image__teardown_never_created_depth_attachment_no {
     var d: DepthAttachment;
     d.image = nil;
     d.mem   = nil;

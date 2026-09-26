@@ -439,7 +439,7 @@ fun renderer_message(e: RendererError) str {
     ret "the surface does not offer TRANSFER_SRC, so the window cannot be read back";
 }
 
-test "error: a Vulkan failure keeps its call and result" {
+test error__vulkan_failure_keeps_call_result {
     val e: Error = vk_failed(VkCall.create_buffer{}, -2);
     if (!sel e.vulkan)                    { ret 1; }
     if (!sel e.vulkan.call.create_buffer) { ret 2; }
@@ -447,13 +447,13 @@ test "error: a Vulkan failure keeps its call and result" {
     ret 0;
 }
 
-test "error: the driver-missing result is named" {
+test error__driver_missing_result_named {
     val m: str = vk_result_message(-9);
     if (m[0] != 'V' || m[9] != 'I') { ret 1; }
     ret 0;
 }
 
-test "error: every case renders a message" {
+test error__case_renders_message {
     val m: str = error_message(Error.full{Capacity.pipelines{}});
     if (m[0] != 't') { ret 1; }
     val v: str = error_message(vk_failed(VkCall.queue_present{}, -4));

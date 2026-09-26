@@ -426,7 +426,7 @@ pub fun storage_dnit(s: *FrameStorage, v: *Vk) {
 # mistake hands a shader a buffer shorter than the payload or lets one frame
 # write into the buffer the other is being drawn from.
 
-test "storage: the schedule doubles until the need fits" {
+test storage__schedule_doubles_until_need_fits {
     # A schedule that grew by a fixed step would allocate a buffer per frame for
     # a payload creeping up by one light, and reach MAX_STORAGE_BUFFERS in
     # sixteen frames.
@@ -448,7 +448,7 @@ fun refused(r: err[Error]) bool {
     ret sel r.err;
 }
 
-test "storage: a schedule never returns less than the need" {
+test storage__schedule_never_returns_less_need {
     # The one property that matters: a capacity short of the payload is a shader
     # reading past the end of its block, which no layer reports and which draws.
     var need: usize = 1;
@@ -461,7 +461,7 @@ test "storage: a schedule never returns less than the need" {
     ret 0;
 }
 
-test "storage: growth never shrinks what a frame already has" {
+test storage__growth_never_shrinks_frame_already_has {
     # The replaced buffer is retained but not read from again, so a schedule
     # that answered smaller than the current capacity would move the payload
     # into a buffer that cannot hold what the frame had already written.
@@ -471,7 +471,7 @@ test "storage: growth never shrinks what a frame already has" {
     ret 0;
 }
 
-test "storage: a need past the ceiling is refused rather than clamped" {
+test storage__need_past_ceiling_refused_rather_clamped {
     # Clamping would hand back a buffer holding part of the payload, and the
     # shader would read the rest as whatever the tail contains.
     val past: opt[usize] = storage_size_for(0, STORAGE_MAX_BYTES + 1);
@@ -480,7 +480,7 @@ test "storage: a need past the ceiling is refused rather than clamped" {
     ret 0;
 }
 
-test "storage: the ceiling is reachable by doubling from the base" {
+test storage__ceiling_reachable_doubling_base {
     # A base that did not divide the ceiling would leave the last doubling
     # overshooting it, and storage_size_for would answer a size the ceiling
     # forbids. Counting the steps is the other half: every one of them is a
@@ -497,7 +497,7 @@ test "storage: the ceiling is reachable by doubling from the base" {
     ret 0;
 }
 
-test "storage: every capacity is a legal storage descriptor" {
+test storage__capacity_legal_storage_descriptor {
     # Two device rules, neither of which this can query. The range a descriptor
     # names is the whole buffer, so a capacity past the smallest
     # maxStorageBufferRange any implementation may report is a descriptor a
@@ -518,7 +518,7 @@ test "storage: every capacity is a legal storage descriptor" {
     ret 0;
 }
 
-test "storage: a write is refused before the storage is created" {
+test storage__write_refused_before_storage_created {
     # Refused rather than copied into a nil mapping, which is a fault in the
     # middle of a frame rather than a number a game can read.
     var s: FrameStorage;
@@ -532,7 +532,7 @@ test "storage: a write is refused before the storage is created" {
     ret 0;
 }
 
-test "storage: a frame past the ring is refused rather than indexing off it" {
+test storage__frame_past_ring_refused_rather_indexing {
     var s: FrameStorage;
     var v: Vk;
     s.ready   = true;
@@ -545,7 +545,7 @@ test "storage: a frame past the ring is refused rather than indexing off it" {
     ret 0;
 }
 
-test "storage: a write that fits lands at its offset and moves the mark" {
+test storage__write_fits_lands_offset_moves_mark {
     # No device, so the buffer is a stack array standing in for the mapping.
     # What is under test is the offset arithmetic: a write landing anywhere else
     # is a payload the shader indexes correctly and finds the wrong bytes in.
@@ -585,7 +585,7 @@ test "storage: a write that fits lands at its offset and moves the mark" {
     ret 0;
 }
 
-test "storage: a write past the capacity with no device is refused, not truncated" {
+test storage__write_past_capacity_no_device_refused {
     # The ceiling case: growth is unavailable, so exhaustion has to be
     # reportable. Copying the prefix that fit would give the shader a list whose
     # last entries are whatever the tail held.
@@ -611,7 +611,7 @@ test "storage: a write past the capacity with no device is refused, not truncate
     ret 0;
 }
 
-test "storage: an offset that wraps the address space is refused" {
+test storage__offset_wraps_address_space_refused {
     # offset + len wrapping to a small number would pass the capacity check and
     # then copy through a pointer far outside the mapping.
     var s:       FrameStorage;
@@ -630,7 +630,7 @@ test "storage: an offset that wraps the address space is refused" {
     ret 0;
 }
 
-test "storage: each frame writes its own buffer" {
+test storage__frame_writes_buffer {
     # Two frames are in flight, so the CPU fills one while the GPU reads the
     # other. Sharing a buffer would make this frame's light list land in the
     # middle of what the GPU is still drawing from, which flickers under load
@@ -678,7 +678,7 @@ test "storage: each frame writes its own buffer" {
     ret 0;
 }
 
-test "storage: a frame is bound to the last buffer it created" {
+test storage__frame_bound_last_buffer_created {
     # The retained ones are still named by draws recorded before the growth, so
     # they stay in the array. Binding one of them for a later draw would hand
     # the shader the payload as it stood before it grew.
@@ -699,7 +699,7 @@ test "storage: a frame is bound to the last buffer it created" {
     ret 0;
 }
 
-test "storage: teardown on storage that was never created is a no-op" {
+test storage__teardown_storage_never_created_no_op {
     var s: FrameStorage;
     var v: Vk;
     v.ready = false;
