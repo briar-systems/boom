@@ -39,8 +39,6 @@ use boom.math.vec.Vec2;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec2;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.option.opt;
 use std.types.size.usize;
 

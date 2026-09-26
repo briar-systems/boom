@@ -46,11 +46,9 @@ use std.print;
 use std.runtime;
 use std.types.bool.bool;
 use std.types.bool.false;
-use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
-use std.types.string.str;
 
 # The game's own state, carried through ctx.user.
 # ---

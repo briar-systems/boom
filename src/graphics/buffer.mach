@@ -25,8 +25,6 @@ use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use mem: std.memory;
-use std.types.bool.bool;
-use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;

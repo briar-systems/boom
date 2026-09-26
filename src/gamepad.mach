@@ -18,7 +18,6 @@
 use inp: boom.input;
 use glfw;
 use glfw.c;
-use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;

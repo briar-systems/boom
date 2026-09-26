@@ -22,8 +22,6 @@ use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.string.str;

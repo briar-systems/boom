@@ -26,7 +26,6 @@ use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.math.mat.Mat4;
 use boom.math.mat.mat4_from_quat;
-use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_orthographic;
 use boom.math.mat.mat4_project_point;
@@ -40,8 +39,6 @@ use boom.math.vec.Vec3;
 use boom.math.vec.vec2;
 use boom.math.vec.vec3;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 
 # A view of a 2D world.
 # ---

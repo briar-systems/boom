@@ -19,8 +19,6 @@ use boom.math.quat.quat_from_axis_angle;
 use boom.math.vec.Vec3;
 use boom.math.vec.vec3;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 
 # The corners of a box, or an empty one.
 # ---
