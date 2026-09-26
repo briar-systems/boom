@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-26
+
 ### Changed
+- **Breaking.** boom requires mach 6 (`mach = "^6"`) and builds against std
+  9.0, declared `^9.0` (#200). The graphics dependencies move to their mach 6
+  releases: glfw `^0.9`, audio `^0.10`, image `^0.8`, font `^0.9`, vk `^0.7`,
+  gltf `^0.8` and shader `^0.4`, each pinned by its gitlink (std 9.0.0, glfw
+  0.9.0, audio 0.10.0, image 0.8.0, font 0.9.0, vk 0.7.0, gltf 0.8.0, shader
+  0.4.0). Resolution is flat, so a consumer moves its root to mach 6 and std
+  9 with this release. Nothing boom exports changes shape, and std 9's one
+  behaviour change, an empty needle in `str_index_of` and its relatives,
+  touches nothing boom calls. The demos declare `mach = "^6"` and pin std
+  `tag/v9.0.0`.
+- Every test is named by identifier (`test subject__case`), as mach 6
+  requires, and the suite is pruned to mach's test policy, from 488 tests to
+  246 (#200). Sweeps and near-duplicates fold into one test per subject, and
+  checks of trivial code, the timing-dependent audio claim race, the
+  environment-dependent live-clock and vfs user-root checks, and a face
+  decode pin on a miscompile fixed in mach 5.2.1 are gone. Test-only helpers
+  are `#[testing]`. `test/selections/verify.sh` matches declared tests to
+  `mach test --list` by qualified name.
+- CI seeds mach 6.1.0, and the library, its test fixture and the demos drop
+  the 52 imports it reports as unused (#202).
 - The examples move from `examples/<name>` to `demo/<name>` (#196), each still
   its own project, and their artifact entries move under `src/bin/`:
   `src/bin/main.mach` for each executable, and `src/bin/shaders/` for the
