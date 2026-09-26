@@ -151,14 +151,11 @@ fun absf(x: f32) f32 {
     ret x;
 }
 
-# --------------------------------------------------------------------- tests
-#
-# Every check here is against a camera whose view is known by construction, so
-# the expected answers come from the geometry rather than from running the code
-# and recording what it said.
+# expected answers come from geometry known by construction, not recorded output
 
-# A camera at (0, 0, 10) looking at the origin down -z, 90 degrees vertical,
-# square aspect, near 1 far 100.
+# a camera at (0, 0, 10) looking at the origin down -z, 90 degrees vertical,
+# square aspect, near 1 far 100
+#[testing]
 fun test_frustum() Frustum {
     var c: Camera = camera_perspective(vec3(0.0, 0.0, 10.0), vec3(0.0, 0.0, 0.0),
         1.5707963, 1.0, 1.0, 100.0);
@@ -168,6 +165,7 @@ fun test_frustum() Frustum {
     ret frustum_from_matrix(?vp);
 }
 
+#[testing]
 fun box_at(x: f32, y: f32, z: f32, r: f32) Aabb {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(x - r, y - r, z - r));
@@ -175,91 +173,47 @@ fun box_at(x: f32, y: f32, z: f32, r: f32) Aabb {
     ret b;
 }
 
-test frustum__box_point_camera_looks_visible {
+test frustum_contains_aabb__each_plane_rejects {
     var f: Frustum = test_frustum();
     var b: Aabb    = box_at(0.0, 0.0, 0.0, 1.0);
     if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
+    # behind the eye, which without a near plane projects back mirrored
+    b = box_at(0.0, 0.0, 20.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 2; }
+    # past the far plane at z = -90
+    b = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 3; }
+    # the half-extent at the origin is 10, so x or y = 100 is outside
+    b = box_at(100.0, 0.0, 0.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 4; }
+    b = box_at(0.0, 100.0, 0.0, 1.0);
+    if (frustum_contains_aabb(?f, ?b)) { ret 5; }
+    # vulkan clips at z_ndc < 0, opengl at -1, and the two differ only between
+    # the eye and the near plane (world z in (9, 10)), which the grid never samples
+    b = box_at(0.0, 0.0, 9.5, 0.1);
+    if (frustum_contains_aabb(?f, ?b)) { ret 6; }
+    b = box_at(0.0, 0.0, 8.5, 0.1);
+    if (!frustum_contains_aabb(?f, ?b)) { ret 7; }
     ret 0;
 }
 
-test frustum__box_behind_camera_rejected {
-    # The case that matters most: without a near plane, geometry behind the eye
-    # projects back onto the screen mirrored, so failing to reject it draws
-    # things that are not there.
+test frustum_contains_aabb__partial_overlap_kept_empty_rejected {
     var f: Frustum = test_frustum();
-    var b: Aabb    = box_at(0.0, 0.0, 20.0, 1.0);
-    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
-    ret 0;
-}
-
-test frustum__box_beyond_far_plane_rejected {
-    # The camera sits at z = 10 with a far plane 100 away, so anything past
-    # z = -90 is outside it.
-    var f: Frustum = test_frustum();
-    var b: Aabb    = box_at(0.0, 0.0, 0.0 - 200.0, 1.0);
-    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
-    ret 0;
-}
-
-test frustum__reversed_infinite_perspective_clips_near_has {
-    var p: Mat4    = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
-    var f: Frustum = frustum_from_matrix(?p);
-
-    if (f.planes[4][0] != 0.0 || f.planes[4][1] != 0.0
-        || f.planes[4][2] != 0.0 || f.planes[4][3] <= 0.0) { ret 1; }
-
-    var before_near: Aabb = box_at(0.0, 0.0, 0.0 - 0.05, 0.01);
-    if (frustum_contains_aabb(?f, ?before_near)) { ret 2; }
-
-    var distant: Aabb = box_at(0.0, 0.0, 0.0 - 130000.0, 10.0);
-    if (!frustum_contains_aabb(?f, ?distant)) { ret 3; }
-    ret 0;
-}
-
-test frustum__box_off_side_rejected {
-    # At 90 degrees vertical the half-extent at the origin equals the distance,
-    # which is 10, so a small box at x = 100 is far outside.
-    var f: Frustum = test_frustum();
-    var b: Aabb    = box_at(100.0, 0.0, 0.0, 1.0);
-    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
-    var a: Aabb = box_at(0.0, 100.0, 0.0, 1.0);
-    if (frustum_contains_aabb(?f, ?a)) { ret 2; }
-    ret 0;
-}
-
-test frustum__box_straddling_edge_kept {
-    # Conservative in the direction that matters. A box mostly off screen but
-    # partly on it must be drawn, or things vanish as they leave the view
-    # instead of sliding off it.
-    var f: Frustum = test_frustum();
-    # At the origin the visible half-width is 10, so a box spanning x from 5 to
-    # 105 crosses the right edge.
+    # a box crossing the right edge is drawn, or things vanish as they leave view
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(5.0, 0.0 - 1.0, 0.0 - 1.0));
     aabb_add(?b, vec3(105.0, 1.0, 1.0));
     if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
+    # a huge box around the camera has its centre outside several planes
+    b = box_at(0.0, 0.0, 0.0, 1000.0);
+    if (!frustum_contains_aabb(?f, ?b)) { ret 2; }
+    # an empty box's sentinel corners are not coordinates
+    b = aabb_empty();
+    if (frustum_contains_aabb(?f, ?b)) { ret 3; }
     ret 0;
 }
 
-test frustum__huge_box_containing_camera_kept {
-    # Its centre is outside several planes at once while the box itself fills
-    # the view. A test that rejected on the centre alone would cull the ground.
-    var f: Frustum = test_frustum();
-    var b: Aabb    = box_at(0.0, 0.0, 0.0, 1000.0);
-    if (!frustum_contains_aabb(?f, ?b)) { ret 1; }
-    ret 0;
-}
-
-test frustum__empty_box_not_visible {
-    # A mesh with no geometry has nothing to draw, and the sentinel corners an
-    # empty box carries would otherwise be tested as real coordinates.
-    var f: Frustum = test_frustum();
-    var b: Aabb    = aabb_empty();
-    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
-    ret 0;
-}
-
-test frustum__planes_agree_projection_they_came {
+test frustum__planes_agree_with_projection {
     # The cross-check. A point is inside the frustum exactly when the matrix
     # maps it into the clip volume, and those are two separate derivations: if
     # they disagree, culling removes things that would have been drawn and
@@ -304,7 +258,22 @@ test frustum__planes_agree_projection_they_came {
     ret 0;
 }
 
-test frustum__orthographic_projection_culls_same_way {
+test frustum__reversed_infinite_has_near_no_far {
+    var p: Mat4    = mat4_perspective_reversed_infinite(1.5707963, 1.0, 0.1);
+    var f: Frustum = frustum_from_matrix(?p);
+
+    if (f.planes[4][0] != 0.0 || f.planes[4][1] != 0.0
+        || f.planes[4][2] != 0.0 || f.planes[4][3] <= 0.0) { ret 1; }
+
+    var before_near: Aabb = box_at(0.0, 0.0, 0.0 - 0.05, 0.01);
+    if (frustum_contains_aabb(?f, ?before_near)) { ret 2; }
+
+    var distant: Aabb = box_at(0.0, 0.0, 0.0 - 130000.0, 10.0);
+    if (!frustum_contains_aabb(?f, ?distant)) { ret 3; }
+    ret 0;
+}
+
+test frustum__orthographic_sides_parallel {
     # Orthographic has no eye point, so its side planes are parallel rather
     # than fanning. A frustum built only against perspective would have the
     # side planes right by accident and the near plane wrong.
@@ -327,27 +296,7 @@ test frustum__orthographic_projection_culls_same_way {
     ret 0;
 }
 
-test frustum__near_plane_vulkan_s_not_opengl {
-    # The depth conventions differ only between the eye and the near plane:
-    # Vulkan clips at z_ndc < 0, OpenGL at z_ndc < -1. Everything beyond the
-    # near plane agrees, so a sweep that does not sample that narrow band
-    # cannot tell the two apart, and the grid check above does not.
-    #
-    # The camera sits at z = 10 with near = 1, so the near plane is at z = 9 and
-    # the band is world z in (9, 10). A box at z = 9.5 is in front of the eye
-    # and nearer than the near plane, so it must be rejected.
-    var f: Frustum = test_frustum();
-    var b: Aabb    = box_at(0.0, 0.0, 9.5, 0.1);
-    if (frustum_contains_aabb(?f, ?b)) { ret 1; }
-
-    # And one just beyond the near plane is kept, so the plane is in the right
-    # place rather than merely rejecting everything nearby.
-    var c: Aabb = box_at(0.0, 0.0, 8.5, 0.1);
-    if (!frustum_contains_aabb(?f, ?c)) { ret 2; }
-    ret 0;
-}
-
-test frustum__plane_normal_unit_length {
+test frustum__planes_unit_length {
     # The box test compares a centre distance against a box reach, and both
     # scale with the plane, so it gives the same answer either way: nothing in
     # this module fails if the planes are left unnormalized. What breaks is a

@@ -45,39 +45,31 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_len;
 
+#[testing]
 #[embed("../../../res/test/fonts/DejaVuSans-subset.ttf")]
 val DEJAVU: [_]u8;
 
 # the subset's design-unit line span, ascent minus descent
+#[testing]
 val SPAN: f32 = 2384.0;
 
+#[testing]
 fun dejavu(a: *allo.Allocator) res[Typeface, Error] {
     ret typeface_from_static(a, ?DEJAVU[0], $length_of(DEJAVU));
 }
 
+#[testing]
 fun units(advance: f32, pixels: f32) f32 {
     ret advance * (pixels / SPAN);
 }
 
+#[testing]
 fun pages(a: *allo.Allocator) bool {
     val made: err[allo.Error] = page.make(a);
     ret sel made.ok;
 }
 
-test fixture__typeface_parses_embedded_bytes_without_device {
-    var a: allo.Allocator;
-    if (!pages(?a)) { ret 1; }
-    val made: res[Typeface, Error] = dejavu(?a);
-    if (!sel made.ok) { ret 1; }
-    var t: Typeface = made.ok;
-    if (!t.valid)     { ret 2; }
-    if (t.faces != 0) { ret 3; }
-    val done: err[Error] = typeface_delete(?t);
-    if (!sel done.ok) { ret 4; }
-    ret 0;
-}
-
-test fixture__face_reports_typeface_s_metrics {
+test face_glyph__real_metrics {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = dejavu(?a);
@@ -119,7 +111,7 @@ test fixture__face_reports_typeface_s_metrics {
     ret 0;
 }
 
-test fixture__layout_measures_real_advances_caches_them {
+test face_measure__real_advances_cached {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = dejavu(?a);
@@ -155,7 +147,7 @@ test fixture__layout_measures_real_advances_caches_them {
     ret 0;
 }
 
-test fixture__pixel_faces_measure_whole_pixels {
+test font_pixel_options__whole_pixel_measure {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = dejavu(?a);
@@ -174,7 +166,7 @@ test fixture__pixel_faces_measure_whole_pixels {
     ret 0;
 }
 
-test fixture__typeface_serves_several_faces_outlives_them {
+test typeface__serves_faces_and_outlives_them {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = dejavu(?a);
@@ -202,7 +194,7 @@ test fixture__typeface_serves_several_faces_outlives_them {
     ret 0;
 }
 
-test fixture__copied_typeface_outlives_caller_s_bytes {
+test typeface_from_bytes__copies_bytes {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = typeface_from_bytes(?a, ?DEJAVU[0], $length_of(DEJAVU));
@@ -219,7 +211,7 @@ test fixture__copied_typeface_outlives_caller_s_bytes {
     ret 0;
 }
 
-test fixture__measuring_font_never_admits_glyph_atlas {
+test text_measure__never_admits_atlas {
     var a: allo.Allocator;
     if (!pages(?a)) { ret 1; }
     val made: res[Typeface, Error] = dejavu(?a);

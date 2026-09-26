@@ -144,6 +144,7 @@ pub fun pose_matrices(pose: *Pose) *Mat4 {
 }
 
 # build a two-joint chain skeleton for tests: root then a child of it
+#[testing]
 fun fixture_chain(sk: *Skeleton) {
     sk.count      = 2;
     sk.parents[0] = opt[usize].none{};
@@ -160,7 +161,7 @@ fun fixture_chain(sk: *Skeleton) {
     }
 }
 
-test skeleton__composition_propagates_parent_transform_child {
+test skeleton_pose__composes_parent_into_child {
     var sk: Skeleton;
     fixture_chain(?sk);
 
@@ -180,13 +181,14 @@ test skeleton__composition_propagates_parent_transform_child {
     ret 0;
 }
 
-test skeleton__palette_tail_identity_not_whatever_stack {
+test skeleton_rest_pose__identity_tail_and_inverse_bind {
     # A skinned draw uploads all MAX_JOINTS matrices, because that is the size
     # of the storage block the shader declares. A vertex referencing a joint
     # past `count` would otherwise be transformed by uninitialized floats and
     # flung somewhere unbounded, stretching the whole mesh into a spike.
     var sk: Skeleton;
     fixture_chain(?sk);
+    sk.inverse_bind[1] = mat4_translation(vec3(0.0 - 3.0, 0.0, 0.0));
 
     var pose: Pose;
     # Dirty the tail first, so the fill is what is being observed rather than
@@ -208,31 +210,12 @@ test skeleton__palette_tail_identity_not_whatever_stack {
     # JOINTS_0 value most often lands on.
     val next: *Mat4 = ?pose.matrices[2];
     if (next.m[3][0] != 0.0 || next.m[3][3] != 1.0) { ret 4; }
-    ret 0;
-}
-
-test skeleton__palette_exactly_shader_s_storage_block {
-    # boom.graphics.renderer uploads $size_of(Mat4) * MAX_JOINTS bytes in one
-    # copy. A palette narrower than that reads past the Pose; wider, and the
-    # last joints come from the next draw's palette.
-    if ($size_of(Mat4) != 64)                { ret 1; }
-    if ($size_of(Mat4) * MAX_JOINTS != 8192) { ret 2; }
-    ret 0;
-}
-
-test skeleton__inverse_bind_matrix_folds_skinning_matrix {
-    var sk: Skeleton;
-    fixture_chain(?sk);
-    sk.inverse_bind[1] = mat4_translation(vec3(0.0 - 3.0, 0.0, 0.0));
-
-    var pose: Pose;
-    skeleton_rest_pose(?sk, ?pose);
     # rest globals are identity, so joint 1's skinning matrix is its inverse bind
-    if (pose.matrices[1].m[3][0] != 0.0 - 3.0) { ret 1; }
+    if (pose.matrices[1].m[3][0] != 0.0 - 3.0) { ret 5; }
     ret 0;
 }
 
-test skeleton__socket_globals_retain_parent_rotation_translation {
+test skeleton_globals__child_listed_before_parent {
     var sk: Skeleton;
     fixture_chain(?sk);
     sk.parents[0]       = opt[usize].some{1};

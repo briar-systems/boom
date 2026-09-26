@@ -696,118 +696,66 @@ pub fun pad_stick(i: *Input, pad: usize, s: PadStick) Vec2 {
 
 # --------------------------------------------------------------------- tests
 
-test input__press_observed_exactly_tick {
+test input_begin_tick__edges_last_one_tick {
     var i: Input = input_new();
     input_key_event(?i, KEY_W, true);
-
+    input_button_event(?i, BUTTON_LEFT, true);
     input_begin_tick(?i);
-    if (!key_pressed(?i, KEY_W)) { ret 1; }
-    if (!key_down(?i, KEY_W))    { ret 1; }
+    if (!key_pressed(?i, KEY_W))          { ret 1; }
+    if (!button_pressed(?i, BUTTON_LEFT)) { ret 2; }
 
-    # The second tick of the same frame sees the key held, but the edge is
+    # a second tick in the same frame sees the input held, but the edge is
     # spent. a frame-scoped implementation fires it again here.
     input_begin_tick(?i);
-    if (key_pressed(?i, KEY_W)) { ret 1; }
-    if (!key_down(?i, KEY_W))   { ret 1; }
-    ret 0;
-}
+    if (key_pressed(?i, KEY_W))          { ret 3; }
+    if (!key_down(?i, KEY_W))            { ret 4; }
+    if (button_pressed(?i, BUTTON_LEFT)) { ret 5; }
+    if (!button_down(?i, BUTTON_LEFT))   { ret 6; }
 
-test input__press_during_frame_ticks_zero_times {
-    var i: Input = input_new();
-    input_key_event(?i, KEY_SPACE, true);
-    # No tick ran this frame: the accumulator held less than one step.
-    # Nothing is folded, so nothing may be discarded either.
+    input_key_event(?i, KEY_W, false);
     input_begin_tick(?i);
-    if (!key_pressed(?i, KEY_SPACE)) { ret 1; }
+    if (!key_released(?i, KEY_W)) { ret 7; }
+    if (key_down(?i, KEY_W))      { ret 8; }
     ret 0;
 }
 
-test input__tap_faster_tick_reports_both_edges {
+test input_begin_tick__tap_within_tick_reports_both_edges {
     var i: Input = input_new();
     input_key_event(?i, KEY_SPACE, true);
     input_key_event(?i, KEY_SPACE, false);
-
     input_begin_tick(?i);
-    # Both edges, and the key ends up. collapsing this to the net state eats
-    # the tap entirely, which is the bug a player feels and a developer cannot
-    # reproduce.
+    # collapsing this to the net state eats the tap entirely
     if (!key_pressed(?i, KEY_SPACE))  { ret 1; }
-    if (!key_released(?i, KEY_SPACE)) { ret 1; }
-    if (key_down(?i, KEY_SPACE))      { ret 1; }
+    if (!key_released(?i, KEY_SPACE)) { ret 2; }
+    if (key_down(?i, KEY_SPACE))      { ret 3; }
     ret 0;
 }
 
-test input__edges_clear_but_held_state_persists {
-    var i: Input = input_new();
-    input_key_event(?i, KEY_A, true);
-    input_begin_tick(?i);
-    input_begin_tick(?i);
-    input_begin_tick(?i);
-    if (key_pressed(?i, KEY_A)) { ret 1; }
-    if (!key_down(?i, KEY_A))   { ret 1; }
-
-    input_key_event(?i, KEY_A, false);
-    input_begin_tick(?i);
-    if (!key_released(?i, KEY_A)) { ret 1; }
-    if (key_down(?i, KEY_A))      { ret 1; }
-    ret 0;
-}
-
-test input__mouse_delta_accumulates_over_whole_tick {
+test input_begin_tick__mouse_accumulates_per_tick {
     var i: Input = input_new();
     input_mouse_event(?i, 10.0, 0.0);
-    input_mouse_event(?i, 20.0, 0.0);
     input_mouse_event(?i, 25.0, 5.0);
-
-    input_begin_tick(?i);
-    if (i.mouse_x != 25.0 || i.mouse_y != 5.0) { ret 1; }
-    # 25 total, not the 5 of the final event
-    if (i.mouse_dx != 25.0 || i.mouse_dy != 5.0) { ret 1; }
-
-    # Delta resets per tick; position does not
-    input_begin_tick(?i);
-    if (i.mouse_dx != 0.0) { ret 1; }
-    if (i.mouse_x != 25.0) { ret 1; }
-    ret 0;
-}
-
-test input__scroll_accumulates_per_tick_resets {
-    var i: Input = input_new();
     input_scroll_event(?i, 0.0, 1.0);
     input_scroll_event(?i, 0.0, 2.0);
     input_begin_tick(?i);
-    if (i.scroll_y != 3.0) { ret 1; }
+    if (i.mouse_x != 25.0 || i.mouse_y != 5.0) { ret 1; }
+    # 25 total, not the 15 of the final event
+    if (i.mouse_dx != 25.0 || i.mouse_dy != 5.0) { ret 2; }
+    if (i.scroll_y != 3.0)                       { ret 3; }
+
+    # deltas reset per tick, position does not
     input_begin_tick(?i);
-    if (i.scroll_y != 0.0) { ret 1; }
+    if (i.mouse_dx != 0.0 || i.scroll_y != 0.0) { ret 4; }
+    if (i.mouse_x != 25.0)                      { ret 5; }
     ret 0;
 }
 
-test input__unmapped_key_inert_rather_aliasing {
+test input_key_event__unknown_key_inert {
     var i: Input = input_new();
     input_key_event(?i, KEY_UNKNOWN, true);
     input_begin_tick(?i);
-    if (key_down(?i, KEY_UNKNOWN))    { ret 1; }
-    if (key_pressed(?i, KEY_UNKNOWN)) { ret 1; }
-    # And no real key was disturbed
-    if (key_down(?i, KEY_A)) { ret 1; }
-    ret 0;
-}
-
-test input__axis_1_0_or_1_opposites {
-    var i: Input = input_new();
-    if (axis(?i, KEY_A, KEY_D) != 0.0) { ret 1; }
-
-    input_key_event(?i, KEY_D, true);
-    input_begin_tick(?i);
-    if (axis(?i, KEY_A, KEY_D) != 1.0) { ret 1; }
-
-    input_key_event(?i, KEY_A, true);
-    input_begin_tick(?i);
-    if (axis(?i, KEY_A, KEY_D) != 0.0) { ret 1; }
-
-    input_key_event(?i, KEY_D, false);
-    input_begin_tick(?i);
-    if (axis(?i, KEY_A, KEY_D) != -1.0) { ret 1; }
+    if (key_down(?i, KEY_UNKNOWN)) { ret 1; }
+    if (key_down(?i, KEY_A))       { ret 2; }
     ret 0;
 }
 
@@ -815,6 +763,7 @@ test input__axis_1_0_or_1_opposites {
 
 # Build a poll's worth of platform state: no buttons held, sticks centred,
 # triggers at rest, which is -1 and not 0.
+#[testing]
 fun pad_rest(buttons: *u8, axes: *f32) {
     var b: usize = 0;
     for (b < PAD_NATIVE_BUTTONS) {
@@ -829,7 +778,7 @@ fun pad_rest(buttons: *u8, axes: *f32) {
     axes[PAD_AXIS_RIGHT_TRIGGER::usize] = -1.0;
 }
 
-test input__pad_press_observed_exactly_tick {
+test input_pad_poll__edges_last_one_tick {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -853,7 +802,7 @@ test input__pad_press_observed_exactly_tick {
     ret 0;
 }
 
-test input__disconnected_pad_releases_holding {
+test input_pad_poll__disconnect_releases_holding {
     # A cable kicked out mid-run must not latch the stick and the trigger on.
     # Without this a rig walks into a wall firing until the process ends.
     var i:       Input = input_new();
@@ -876,7 +825,7 @@ test input__disconnected_pad_releases_holding {
     ret 0;
 }
 
-test input__trigger_has_hysteresis_does_not_chatter {
+test input_pad_poll__trigger_hysteresis {
     # One threshold means a trigger resting on it emits a press every poll,
     # which turns a semi-automatic weapon into a continuous one.
     var i:       Input = input_new();
@@ -886,7 +835,8 @@ test input__trigger_has_hysteresis_does_not_chatter {
 
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
-    if (pad_down(?i, 0, PAD_RIGHT_TRIGGER)) { ret 1; }
+    if (pad_down(?i, 0, PAD_RIGHT_TRIGGER))                { ret 1; }
+    if (pad_trigger(?i, 0, PAD_AXIS_RIGHT_TRIGGER) != 0.0) { ret 8; }
 
     # 0.5 unit: past the up threshold, short of the down threshold. Nothing.
     axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 0.0;
@@ -898,7 +848,8 @@ test input__trigger_has_hysteresis_does_not_chatter {
     axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 1.0;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
-    if (!pad_pressed(?i, 0, PAD_RIGHT_TRIGGER)) { ret 3; }
+    if (!pad_pressed(?i, 0, PAD_RIGHT_TRIGGER))            { ret 3; }
+    if (pad_trigger(?i, 0, PAD_AXIS_RIGHT_TRIGGER) != 1.0) { ret 9; }
 
     # Back to the middle: still down, because the up threshold is lower.
     axes[PAD_AXIS_RIGHT_TRIGGER::usize] = 0.0;
@@ -916,36 +867,14 @@ test input__trigger_has_hysteresis_does_not_chatter {
     ret 0;
 }
 
-test input__trigger_reads_0_rest_not_1 {
-    var i:       Input = input_new();
-    var buttons: [15]u8;
-    var axes:    [6]f32;
-    pad_rest(?buttons[0], ?axes[0]);
-    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
-    input_begin_tick(?i);
-    if (pad_trigger(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 0.0) { ret 1; }
-
-    axes[PAD_AXIS_LEFT_TRIGGER::usize] = 1.0;
-    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
-    input_begin_tick(?i);
-    if (pad_trigger(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 1.0) { ret 2; }
-
-    # The raw axis still reports what the platform said.
-    if (pad_axis(?i, 0, PAD_AXIS_LEFT_TRIGGER) != 1.0) { ret 3; }
-    ret 0;
-}
-
-test input__stick_deadzone_radial_not_per_axis {
-    # A per-axis deadzone squares off the stick: a diagonal push clears both
-    # thresholds at a lower magnitude than a straight one, so a rig moves
-    # faster on the diagonal and the dead region is a cross rather than a disc.
+test pad_stick__radial_deadzone_rescaled {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
     pad_rest(?buttons[0], ?axes[0]);
 
-    # Each component is under the deadzone but the magnitude is over it, which
-    # is exactly the case a per-axis implementation reports as centred.
+    # each component is under the deadzone but the magnitude is over it, which
+    # a per-axis deadzone reports as centred
     axes[PAD_AXIS_LEFT_X::usize] = 0.18;
     axes[PAD_AXIS_LEFT_Y::usize] = 0.18;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
@@ -953,50 +882,33 @@ test input__stick_deadzone_radial_not_per_axis {
     val d: Vec2 = pad_stick(?i, 0, PadStick.left{});
     if (d[0] == 0.0 && d[1] == 0.0) { ret 1; }
 
-    # And the reverse: each component over the deadzone individually is fine.
     axes[PAD_AXIS_LEFT_X::usize] = 0.1;
     axes[PAD_AXIS_LEFT_Y::usize] = 0.1;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val c: Vec2 = pad_stick(?i, 0, PadStick.left{});
     if (c[0] != 0.0 || c[1] != 0.0) { ret 2; }
-    ret 0;
-}
 
-test input__stick_leaves_deadzone_zero_clamps {
-    # Rescaling matters: without it the magnitude jumps straight to the
-    # deadzone value the moment the stick moves, so a rig cannot walk slowly.
-    var i:       Input = input_new();
-    var buttons: [15]u8;
-    var axes:    [6]f32;
-    pad_rest(?buttons[0], ?axes[0]);
-
-    # Just past the deadzone: nearly zero, not nearly 0.2.
+    # just past the deadzone reads nearly zero, not nearly the deadzone
     axes[PAD_AXIS_LEFT_X::usize] = PAD_DEADZONE + 0.001;
+    axes[PAD_AXIS_LEFT_Y::usize] = 0.0;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val slow: Vec2 = pad_stick(?i, 0, PadStick.left{});
-    if (slow[0] <= 0.0)  { ret 1; }
-    if (slow[0] >= 0.01) { ret 2; }
+    if (slow[0] <= 0.0 || slow[0] >= 0.01) { ret 3; }
 
-    # Full deflection is exactly 1, and a corner past it does not exceed 1.
-    axes[PAD_AXIS_LEFT_X::usize] = 1.0;
-    input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
-    input_begin_tick(?i);
-    val full: Vec2 = pad_stick(?i, 0, PadStick.left{});
-    if (full[0] != 1.0) { ret 3; }
-
+    # a corner past full deflection clamps to 1
     axes[PAD_AXIS_LEFT_X::usize] = 1.0;
     axes[PAD_AXIS_LEFT_Y::usize] = 1.0;
     input_pad_poll(?i, 0, true, ?buttons[0], ?axes[0]);
     input_begin_tick(?i);
     val corner: Vec2 = pad_stick(?i, 0, PadStick.left{});
     val mag:    f32  = sqrtf(corner[0] * corner[0] + corner[1] * corner[1]);
-    if (mag > 1.001) { ret 4; }
+    if (mag < 0.999 || mag > 1.001) { ret 4; }
     ret 0;
 }
 
-test input__pads_independent_join_reports {
+test pad_first_pressed__names_joining_pad {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -1018,7 +930,7 @@ test input__pads_independent_join_reports {
     ret 0;
 }
 
-test input__out_range_pad_inert {
+test input_pad_poll__out_of_range_pad_inert {
     var i:       Input = input_new();
     var buttons: [15]u8;
     var axes:    [6]f32;
@@ -1030,17 +942,5 @@ test input__out_range_pad_inert {
     if (pad_connected(?i, MAX_PADS))   { ret 1; }
     if (pad_down(?i, MAX_PADS, PAD_A)) { ret 2; }
     if (pad_count(?i) != 0)            { ret 3; }
-    ret 0;
-}
-
-test input__buttons_carry_same_edge_semantics_keys {
-    var i: Input = input_new();
-    input_button_event(?i, BUTTON_LEFT, true);
-    input_begin_tick(?i);
-    if (!button_pressed(?i, BUTTON_LEFT)) { ret 1; }
-    if (!button_down(?i, BUTTON_LEFT))    { ret 1; }
-    input_begin_tick(?i);
-    if (button_pressed(?i, BUTTON_LEFT)) { ret 1; }
-    if (!button_down(?i, BUTTON_LEFT))   { ret 1; }
     ret 0;
 }

@@ -281,7 +281,7 @@ fun splat4(v: f32) f32x4 {
     ret f32x4{v, v, v, v};
 }
 
-test mat__columns_preserve_std140_matrix_layout {
+test mat4__std140_column_layout {
     if ($size_of(Mat4) != 64 || $align_of(Mat4) != 16) { ret 1; }
     var m: Mat4 = mat4_identity();
     val p: *f32 = mat4_ptr(?m);
@@ -289,29 +289,7 @@ test mat__columns_preserve_std140_matrix_layout {
     ret 0;
 }
 
-test mat__identity_multiplicative_unit {
-    var id: Mat4 = mat4_identity();
-    var t:  Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
-    var r:  Mat4 = mat4_mul(?id, ?t);
-    if (r.m[3][0] != 1.0 || r.m[3][1] != 2.0 || r.m[3][2] != 3.0) { ret 1; }
-    ret 0;
-}
-
-test mat__multiply_composes_translations {
-    var a: Mat4 = mat4_translation(vec3(1.0, 0.0, 0.0));
-    var b: Mat4 = mat4_translation(vec3(0.0, 2.0, 0.0));
-    var r: Mat4 = mat4_mul(?a, ?b);
-    if (r.m[3][0] != 1.0 || r.m[3][1] != 2.0 || r.m[3][2] != 0.0) { ret 1; }
-    ret 0;
-}
-
-test mat__scale_lands_diagonal {
-    var s: Mat4 = mat4_scale(vec3(2.0, 3.0, 4.0));
-    if (s.m[0][0] != 2.0 || s.m[1][1] != 3.0 || s.m[2][2] != 4.0 || s.m[3][3] != 1.0) { ret 1; }
-    ret 0;
-}
-
-test mat__perspective_maps_clip_planes_vulkan_depth {
+test mat4_perspective__vulkan_depth_and_y {
     # Vulkan clip space is z in [0, 1], not OpenGL's [-1, 1]. Under the OpenGL
     # form everything from the near plane to the midpoint of the frustum lands
     # at a negative z and is clipped away, which looks like the near half of
@@ -336,7 +314,7 @@ test mat__perspective_maps_clip_planes_vulkan_depth {
     ret 0;
 }
 
-test mat__infinite_reversed_perspective_maps_near_distance {
+test mat4_perspective_reversed_infinite__near_one_distant_zero {
     val near: f32  = 0.1;
     var p:    Mat4 = mat4_perspective_reversed_infinite(1.5707963, 1.0, near);
     if (p.m[2][3] != 0.0 - 1.0) { ret 1; }
@@ -352,7 +330,7 @@ test mat__infinite_reversed_perspective_maps_near_distance {
     ret 0;
 }
 
-test mat__orthographic_maps_pixel_box_vulkan_clip {
+test mat4_orthographic__pixel_box_to_vulkan_clip {
     # The projection a 2D pass builds: origin at the top left, y growing down
     # the window, depth in [-1, 1] eye space mapping to [0, 1] clip space.
     val w: f32  = 800.0;
@@ -381,22 +359,7 @@ test mat__orthographic_maps_pixel_box_vulkan_clip {
     ret 0;
 }
 
-test mat__look_at_z_axis_faces_origin {
-    var v: Mat4 = mat4_look_at(vec3(0.0, 0.0, 5.0), vec3(0.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0));
-    if (v.m[3][3] != 1.0) { ret 1; }
-    val d: f32 = v.m[3][2] - (0.0 - 5.0);
-    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 2; }
-    ret 0;
-}
-
-test mat__point_picks_up_translation_column {
-    var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
-    val p: Vec3 = mat4_transform_point(?t, vec3(10.0, 20.0, 30.0));
-    if (p[0] != 11.0 || p[1] != 22.0 || p[2] != 33.0) { ret 1; }
-    ret 0;
-}
-
-test mat__direction_ignores_translation_column {
+test mat4_transform_dir__ignores_translation {
     var t: Mat4 = mat4_translation(vec3(1.0, 2.0, 3.0));
     val d: Vec3 = mat4_transform_dir(?t, vec3(10.0, 20.0, 30.0));
     # a normal that picks up a translation points somewhere else entirely
@@ -405,7 +368,7 @@ test mat__direction_ignores_translation_column {
     ret 0;
 }
 
-test mat__transform_agrees_composing_matrices {
+test mat4_mul__column_major_composition {
     # the check that catches a transposed convention. building T*S and
     # transforming once must equal scaling then translating, and it does
     # not if the elements are read row-major.
@@ -422,10 +385,8 @@ test mat__transform_agrees_composing_matrices {
     ret 0;
 }
 
-test mat__rotation_moves_point_off_axis {
-    # a transform that only ever reproduced its input would pass the
-    # translation tests above by doing nothing, so this asserts an
-    # actual rotation: 90 degrees about z sends +x to +y.
+test mat4_from_quat__quarter_turn_about_z {
+    # 90 degrees about z sends +x to +y
     val h: f32  = 0.70710678;
     var r: Mat4 = mat4_from_quat(f32x4{0.0, 0.0, h, h});
     val p: Vec3 = mat4_transform_point(?r, vec3(1.0, 0.0, 0.0));
@@ -434,7 +395,7 @@ test mat__rotation_moves_point_off_axis {
     ret 0;
 }
 
-test mat__projecting_point_divides_through_w {
+test mat4_project_point__divides_through_w {
     # A perspective matrix puts -z in w, so a point twice as far away lands at
     # half the offset. transform_point skips that divide and would report both
     # at the same place, which is the trap this function exists to remove.

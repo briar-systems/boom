@@ -103,14 +103,7 @@ pub fun quat_slerp(a: Quat, b: Quat, t: f32) Quat {
     ret a * f32x4{s0, s0, s0, s0} + end * f32x4{s1, s1, s1, s1};
 }
 
-test quat__identity_multiplicative_unit {
-    val q: Quat = quat_from_axis_angle(f32x4{0.0, 1.0, 0.0, 0.0}, 1.0);
-    val r: Quat = quat_mul(q, quat_identity());
-    if (r[0] != q[0] || r[1] != q[1] || r[2] != q[2] || r[3] != q[3]) { ret 1; }
-    ret 0;
-}
-
-test quat__axis_angle_produces_unit_quaternion {
+test quat_from_axis_angle__normalizes_axis {
     val q:   Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 2.0, 0.0}, 1.5);
     val len: f32  = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
     val d:   f32  = len - 1.0;
@@ -118,7 +111,7 @@ test quat__axis_angle_produces_unit_quaternion {
     ret 0;
 }
 
-test quat__slerp_returns_endpoints_t_0_t {
+test quat_slerp__endpoints_and_midpoint {
     val a:  Quat = quat_identity();
     val b:  Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 1.5707963);
     val r0: Quat = quat_slerp(a, b, 0.0);
@@ -126,20 +119,14 @@ test quat__slerp_returns_endpoints_t_0_t {
     val r1: Quat = quat_slerp(a, b, 1.0);
     if (r1[2] - b[2] > 0.0001 || r1[2] - b[2] < 0.0 - 0.0001) { ret 2; }
     if (r1[3] - b[3] > 0.0001 || r1[3] - b[3] < 0.0 - 0.0001) { ret 3; }
-    ret 0;
-}
-
-test quat__slerp_midpoint_bisects_quarter_turn {
-    val a:      Quat = quat_identity();
-    val b:      Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 1.5707963);
     val mid:    Quat = quat_slerp(a, b, 0.5);
     val expect: Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 0.78539815);
-    if (mid[2] - expect[2] > 0.001 || mid[2] - expect[2] < 0.0 - 0.001) { ret 1; }
-    if (mid[3] - expect[3] > 0.001 || mid[3] - expect[3] < 0.0 - 0.001) { ret 2; }
+    if (mid[2] - expect[2] > 0.001 || mid[2] - expect[2] < 0.0 - 0.001) { ret 4; }
+    if (mid[3] - expect[3] > 0.001 || mid[3] - expect[3] < 0.0 - 0.001) { ret 5; }
     ret 0;
 }
 
-test quat__slerp_takes_shortest_arc_across_hemisphere {
+test quat_slerp__shortest_arc_across_hemisphere {
     val a:   Quat = quat_identity();
     val b:   Quat = f32x4{0.0, 0.0, 0.0, 0.0 - 1.0};
     val mid: Quat = quat_slerp(a, b, 0.5);

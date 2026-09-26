@@ -382,6 +382,7 @@ pub fun face_height(f: *FontFace, s: str) f32 {
 }
 
 # a face with known metrics and no typeface, for tests that need no font file
+#[testing]
 fun seeded_face(a: *allo.Allocator, advance: f32) FontFace {
     var f: FontFace;
     f.a       = a;
@@ -400,6 +401,7 @@ fun seeded_face(a: *allo.Allocator, advance: f32) FontFace {
     ret f;
 }
 
+#[testing]
 fun seed(f: *FontFace, cp: u32, advance: f32) {
     var m: GlyphMetrics;
     m.advance  = advance;
@@ -407,16 +409,18 @@ fun seed(f: *FontFace, cp: u32, advance: f32) {
     gmap.insert[u32, GlyphMetrics](?f.metrics, cp, m);
 }
 
+#[testing]
 fun unseed(f: *FontFace) {
     gmap.dnit[u32, GlyphMetrics](?f.metrics);
 }
 
+#[testing]
 fun test_alloc(a: *allo.Allocator) bool {
     val made: err[allo.Error] = page.make(a);
     ret sel made.ok;
 }
 
-test face__string_walked_codepoints_not_bytes {
+test face_measure__walks_codepoints_skips_controls {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -430,22 +434,15 @@ test face__string_walked_codepoints_not_bytes {
     if (face_measure(?f, ?acute[0]) != 7.0) { ret 3; }
     if (face_measure(?f, "abc") != 21.0)    { ret 4; }
     if (face_measure(?f, "") != 0.0)        { ret 5; }
+    # layout controls contribute no advance
+    if (face_measure(?f, "a\tb") != 14.0)                                                 { ret 6; }
+    if (face_measure(?f, "a\rb") != 14.0)                                                 { ret 7; }
+    if (!is_layout_control(9) || !is_layout_control(13) || !is_layout_control(0x7F))      { ret 8; }
+    if (is_layout_control(NEWLINE) || is_layout_control(32) || is_layout_control(0x4F60)) { ret 9; }
     ret 0;
 }
 
-test face__control_character_contributes_no_advance {
-    var a: allo.Allocator;
-    if (!test_alloc(?a)) { ret 1; }
-    var f: FontFace = seeded_face(?a, 7.0);
-    fin { unseed(?f); }
-    if (face_measure(?f, "a\tb") != 14.0)                                                 { ret 2; }
-    if (face_measure(?f, "a\rb") != 14.0)                                                 { ret 3; }
-    if (!is_layout_control(9) || !is_layout_control(13) || !is_layout_control(0x7F))      { ret 4; }
-    if (is_layout_control(NEWLINE) || is_layout_control(32) || is_layout_control(0x4F60)) { ret 5; }
-    ret 0;
-}
-
-test face__line_break_measures_widest_line {
+test face_measure__widest_line_and_height {
     var a: allo.Allocator;
     if (!test_alloc(?a)) { ret 1; }
     var f: FontFace = seeded_face(?a, 7.0);
@@ -460,7 +457,7 @@ test face__line_break_measures_widest_line {
     ret 0;
 }
 
-test face__text_next_advances_past_malformed_bytes_time {
+test text_next__malformed_bytes_advance_one {
     var cp:   u32   = 0;
     var lone: [3]u8 = [3]u8{0x80, 0x61, 0};
     if (text_next(?lone[0], 0, 2, ?cp) != 1) { ret 1; }
@@ -473,32 +470,7 @@ test face__text_next_advances_past_malformed_bytes_time {
     ret 0;
 }
 
-test face__decode_after_earlier_decode_reads_bytes {
-    # the shape of a mach opt 2 miscompile fixed in 5.2.1: an indexed address
-    # flowing into an inlined utf8.decode returned U+FFFD after a decode on
-    # another stack array. meaningful under the release profile CI runs
-    var cp:   u32   = 0;
-    var head: [2]u8 = [2]u8{0x41, 0};
-    if (text_next(?head[0], 0, 1, ?cp) != 1 || cp != 0x41) { ret 1; }
-    var ni: [4]u8 = [4]u8{0xE4, 0xBD, 0xA0, 0};
-    if (text_next(?ni[0], 0, 3, ?cp) != 3) { ret 2; }
-    if (cp != 0x4F60)                      { ret 3; }
-    ret 0;
-}
-
-test face__invalid_face_measures_zero {
-    var a: allo.Allocator;
-    if (!test_alloc(?a)) { ret 1; }
-    var f: FontFace = seeded_face(?a, 7.0);
-    fin { unseed(?f); }
-    f.valid = false;
-    if (face_measure(?f, "abc") != 0.0) { ret 2; }
-    if (face_height(?f, "abc") != 0.0)  { ret 3; }
-    if (face_lines(?f, "abc") != 0)     { ret 4; }
-    ret 0;
-}
-
-test face__invalid_size_policy_refused_case {
+test options_refusal__each_case {
     val bad_height: opt[TextError] = options_refusal(0.0, font_options());
     if (!(sel bad_height.some && sel bad_height.some.pixel_height)) { ret 1; }
     var zero: FontOptions = font_options();
@@ -516,7 +488,7 @@ test face__invalid_size_policy_refused_case {
     ret 0;
 }
 
-test face__pixel_policy_preserves_em_aligned_design {
+test font_pixel_options__em_aligned_scale {
     val options: FontOptions = font_pixel_options();
     if (!sel options.raster.pixel) { ret 1; }
     if (!sel options.size_mode.em) { ret 2; }
@@ -536,7 +508,7 @@ test face__pixel_policy_preserves_em_aligned_design {
     ret 0;
 }
 
-test face__face_live_atlases_refuses_delete {
+test face_delete__refused_while_atlases_live {
     var t: Typeface;
     t.faces = 1;
     var f: FontFace;

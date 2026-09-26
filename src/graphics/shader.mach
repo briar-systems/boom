@@ -242,59 +242,49 @@ pub fun shader_delete(s: *Shader, d: *Device) {
 # validation and the cache lookup, which is where a mistake either rejects a
 # valid shader or hands a draw a pipeline built for different geometry.
 
-test shader__module_not_whole_number_spir_v {
-    # Rejected here rather than inside pipeline creation, where it surfaces as
-    # an unexplained driver failure a long way from the call that caused it.
+test shader__validates_modules {
+    # rejected here rather than inside pipeline creation, where it surfaces as an
+    # unexplained driver failure far from the call that caused it
     var s:     Shader;
     var bytes: [64]u8;
     if (!refused_words(shader(?s, ?bytes[0], 21, ?bytes[0], 64), 21)) { ret 1; }
     if (!refused_words(shader(?s, ?bytes[0], 64, ?bytes[0], 21), 21)) { ret 2; }
-    # Too short to hold a SPIR-V header at all.
+    # too short to hold a header
     if (!refused_words(shader(?s, ?bytes[0], 16, ?bytes[0], 64), 16)) { ret 3; }
-    # And a valid pair is accepted.
-    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 4; }
+    if (!missing_stage(shader(?s, nil, 64, ?bytes[0], 64)))           { ret 4; }
+    if (!missing_stage(shader(?s, ?bytes[0], 64, nil, 64)))           { ret 5; }
+    # a valid pair is accepted and builds nothing until a draw names a pass
+    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 6; }
+    if (shader_pipelines(?s) != 0)                           { ret 7; }
     ret 0;
 }
 
+#[testing]
 fun declared(r: err[Error]) bool {
     ret sel r.ok;
 }
 
+#[testing]
 fun refused_words(r: err[Error], len: usize) bool {
     ret sel r.err && (sel r.err.shader && (sel r.err.shader.spirv_words && r.err.shader.spirv_words == len));
 }
 
+#[testing]
 fun missing_stage(r: err[Error]) bool {
     ret sel r.err && (sel r.err.shader && sel r.err.shader.missing_stage);
 }
 
+#[testing]
 fun builds_nothing(r: res[*Pipeline, Error]) bool {
     ret sel r.err;
 }
 
+#[testing]
 fun hands_out(r: res[*Pipeline, Error], p: *Pipeline) bool {
     ret sel r.ok && r.ok == p;
 }
 
-test shader__missing_module_refused_rather_deferred {
-    var s:     Shader;
-    var bytes: [64]u8;
-    if (!missing_stage(shader(?s, nil, 64, ?bytes[0], 64))) { ret 1; }
-    if (!missing_stage(shader(?s, ?bytes[0], 64, nil, 64))) { ret 2; }
-    ret 0;
-}
-
-test shader__fresh_shader_has_built_nothing {
-    # Creation records what the shader is and builds nothing, because a pipeline
-    # needs a render pass and a vertex layout that are not known until a draw.
-    var s:     Shader;
-    var bytes: [64]u8;
-    if (!declared(shader(?s, ?bytes[0], 64, ?bytes[0], 64))) { ret 1; }
-    if (shader_pipelines(?s) != 0)                           { ret 2; }
-    ret 0;
-}
-
-test shader__built_pipeline_reused_pass_layout {
+test shader_pipeline__reused_only_for_same_pass_layout_depth {
     # THE DEFECT THIS CATCHES. A pipeline bakes in both the render pass and the
     # vertex layout, so handing a draw the entry built for a different one is
     # not a slower picture, it is undefined behaviour that a driver may or may
@@ -350,7 +340,7 @@ test shader__built_pipeline_reused_pass_layout {
     ret 0;
 }
 
-test shader__full_shader_refuses_rather_evicting_live {
+test shader_pipeline__full_refuses_rather_than_evicting {
     # Eviction would destroy a pipeline a command buffer may still be executing,
     # which is a use-after-free the driver reports at a distance if at all. So
     # the cache fills and stops, and the draw is dropped and counted.
@@ -387,7 +377,7 @@ test shader__full_shader_refuses_rather_evicting_live {
     ret 0;
 }
 
-test shader__unready_shader_builds_nothing {
+test shader_pipeline__unready_builds_nothing {
     # A Shader left at its zero value has no modules, and reaching the driver
     # with a null pointer and a zero length is a crash rather than an error.
     var s:             Shader;

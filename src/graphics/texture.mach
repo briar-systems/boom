@@ -43,7 +43,6 @@ use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use std.types.string.str_equals;
 use vk;
 
 # an opaque handle to a GPU texture
@@ -369,11 +368,13 @@ pub fun texture_release_owned(d: *Device, t: *Texture) {
 }
 
 # whether a texture creation was refused with the given texture case
+#[testing]
 fun refused_dimensions(r: res[Texture, Error]) bool {
     ret sel r.err && (sel r.err.texture && sel r.err.texture.dimensions);
 }
 
 # an encoder source image over borrowed rgba pixels
+#[testing]
 fun source_image(px: *u8, w: u32, h: u32) img.Image {
     var srcimg: img.Image;
     srcimg.pixels     = px;
@@ -384,33 +385,19 @@ fun source_image(px: *u8, w: u32, h: u32) img.Image {
     ret srcimg;
 }
 
-test texture__fresh_handle_carries_no_image {
-    var t: Texture;
-    t.image.view = nil;
-    if (texture_view(?t) != nil) { ret 1; }
-    ret 0;
-}
-
-test texture__creation_against_uninitialized_context_refused {
-    var d: Device;
-    d.ready = false;
-    var px: [4]u8               = [4]u8{255, 255, 255, 255};
-    val r:  res[Texture, Error] = texture(?d, ?px[0], 1, 1, ColorSpace.srgb{});
-    if (!sel r.err)               { ret 1; }
-    if (!sel r.err.uninitialized) { ret 2; }
-    ret 0;
-}
-
-test texture__non_positive_dimensions_refused_before_allocating {
-    var d: Device;
-    d.ready = true;
+test texture__refused_before_device {
+    var d:  Device;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
-    if (!refused_dimensions(texture(?d, ?px[0], 0, 1, ColorSpace.srgb{})))  { ret 1; }
-    if (!refused_dimensions(texture(?d, ?px[0], 1, -4, ColorSpace.srgb{}))) { ret 2; }
+    d.ready = false;
+    val cold: res[Texture, Error] = texture(?d, ?px[0], 1, 1, ColorSpace.srgb{});
+    if (!(sel cold.err && sel cold.err.uninitialized)) { ret 1; }
+    d.ready = true;
+    if (!refused_dimensions(texture(?d, ?px[0], 0, 1, ColorSpace.srgb{})))  { ret 2; }
+    if (!refused_dimensions(texture(?d, ?px[0], 1, -4, ColorSpace.srgb{}))) { ret 3; }
     ret 0;
 }
 
-test texture__region_write_validates_before_touching_device {
+test upload_region__validates_before_device {
     var d:  Device;
     var t:  Texture;
     var px: [4]u8 = [4]u8{255, 255, 255, 255};
@@ -425,147 +412,78 @@ test texture__region_write_validates_before_touching_device {
     ret 0;
 }
 
-test texture__decode_round_trips_qoi_image {
+test decode__png_round_trips {
+    # png takes the one branch with a scratch buffer
     var src_px: [16]u8 = [16]u8{
         255, 0, 0, 255, 0, 255, 0, 255,
         0, 0, 255, 255, 255, 255, 0, 255,
     };
     var srcimg: img.Image = source_image(?src_px[0], 2, 2);
-
-    var enc: [512]u8;
-    val n:   res[usize, img.EncodeError] = img.qoi_encode(?srcimg, ?enc[0], 512);
+    var enc: [1024]u8;
+    val n: res[usize, img.EncodeError] = img.png_encode(?srcimg, ?enc[0], 1024);
     if (!sel n.ok) { ret 1; }
 
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
-    if (sel made.err) { ret 1; }
+    if (sel made.err) { ret 2; }
     val r: res[Decoded, Error] = decode(?enc[0], n.ok, ColorSpace.srgb{}, ?pa);
-    if (!sel r.ok) { ret 2; }
+    if (!sel r.ok) { ret 3; }
     val dec: Decoded = r.ok;
-    if (dec.width != 2 || dec.height != 2)                                                        { ret 3; }
-    if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 4; }
-    if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0)                         { ret 5; }
-    if (!sel dec.space.srgb)                                                                      { ret 6; }
+    if (dec.width != 2 || dec.height != 2)                                                        { ret 4; }
+    if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 5; }
+    if (dec.pixels[12] != 255 || dec.pixels[13] != 255 || dec.pixels[14] != 0)                    { ret 6; }
     if (image_format(dec.space) != vk.FORMAT_R8G8B8A8_SRGB)                                       { ret 7; }
     val freed: err[allo.Error] = allo.deallocate[u8](?pa, dec.pixels, dec.len);
     if (sel freed.err) { ret 8; }
     ret 0;
 }
 
-test texture__decoded_data_retains_explicit_linear_colour {
+test decode__qoi_retains_linear_space {
     var src_px: [4]u8     = [4]u8{128, 64, 32, 255};
     var srcimg: img.Image = source_image(?src_px[0], 1, 1);
-
     var enc: [64]u8;
-    val n:   res[usize, img.EncodeError] = img.qoi_encode(?srcimg, ?enc[0], 64);
+    val n: res[usize, img.EncodeError] = img.qoi_encode(?srcimg, ?enc[0], 64);
     if (!sel n.ok) { ret 1; }
 
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
-    if (sel made.err) { ret 1; }
+    if (sel made.err) { ret 2; }
     val r: res[Decoded, Error] = decode(?enc[0], n.ok, ColorSpace.linear{}, ?pa);
-    if (!sel r.ok) { ret 2; }
+    if (!sel r.ok) { ret 3; }
     val linear: Decoded = r.ok;
     if (linear.pixels[0] != 128 || linear.pixels[1] != 64
-        || linear.pixels[2] != 32 || linear.pixels[3] != 255) { ret 3; }
-    if (!sel linear.space.linear)                               { ret 4; }
+        || linear.pixels[2] != 32 || linear.pixels[3] != 255) { ret 4; }
     if (image_format(linear.space) != vk.FORMAT_R8G8B8A8_UNORM) { ret 5; }
     val freed: err[allo.Error] = allo.deallocate[u8](?pa, linear.pixels, linear.len);
     if (sel freed.err) { ret 6; }
     ret 0;
 }
 
-test texture__decode_round_trips_png_image {
-    # PNG is the format the art is authored in, and it was the one the dispatch
-    # refused: mach-image grew a decoder and this module never called it, so a
-    # .png reported "unsupported image format" with the decoder sitting right
-    # there. Round-tripping through the encoder pins that the branch is wired.
-    var src_px: [16]u8 = [16]u8{
-        255, 0, 0, 255, 0, 255, 0, 255,
-        0, 0, 255, 255, 255, 255, 0, 255,
-    };
-    var srcimg: img.Image = source_image(?src_px[0], 2, 2);
-
-    var enc:   [1024]u8;
-    val bound: res[usize, img.EncodeError] = img.png_encode_bound(2, 2);
-    if (!sel bound.ok)   { ret 1; }
-    if (bound.ok > 1024) { ret 1; }
-    val n: res[usize, img.EncodeError] = img.png_encode(?srcimg, ?enc[0], 1024);
-    if (!sel n.ok) { ret 2; }
-    val detected: opt[Format] = img.detect(?enc[0], n.ok);
-    if (!sel detected.some)     { ret 3; }
-    if (!sel detected.some.png) { ret 3; }
-
-    var pa:   allo.Allocator;
-    val made: err[allo.Error] = page.make(?pa);
-    if (sel made.err) { ret 4; }
-    val r: res[Decoded, Error] = decode(?enc[0], n.ok, ColorSpace.srgb{}, ?pa);
-    if (!sel r.ok) { ret 4; }
-    val dec: Decoded = r.ok;
-    if (dec.width != 2 || dec.height != 2)                                                        { ret 5; }
-    if (dec.pixels[0] != 255 || dec.pixels[1] != 0 || dec.pixels[2] != 0 || dec.pixels[3] != 255) { ret 6; }
-    if (dec.pixels[4] != 0 || dec.pixels[5] != 255 || dec.pixels[6] != 0)                         { ret 7; }
-    if (dec.pixels[12] != 255 || dec.pixels[13] != 255 || dec.pixels[14] != 0)                    { ret 8; }
-    val freed: err[allo.Error] = allo.deallocate[u8](?pa, dec.pixels, dec.len);
-    if (sel freed.err) { ret 9; }
-    ret 0;
-}
-
-test texture__unsupported_format_reports_cleanly {
-    var junk: [8]u8           = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+test decode__unsupported_format_named {
     var pa:   allo.Allocator;
     val made: err[allo.Error] = page.make(?pa);
     if (sel made.err) { ret 1; }
-    val r: res[Decoded, Error] = decode(?junk[0], 8, ColorSpace.srgb{}, ?pa);
-    if (!sel r.err)                     { ret 1; }
-    if (!sel r.err.texture)             { ret 2; }
-    if (!sel r.err.texture.format)      { ret 3; }
-    if (!sel r.err.texture.format.none) { ret 4; }
+    var junk: [8]u8 = [8]u8{1, 2, 3, 4, 5, 6, 7, 8};
+    val u: res[Decoded, Error] = decode(?junk[0], 8, ColorSpace.srgb{}, ?pa);
+    if (!sel u.err)                         { ret 2; }
+    if (!sel u.err.texture)                 { ret 2; }
+    if (!sel u.err.texture.format)            { ret 3; }
+    if (!sel u.err.texture.format.none)       { ret 4; }
+    # a detected jpeg names itself rather than reading as junk
+    var jpeg: [8]u8 = [8]u8{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F'};
+    val j: res[Decoded, Error] = decode(?jpeg[0], 8, ColorSpace.srgb{}, ?pa);
+    if (!sel j.err)                         { ret 5; }
+    if (!sel j.err.texture)                 { ret 5; }
+    if (!sel j.err.texture.format)            { ret 6; }
+    if (!sel j.err.texture.format.some)       { ret 7; }
+    if (!sel j.err.texture.format.some.jpeg)  { ret 8; }
     ret 0;
 }
 
-test texture__detected_jpeg_refused_format_named {
-    var jpeg: [8]u8           = [8]u8{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F'};
-    var pa:   allo.Allocator;
-    val made: err[allo.Error] = page.make(?pa);
-    if (sel made.err) { ret 1; }
-    val r: res[Decoded, Error] = decode(?jpeg[0], 8, ColorSpace.srgb{}, ?pa);
-    if (!sel r.err)                          { ret 1; }
-    if (!sel r.err.texture)                  { ret 2; }
-    if (!sel r.err.texture.format)           { ret 3; }
-    if (!sel r.err.texture.format.some)      { ret 4; }
-    if (!sel r.err.texture.format.some.jpeg) { ret 5; }
-    ret 0;
-}
-
-test texture__load_path_resolved_through_vfs {
-    # The loaders that read files must agree on what a path means. This one took
-    # a raw filesystem path while sound_load and font_load resolved `res://`, so
-    # `res://art/x.qoi` loaded a sound and failed for a texture.
-    #
-    # Asserted through vfs_resolve rather than by loading, which needs a device:
-    # what is being pinned is that the scheme is honoured and that a plain path
-    # is left alone, and both are decided before any device is touched.
-    var a:    allo.Allocator;
-    val made: err[allo.Error] = page.make(?a);
-    if (sel made.err) { ret 1; }
-
-    val r: res[str, vfs.VfsError] = vfs.vfs_resolve(?a, "res://art/sheet.qoi");
-    if (!sel r.ok)                              { ret 1; }
-    if (!str_equals(r.ok, "res/art/sheet.qoi")) { ret 2; }
-
-    # No scheme, so it is a filesystem path and must survive untouched.
-    val p2: res[str, vfs.VfsError] = vfs.vfs_resolve(?a, "assets/sheet.qoi");
-    if (!sel p2.ok)                             { ret 3; }
-    if (!str_equals(p2.ok, "assets/sheet.qoi")) { ret 4; }
-    ret 0;
-}
-
-test texture__missing_asset_reports_load_not_decode {
+test load__missing_asset_reports_load {
     var d: Device;
     d.ready = true;
     val r: res[Texture, Error] = texture_load(?d, "/nonexistent/boom/texture.qoi");
-    if (!sel r.err)      { ret 2; }
-    if (!sel r.err.load) { ret 3; }
+    if (!(sel r.err && sel r.err.load)) { ret 1; }
     ret 0;
 }

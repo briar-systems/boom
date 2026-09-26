@@ -515,91 +515,65 @@ fun absolute_env(a: *allo.Allocator, name: str, suffix: str) res[opt[Root], VfsE
 }
 
 # whether a resolution produced exactly the expected path
+#[testing]
 fun resolves_to(r: res[str, VfsError], expected: str) bool {
     ret sel r.ok && str_equals(r.ok, expected);
 }
 
 # whether a user data root was refused as an invalid namespace
+#[testing]
 fun refused_namespace(r: res[str, VfsError]) bool {
     ret sel r.err && sel r.err.invalid_namespace;
 }
 
-test vfs__res_resolves_against_res_root {
+test vfs_resolve__joins_root {
     var a: allo.Allocator;
     page.make(?a);
-    val saved: str = res_root;
+    val saved_res:  str = res_root;
+    val saved_user: str = user_root;
+
     res_root = "assets";
-
-    val r: res[str, VfsError] = vfs_resolve(?a, "res://art/hero.qoi");
-    res_root = saved;
-    if (!resolves_to(r, "assets/art/hero.qoi")) { ret 1; }
-    ret 0;
-}
-
-test vfs__root_trailing_slash_does_not_double {
-    var a: allo.Allocator;
-    page.make(?a);
-    val saved: str = res_root;
-
+    val plain: res[str, VfsError] = vfs_resolve(?a, "res://art/hero.qoi");
+    # both spellings of a root are natural to write, so both must land here
     res_root = "assets/";
-    val r: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
-    res_root = saved;
-    # Both spellings of a root are natural to write, so both must land here
-    if (!resolves_to(r, "assets/hero.qoi")) { ret 1; }
-    ret 0;
-}
-
-test vfs__absolute_root_works_including_slash {
-    var a: allo.Allocator;
-    page.make(?a);
-    val saved: str = res_root;
-
-    res_root = "/opt/game/data";
-    val r: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
-    if (!resolves_to(r, "/opt/game/data/hero.qoi")) {
-        res_root = saved;
-        ret 1;
-    }
-
+    val slash: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
     res_root = "/";
-    val r2: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
-    res_root = saved;
-    if (!resolves_to(r2, "/hero.qoi")) { ret 2; }
+    val top: res[str, VfsError] = vfs_resolve(?a, "res://hero.qoi");
+    user_root = "/tmp/game-state";
+    val user: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
+    res_root  = saved_res;
+    user_root = saved_user;
+
+    if (!resolves_to(plain, "assets/art/hero.qoi"))       { ret 1; }
+    if (!resolves_to(slash, "assets/hero.qoi"))           { ret 2; }
+    if (!resolves_to(top, "/hero.qoi"))                   { ret 3; }
+    if (!resolves_to(user, "/tmp/game-state/save1.dat")) { ret 4; }
     ret 0;
 }
 
-test vfs__bare_path_passes_through_unchanged {
+test vfs_resolve__bare_path_passes_through {
     var a: allo.Allocator;
     page.make(?a);
     val r: res[str, VfsError] = vfs_resolve(?a, "some/plain/path.txt");
     if (!resolves_to(r, "some/plain/path.txt")) { ret 1; }
-    if (vfs_has_scheme("some/plain/path.txt"))  { ret 2; }
+    # a `://` after a separator is a directory name, not a scheme
+    if (vfs_has_scheme("weird/a://b")) { ret 2; }
+    val d: res[str, VfsError] = vfs_resolve(?a, "weird/a://b");
+    if (!resolves_to(d, "weird/a://b")) { ret 3; }
     ret 0;
 }
 
-test vfs__after_separator_directory_not_scheme {
-    # A path like `weird/a://b` names a directory that happens to contain the
-    # characters. treating it as a scheme would silently redirect the lookup.
-    if (vfs_has_scheme("weird/a://b")) { ret 1; }
+test vfs_resolve__unknown_scheme_refused {
     var a: allo.Allocator;
     page.make(?a);
-    val r: res[str, VfsError] = vfs_resolve(?a, "weird/a://b");
-    if (!resolves_to(r, "weird/a://b")) { ret 2; }
-    ret 0;
-}
-
-test vfs__unknown_scheme_error_not_silent_passthrough {
-    var a: allo.Allocator;
-    page.make(?a);
-    # Passing it through would resolve `bogus://x` against the working
-    # directory and fail later with a confusing not-found
+    # passing it through would fail later with a confusing not-found
     val r: res[str, VfsError] = vfs_resolve(?a, "bogus://x");
     if (!sel r.err)                { ret 1; }
     if (!sel r.err.unknown_scheme) { ret 2; }
     ret 0;
 }
 
-test vfs__registered_scheme_resolves_re_registering_replaces {
+test vfs_register__replaces_and_refuses_builtins {
     var a: allo.Allocator;
     page.make(?a);
 
@@ -607,29 +581,24 @@ test vfs__registered_scheme_resolves_re_registering_replaces {
     if (!sel first.ok) { ret 1; }
     val r: res[str, VfsError] = vfs_resolve(?a, "mods://weapons.pack");
     if (!resolves_to(r, "mods/enabled/weapons.pack")) { ret 2; }
-
-    # Re-registering must replace rather than append, so a reload does not
-    # leak table entries or leave the old root shadowing the new one
+    # re-registering replaces, so the old root cannot shadow the new one
     val again: err[RegisterError] = vfs_register("mods", "other");
     if (!sel again.ok) { ret 3; }
     val r2: res[str, VfsError] = vfs_resolve(?a, "mods://weapons.pack");
     if (!resolves_to(r2, "other/weapons.pack")) { ret 4; }
+
+    # an entry named res or user could never be consulted
+    val res_refused: err[RegisterError] = vfs_register("res", "/tmp/somewhere");
+    if (!sel res_refused.err)         { ret 5; }
+    if (!sel res_refused.err.builtin) { ret 6; }
+    val user_refused: err[RegisterError] = vfs_register("user", "/tmp/elsewhere");
+    if (!sel user_refused.err) { ret 7; }
+    val kept: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
+    if (!resolves_to(kept, "res/sprite.qoi")) { ret 8; }
     ret 0;
 }
 
-test vfs__user_honours_explicit_override {
-    var a: allo.Allocator;
-    page.make(?a);
-    val saved: str = user_root;
-
-    user_root = "/tmp/game-state";
-    val r: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
-    user_root = saved;
-    if (!resolves_to(r, "/tmp/game-state/save1.dat")) { ret 1; }
-    ret 0;
-}
-
-test vfs__explicit_user_root_already_application_scoped {
+test vfs_user_data_root__explicit_root_cloned {
     var a: allo.Allocator;
     page.make(?a);
     val saved: str = user_root;
@@ -646,7 +615,7 @@ test vfs__explicit_user_root_already_application_scoped {
     ret 0;
 }
 
-test vfs__user_data_namespaces_single_path_components {
+test vfs_user_data_root__refuses_invalid_namespace {
     var a: allo.Allocator;
     page.make(?a);
     if (!refused_namespace(vfs_user_data_root(?a, "..", "ludus"))) { ret 1; }
@@ -672,41 +641,7 @@ test vfs__user_data_namespaces_single_path_components {
     ret 0;
 }
 
-test vfs__user_derives_root_or_reports_missing {
-    var a: allo.Allocator;
-    page.make(?a);
-    val saved: str = user_root;
-    user_root = "";
-
-    val r: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
-    user_root = saved;
-    # Sandboxed processes may expose no HOME or platform data directory. that
-    # is an explicit error instead of writing into the working directory.
-    if (sel r.err)          { ret 0; }
-    if (str_len(r.ok) == 0) { ret 1; }
-    ret 0;
-}
-
-test vfs__built_schemes_refused_rather_silently_ignored {
-    # An entry named res or user can never be consulted, because vfs_resolve
-    # answers those from res_root and user_root first. Accepting one and
-    # reporting success is worse than refusing: the caller believes it has
-    # redirected res:// and every asset then loads from the old root.
-    val res_refused: err[RegisterError] = vfs_register("res", "/tmp/somewhere");
-    if (!sel res_refused.err)         { ret 1; }
-    if (!sel res_refused.err.builtin) { ret 2; }
-    val user_refused: err[RegisterError] = vfs_register("user", "/tmp/elsewhere");
-    if (!sel user_refused.err) { ret 3; }
-
-    # And the refusal must not have consumed a slot or shadowed the real root.
-    var a: allo.Allocator;
-    page.make(?a);
-    val r: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
-    if (!resolves_to(r, "res/sprite.qoi")) { ret 4; }
-    ret 0;
-}
-
-test vfs__missing_file_reports_read_not_path {
+test vfs_read_bytes__read_vs_path_errors {
     var a:    allo.Allocator;
     val made: err[allo.Error] = page.make(?a);
     if (sel made.err) { ret 1; }
@@ -716,17 +651,5 @@ test vfs__missing_file_reports_read_not_path {
     val bogus: res[vector.Vector[u8], ReadError] = vfs_read_bytes(?a, "bogus://asset.bin");
     if (!sel bogus.err)      { ret 4; }
     if (!sel bogus.err.path) { ret 5; }
-    ret 0;
-}
-
-test vfs__res_root_redirects_res_scheme {
-    # The supported way to do what vfs_register("res", ...) looks like it does.
-    val saved: str = res_root;
-    res_root = "assets/packed";
-    var a: allo.Allocator;
-    page.make(?a);
-    val r: res[str, VfsError] = vfs_resolve(?a, "res://sprite.qoi");
-    res_root = saved;
-    if (!resolves_to(r, "assets/packed/sprite.qoi")) { ret 1; }
     ret 0;
 }

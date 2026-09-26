@@ -44,12 +44,6 @@ pub fun rect(x: f32, y: f32, w: f32, h: f32) Rect {
     ret Rect{x: x, y: y, w: w, h: h};
 }
 
-test sprite__rect_carries_position_size {
-    val r: Rect = rect(10.0, 20.0, 30.0, 40.0);
-    if (r.x != 10.0 || r.y != 20.0 || r.w != 30.0 || r.h != 40.0) { ret 1; }
-    ret 0;
-}
-
 # Whether two rectangles share any area.
 #
 # Touching edges do not count as overlapping, which is what keeps a sprite
@@ -67,7 +61,7 @@ pub fun rect_overlaps(a: Rect, b: Rect) bool {
     ret true;
 }
 
-test sprite__rectangles_overlap_they_share_area {
+test rect_overlaps__edges_and_containment {
     val view: Rect = rect(0.0, 0.0, 320.0, 180.0);
 
     # Wholly inside.

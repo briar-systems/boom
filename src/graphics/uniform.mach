@@ -98,77 +98,17 @@ pub fun src_uv(r: Rect, width: u32, height: u32) Vec4 {
 
 # --------------------------------------------------------------------- tests
 #
-# These assert the layout, not behaviour. A wrong size or offset here is read by
-# the shader as whatever happens to be at that address, so it produces no error
-# at any layer and shows up as geometry in the wrong place.
+# the block layouts are checked against the shaders in boom.graphics.spirv
 
-test uniform__screen_block_exactly_matrix {
-    # The immediate-mode stage reads a projection and nothing else. A block that
-    # grew here without the shader growing to match would leave the stage
-    # reading a projection out of the wrong bytes, which draws the whole UI
-    # somewhere unrelated rather than failing.
-    if ($size_of(ScreenUniforms) != 64)             { ret 1; }
-    if ($size_of(ScreenUniforms) != $size_of(Mat4)) { ret 2; }
-    ret 0;
-}
-
-test uniform__matrix_four_consecutive_vec4s {
-    # std140 lays a mat4 out as four 16-byte-aligned vec4s, which is what the
-    # shaders declare and what makes the upload a copy rather than a repack.
-    if ($size_of(Mat4) != 64) { ret 1; }
-    if ($size_of(Vec4) != 16) { ret 2; }
-    ret 0;
-}
-
-test uniform__mesh_block_two_matrices_no_padding {
-    # The shader declares mvp_0..3 then model_0..3, eight consecutive vec4s.
-    # Any padding between the two matrices shifts every model column by the gap.
-    if ($size_of(MeshUniforms) != 128) { ret 1; }
-    ret 0;
-}
-
-test uniform__skinned_block_two_matrices_no_padding {
-    if ($size_of(SkinnedUniforms) != 128) { ret 1; }
-    ret 0;
-}
-
-test uniform__mesh_skinned_blocks_same_size {
-    # boom.graphics.renderer writes the base colour into the slot at one fixed
-    # offset for both programs. If these diverged, the skinned path would read
-    # its colour out of the middle of a matrix and the unskinned path would read
-    # past the end of its own block, neither with any diagnostic.
-    #
-    # A comptime check would be better, but $if does not accept $size_of
-    # (briar-systems/mach#2857).
-    if ($size_of(MeshUniforms) != $size_of(SkinnedUniforms)) { ret 1; }
-    ret 0;
-}
-
-test uniform__tint_block_vec4 {
-    if ($size_of(TintUniforms) != 16) { ret 1; }
-    ret 0;
-}
-
-test uniform__full_atlas_rect_maps_whole_uv {
-    val uv: Vec4 = src_uv(Rect{x: 0.0, y: 0.0, w: 256.0, h: 256.0}, 256, 256);
-    if (uv[0] != 0.0 || uv[1] != 0.0) { ret 1; }
-    if (uv[2] != 1.0 || uv[3] != 1.0) { ret 2; }
-    ret 0;
-}
-
-test uniform__sub_rect_divides_atlas_not_itself {
-    # A 32x32 glyph at (64, 96) in a 256x128 atlas. Dividing width and height by
-    # the same number is the mistake, and it is invisible on a square atlas.
+test src_uv__divides_each_axis_by_atlas {
+    # a 32x32 glyph at (64, 96) in a 256x128 atlas; one divisor for both axes is invisible on a square atlas
     val uv: Vec4 = src_uv(Rect{x: 64.0, y: 96.0, w: 32.0, h: 32.0}, 256, 128);
     if (uv[0] != 0.25)  { ret 1; }
     if (uv[1] != 0.75)  { ret 2; }
     if (uv[2] != 0.125) { ret 3; }
     if (uv[3] != 0.25)  { ret 4; }
-    ret 0;
-}
-
-test uniform__zero_sized_atlas_yields_zeroes_rather {
-    val uv: Vec4 = src_uv(Rect{x: 1.0, y: 1.0, w: 1.0, h: 1.0}, 0, 64);
-    if (uv[0] != 0.0 || uv[2] != 0.0) { ret 1; }
+    # a zero-sized atlas yields zeroes rather than dividing by zero
+    val z: Vec4 = src_uv(Rect{x: 1.0, y: 1.0, w: 1.0, h: 1.0}, 0, 64);
+    if (z[0] != 0.0 || z[2] != 0.0) { ret 5; }
     ret 0;
 }

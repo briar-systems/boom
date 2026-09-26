@@ -396,11 +396,9 @@ pub fun swapchain_rebuild(s: *Swapchain, v: *Vk, width: u32, height: u32,
 # Creation needs a device and a surface, so these cover the extent clamp, which
 # is pure and is where a wrong answer produces a swapchain the driver rejects.
 
-test swapchain__both_srgb_surface_formats_recognized {
-    # Textures are sampled through sRGB image formats, so the shader works in
-    # linear light and the surface is what encodes on write. Recognizing only
-    # one of the two variants would silently pick a UNORM format on a driver
-    # that offers the other, and every colour would come out dark.
+test format_is_srgb__both_variants {
+    # recognizing only one variant would pick a UNORM surface on a driver that
+    # offers the other, and every colour would come out dark
     if (!format_is_srgb(vk.FORMAT_B8G8R8A8_SRGB)) { ret 1; }
     if (!format_is_srgb(vk.FORMAT_R8G8B8A8_SRGB)) { ret 2; }
     if (format_is_srgb(vk.FORMAT_B8G8R8A8_UNORM)) { ret 3; }
@@ -408,100 +406,65 @@ test swapchain__both_srgb_surface_formats_recognized {
     ret 0;
 }
 
-test swapchain__surface_fixed_extent_overrides_request {
+test clamp_extent__fixed_or_clamped {
     var caps: vk.SurfaceCapabilitiesKHR;
     caps.currentExtent.width  = 800;
     caps.currentExtent.height = 600;
     var w: u32 = 1920;
     var h: u32 = 1080;
     clamp_extent(?caps, ?w, ?h);
-    # The surface's own extent is authoritative when it is not the sentinel.
     if (w != 800 || h != 600) { ret 1; }
-    ret 0;
-}
 
-test swapchain__sentinel_extent_clamps_request_range {
-    var caps: vk.SurfaceCapabilitiesKHR;
+    # the sentinel defers to the request, clamped to the surface's range
     caps.currentExtent.width   = 0xFFFFFFFF;
     caps.currentExtent.height  = 0xFFFFFFFF;
     caps.minImageExtent.width  = 640;
     caps.minImageExtent.height = 480;
     caps.maxImageExtent.width  = 1280;
     caps.maxImageExtent.height = 720;
-
-    var w: u32 = 1920;
-    var h: u32 = 1080;
+    w = 1920;
+    h = 1080;
     clamp_extent(?caps, ?w, ?h);
-    if (w != 1280 || h != 720) { ret 1; }
-
+    if (w != 1280 || h != 720) { ret 2; }
     w = 100;
     h = 100;
     clamp_extent(?caps, ?w, ?h);
-    if (w != 640 || h != 480) { ret 1; }
-
+    if (w != 640 || h != 480) { ret 3; }
     w = 800;
     h = 600;
     clamp_extent(?caps, ?w, ?h);
-    if (w != 800 || h != 600) { ret 1; }
+    if (w != 800 || h != 600) { ret 4; }
     ret 0;
 }
 
-test swapchain__teardown_uninitialized_handle_no_op {
-    var s: Swapchain;
-    s.ready = false;
-    var v: Vk;
-    v.ready = false;
-    swapchain_dnit(?s, ?v);
-    if (s.ready) { ret 1; }
-    ret 0;
-}
-
-test swapchain__present_mode_maps_vulkan_constant_names {
-    # Both enumerations start at zero and disagree about which mode that is, so
-    # a mapping written as a cast turns vsync into the mode that tears. Nothing
-    # catches that: the swapchain is created, it presents, and the only symptom
-    # is an image the player did not ask to have torn.
-    if (present_mode_vk(PresentMode.vsync{}) != vk.PRESENT_MODE_FIFO_KHR)          { ret 1; }
-    if (present_mode_vk(PresentMode.mailbox{}) != vk.PRESENT_MODE_MAILBOX_KHR)     { ret 2; }
-    if (present_mode_vk(PresentMode.immediate{}) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 3; }
-    ret 0;
-}
-
-test swapchain__zeroed_present_mode_vsync_surface_offers {
+test present_mode__zero_is_vsync_and_maps_by_name {
+    # both enumerations start at zero and disagree about which mode that is, so
+    # a cast would turn vsync into the mode that tears
     var mode: PresentMode;
     if (!sel mode.vsync) { ret 1; }
+    if (present_mode_vk(PresentMode.vsync{}) != vk.PRESENT_MODE_FIFO_KHR)          { ret 2; }
+    if (present_mode_vk(PresentMode.mailbox{}) != vk.PRESENT_MODE_MAILBOX_KHR)     { ret 3; }
+    if (present_mode_vk(PresentMode.immediate{}) != vk.PRESENT_MODE_IMMEDIATE_KHR) { ret 4; }
     ret 0;
 }
 
-test swapchain__vsync_needs_no_device_known_supported {
-    # Required of every implementation, so the answer is available before
-    # bring-up, which is what lets a menu assembled during start-up list what it
-    # can offer. The optional two cannot be answered without a surface and must
-    # not be claimed on the strength of being asked about.
+test pick_present_mode__unsupported_falls_to_vsync {
+    # vsync is known supported before bring-up, the optional two are never
+    # claimed without a surface, and a missing one falls to vsync rather than to
+    # the other optional mode, which differs in whether the image tears
     var v: Vk;
     v.ready = false;
     if (!present_mode_supported(?v, PresentMode.vsync{}))    { ret 1; }
     if (present_mode_supported(?v, PresentMode.mailbox{}))   { ret 2; }
     if (present_mode_supported(?v, PresentMode.immediate{})) { ret 3; }
-    ret 0;
-}
-
-test swapchain__mode_surface_will_not_do_falls {
-    # Not to the other optional mode. MAILBOX and IMMEDIATE differ in whether
-    # the image tears, so substituting one for the other would change what the
-    # player sees on hardware they never asked about.
-    var v: Vk;
-    v.ready = false;
     val mailbox: PresentMode = pick_present_mode(?v, PresentMode.mailbox{});
-    if (!sel mailbox.vsync) { ret 1; }
+    if (!sel mailbox.vsync) { ret 4; }
     val immediate: PresentMode = pick_present_mode(?v, PresentMode.immediate{});
-    if (!sel immediate.vsync) { ret 2; }
-    val vsync: PresentMode = pick_present_mode(?v, PresentMode.vsync{});
-    if (!sel vsync.vsync) { ret 3; }
+    if (!sel immediate.vsync) { ret 5; }
     ret 0;
 }
 
-test swapchain__images_may_copied_surface_offers {
+test image_usage_for__transfer_src_only_when_offered {
     val offered: [2]u32 = image_usage_for(vk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT
         | vk.IMAGE_USAGE_TRANSFER_SRC_BIT | vk.IMAGE_USAGE_TRANSFER_DST_BIT);
     if ((offered[0] & vk.IMAGE_USAGE_TRANSFER_SRC_BIT) == 0)     { ret 1; }

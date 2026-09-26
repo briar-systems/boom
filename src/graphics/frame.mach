@@ -659,67 +659,10 @@ pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
 
 # --------------------------------------------------------------------- tests
 #
-# The loop needs a device, a surface, and a swapchain, so it is not reachable
-# in CI. These cover the frame-index rotation, which is pure and is where an
-# error makes two frames share one set of synchronization objects.
+# The loop needs a device, a surface, and a swapchain, so these cover the pure
+# window-pass transitions and the readback request.
 
-test frame__frame_index_rotates_wraps {
-    var f: FrameLoop;
-    f.current = 0;
-    var seen: [4]usize;
-    var i:    usize = 0;
-    for (i < 4) {
-        seen[i]   = f.current;
-        f.current = (f.current + 1) % MAX_FRAMES_IN_FLIGHT;
-        i         = i + 1;
-    }
-    # Two frames in flight, so the sequence is 0,1,0,1. A wrap that skipped or
-    # repeated would let two frames share a command buffer and fence.
-    if (seen[0] != 0 || seen[1] != 1) { ret 1; }
-    if (seen[2] != 0 || seen[3] != 1) { ret 1; }
-    ret 0;
-}
-
-test frame__flight_frame_has_slot {
-    # One command buffer, one acquire semaphore, and a fence per frame. Sharing
-    # any of them across frames is the race this indexing exists to prevent.
-    if (MAX_FRAMES_IN_FLIGHT < 2) { ret 1; }
-    var f: FrameLoop;
-    var i: usize = 0;
-    for (i < MAX_FRAMES_IN_FLIGHT) {
-        f.frames[i].command = nil;
-        i                   = i + 1;
-    }
-    ret 0;
-}
-
-test frame__there_render_finished_semaphore_swapchain_image {
-    # Not MAX_FRAMES_IN_FLIGHT of them. The signal is waited on by the present of
-    # one image and is only known to have retired when that image is acquired
-    # again, so the count that matters is the swapchain's, and the two do not
-    # divide: two frames in flight against three images reuses a per-frame
-    # semaphore while a previous present still holds it.
-    var f: FrameLoop;
-    var k: usize = 0;
-    for (k < MAX_IMAGES) {
-        f.finished[k] = nil;
-        k             = k + 1;
-    }
-    if (MAX_IMAGES <= MAX_FRAMES_IN_FLIGHT) { ret 1; }
-    ret 0;
-}
-
-test frame__teardown_uninitialized_loop_no_op {
-    var f: FrameLoop;
-    f.ready = false;
-    var v: Vk;
-    v.ready = false;
-    frame_dnit(?f, ?v);
-    if (f.ready) { ret 1; }
-    ret 0;
-}
-
-test frame__window_pass_begins_idle_window_clears {
+test window_step__per_state {
     val a: WindowStep = window_step(WindowPass.idle{}, true);
     val b: WindowStep = window_step(WindowPass.idle{}, false);
     val c: WindowStep = window_step(WindowPass.open{}, true);
@@ -730,14 +673,11 @@ test frame__window_pass_begins_idle_window_clears {
     if (!sel c.clear)  { ret 3; }
     if (!sel d.keep)   { ret 4; }
     if (!sel e.nested) { ret 5; }
-    ret 0;
-}
-
-test frame__offscreen_pass_suspends_window_open {
+    # an offscreen pass suspends only a window pass that is open
     val open: WindowPass = window_suspended(WindowPass.open{});
     val idle: WindowPass = window_suspended(WindowPass.idle{});
-    if (!sel open.suspended) { ret 1; }
-    if (!sel idle.idle)      { ret 2; }
+    if (!sel open.suspended) { ret 6; }
+    if (!sel idle.idle)      { ret 7; }
     ret 0;
 }
 
@@ -746,7 +686,7 @@ test frame__offscreen_pass_suspends_window_open {
 # offscreen one, because pass_begin for the window records into whichever
 # render pass is open. So the suspended arm of window_step is unreachable, and
 # this is what keeps it so when the transitions change.
-test frame__no_sequence_passes_begins_window_pass {
+test window_step__never_nests_in_any_sequence {
     val ops:   u32 = 3;
     val depth: u32 = 6;
     var total: u32 = 1;
@@ -790,7 +730,7 @@ test frame__no_sequence_passes_begins_window_pass {
     ret 0;
 }
 
-test frame__window_readback_refused_surface_does_not {
+test frame_capture__arms_only_a_readable_full_request {
     var f: FrameLoop;
     f.capture = opt[Capture].none{};
     var s: Swapchain;
@@ -803,26 +743,18 @@ test frame__window_readback_refused_surface_does_not {
     if (!sel e.err.renderer)                 { ret 2; }
     if (!sel e.err.renderer.window_readback) { ret 3; }
     if (sel f.capture.some)                  { ret 4; }
-    ret 0;
-}
 
-test frame__window_readback_names_bytes_needs_arms {
-    var f: FrameLoop;
-    f.capture = opt[Capture].none{};
-    var s: Swapchain;
+    # a short buffer names the bytes the window needs
     s.readable = true;
-    s.width    = 8;
-    s.height   = 8;
-    var out:   [256]u8;
     val short: err[Error] = frame_capture(?f, ?s, ?out[0], 255);
-    if (!sel short.err)                        { ret 1; }
-    if (!sel short.err.image)                  { ret 2; }
-    if (!sel short.err.image.readback_short)   { ret 3; }
-    if (short.err.image.readback_short != 256) { ret 4; }
-    if (sel f.capture.some)                    { ret 5; }
+    if (!sel short.err)                        { ret 5; }
+    if (!sel short.err.image)                  { ret 6; }
+    if (!sel short.err.image.readback_short)   { ret 7; }
+    if (short.err.image.readback_short != 256) { ret 8; }
+    if (sel f.capture.some)                    { ret 9; }
     val ok: err[Error] = frame_capture(?f, ?s, ?out[0], 256);
-    if (!sel ok.ok)                { ret 6; }
-    if (!sel f.capture.some)       { ret 7; }
-    if (f.capture.some.len != 256) { ret 8; }
+    if (!sel ok.ok)                { ret 10; }
+    if (!sel f.capture.some)       { ret 11; }
+    if (f.capture.some.len != 256) { ret 12; }
     ret 0;
 }

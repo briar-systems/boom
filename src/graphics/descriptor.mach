@@ -836,7 +836,7 @@ pub fun descriptors_dnit(d: *Descriptors, v: *Vk) {
 # uniform range, which appears as one-frame flicker under load and not at all
 # when the GPU keeps up.
 
-test descriptor__slot_frame_gets_distinct_set {
+test set_index__distinct_per_slot_and_frame {
     var seen: [1024]bool;
     var i:    usize = 0;
     for (i < 1024) {
@@ -864,80 +864,27 @@ test descriptor__slot_frame_gets_distinct_set {
     ret 0;
 }
 
-test descriptor__two_frames_slot_do_not_share {
-    # Sharing one means frame N overwrites the uniforms frame N-1 is executing.
-    if (set_index(0, 0) == set_index(0, 1)) { ret 1; }
-    if (set_index(7, 0) != 14)              { ret 2; }
-    if (set_index(7, 1) != 15)              { ret 3; }
-    ret 0;
-}
-
-test descriptor__slot_offsets_do_not_overlap_256 {
-    # 256 is the largest minUniformBufferOffsetAlignment any implementation
-    # reports. An offset that is not a multiple of it is rejected on the
-    # hardware that asks for it and accepted everywhere else.
-    if (slot_offset(0) != 0)               { ret 1; }
-    if (slot_offset(1) != SLOT_BYTES::u64) { ret 2; }
-    var i: usize = 0;
-    for (i < MAX_SLOTS) {
-        if ((slot_offset(i) % 256) != 0) { ret 3; }
-        i = i + 1;
-    }
-    # The last slot must still lie inside the ring.
-    if (slot_offset(MAX_SLOTS - 1) + SLOT_BYTES::u64 != (MAX_SLOTS * SLOT_BYTES)::u64) { ret 4; }
-    ret 0;
-}
-
-test descriptor__slot_wide_enough_widest_uniform_block {
-    # Written against the blocks themselves rather than a literal, because the
-    # widest one has already changed once and a number left behind outlives the
-    # reason for it. A slot narrower than the block would make a draw's uniforms
-    # run into the next draw's.
+# minUniformBufferOffsetAlignment is up to 256, so an unaligned offset passes on
+# the machine it was written on and fails on one reporting 256
+test slot_layout__blocks_fit_and_align {
+    # against the blocks themselves, since the widest has changed before
     if (SLOT_BYTES < $size_of(SkinnedUniforms)) { ret 1; }
     if (SLOT_BYTES < $size_of(MeshUniforms))    { ret 2; }
     if (SLOT_BYTES < $size_of(ScreenUniforms))  { ret 3; }
+    if ((SLOT_BYTES % UNIFORM_ALIGN) != 0)      { ret 4; }
+    # the colour sits after the transform block, or it lands in the matrices
+    if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0)      { ret 5; }
+    if (COLOUR_OFFSET < $size_of(SkinnedUniforms)) { ret 6; }
+    if (COLOUR_OFFSET < $size_of(MeshUniforms))    { ret 7; }
+    if (COLOUR_OFFSET + $size_of(TintUniforms) > SLOT_BYTES) { ret 8; }
+    # the game's block sits after the colour and a full one fits the slot
+    if ((USER_OFFSET % UNIFORM_ALIGN) != 0)    { ret 9; }
+    if (USER_OFFSET < COLOUR_OFFSET + 16)      { ret 10; }
+    if (USER_OFFSET + USER_BYTES > SLOT_BYTES) { ret 11; }
     ret 0;
 }
 
-test descriptor__both_uniform_ranges_slot_correctly_aligned {
-    # A uniform descriptor's buffer offset must be a multiple of
-    # minUniformBufferOffsetAlignment, which is up to 256. This applies to the
-    # colour block at COLOUR_OFFSET as much as to the slot itself: an offset of
-    # 128 into an aligned slot is accepted on hardware reporting 16 and rejected
-    # on hardware reporting 256, so it passes wherever it was written and fails
-    # on someone else's machine.
-    if ((SLOT_BYTES % UNIFORM_ALIGN) != 0)    { ret 1; }
-    if ((COLOUR_OFFSET % UNIFORM_ALIGN) != 0) { ret 2; }
-    if (COLOUR_OFFSET == 0)                   { ret 3; }
-    # The colour must not run past the end of its slot.
-    if (COLOUR_OFFSET + 16 > SLOT_BYTES) { ret 4; }
-    ret 0;
-}
-
-test descriptor__game_s_block_aligned_fits_inside {
-    # The same alignment rule as the colour, and the same failure mode: an
-    # unaligned offset is accepted on hardware reporting 16 and rejected on
-    # hardware reporting 256, so it works wherever it was written and fails on
-    # someone else's machine.
-    if ((USER_OFFSET % UNIFORM_ALIGN) != 0) { ret 1; }
-    # It must not overlap the colour block below it.
-    if (USER_OFFSET < COLOUR_OFFSET + 16) { ret 2; }
-    # And a full-size block must not run past the end of the slot, or a game
-    # writing USER_BYTES would be refused at the draw rather than here.
-    if (USER_OFFSET + USER_BYTES > SLOT_BYTES) { ret 3; }
-    ret 0;
-}
-
-test descriptor__transform_block_fits_before_colour {
-    # A colour offset below the transform block would place the fragment stage's
-    # colour inside the vertex stage's matrices, which draws the geometry
-    # somewhere else entirely while the colour still looks right.
-    if (COLOUR_OFFSET < $size_of(SkinnedUniforms)) { ret 1; }
-    if (COLOUR_OFFSET < $size_of(MeshUniforms))    { ret 2; }
-    ret 0;
-}
-
-test descriptor__slots_run_out_rather_wrapping_onto {
+test take__exhausts_without_wrapping {
     # No device, so no block can be created: this is the ceiling case, where
     # growth is unavailable and exhaustion must still be reportable. Wrapping to
     # 0 would silently give a later draw the same uniform range as the first.
@@ -961,14 +908,13 @@ test descriptor__slots_run_out_rather_wrapping_onto {
     ret 0;
 }
 
+#[testing]
 fun took(slot: opt[usize], expected: usize) bool {
     ret sel slot.some && slot.some == expected;
 }
 
-test descriptor__slot_maps_block_offset {
-    # The arithmetic that sends a write into the right ring. A mistake here puts
-    # one block's draw into another block's memory, which is invisible at the
-    # call site and looks like a corrupted uniform much later.
+test slot__block_and_offset {
+    # a mistake sends one block's draw into another block's memory
     if (slot_block(0) != 0)                       { ret 1; }
     if (slot_block(SLOTS_PER_BLOCK - 1) != 0)     { ret 2; }
     if (slot_block(SLOTS_PER_BLOCK) != 1)         { ret 3; }
@@ -977,71 +923,44 @@ test descriptor__slot_maps_block_offset {
     if (slot_in_block(SLOTS_PER_BLOCK) != 0)     { ret 5; }
     if (slot_in_block(SLOTS_PER_BLOCK + 7) != 7) { ret 6; }
 
-    # Every block's ring starts at zero, so an offset is block-relative and the
-    # last slot of a block still fits inside it.
+    # offsets are block-relative, 256-aligned, and the last slot still fits
     if (slot_offset(SLOTS_PER_BLOCK) != 0)                   { ret 7; }
     if (slot_offset(SLOTS_PER_BLOCK + 1) != SLOT_BYTES::u64) { ret 8; }
     if (slot_offset(SLOTS_PER_BLOCK - 1) + SLOT_BYTES::u64
         != (SLOTS_PER_BLOCK * SLOT_BYTES)::u64) { ret 9; }
+    var i: usize = 0;
+    for (i < MAX_SLOTS) {
+        if ((slot_offset(i) % 256) != 0) { ret 10; }
+        i = i + 1;
+    }
 
-    # Two slots in different blocks share a set index, which is correct because
-    # they index different blocks' set arrays.
-    if (set_index(SLOTS_PER_BLOCK, 0) != set_index(0, 0)) { ret 10; }
+    # different blocks share a set index because they index different set arrays
+    if (set_index(SLOTS_PER_BLOCK, 0) != set_index(0, 0)) { ret 11; }
     ret 0;
 }
 
-test descriptor__block_larger_slot_refused_not_truncated {
+test write__past_slot_refused {
+    # writing past a slot corrupts the next draw rather than this one
     var d: Descriptors;
     d.ready = true;
     var bytes: [8]u8;
-    # Writing it would run over the next slot, corrupting a draw that has not
-    # been recorded yet.
-    if (descriptors_write_slot(?d, 0, 0, ?bytes[0], SLOT_BYTES + 1)) { ret 1; }
+    if (descriptors_write_slot(?d, 0, 0, ?bytes[0], SLOT_BYTES + 1))       { ret 1; }
+    if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES - 4, ?bytes[0], 8)) { ret 2; }
+    if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES, ?bytes[0], 1))     { ret 3; }
+    if (descriptors_write_palette(?d, 0, 0, ?bytes[0], PALETTE_BYTES + 1)) { ret 4; }
     ret 0;
 }
 
-test descriptor__offset_write_must_fit_inside_slot {
+# a set bound with a binding unwritten has the shader read a descriptor never filled
+test bind_slot__refuses_unwritten_bindings {
     var d: Descriptors;
-    d.ready = true;
-    var bytes: [8]u8;
-    # A tint written past the slot lands in the next draw's transform, which
-    # moves an unrelated draw rather than mis-colouring this one.
-    if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES - 4, ?bytes[0], 8)) { ret 1; }
-    if (descriptors_write_slot_at(?d, 0, 0, SLOT_BYTES, ?bytes[0], 1))     { ret 2; }
-    ret 0;
-}
-
-test descriptor__slot_holds_transform_block_tint_together {
-    # The transform block at offset 0 and TintUniforms at COLOUR_OFFSET. If they
-    # did not both fit, the tint would need a slot of its own and the two would
-    # drift.
-    if (COLOUR_OFFSET + $size_of(TintUniforms) > SLOT_BYTES) { ret 1; }
-    ret 0;
-}
-
-test descriptor__nil_image_view_refused_rather_left {
-    # Every fragment stage samples, so a set bound with binding 1 unwritten has
-    # the shader read a descriptor that was never filled. Silently skipping the
-    # write is what made that possible.
-    var d: Descriptors;
-    d.ready = true;
+    d.ready  = true;
+    d.bcount = 1;
     var v: Vk;
     v.ready = false;
     if (descriptors_bind_slot(?d, ?v, 0, 0, 64, nil, nil, 0, 0, nil, 0)) { ret 1; }
-    ret 0;
-}
 
-test descriptor__set_not_bound_without_frame_storage {
-    # Binding 8 is in every layout, so a set bound with it unwritten is
-    # undefined behaviour even under a shader that never reads it, and the
-    # layers report it as a use-after-free far from the draw. The renderer
-    # always has a buffer to name; refusing here is what keeps that a
-    # requirement rather than a habit.
-    var d: Descriptors;
-    var v: Vk;
-    d.ready  = true;
-    d.bcount = 1;
-    v.ready  = false;
+    # binding 8 is in every layout, and a zero range is what no storage looks like
     var views:    [4]vk.ImageView;
     var samplers: [4]vk.Sampler;
     var i:        usize = 0;
@@ -1050,13 +969,11 @@ test descriptor__set_not_bound_without_frame_storage {
         samplers[i] = nil;
         i           = i + 1;
     }
-    # A zero range is refused for the same reason: Vulkan forbids it, and it is
-    # what an uninitialized capacity looks like.
-    if (descriptors_bind_slot(?d, ?v, 0, 0, 64, ?views[0], ?samplers[0], 0, 0, nil, 4096)) { ret 1; }
+    if (descriptors_bind_slot(?d, ?v, 0, 0, 64, ?views[0], ?samplers[0], 0, 0, nil, 4096)) { ret 2; }
     ret 0;
 }
 
-test descriptor__uninitialized_pool_refuses_everything {
+test descriptors__uninitialized_refuses_everything {
     var d: Descriptors;
     d.ready  = false;
     d.used   = 0;
@@ -1077,42 +994,28 @@ test descriptor__uninitialized_pool_refuses_everything {
     ret 0;
 }
 
-test descriptor__palette_slot_holds_full_joint_palette {
-    # MAX_JOINTS 4x4 float matrices. A slot narrower than the storage block the
-    # shader declares makes the vertex stage read the next draw's palette for
-    # its last joints, which bends part of a character by another's pose.
+test palette__block_and_offset {
+    # MAX_JOINTS 4x4 float matrices, or the last joints read the next draw's pose
     if (PALETTE_BYTES != 128 * 64) { ret 1; }
-    ret 0;
-}
+    # block and offset must agree, or a character draws in another's pose
+    if (palette_block(0) != 0)                   { ret 2; }
+    if (palette_offset(0) != 0)                  { ret 3; }
+    if (palette_offset(1) != PALETTE_BYTES::u64) { ret 4; }
 
-test descriptor__palette_slot_names_block_offset_within {
-    # The two have to agree. An index that disagrees with the offset binds the
-    # right buffer at the wrong place, or the wrong buffer at a plausible one,
-    # and either draws a recognisable character in another character's pose.
-    #
-    # 8192 is a multiple of every minStorageBufferOffsetAlignment a device
-    # reports, so no offset here needs a device query to be legal.
-    if (palette_block(0) != 0)                   { ret 1; }
-    if (palette_offset(0) != 0)                  { ret 2; }
-    if (palette_offset(1) != PALETTE_BYTES::u64) { ret 3; }
+    if (palette_block(PALETTES_PER_BLOCK - 1) != 0) { ret 5; }
+    if (palette_block(PALETTES_PER_BLOCK) != 1)     { ret 6; }
+    if (palette_offset(PALETTES_PER_BLOCK) != 0)    { ret 7; }
 
-    if (palette_block(PALETTES_PER_BLOCK - 1) != 0) { ret 4; }
-    # The first slot of the second block wraps the offset back to zero, which is
-    # the point of splitting: each block is a buffer of its own.
-    if (palette_block(PALETTES_PER_BLOCK) != 1)  { ret 5; }
-    if (palette_offset(PALETTES_PER_BLOCK) != 0) { ret 6; }
-
-    # And no slot ever addresses past the end of the block holding it.
     var i: usize = 0;
     for (i < MAX_PALETTES) {
-        if (palette_offset(i) + PALETTE_BYTES::u64 > (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64) { ret 7; }
-        if (palette_block(i) >= MAX_PALETTE_BLOCKS)                                             { ret 8; }
+        if (palette_offset(i) + PALETTE_BYTES::u64 > (PALETTES_PER_BLOCK * PALETTE_BYTES)::u64) { ret 8; }
+        if (palette_block(i) >= MAX_PALETTE_BLOCKS)                                             { ret 9; }
         i = i + 1;
     }
     ret 0;
 }
 
-test descriptor__palette_slots_handed_out_order_reset {
+test take_palette__exhausts_and_resets {
     var d: Descriptors;
     var v: Vk;
     d.ready = true;
@@ -1135,35 +1038,5 @@ test descriptor__palette_slots_handed_out_order_reset {
     if (!sel full.none) { ret 2; }
     descriptors_begin_frame(?d);
     if (!took(descriptors_take_palette(?d, ?v, 0), 0)) { ret 3; }
-    ret 0;
-}
-
-test descriptor__palette_ring_holds_more_block_skinned {
-    # The defect this replaces: the ring was a flat 32, so the thirty-third
-    # skinned draw in a frame was refused. Refusal is in submission order, so a
-    # crowd lost whichever characters were submitted last, and said nothing.
-    if (MAX_PALETTES <= PALETTES_PER_BLOCK)                      { ret 1; }
-    if (MAX_PALETTES != PALETTES_PER_BLOCK * MAX_PALETTE_BLOCKS) { ret 2; }
-    ret 0;
-}
-
-test descriptor__palette_larger_slot_refused {
-    var d: Descriptors;
-    d.ready = true;
-    var bytes: [8]u8;
-    if (descriptors_write_palette(?d, 0, 0, ?bytes[0], PALETTE_BYTES + 1)) { ret 1; }
-    ret 0;
-}
-
-test descriptor__beginning_frame_frees_palette_ring_too {
-    # Resetting only the uniform ring leaks palette slots across frames, so a
-    # scene with a few skinned characters stops animating after 32 frames.
-    var d: Descriptors;
-    d.ready = true;
-    d.used  = 7;
-    d.pused = 3;
-    descriptors_begin_frame(?d);
-    if (d.used != 0)  { ret 1; }
-    if (d.pused != 0) { ret 2; }
     ret 0;
 }

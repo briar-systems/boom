@@ -266,7 +266,7 @@ pub fun vertex_format_is_skinned(f: *VertexFormat) bool {
     ret joints && weights;
 }
 
-test vertex__immediate_mode_format_matches_blit_s {
+test vertex_format_ui__matches_blit_layout {
     # blit documents its Vert as 8 f32 at a 32-byte stride: aPos (vec2) at 0,
     # aUV (vec2) at 8, aColor (vec4) at 16. A consumer uploads its draw list
     # through this format with no repacking, so a disagreement does not fail to
@@ -296,18 +296,12 @@ test vertex__immediate_mode_format_matches_blit_s {
     ret 0;
 }
 
-test vertex__standard_format_packs_32_byte_stride {
+test vertex_format_add__appends_after_standard {
     var f: VertexFormat = vertex_format_standard();
-    if (f.count != 3)                 { ret 1; }
-    if (f.attributes[0].offset != 0)  { ret 2; }
-    if (f.attributes[1].offset != 12) { ret 3; }
-    if (f.attributes[2].offset != 24) { ret 4; }
-    if (f.stride != 32)               { ret 5; }
-    ret 0;
-}
-
-test vertex__skinning_attributes_describe_joints_weights {
-    var f: VertexFormat = vertex_format_standard();
+    if (f.count != 3)                 { ret 7; }
+    if (f.attributes[1].offset != 12) { ret 8; }
+    if (f.attributes[2].offset != 24) { ret 9; }
+    if (f.stride != 32)               { ret 10; }
     if (!vertex_format_add(?f, SEMANTIC_JOINTS_0, 3, COMP_U16, 4, 0, 1))  { ret 1; }
     if (!vertex_format_add(?f, SEMANTIC_WEIGHTS_0, 4, COMP_F32, 4, 0, 0)) { ret 2; }
     val joints: *VertexAttribute = ?f.attributes[3];
@@ -318,7 +312,7 @@ test vertex__skinning_attributes_describe_joints_weights {
     ret 0;
 }
 
-test vertex__add_refuses_overflow_attribute_table {
+test vertex_format_add__refuses_full_table {
     var f: VertexFormat = vertex_format();
     var i: u32          = 0;
     for (i < MAX_ATTRIBUTES::u32) {

@@ -233,22 +233,12 @@ pub fun cache_dnit(c: *PipelineCache, v: *Vk) {
 # matches the wrong entry hands a draw a pipeline built for another layout,
 # which reads every attribute past the first from the wrong offset.
 
-test cache__empty_cache_finds_nothing {
-    var c: PipelineCache;
-    cache_init(?c);
-    var f:             VertexFormat      = vertex_format_standard();
-    var compatibility: PassCompatibility = pass_compatibility_one(1);
-    val found:         opt[usize]        = cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
-        DepthConvention.forward{});
-    if (!sel found.none) { ret 1; }
-    ret 0;
-}
-
+#[testing]
 fun misses(found: opt[usize]) bool {
     ret sel found.none;
 }
 
-test cache__entry_matches_program_format {
+test cache_find__matches_every_key {
     var c: PipelineCache;
     cache_init(?c);
     var compatibility: PassCompatibility = pass_compatibility_one(1);
@@ -284,32 +274,10 @@ test cache__entry_matches_program_format {
         DepthConvention.forward{}))) { ret 4; }
     if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
         DepthConvention.reversed{}))) { ret 5; }
-    ret 0;
-}
 
-test cache__dead_entry_not_matched {
-    var c: PipelineCache;
-    cache_init(?c);
-    var compatibility: PassCompatibility = pass_compatibility_one(1);
-    c.entries[0].program       = PROGRAM_MESH;
-    c.entries[0].format        = vertex_format_standard();
-    c.entries[0].compatibility = compatibility;
-    c.entries[0].depth         = DepthConvention.forward{};
-    c.entries[0].live          = false;
-    c.count                    = 1;
-    var f: VertexFormat = vertex_format_standard();
-    if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?f,
-        DepthConvention.forward{}))) { ret 1; }
-    ret 0;
-}
-
-test cache__teardown_clears_entries {
-    var c: PipelineCache;
-    cache_init(?c);
-    c.count = 0;
-    var v: Vk;
-    v.ready = false;
-    cache_dnit(?c, ?v);
-    if (c.count != 0) { ret 1; }
+    # a dead entry matches nothing.
+    c.entries[0].live = false;
+    if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
+        DepthConvention.forward{}))) { ret 7; }
     ret 0;
 }

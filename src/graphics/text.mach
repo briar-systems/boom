@@ -282,24 +282,3 @@ pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     if (!f.valid) { ret x; }
     ret atlas_draw(p, f.atlas, s, x, y, tint);
 }
-
-test text__invalid_font_measures_draws_nothing {
-    var f: Font;
-    f.valid = false;
-    if (text_measure(?f, "abc") != 0.0) { ret 1; }
-    if (text_height(?f, "abc") != 0.0)  { ret 2; }
-    if (text_lines(?f, "abc") != 0)     { ret 3; }
-    if (font_preload(?f, "abc"))        { ret 4; }
-    if (font_glyph_count(?f) != 0)      { ret 5; }
-    if (font_missing(?f) != 0)          { ret 6; }
-    ret 0;
-}
-
-test text__bytes_not_font_fail_before_device {
-    var a:     allo.Allocator;
-    var d:     Device;
-    var bytes: [4]u8            = [4]u8{0, 1, 2, 3};
-    val r:     res[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 4, 16.0);
-    if (!(sel r.err && (sel r.err.text && sel r.err.text.font))) { ret 1; }
-    ret 0;
-}

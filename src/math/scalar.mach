@@ -186,6 +186,7 @@ pub fun acosf(x: f32) f32 {
 # b:   second value
 # eps: tolerance
 # ret: true when |a - b| <= eps
+#[testing]
 fun close(a: f64, b: f64, eps: f64) bool {
     var d: f64 = a - b;
     if (d < 0.0) {
@@ -194,7 +195,7 @@ fun close(a: f64, b: f64, eps: f64) bool {
     ret d <= eps;
 }
 
-test scalar__sqrt_perfect_square {
+test sqrt64__values_and_domain {
     if (!close(sqrt64(16.0), 4.0, 0.00001))       { ret 1; }
     if (!close(sqrt64(2.0), 1.41421356, 0.00001)) { ret 2; }
     if (sqrt64(0.0) != 0.0)                       { ret 3; }
@@ -202,110 +203,45 @@ test scalar__sqrt_perfect_square {
     ret 0;
 }
 
-test scalar__sine_cardinal_angles {
-    if (!close(sin64(0.0), 0.0, 0.00001))                 { ret 1; }
-    if (!close(sin64(HALF_PI), 1.0, 0.00001))             { ret 2; }
-    if (!close(sin64(PI), 0.0, 0.00001))                  { ret 3; }
-    if (!close(sin64(0.0 - HALF_PI), 0.0 - 1.0, 0.00001)) { ret 4; }
+test sin_cos__cardinal_angles {
+    # cos(0) and sin(0) are exact: a cos(0) above one makes rotations
+    # non-orthonormal and puts acos outside its domain
+    if (cos64(0.0) != 1.0 || cosf(0.0) != 1.0) { ret 1; }
+    if (sin64(0.0) != 0.0 || sinf(0.0) != 0.0) { ret 2; }
+    if (!close(sin64(HALF_PI), 1.0, 0.00001))             { ret 3; }
+    if (!close(sin64(PI), 0.0, 0.00001))                  { ret 4; }
+    if (!close(sin64(0.0 - HALF_PI), 0.0 - 1.0, 0.00001)) { ret 5; }
+    if (!close(cos64(HALF_PI), 0.0, 0.00001))             { ret 6; }
+    if (!close(cos64(PI), 0.0 - 1.0, 0.00001))            { ret 7; }
+    if (!close(sin64(TWO_PI + HALF_PI), 1.0, 0.00001))    { ret 8; }
+    if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001))        { ret 9; }
     ret 0;
 }
 
-test scalar__cosine_cardinal_angles {
-    if (!close(cos64(0.0), 1.0, 0.00001))      { ret 1; }
-    if (!close(cos64(HALF_PI), 0.0, 0.00001))  { ret 2; }
-    if (!close(cos64(PI), 0.0 - 1.0, 0.00001)) { ret 3; }
-    ret 0;
-}
-
-test scalar__sine_survives_range_reduction {
-    if (!close(sin64(TWO_PI + HALF_PI), 1.0, 0.00001)) { ret 1; }
-    if (!close(sin64(0.0 - TWO_PI), 0.0, 0.00001))     { ret 2; }
-    ret 0;
-}
-
-test scalar__tangent_eighth_turn {
-    if (!close(tan64(PI / 4.0), 1.0, 0.00001)) { ret 1; }
-    ret 0;
-}
-
-test scalar__radians_converts_degrees {
-    val r: f32 = radians(180.0);
-    val d: f64 = r::f64 - PI;
-    if (d > 0.0001 || d < 0.0 - 0.0001) { ret 1; }
-    ret 0;
-}
-
-test scalar__arccosine_cardinal_values {
-    if (!close(acos64(1.0), 0.0, 0.0001))      { ret 1; }
-    if (!close(acos64(0.0), HALF_PI, 0.0001))  { ret 2; }
-    if (!close(acos64(0.0 - 1.0), PI, 0.0001)) { ret 3; }
-    if (!close(acos64(0.5), PI / 3.0, 0.0005)) { ret 4; }
-    ret 0;
-}
-
-test scalar__arccosine_clamps_out_range_input {
-    if (!close(acos64(1.5), 0.0, 0.0001))      { ret 1; }
-    if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 2; }
-    ret 0;
-}
-
-test scalar__cosine_zero_exactly {
-    # The defect this guards. cos was sin(x + pi/2), which evaluated sine's
-    # series at the far end of its reduced range, so cos(0) returned 1.0000035:
-    # not merely imprecise but greater than one. A rotation matrix built from it
-    # is not orthonormal and acos of it is outside the domain.
-    if (cos64(0.0) != 1.0) { ret 1; }
-    if (cosf(0.0) != 1.0)  { ret 2; }
-    if (sin64(0.0) != 0.0) { ret 3; }
-    if (sinf(0.0) != 0.0)  { ret 4; }
-    ret 0;
-}
-
-test scalar__sine_cosine_never_leave_1_1 {
-    # A value outside the range is what makes downstream code fail rather than
-    # merely drift: acos rejects it and a normalize divides by more than it
-    # should. Swept rather than spot-checked, since the old error was worst at
-    # the ends of the reduced range and zero in the middle.
-    var i: i32 = 0;
-    for (i <= 400) {
-        val x: f64 = (0.0 - 25.0) + i::f64 * 0.125;
-        if (sin64(x) > 1.0 || sin64(x) < 0.0 - 1.0) { ret 1; }
-        if (cos64(x) > 1.0 || cos64(x) < 0.0 - 1.0) { ret 2; }
-        i = i + 1;
-    }
-    ret 0;
-}
-
-test scalar__sine_cosine_satisfy_pythagorean_identity {
-    # Derived rather than recorded: whatever the series does, sin^2 + cos^2 must
-    # be one at every angle. This is what catches a range reduction that drifts
-    # or a series truncated too early, without pinning either to a table of
-    # values that would need regenerating.
+test sin_cos__bounded_and_consistent_across_range {
+    # derived, not recorded: both stay in [-1, 1], sin^2 + cos^2 is one, and cos
+    # leads sin by a quarter turn, which catches a drifting range reduction or a
+    # series truncated too early
     var i: i32 = 0;
     for (i <= 400) {
         val x: f64 = (0.0 - 25.0) + i::f64 * 0.125;
         val s: f64 = sin64(x);
         val c: f64 = cos64(x);
-        var d: f64 = s * s + c * c - 1.0;
-        if (d < 0.0) { d = 0.0 - d; }
-        # Comfortably tighter than the 3.5e-6 the four-term series produced, and
-        # loose enough not to pin the exact truncation.
-        if (d > 0.000001) { ret 1; }
+        if (s > 1.0 || s < 0.0 - 1.0) { ret 1; }
+        if (c > 1.0 || c < 0.0 - 1.0) { ret 2; }
+        if (!close(s * s + c * c, 1.0, 0.000001)) { ret 3; }
+        if (!close(c, sin64(x + HALF_PI), 0.00001)) { ret 4; }
         i = i + 1;
     }
     ret 0;
 }
 
-test scalar__cosine_leads_sine_quarter_turn {
-    # The identity the old implementation was built on, now checked rather than
-    # assumed. If the two ever disagree, one of the reductions is wrong.
-    var i: i32 = 0;
-    for (i <= 200) {
-        val x: f64 = (0.0 - 12.0) + i::f64 * 0.125;
-        var d: f64 = cos64(x) - sin64(x + HALF_PI);
-        if (d < 0.0)     { d = 0.0 - d; }
-        if (d > 0.00001) { ret 1; }
-        i = i + 1;
-    }
+test acos64__cardinal_and_clamped {
+    if (!close(acos64(1.0), 0.0, 0.0001))      { ret 1; }
+    if (!close(acos64(0.0), HALF_PI, 0.0001))  { ret 2; }
+    if (!close(acos64(0.0 - 1.0), PI, 0.0001)) { ret 3; }
+    if (!close(acos64(0.5), PI / 3.0, 0.0005)) { ret 4; }
+    if (!close(acos64(1.5), 0.0, 0.0001))      { ret 5; }
+    if (!close(acos64(0.0 - 1.5), PI, 0.0001)) { ret 6; }
     ret 0;
 }

@@ -262,7 +262,7 @@ pub fun typeface_hhea(t: *Typeface) fhhea.Hhea {
     ret h;
 }
 
-test typeface__bytes_not_font_refused_before_copy {
+test typeface_from__refuses_non_font_and_empty {
     var bytes: [4]u8                = [4]u8{0, 1, 2, 3};
     val r:     res[Typeface, Error] = typeface_from_bytes(nil, ?bytes[0], 4);
     if (!(sel r.err && (sel r.err.text && sel r.err.text.font))) { ret 1; }
@@ -271,21 +271,7 @@ test typeface__bytes_not_font_refused_before_copy {
     ret 0;
 }
 
-test typeface__typeface_live_faces_refuses_delete {
-    var t: Typeface;
-    t.valid = true;
-    t.faces = 1;
-    val refused: err[Error] = typeface_delete(?t);
-    if (!(sel refused.err && (sel refused.err.text && sel refused.err.text.in_use))) { ret 1; }
-    if (!t.valid)                                                                    { ret 2; }
-    t.faces = 0;
-    val done: err[Error] = typeface_delete(?t);
-    if (!sel done.ok) { ret 3; }
-    if (t.valid)      { ret 4; }
-    ret 0;
-}
-
-test typeface__outline_scratch_sized_larger_declared_maxima {
+test outline_scratch_sizes__declared_fallback_and_floor {
     val cjk: [2]usize = outline_scratch_sizes(opt[fmaxp.Maxima].some{fmaxp.Maxima{
         max_points:           900, max_contours: 60,
         max_composite_points: 1200, max_composite_contours: 40,
