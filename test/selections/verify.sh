@@ -32,7 +32,9 @@ targets="$*"
 list() {
     local out="$1"
     shift
-    "$mach" test . "$@" --list > "$out" || fail "could not list: mach test . $*"
+    # the listing also carries the build's step lines; a test's qualified name holds `#`
+    "$mach" test . "$@" --list > "$out.raw" || fail "could not list: mach test . $*"
+    grep -E '^[^[:space:]]+#' "$out.raw" > "$out" || true
 }
 
 missing=0
