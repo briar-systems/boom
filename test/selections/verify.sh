@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # every test declared under src runs under some `mach test` selection, on every target
 #
-# mach 5.12 tests one artifact's closure (mach#3813), so a module no artifact
+# mach tests one artifact's closure (mach#3813), so a module no artifact
 # reaches has its tests dropped without a word. this fails on any declared test
 # that neither `mach test .` nor `mach test . --lib tests` collects, on each
 # target named after the compiler, or every target the tests artifact declares.
@@ -17,7 +17,12 @@ trap 'rm -rf -- "$scratch"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 cd "$root"
-grep -rnE --include='*.mach' '^[[:space:]]*test "' src | cut -d: -f1,2 | sort -u > "$scratch/declared.txt"
+# a test's qualified name is its module path, `#`, and its name: src/audio.mach's
+# `test foo` is boom.audio#foo, which is what mach test --list prints first
+project="$(sed -n 's/^id *= *"\(.*\)"$/\1/p' mach.toml)"
+grep -rE --include='*.mach' '^[[:space:]]*test [A-Za-z_]' src \
+    | sed -E "s|^src/(.*)\.mach:[[:space:]]*test ([A-Za-z_][A-Za-z0-9_]*).*|$project.\1#\2|; s|/|.|g" \
+    | sort -u > "$scratch/declared.txt"
 [ -s "$scratch/declared.txt" ] || fail "found no test declarations under src"
 
 targets="$*"
@@ -27,18 +32,19 @@ targets="$*"
 list() {
     local out="$1"
     shift
-    "$mach" test . "$@" --list > "$out" || fail "could not list: mach test . $*"
+    # the listing also carries the build's step lines; a test's qualified name holds `#`
+    "$mach" test . "$@" --list > "$out.raw" || fail "could not list: mach test . $*"
+    grep -E '^[^[:space:]]+#' "$out.raw" > "$out" || true
 }
 
 missing=0
 for target in $targets; do
     list "$scratch/$target-boom.txt" --target "$target"
     list "$scratch/$target-tests.txt" --lib tests --target "$target"
-    cat "$scratch/$target-boom.txt" "$scratch/$target-tests.txt" | awk '{print $NF}' | grep -E '^src/.+:[0-9]+$' | sort -u > "$scratch/$target-union.txt" || true
+    cat "$scratch/$target-boom.txt" "$scratch/$target-tests.txt" | awk '{print $1}' | sort -u > "$scratch/$target-union.txt"
     dropped="$(comm -23 "$scratch/declared.txt" "$scratch/$target-union.txt")"
     printf '%s: boom %d, tests %d, both %d of %d declared\n' "$target" \
-        "$(awk '{print $NF}' "$scratch/$target-boom.txt" | grep -cE '^src/.+:[0-9]+$' || true)" \
-        "$(awk '{print $NF}' "$scratch/$target-tests.txt" | grep -cE '^src/.+:[0-9]+$' || true)" \
+        "$(wc -l < "$scratch/$target-boom.txt")" "$(wc -l < "$scratch/$target-tests.txt")" \
         "$(comm -12 "$scratch/declared.txt" "$scratch/$target-union.txt" | wc -l)" "$(wc -l < "$scratch/declared.txt")"
     if [ -n "$dropped" ]; then
         echo "::error::$target runs no selection that collects these tests; reach their modules from src/lib/tests.mach:"

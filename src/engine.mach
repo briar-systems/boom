@@ -127,13 +127,14 @@ use boom.context.context_user;
 use boom.timestep.timestep_new;
 use std.types.bool.true;
 
+#[testing]
 fun stop_on_tick(ctx: *Context) {
     val ticks: *i64 = context_user(ctx)::*i64;
     @ticks = @ticks + 1;
     context_stop(ctx);
 }
 
-test "engine: stopping a tick leaves catch-up work pending" {
+test tick_pending__stop_leaves_backlog {
     var ticks: i64 = 0;
     var ctx:   Context;
     ctx.running = true;

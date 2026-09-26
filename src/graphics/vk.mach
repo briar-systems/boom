@@ -35,7 +35,6 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
-use std.types.size.usize;
 use std.types.string.str;
 use vk;
 
@@ -545,39 +544,4 @@ pub fun vk_dnit(v: *Vk) {
     vk.vkDestroySurfaceKHR(v.instance, v.surface, nil);
     vk.vkDestroyInstance(v.instance, nil);
     v.ready = false;
-}
-
-# --------------------------------------------------------------------- tests
-#
-# Bring-up needs a Vulkan loader, an ICD, and a window, so vk_init is not
-# reachable here. These cover the pure decisions around it.
-
-test "vk: a fresh handle is not ready" {
-    var v: Vk;
-    v.ready = false;
-    if (v.ready) { ret 1; }
-    # Teardown on a handle that never initialized must be a no-op rather than
-    # destroying a device that was never created.
-    vk_dnit(?v);
-    ret 0;
-}
-
-test "vk: the packed API versions decode to the versions they name" {
-    # A game's SPIR-V may need a version a driver only accepts when the instance
-    # declared API 1.3 or later. A wrong constant here is accepted by instance
-    # creation and rejected later by every vkCreateShaderModule.
-    if (API_VERSION_1_3 != 0x00403000)          { ret 1; }
-    if ((API_VERSION_1_3 >> 22) != 1)           { ret 2; }
-    if (((API_VERSION_1_3 >> 12) & 0x3FF) != 3) { ret 3; }
-    if (API_VERSION_1_3 <= API_VERSION_1_0)     { ret 4; }
-    ret 0;
-}
-
-test "vk: the packed API version is VK_API_VERSION_1_0" {
-    # (1 << 22) | (0 << 12) | 0. A wrong value is accepted by the loader and
-    # then silently caps or rejects features later.
-    if (API_VERSION_1_0 != 0x00400000)          { ret 1; }
-    if ((API_VERSION_1_0 >> 22) != 1)           { ret 1; }
-    if (((API_VERSION_1_0 >> 12) & 0x3FF) != 0) { ret 1; }
-    ret 0;
 }

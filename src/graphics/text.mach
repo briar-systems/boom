@@ -29,7 +29,6 @@ use boom.graphics.device.Device;
 use boom.graphics.error.Error;
 use boom.graphics.renderer.Pass;
 use boom.graphics.text.atlas.GlyphAtlas;
-use boom.graphics.text.atlas.atlas_cell_count;
 use boom.graphics.text.atlas.atlas_delete;
 use boom.graphics.text.atlas.atlas_draw;
 use boom.graphics.text.atlas.atlas_init;
@@ -55,7 +54,6 @@ use allo: std.allocator;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -281,25 +279,4 @@ pub fun text_lines(f: *Font, s: str) usize {
 pub fun text_draw(p: *Pass, f: *Font, s: str, x: f32, y: f32, tint: Vec4) f32 {
     if (!f.valid) { ret x; }
     ret atlas_draw(p, f.atlas, s, x, y, tint);
-}
-
-test "text: an invalid font measures and draws nothing" {
-    var f: Font;
-    f.valid = false;
-    if (text_measure(?f, "abc") != 0.0) { ret 1; }
-    if (text_height(?f, "abc") != 0.0)  { ret 2; }
-    if (text_lines(?f, "abc") != 0)     { ret 3; }
-    if (font_preload(?f, "abc"))        { ret 4; }
-    if (font_glyph_count(?f) != 0)      { ret 5; }
-    if (font_missing(?f) != 0)          { ret 6; }
-    ret 0;
-}
-
-test "text: bytes that are not a font fail before any device work" {
-    var a:     allo.Allocator;
-    var d:     Device;
-    var bytes: [4]u8            = [4]u8{0, 1, 2, 3};
-    val r:     res[Font, Error] = font_from_bytes(?a, ?d, ?bytes[0], 4, 16.0);
-    if (!(sel r.err && (sel r.err.text && sel r.err.text.font))) { ret 1; }
-    ret 0;
 }

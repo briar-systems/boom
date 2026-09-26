@@ -60,7 +60,7 @@ var position: f32x4;
 
 # Transform a point by a 4x4 matrix given as its four columns.
 #
-# See src/shaders/mesh_vert.mach for why the product is a combination of
+# See src/bin/shaders/mesh_vert.mach for why the product is a combination of
 # columns rather than four dot products. Duplicated here rather than shared
 # because a SPIR-V shader cannot call a function defined in another module
 # (mach#2823).

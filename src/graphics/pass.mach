@@ -302,7 +302,7 @@ fun pass_dependencies() [2]vk.SubpassDependency {
     ret out;
 }
 
-test "pass: continuations preserve depth across every completed pass" {
+test depth_attachment__survives_into_continuation {
     val clear:  PassOptions              = pass_clearing(7, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     val load:   PassOptions              = pass_loading(7, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
     val before: vk.AttachmentDescription = depth_attachment(?clear);
@@ -316,7 +316,7 @@ test "pass: continuations preserve depth across every completed pass" {
     ret 0;
 }
 
-test "pass: dependencies cover attachment loads writes and late depth stores" {
+test pass_dependencies__cover_attachments_and_sampling {
     val deps:   [2]vk.SubpassDependency = pass_dependencies();
     val stages: u32                     = vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
         | vk.PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
@@ -336,15 +336,11 @@ test "pass: dependencies cover attachment loads writes and late depth stores" {
         if (deps[i].dependencyFlags != 0)               { ret 7; }
         i = i + 1;
     }
-    ret 0;
-}
-
-test "pass: sampling completes before reuse and observes prior attachment writes" {
-    val deps: [2]vk.SubpassDependency = pass_dependencies();
-    if ((deps[0].srcStageMask & vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) == 0) { ret 1; }
-    if ((deps[0].srcAccessMask & vk.ACCESS_SHADER_READ_BIT) == 0)            { ret 2; }
-    if ((deps[1].dstStageMask & vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) == 0) { ret 3; }
-    if ((deps[1].dstAccessMask & vk.ACCESS_SHADER_READ_BIT) == 0)            { ret 4; }
+    # sampling finishes before reuse, and a later sample sees what was drawn
+    if ((deps[0].srcStageMask & vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) == 0) { ret 8; }
+    if ((deps[0].srcAccessMask & vk.ACCESS_SHADER_READ_BIT) == 0)            { ret 9; }
+    if ((deps[1].dstStageMask & vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) == 0) { ret 10; }
+    if ((deps[1].dstAccessMask & vk.ACCESS_SHADER_READ_BIT) == 0)            { ret 11; }
     ret 0;
 }
 
@@ -354,33 +350,7 @@ test "pass: sampling completes before reuse and observes prior attachment writes
 # actually wrong: that two passes built for different purposes vary only in the
 # members render pass compatibility exempts.
 
-test "pass: a clearing and a loading pass differ only where compatibility allows" {
-    # Formats and the depth format are the compatibility-relevant members these
-    # options can reach. If a clearing pass and a loading pass ever disagreed on
-    # the colour format, every pipeline drawn through both would be invalid, and
-    # the diagnostic names two render passes rather than this line.
-    val a: PassOptions = pass_clearing(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-    val b: PassOptions = pass_loading(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (a.color_formats[0] != b.color_formats[0]) { ret 1; }
-    if (a.color_count != b.color_count)           { ret 2; }
-    ret 0;
-}
-
-test "pass: a single-attachment pass is the multi form with a count of one" {
-    # pass_clearing is the common case and must stay exactly the old behaviour,
-    # or every existing pipeline built against it becomes incompatible.
-    var fmt: i32         = vk.FORMAT_B8G8R8A8_SRGB;
-    val one: PassOptions = pass_clearing(fmt, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    val mrt: PassOptions = pass_clearing_mrt(?fmt, 1, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (one.color_count != 1)                         { ret 1; }
-    if (one.color_formats[0] != mrt.color_formats[0]) { ret 2; }
-    if (one.color_load != mrt.color_load)             { ret 3; }
-    if (one.color_initial != mrt.color_initial)       { ret 4; }
-    if (one.color_final != mrt.color_final)           { ret 5; }
-    ret 0;
-}
-
-test "pass: compatibility is attachment count and formats" {
+test pass_compatibility__count_and_formats {
     var a_formats: [4]i32            = [4]i32{1, 2, 0, 0};
     var b_formats: [4]i32            = [4]i32{1, 2, 0, 0};
     var c_formats: [4]i32            = [4]i32{1, 3, 0, 0};
@@ -394,10 +364,8 @@ test "pass: compatibility is attachment count and formats" {
     ret 0;
 }
 
-test "pass: an impossible attachment count is clamped into range" {
-    # Zero would create a pass nothing can draw into and a count past the
-    # guaranteed minimum would fail validation on a conforming device. Both are
-    # caller errors, and a working pass beats one that does not exist.
+test attachment_count__clamped_to_range {
+    # zero draws nowhere and past the guaranteed minimum fails validation
     var fmts: [4]i32      = [4]i32{1, 2, 3, 4};
     val zero: PassOptions = pass_clearing_mrt(?fmts[0], 0, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
     if (zero.color_count != 1) { ret 1; }
@@ -408,32 +376,16 @@ test "pass: an impossible attachment count is clamped into range" {
     val four: PassOptions = pass_clearing_mrt(?fmts[0], 4, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
     if (four.color_count != 4)      { ret 3; }
     if (four.color_formats[3] != 4) { ret 4; }
+
+    val load: PassOptions = pass_loading_mrt(?fmts[0], 0,
+        vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    if (load.color_count != 1) { ret 5; }
     ret 0;
 }
 
-test "pass: a clearing pass discards, a loading pass preserves" {
-    # The resume pass exists so an offscreen excursion does not erase the frame.
-    # A clear here, or an UNDEFINED initial layout, wipes everything already
-    # drawn and looks like the excursion itself failing to render.
-    val a: PassOptions = pass_clearing(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (a.color_load != vk.ATTACHMENT_LOAD_OP_CLEAR)  { ret 1; }
-    if (a.color_initial != vk.IMAGE_LAYOUT_UNDEFINED) { ret 2; }
-    if (a.depth_load != vk.ATTACHMENT_LOAD_OP_CLEAR)  { ret 3; }
-
-    val b: PassOptions = pass_loading(vk.FORMAT_B8G8R8A8_SRGB, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (b.color_load != vk.ATTACHMENT_LOAD_OP_LOAD)                          { ret 4; }
-    if (b.depth_load != vk.ATTACHMENT_LOAD_OP_LOAD)                          { ret 5; }
-    if (b.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)         { ret 6; }
-    if (b.depth_initial != vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) { ret 7; }
-    ret 0;
-}
-
-test "pass: a loading pass differs from a clearing one only where compatibility allows" {
-    # These two are used interchangeably with one set of pipelines, which is
-    # only legal because render pass compatibility exempts load and store
-    # operations and attachment layouts. Every other member must match, or a
-    # pipeline built against one is invalid in the other and the diagnostic
-    # names two render passes rather than this line.
+# the two share one set of pipelines, legal only because compatibility exempts
+# load ops and layouts, so every other member must match
+test pass_loading__compatible_with_clearing_but_preserves {
     var fmts: [4]i32      = [4]i32{7, 8, 9, 10};
     val c:    PassOptions = pass_clearing_mrt(?fmts[0], 3, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     val l:    PassOptions = pass_loading_mrt(?fmts[0], 3,
@@ -446,26 +398,17 @@ test "pass: a loading pass differs from a clearing one only where compatibility 
         i = i + 1;
     }
 
-    # And they must actually differ in the load op, or the loading pass clears.
-    if (c.color_load != vk.ATTACHMENT_LOAD_OP_CLEAR) { ret 3; }
-    if (l.color_load != vk.ATTACHMENT_LOAD_OP_LOAD)  { ret 4; }
-    if (l.depth_load != vk.ATTACHMENT_LOAD_OP_LOAD)  { ret 5; }
-    ret 0;
-}
-
-test "pass: a loading pass enters in the layout it is told, not a fixed one" {
-    # The window's resume pass enters attachments a suspended pass left
-    # mid-render. An offscreen target enters in SHADER_READ_ONLY_OPTIMAL,
-    # because that is where its own pass leaves it. Hardcoding either one makes
-    # the other preserve nothing, and the pass still creates successfully.
-    var fmt:    i32         = 7;
-    val target: PassOptions = pass_loading_mrt(?fmt, 1,
-        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (target.color_initial != vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) { ret 1; }
-
+    if (c.color_load != vk.ATTACHMENT_LOAD_OP_CLEAR)  { ret 3; }
+    if (c.depth_load != vk.ATTACHMENT_LOAD_OP_CLEAR)  { ret 4; }
+    if (c.color_initial != vk.IMAGE_LAYOUT_UNDEFINED) { ret 5; }
+    # a clear or an UNDEFINED entry here erases the frame an excursion resumes
+    if (l.color_load != vk.ATTACHMENT_LOAD_OP_LOAD)                          { ret 6; }
+    if (l.depth_load != vk.ATTACHMENT_LOAD_OP_LOAD)                          { ret 7; }
+    if (l.depth_initial != vk.IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) { ret 8; }
+    # a target enters where its own pass left it, the window mid-render
+    if (l.color_initial != vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) { ret 9; }
     val window: PassOptions = pass_loading(7, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (window.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) { ret 2; }
-    if (window.color_final != vk.IMAGE_LAYOUT_PRESENT_SRC_KHR)            { ret 3; }
+    if (window.color_initial != vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) { ret 10; }
+    if (window.color_final != vk.IMAGE_LAYOUT_PRESENT_SRC_KHR)            { ret 11; }
     ret 0;
 }

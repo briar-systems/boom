@@ -1,8 +1,8 @@
 out/
 
-# an example is a root of its own that realizes boom and its closure under dep/
+# a demo is a root of its own that realizes boom and its closure under dep/
 # as a path copy and plain clones; nothing there is source
-/examples/*/dep/
+/demo/*/dep/
 
-# generated at runtime by examples/audio, not assets
+# generated at runtime by demo/audio, not assets
 *.wav

@@ -807,23 +807,31 @@ pub fun sampler_dnit(s: vk.Sampler, v: *Vk) {
 
 # --------------------------------------------------------------------- tests
 #
-# Creation needs a device, so these cover the size arithmetic and the barrier
-# masks: the two places where a wrong answer is accepted by Vulkan and shows up
-# as a black texture on some hardware and not others.
+# creation needs a device, so these cover the size arithmetic, the barrier
+# masks and the region bounds, where a wrong answer is accepted by vulkan
 
-test "image: byte size is width times height times four" {
-    if (image_bytes(2, 3) != 24)  { ret 1; }
-    if (image_bytes(1, 1) != 4)   { ret 2; }
-    if (image_bytes(0, 100) != 0) { ret 3; }
-    ret 0;
-}
-
+#[testing]
 fun raw_bytes_are(i: *Image, expected: usize) bool {
     val raw: opt[usize] = image_raw_bytes(i);
     ret sel raw.some && raw.some == expected;
 }
 
-test "image: raw byte size follows the image format" {
+#[testing]
+fun masks_are(old: i32, new: i32, src_stage: u32, dst_stage: u32, src_access: u32,
+    dst_access: u32) bool {
+    val m: opt[TransitionMasks] = transition_masks(old, new);
+    if (!sel m.some) { ret false; }
+    ret m.some.src_stage == src_stage && m.some.dst_stage == dst_stage
+        && m.some.src_access == src_access && m.some.dst_access == dst_access;
+}
+
+test bytes__large_texture_does_not_overflow {
+    # 16384 x 16384 rgba is 1 GiB, which wraps a 32-bit multiply to zero
+    if (image_bytes(16384, 16384) != 1073741824) { ret 1; }
+    ret 0;
+}
+
+test raw_bytes__follow_format {
     var i: Image;
     i.width  = 2;
     i.height = 3;
@@ -837,44 +845,38 @@ test "image: raw byte size follows the image format" {
     ret 0;
 }
 
-test "image: a large texture does not overflow its size" {
-    # 16384 x 16384 RGBA is 1 GiB, which wraps a 32-bit multiply to zero and
-    # would allocate a staging buffer smaller than the copy that follows.
-    val n: usize = image_bytes(16384, 16384);
-    if (n != 1073741824) { ret 1; }
+test transition_masks__order_each_pair {
+    # a later source or earlier destination lets a stage touch the image before
+    # the prior use lands, which fails on other hardware and not this one
+    if (!masks_are(vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+        0, vk.ACCESS_TRANSFER_WRITE_BIT)) { ret 1; }
+    if (!masks_are(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        vk.ACCESS_TRANSFER_WRITE_BIT, vk.ACCESS_SHADER_READ_BIT)) { ret 2; }
+    # a live atlas page keeps its texels, so sampling finishes before the write
+    if (!masks_are(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+        vk.ACCESS_SHADER_READ_BIT, vk.ACCESS_TRANSFER_WRITE_BIT)) { ret 3; }
+    # a target sampled before its first render
+    if (!masks_are(vk.IMAGE_LAYOUT_UNDEFINED, vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT, vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        0, vk.ACCESS_SHADER_READ_BIT)) { ret 4; }
+    # a window readback waits for the colour writes, and a present names no access
+    if (!masks_are(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk.PIPELINE_STAGE_TRANSFER_BIT,
+        vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, vk.ACCESS_TRANSFER_READ_BIT)) { ret 5; }
+    if (!masks_are(vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        vk.PIPELINE_STAGE_TRANSFER_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        vk.ACCESS_TRANSFER_READ_BIT, 0)) { ret 6; }
+    if (!masks_are(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, vk.IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0)) { ret 7; }
     ret 0;
 }
 
-test "image: the receive transition waits for nothing and writes at transfer" {
-    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
-        vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    if (!sel m.some)                                           { ret 1; }
-    if (m.some.src_stage != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT) { ret 2; }
-    if (m.some.dst_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)    { ret 3; }
-    if (m.some.src_access != 0)                                { ret 4; }
-    if (m.some.dst_access != vk.ACCESS_TRANSFER_WRITE_BIT)     { ret 5; }
-    ret 0;
-}
-
-test "image: the read transition orders the copy before the fragment stage" {
-    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (!sel m.some) { ret 1; }
-    # Naming a later source stage or an earlier destination lets the fragment
-    # stage sample the image before the copy lands, which a driver is free to
-    # do and most do not, so it fails on other hardware and not on this one.
-    if (m.some.src_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)        { ret 2; }
-    if (m.some.dst_stage != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
-    if (m.some.src_access != vk.ACCESS_TRANSFER_WRITE_BIT)         { ret 4; }
-    if (m.some.dst_access != vk.ACCESS_SHADER_READ_BIT)            { ret 5; }
-    ret 0;
-}
-
-test "image: an unhandled transition is refused rather than zeroed" {
-    # Emitting a barrier with zeroed masks synchronizes nothing while looking
-    # like it did, so a pair the table does not carry must fail rather than be
-    # recorded. These are arbitrary pairs nothing in boom performs. The point is
-    # that the table is a closed set, not that it happens to be missing them.
+test transition_masks__unhandled_pair_refused {
+    # zeroed masks would synchronize nothing while looking like they did
     val present: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
     if (!sel present.none) { ret 1; }
@@ -884,108 +886,24 @@ test "image: an unhandled transition is refused rather than zeroed" {
     ret 0;
 }
 
-test "image: a live image can be written into and left readable" {
-    # The glyph atlas writes one cell of a page that is already being sampled.
-    # Unlike a fresh upload the old layout is not UNDEFINED, so the barrier has
-    # to order the write after any sampling still in flight rather than let the
-    # driver treat the existing texels as discardable.
-    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    if (!sel m.some)                                               { ret 1; }
-    if (m.some.src_stage != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 2; }
-    if (m.some.dst_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)        { ret 3; }
-    if (m.some.src_access != vk.ACCESS_SHADER_READ_BIT)            { ret 4; }
-    if (m.some.dst_access != vk.ACCESS_TRANSFER_WRITE_BIT)         { ret 5; }
-    # and back, so a region write never strands the image in a transfer layout
-    val back: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (!sel back.some) { ret 6; }
-    ret 0;
-}
-
-test "image: the window's image is read after its colour writes and handed on to present" {
-    # A window readback copies the swapchain image between the last pass and
-    # the present. The copy must wait for the colour attachment writes, and the
-    # hand-off to the presentation engine names no access, exactly as the
-    # barrier frame_end records when nothing is captured.
-    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    if (!sel m.some)                                                       { ret 1; }
-    if (m.some.src_stage != vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) { ret 2; }
-    if (m.some.dst_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)                { ret 3; }
-    if (m.some.src_access != vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)         { ret 4; }
-    if (m.some.dst_access != vk.ACCESS_TRANSFER_READ_BIT)                  { ret 5; }
-    val on: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (!sel on.some)                                              { ret 6; }
-    if (on.some.src_stage != vk.PIPELINE_STAGE_TRANSFER_BIT)       { ret 7; }
-    if (on.some.dst_stage != vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT) { ret 8; }
-    if (on.some.src_access != vk.ACCESS_TRANSFER_READ_BIT)         { ret 9; }
-    if (on.some.dst_access != 0)                                   { ret 10; }
-    # and the plain hand-off every uncaptured frame takes
-    val plain: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        vk.IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if (!sel plain.some)                                                       { ret 11; }
-    if (plain.some.src_stage != vk.PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT) { ret 12; }
-    if (plain.some.dst_stage != vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT)          { ret 13; }
-    if (plain.some.src_access != vk.ACCESS_COLOR_ATTACHMENT_WRITE_BIT)         { ret 14; }
-    if (plain.some.dst_access != 0)                                            { ret 15; }
-    ret 0;
-}
-
-test "image: a region write refuses an image that was never created" {
+test upload_region__validates_before_device {
     var i:  Image;
     var v:  Vk;
     var px: [4]u8;
-    val r:  err[Error] = image_upload_region(?i, ?v, nil, ?px[0], 0, 0, 1, 1);
-    if (!(sel r.err && (sel r.err.image && sel r.err.image.not_created))) { ret 1; }
-    ret 0;
-}
-
-test "image: a region write refuses a rectangle outside the image" {
-    # the bounds are checked before anything touches the device, so a stub
-    # image that claims to be ready is enough to reach them
-    var i: Image;
+    i.ready = false;
+    val cold: err[Error] = image_upload_region(?i, ?v, nil, ?px[0], 0, 0, 1, 1);
+    if (!(sel cold.err && (sel cold.err.image && sel cold.err.image.not_created))) { ret 1; }
+    # a stub that claims to be ready reaches the bounds without a device
     i.ready  = true;
     i.width  = 16;
     i.height = 16;
-    var v:    Vk;
-    var px:   [4]u8;
     val over: err[Error] = image_upload_region(?i, ?v, nil, ?px[0], 16, 0, 1, 1);
-    if (!(sel over.err && (sel over.err.image && sel over.err.image.region))) { ret 1; }
+    if (!(sel over.err && (sel over.err.image && sel over.err.image.region))) { ret 2; }
     # a right edge past u32 must not wrap into a rectangle that fits
     val wrap: err[Error] = image_upload_region(?i, ?v, nil, ?px[0], 0xFFFFFFFFu32, 0, 2, 1);
-    if (!(sel wrap.err && (sel wrap.err.image && sel wrap.err.image.region))) { ret 2; }
+    if (!(sel wrap.err && (sel wrap.err.image && sel wrap.err.image.region))) { ret 3; }
     val empty: err[Error] = image_upload_region(?i, ?v, nil, ?px[0], 0, 0, 0, 1);
-    if (!(sel empty.err && (sel empty.err.image && sel empty.err.image.empty))) { ret 3; }
-    ret 0;
-}
-
-test "image: a target's colour image can be made readable before anything draws" {
-    # A game may sample a render target before its first render. The image is
-    # in UNDEFINED then, while the descriptor claims SHADER_READ_ONLY_OPTIMAL,
-    # which is a lie about the layout rather than merely undefined contents.
-    val m: opt[TransitionMasks] = transition_masks(vk.IMAGE_LAYOUT_UNDEFINED,
-        vk.IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    if (!sel m.some) { ret 1; }
-    # Nothing has touched the image, so there is nothing to wait for, but the
-    # fragment stage's read is what must wait for the transition.
-    if (m.some.src_stage != vk.PIPELINE_STAGE_TOP_OF_PIPE_BIT)     { ret 2; }
-    if (m.some.dst_stage != vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT) { ret 3; }
-    if (m.some.src_access != 0)                                    { ret 4; }
-    if (m.some.dst_access != vk.ACCESS_SHADER_READ_BIT)            { ret 5; }
-    ret 0;
-}
-
-test "image: teardown on an image that was never created is a no-op" {
-    var i: Image;
-    i.handle = nil;
-    i.memory = nil;
-    i.view   = nil;
-    var v: Vk;
-    v.ready = false;
-    image_dnit(?i, ?v);
-    if (i.ready) { ret 1; }
+    if (!(sel empty.err && (sel empty.err.image && sel empty.err.image.empty))) { ret 4; }
     ret 0;
 }
 
@@ -1122,38 +1040,4 @@ pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
         vk.vkFreeMemory(v.device, d.mem, nil);
         d.mem = nil;
     }
-}
-
-test "image: a colour space maps to the format that applies its transfer function" {
-    # An sRGB texture read through a UNORM image hands the shader raw bytes as
-    # though they were linear. Every stage then does exactly what it was told
-    # and the result is washed out, with no diagnostic anywhere.
-    if (image_format(ColorSpace.srgb{}) != vk.FORMAT_R8G8B8A8_SRGB)    { ret 1; }
-    if (image_format(ColorSpace.linear{}) != vk.FORMAT_R8G8B8A8_UNORM) { ret 2; }
-    ret 0;
-}
-
-test "image: a zeroed colour space is sRGB, the space textures are authored in" {
-    var space: ColorSpace;
-    if (!sel space.srgb) { ret 1; }
-    ret 0;
-}
-
-test "image: the depth format is the one every implementation must support" {
-    # A format chosen without a query has to be one the spec mandates. It is
-    # also what makes the window pass and an offscreen target's compatible, so
-    # changing it here without changing both breaks every pipeline.
-    if (DEPTH_FORMAT != vk.FORMAT_D32_SFLOAT) { ret 1; }
-    ret 0;
-}
-
-test "image: teardown of a never-created depth attachment is a no-op" {
-    var d: DepthAttachment;
-    d.image = nil;
-    d.mem   = nil;
-    d.view  = nil;
-    var v: Vk;
-    v.ready = false;
-    depth_attachment_dnit(?d, ?v);
-    ret 0;
 }

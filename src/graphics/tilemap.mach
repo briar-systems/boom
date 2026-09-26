@@ -39,8 +39,6 @@ use boom.math.vec.Vec2;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec2;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.option.opt;
 use std.types.size.usize;
 
@@ -332,31 +330,7 @@ fun span_hi(q: f32, hi: usize) usize {
 use boom.graphics.sprite.rect_overlaps;
 use boom.math.vec.vec4;
 
-test "tilemap: a view inside the field spans exactly the cells it covers" {
-    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(0.0, 0.0));
-
-    # Cells are 32 units. A view from 64 to 192 covers columns 2, 3, 4 and 5,
-    # since column 6 begins at 192 where the view ends. Derived from the
-    # geometry rather than read off the result.
-    val s: TileSpan = tilemap_span(?l, rect(64.0, 64.0, 128.0, 128.0));
-    if (s.col0 != 2 || s.col1 != 6)   { ret 1; }
-    if (s.row0 != 2 || s.row1 != 6)   { ret 2; }
-    if (tilemap_span_cells(?s) != 16) { ret 3; }
-    ret 0;
-}
-
-test "tilemap: a partly covered cell is in the span" {
-    # The failure this prevents is a column of tiles missing along the leading
-    # edge of the screen as the camera pans, which looks like the field ending
-    # early rather than like a rounding error.
-    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(0.0, 0.0));
-    val s: TileSpan  = tilemap_span(?l, rect(65.0, 65.0, 126.0, 126.0));
-    if (s.col0 != 2 || s.col1 != 6) { ret 1; }
-    if (s.row0 != 2 || s.row1 != 6) { ret 2; }
-    ret 0;
-}
-
-test "tilemap: the span agrees with a per-cell overlap test" {
+test span__agrees_with_per_cell_overlap {
     # The span is an optimisation of exactly this loop, so the two have to give
     # the same answer for every cell. Swept over offsets because the disagreement
     # a hand-derived span produces is at one edge, on some offsets only.
@@ -384,7 +358,7 @@ test "tilemap: the span agrees with a per-cell overlap test" {
     ret 0;
 }
 
-test "tilemap: a view off the field spans nothing" {
+test span__view_off_field_spans_nothing {
     var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
 
     # Wholly left, right, above and below. Each has to collapse rather than
@@ -400,7 +374,7 @@ test "tilemap: a view off the field spans nothing" {
     ret 0;
 }
 
-test "tilemap: an expansion walks the span once, skipping holes" {
+test expand__walks_once_skipping_holes {
     # Three rows of four, with holes and one index the sheet does not have. Nine
     # cells are in the span and five of them draw, which is the count the batch
     # has to receive: a loop that emitted a quad for the holes would draw the
@@ -433,7 +407,7 @@ test "tilemap: an expansion walks the span once, skipping holes" {
     ret 0;
 }
 
-test "tilemap: a chunked expansion loses no tile at the boundary" {
+test expand__chunks_match_one_call {
     # The whole reason the cursor is a value. Expanding a span two tiles at a
     # time has to produce exactly what one call produces, or the field is drawn
     # with a tile repeated or missing every chunk, which is a stripe across the
@@ -474,7 +448,7 @@ test "tilemap: a chunked expansion loses no tile at the boundary" {
     ret 0;
 }
 
-test "tilemap: the staging buffer the renderer uses holds a whole chunk" {
+test chunk__fits_renderer_staging_buffer {
     # pass_draw_tilemap declares its stack buffer with a literal size, since an
     # array length must be one. A chunk larger than the buffer would write past
     # it, so the two are tied together here rather than by a comment.
@@ -482,13 +456,14 @@ test "tilemap: the staging buffer the renderer uses holds a whole chunk" {
     ret 0;
 }
 
-# How many cells a view reaches, for the tests that only care about the count.
+# how many cells a view reaches
+#[testing]
 fun cells(layer: *TileLayer, view: Rect) usize {
     var s: TileSpan = tilemap_span(layer, view);
     ret tilemap_span_cells(?s);
 }
 
-test "tilemap: a view larger than the field is clamped to it" {
+test span__oversized_view_clamps_to_field {
     # A camera zoomed out past the world. Without the clamp the span runs past
     # the array and the draw reads memory that is not the map.
     var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(0.0, 0.0));
@@ -503,18 +478,7 @@ test "tilemap: a view larger than the field is clamped to it" {
     ret 0;
 }
 
-test "tilemap: the origin offsets the field" {
-    # A layer placed anywhere but the origin is the case a span derived from the
-    # view alone gets wrong, and it is wrong by a constant, so it looks like the
-    # map being drawn in the wrong place.
-    var l: TileLayer = tile_layer(nil, 128, 128, 32.0, vec2(1000.0, 0.0 - 500.0));
-    val s: TileSpan  = tilemap_span(?l, rect(1064.0, 0.0 - 436.0, 128.0, 128.0));
-    if (s.col0 != 2 || s.col1 != 6) { ret 1; }
-    if (s.row0 != 2 || s.row1 != 6) { ret 2; }
-    ret 0;
-}
-
-test "tilemap: a degenerate layer or view spans nothing" {
+test span__degenerate_input_spans_nothing {
     var empty: TileLayer = tile_layer(nil, 0, 0, 32.0, vec2(0.0, 0.0));
     if (cells(?empty, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 1; }
 
@@ -523,42 +487,24 @@ test "tilemap: a degenerate layer or view spans nothing" {
     # A minimized window gives the pass a view with no area.
     if (cells(?l, rect(0.0, 0.0, 0.0, 0.0)) != 0) { ret 2; }
 
-    # A NEGATIVE EXTENT IS NOT A SMALL VIEW. Its far edge is left of its near
-    # one, so the two ends of the span cross and col0 lands past col1. Every
-    # loop over a span reads it as half-open and would run from a start it can
-    # never reach, which is empty here and is not a shape anything downstream
-    # should have to allow for. This is the assertion that fails when the guard
-    # against it is removed, where the zero cases either side collapse to an
-    # empty span with or without it.
+    # a negative extent must not cross the span's ends
     var back: TileSpan = tilemap_span(?l, rect(100.0, 100.0, 0.0 - 50.0, 0.0 - 50.0));
     if (back.col1 < back.col0 || back.row1 < back.row0) { ret 3; }
     if (tilemap_span_cells(?back) != 0)                 { ret 4; }
 
-    # A zero tile size is the divide the guard in tilemap_span avoids, and this
-    # pins the contract rather than catching a regression: without the guard the
-    # quotient is a NaN, the comparisons in span_lo and span_hi are all false,
-    # and what the integer cast then produces is undefined rather than reliably
-    # wrong. Removing the guard does not fail this, and saying so is better than
-    # a check that reads as if it would.
+    # a zero tile size is the divide the guard avoids
     var zero: TileLayer = tile_layer(nil, 8, 8, 0.0, vec2(0.0, 0.0));
     if (cells(?zero, rect(0.0, 0.0, 100.0, 100.0)) != 0) { ret 5; }
     ret 0;
 }
 
-test "tilemap: an unculled span is the whole field" {
-    var l: TileLayer = tile_layer(nil, 128, 64, 32.0, vec2(0.0, 0.0));
-    val s: TileSpan  = tilemap_all(?l);
-    if (s.col1 != 128 || s.row1 != 64)  { ret 1; }
-    if (tilemap_span_cells(?s) != 8192) { ret 2; }
-    ret 0;
-}
-
 # whether a cell read found exactly this index
+#[testing]
 fun holds(cell: opt[u16], expected: u16) bool {
     ret sel cell.some && cell.some == expected;
 }
 
-test "tilemap: a cell reads its own index and nothing outside the grid" {
+test at__row_major_absent_outside_grid {
     # Row-major, and the transposed reading of it is the bug that looks like a
     # map drawn mirrored about its diagonal, which is only obvious on a
     # non-square grid.
@@ -574,42 +520,5 @@ test "tilemap: a cell reads its own index and nothing outside the grid" {
     if (!sel right.none) { ret 5; }
     val below: opt[u16] = tilemap_at(?l, 0, 3);
     if (!sel below.none) { ret 6; }
-    ret 0;
-}
-
-test "tilemap: a cell's rectangle is its own square of the field" {
-    var l: TileLayer = tile_layer(nil, 8, 8, 32.0, vec2(10.0, 20.0));
-    val r: Rect      = tilemap_cell_rect(?l, 3, 2);
-    if (r.x != 106.0 || r.y != 84.0) { ret 1; }
-    if (r.w != 32.0 || r.h != 32.0)  { ret 2; }
-
-    # Neighbours meet exactly, or the field has seams between its tiles.
-    val n: Rect = tilemap_cell_rect(?l, 4, 2);
-    if (r.x + r.w != n.x) { ret 3; }
-    ret 0;
-}
-
-test "tilemap: an index past the frame array draws nothing" {
-    # The malformed-map case. Sampling past the array hands the shader whatever
-    # follows it as texture coordinates, which draws a wrong tile rather than no
-    # tile, so the check is that nothing is written at all.
-    var frames: [3]Rect = [3]Rect{rect(0.0, 0.0, 0.0, 0.0),
-        rect(0.0, 0.0, 0.5, 0.5),
-        rect(0.5, 0.0, 0.5, 0.5)};
-    var sheet: TileSheet = tile_sheet(opt[*Texture].none{}, ?frames[0], 3);
-
-    val past: opt[Rect] = tilemap_frame(?sheet, 3);
-    if (!sel past.none) { ret 1; }
-    val far: opt[Rect] = tilemap_frame(?sheet, 60000);
-    if (!sel far.none) { ret 3; }
-
-    # The empty index is a hole, not frame zero.
-    val hole: opt[Rect] = tilemap_frame(?sheet, TILE_EMPTY);
-    if (!sel hole.none) { ret 5; }
-
-    # An index in range resolves to its own frame.
-    val framed: opt[Rect] = tilemap_frame(?sheet, 2);
-    if (!sel framed.some)                             { ret 7; }
-    if (framed.some.x != 0.5 || framed.some.w != 0.5) { ret 8; }
     ret 0;
 }

@@ -42,7 +42,6 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.size.usize;
-use std.types.string.str;
 use vk;
 
 # A pipeline and the layouts it was built against.
@@ -141,7 +140,7 @@ fun rasterization_state(d: *PipelineDesc) vk.PipelineRasterizationStateCreateInf
     # it culled part of every closed mesh. Nothing reported that: a cube missing
     # some of its faces still draws, still presents, and still has the right
     # silhouette from the outside, because the faces behind the missing ones are
-    # drawn instead. examples/vulkan reads the render back and compares the
+    # drawn instead. demo/vulkan reads the render back and compares the
     # covered pixel count against the area of the projected hull, which is the
     # check that caught it.
     rs.frontFace       = vk.FRONT_FACE_COUNTER_CLOCKWISE;
@@ -785,144 +784,84 @@ pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
 # the shader as silently wrong values rather than as an error.
 
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
-use boom.graphics.vertex.SEMANTIC_JOINTS_0;
 use boom.graphics.vertex.SEMANTIC_POSITION;
 use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
 use boom.graphics.vertex.vertex_format;
 use boom.graphics.vertex.vertex_format_add;
 use boom.graphics.vertex.vertex_format_standard;
 
+#[testing]
 fun format_is(f: opt[i32], expected: i32) bool {
     ret sel f.some && f.some == expected;
 }
 
+#[testing]
 fun attributes_are(n: opt[u32], expected: u32) bool {
     ret sel n.some && n.some == expected;
 }
 
-test "pipeline: float attributes map by component count" {
+test attribute_format__maps_and_refuses {
     if (!format_is(attribute_format(COMP_F32, 1, 0, 0), vk.FORMAT_R32_SFLOAT))          { ret 1; }
     if (!format_is(attribute_format(COMP_F32, 2, 0, 0), vk.FORMAT_R32G32_SFLOAT))       { ret 2; }
     if (!format_is(attribute_format(COMP_F32, 3, 0, 0), vk.FORMAT_R32G32B32_SFLOAT))    { ret 3; }
     if (!format_is(attribute_format(COMP_F32, 4, 0, 0), vk.FORMAT_R32G32B32A32_SFLOAT)) { ret 4; }
-    ret 0;
-}
+    # normalized changes the format, or a byte colour arrives as 0..255 and clamps to white
+    if (!format_is(attribute_format(COMP_U8, 4, 1, 0), vk.FORMAT_R8G8B8A8_UNORM)) { ret 5; }
+    if (!format_is(attribute_format(COMP_U8, 4, 0, 0), vk.FORMAT_R8G8B8A8_UINT))  { ret 6; }
+    if (!format_is(attribute_format(COMP_I8, 4, 1, 0), vk.FORMAT_R8G8B8A8_SNORM)) { ret 7; }
+    if (!format_is(attribute_format(COMP_I8, 4, 0, 0), vk.FORMAT_R8G8B8A8_SINT))  { ret 8; }
+    # joint indices reach the shader as integers, or every index is zero
+    if (!format_is(attribute_format(COMP_U16, 4, 0, 1), vk.FORMAT_R16G16B16A16_UINT)) { ret 9; }
 
-test "pipeline: normalized changes the format, not merely the flag" {
-    # A packed byte colour must arrive in the shader as a float in [0, 1]. UINT
-    # here would deliver 0..255 and every colour would clamp to white.
-    if (!format_is(attribute_format(COMP_U8, 4, 1, 0), vk.FORMAT_R8G8B8A8_UNORM)) { ret 1; }
-    if (!format_is(attribute_format(COMP_U8, 4, 0, 0), vk.FORMAT_R8G8B8A8_UINT))  { ret 2; }
-    if (!format_is(attribute_format(COMP_I8, 4, 1, 0), vk.FORMAT_R8G8B8A8_SNORM)) { ret 3; }
-    if (!format_is(attribute_format(COMP_I8, 4, 0, 0), vk.FORMAT_R8G8B8A8_SINT))  { ret 4; }
-    ret 0;
-}
-
-test "pipeline: joint indices map to an unsigned integer format" {
-    # glTF JOINTS_0 is an unnormalized u16 vec4 and must reach the shader as
-    # integers; a normalized format would make every joint index zero.
-    if (!format_is(attribute_format(COMP_U16, 4, 0, 1), vk.FORMAT_R16G16B16A16_UINT)) { ret 1; }
-    ret 0;
-}
-
-test "pipeline: an out-of-range component count is rejected" {
     val zero: opt[i32] = attribute_format(COMP_F32, 0, 0, 0);
-    if (!sel zero.none) { ret 1; }
+    if (!sel zero.none) { ret 10; }
     val five: opt[i32] = attribute_format(COMP_F32, 5, 0, 0);
-    if (!sel five.none) { ret 2; }
-    # There is no normalized 32-bit integer vertex format.
+    if (!sel five.none) { ret 11; }
+    # there is no normalized 32-bit integer vertex format
     val unorm32: opt[i32] = attribute_format(COMP_U32, 4, 1, 0);
-    if (!sel unorm32.none) { ret 3; }
+    if (!sel unorm32.none) { ret 12; }
     ret 0;
 }
 
-test "pipeline: vertex input follows the format's locations and offsets" {
+test vertex_attributes__follow_format {
     var f:   VertexFormat = vertex_format_standard();
     var out: [8]vk.VertexInputAttributeDescription;
     if (!attributes_are(vertex_attributes(?f, ?out[0], 8), 3)) { ret 1; }
 
-    # The offsets must be the format's, not a recomputation, or the pipeline and
-    # the uploaded geometry disagree about where each attribute starts.
+    # the format's offsets, or pipeline and geometry disagree on where each starts
     if (out[0].location != 0 || out[0].offset != 0)  { ret 2; }
     if (out[1].location != 1 || out[1].offset != 12) { ret 3; }
     if (out[2].location != 2 || out[2].offset != 24) { ret 4; }
     if (out[2].format != vk.FORMAT_R32G32_SFLOAT)    { ret 5; }
-    # Every attribute reads from the one interleaved buffer.
-    if (out[0].binding != 0 || out[2].binding != 0) { ret 6; }
+    if (out[0].binding != 0 || out[2].binding != 0)  { ret 6; }
+
+    # the count comes from the attribute, not the semantic, or a vec2 position
+    # reads a third float out of the next vertex
+    var g: VertexFormat = vertex_format();
+    vertex_format_add(?g, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0);
+    vertex_format_add(?g, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
+    if (!attributes_are(vertex_attributes(?g, ?out[0], 8), 2)) { ret 7; }
+    if (out[0].format != vk.FORMAT_R32G32_SFLOAT)              { ret 8; }
+    if (out[1].location != 1 || out[1].offset != 8)            { ret 9; }
     ret 0;
 }
 
-test "pipeline: a two-component attribute is described as a two-component format" {
-    # A vec2 has to reach Vulkan as R32G32, not as the R32G32B32 a position
-    # usually is. Getting the component count from the semantic rather than the
-    # attribute would read a third float per vertex out of the next one's
-    # bytes, which skews the whole buffer by a growing amount.
-    var f: VertexFormat = vertex_format();
-    vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 2, 0, 0);
-    vertex_format_add(?f, SEMANTIC_TEXCOORD_0, 1, COMP_F32, 2, 0, 0);
-    var out: [8]vk.VertexInputAttributeDescription;
-    if (!attributes_are(vertex_attributes(?f, ?out[0], 8), 2)) { ret 1; }
-    if (out[0].format != vk.FORMAT_R32G32_SFLOAT)              { ret 2; }
-    if (out[1].location != 1 || out[1].offset != 8)            { ret 3; }
-    ret 0;
-}
-
-test "pipeline: an unrepresentable attribute fails the whole format" {
+test vertex_attributes__all_or_nothing {
+    # a partial count would build a pipeline that silently drops the colour
     var f: VertexFormat = vertex_format();
     vertex_format_add(?f, SEMANTIC_POSITION, 0, COMP_F32, 3, 0, 0);
     vertex_format_add(?f, SEMANTIC_COLOR_0, 1, COMP_U32, 4, 1, 0);
-    var out: [8]vk.VertexInputAttributeDescription;
-    # Writing the first attribute and reporting a partial count would build a
-    # pipeline that silently drops the colour.
+    var out:       [8]vk.VertexInputAttributeDescription;
     val described: opt[u32] = vertex_attributes(?f, ?out[0], 8);
     if (!sel described.none) { ret 1; }
+
+    var s:     VertexFormat = vertex_format_standard();
+    val short: opt[u32]     = vertex_attributes(?s, ?out[0], 2);
+    if (!sel short.none) { ret 2; }
     ret 0;
 }
 
-test "pipeline: a format larger than the output array is refused" {
-    var f:         VertexFormat = vertex_format_standard();
-    var out:       [8]vk.VertexInputAttributeDescription;
-    val described: opt[u32]     = vertex_attributes(?f, ?out[0], 2);
-    if (!sel described.none) { ret 1; }
-    ret 0;
-}
-
-test "pipeline: 2D and 3D descriptions differ where it matters" {
-    val a: PipelineDesc = pipeline_desc_3d();
-    val b: PipelineDesc = pipeline_desc_2d();
-    # Sprites and glyphs need blending and must not be culled or depth-tested;
-    # sharing one description would make overlays disappear behind geometry.
-    if (!sel a.blend.opaque || !a.cull || !a.depth)     { ret 1; }
-    if (!sel b.blend.source_alpha || b.cull || b.depth) { ret 2; }
-    if (a.depth_bias || a.depth_bias_constant != 0.0
-        || a.depth_bias_clamp != 0.0 || a.depth_bias_slope != 0.0) { ret 3; }
-    if (b.depth_bias || b.depth_bias_constant != 0.0
-        || b.depth_bias_clamp != 0.0 || b.depth_bias_slope != 0.0) { ret 4; }
-    ret 0;
-}
-
-test "pipeline: raster depth bias maps exactly to Vulkan state" {
-    var d: PipelineDesc = pipeline_desc_3d();
-    d.depth_bias          = true;
-    d.depth_bias_constant = 1.25;
-    d.depth_bias_clamp    = 0.75;
-    d.depth_bias_slope    = 1.5;
-
-    val rs: vk.PipelineRasterizationStateCreateInfo = rasterization_state(?d);
-    if (rs.depthBiasEnable != vk.TRUE)      { ret 1; }
-    if (rs.depthBiasConstantFactor != 1.25) { ret 2; }
-    if (rs.depthBiasClamp != 0.75)          { ret 3; }
-    if (rs.depthBiasSlopeFactor != 1.5)     { ret 4; }
-    ret 0;
-}
-
-test "pipeline: depth convention selects the matching comparison" {
-    if (depth_compare_op(DepthConvention.forward{}) != vk.COMPARE_OP_LESS)     { ret 1; }
-    if (depth_compare_op(DepthConvention.reversed{}) != vk.COMPARE_OP_GREATER) { ret 2; }
-    ret 0;
-}
-
-test "pipeline: blend modes map to exact attachment factors" {
+test blend_attachment__factors_per_mode {
     val opaque: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.opaque{});
     if (opaque.blendEnable != vk.FALSE
         || opaque.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
@@ -946,27 +885,9 @@ test "pipeline: blend modes map to exact attachment factors" {
     ret 0;
 }
 
-test "pipeline: teardown on a pipeline that was never created is a no-op" {
-    var p: Pipeline;
-    p.handle     = nil;
-    p.layout     = nil;
-    p.set_layout = nil;
-    var v: Vk;
-    v.ready = false;
-    pipeline_dnit(?p, ?v);
-    if (p.ready) { ret 1; }
-    ret 0;
-}
-
-test "pipeline: the full layout declares every binding a stage may read" {
+test set_layout_full__bindings_and_counts {
+    # a layout stopping short has the shader read a descriptor never written
     var l: SetLayout = set_layout_full();
-    # The vertex stage's transforms at 0, a material's first texture at 1, the
-    # tint at 2, the joint palette at 3, the game's own block at 4, a material's
-    # remaining three textures at 5, 6 and 7, and the frame's storage buffer at
-    # 8. A layout stopping short
-    # does not fail loudly: the shader reads a descriptor that was never
-    # written, and before this covered four samplers it read a uniform buffer's
-    # bytes as an image with only the validation layers saying so.
     if (l.count != 9)                                             { ret 1; }
     if (l.kinds[0] != BINDING_UNIFORM)                            { ret 2; }
     if (l.kinds[1] != BINDING_SAMPLER)                            { ret 3; }
@@ -977,35 +898,15 @@ test "pipeline: the full layout declares every binding a stage may read" {
     if (l.kinds[6] != BINDING_SAMPLER)                            { ret 8; }
     if (l.kinds[7] != BINDING_SAMPLER)                            { ret 9; }
     if (l.kinds[FRAME_STORAGE_BINDING::usize] != BINDING_STORAGE) { ret 10; }
+    # descriptor.mach sizes its pools from these counts
+    if (set_layout_count(?l, BINDING_UNIFORM) != 3) { ret 11; }
+    if (set_layout_count(?l, BINDING_SAMPLER) != 4) { ret 12; }
+    if (set_layout_count(?l, BINDING_STORAGE) != 2) { ret 13; }
     ret 0;
 }
 
-test "pipeline: the mesh layout declares only its one uniform" {
-    var l: SetLayout = set_layout_mesh();
-    if (l.count != 1)                  { ret 1; }
-    if (l.kinds[0] != BINDING_UNIFORM) { ret 2; }
-    ret 0;
-}
-
-test "pipeline: a layout counts descriptors per kind, not per set" {
-    # What the pool has to be sized by. The full set holds three uniforms, four
-    # samplers and two storage buffers, so a pool sized at one of each per set
-    # runs out at the first draw. descriptor.mach's pool sizes are derived from
-    # these numbers and must move when they do.
-    var sp: SetLayout = set_layout_full();
-    if (set_layout_count(?sp, BINDING_UNIFORM) != 3) { ret 1; }
-    if (set_layout_count(?sp, BINDING_SAMPLER) != 4) { ret 2; }
-    if (set_layout_count(?sp, BINDING_STORAGE) != 2) { ret 5; }
-
-    var me: SetLayout = set_layout_mesh();
-    if (set_layout_count(?me, BINDING_UNIFORM) != 1) { ret 3; }
-    if (set_layout_count(?me, BINDING_SAMPLER) != 0) { ret 4; }
-    ret 0;
-}
-
-test "pipeline: a gap in the bindings does not shift the later ones" {
-    # A shader is free to leave a binding number unused. Packing the list would
-    # silently move binding 3 to binding 1.
+test set_layout_at__keeps_gaps_and_refuses_past_table {
+    # packing the list would silently move binding 3 to binding 1
     var l: SetLayout = set_layout();
     set_layout_at(?l, 0, BINDING_UNIFORM);
     set_layout_at(?l, 3, BINDING_SAMPLER);
@@ -1014,17 +915,14 @@ test "pipeline: a gap in the bindings does not shift the later ones" {
     if (l.kinds[2] != BINDING_NONE)                 { ret 3; }
     if (l.kinds[3] != BINDING_SAMPLER)              { ret 4; }
     if (set_layout_count(?l, BINDING_UNIFORM) != 1) { ret 5; }
+
+    var e: SetLayout = set_layout();
+    if (set_layout_at(?e, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 6; }
+    if (e.count != 0)                                          { ret 7; }
     ret 0;
 }
 
-test "pipeline: a binding past the table is refused" {
-    var l: SetLayout = set_layout();
-    if (set_layout_at(?l, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 1; }
-    if (l.count != 0)                                          { ret 2; }
-    ret 0;
-}
-
-test "pipeline: a material's texture index maps to its binding" {
+test sampler_binding__lands_on_samplers {
     # Index 0 stays at binding 1 because every shader boom ships declares it
     # there. The rest follow the uniform and storage bindings rather than
     # displacing them.

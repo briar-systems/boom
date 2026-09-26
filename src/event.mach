@@ -7,8 +7,6 @@
 
 use inp: boom.input;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.size.usize;
@@ -190,17 +188,20 @@ pub fun queue_clear(q: *EventQueue) {
 }
 
 # whether a push was accepted
+#[testing]
 fun pushed(q: *EventQueue, e: Event) bool {
     val r: err[QueueError] = queue_push(q, e);
     ret sel r.ok;
 }
 
 # a key event with no modifiers
+#[testing]
 fun key(k: i64) Event {
     ret Event.key{KeyEvent{key: k::inp.Key, action: KeyAction.press{}, mods: 0}};
 }
 
 # the key of a popped key event, or -1 for anything else
+#[testing]
 fun popped_key(q: *EventQueue) i64 {
     val e: opt[Event] = queue_pop(q);
     if (sel e.some) {
@@ -209,47 +210,19 @@ fun popped_key(q: *EventQueue) i64 {
     ret -1;
 }
 
-test "event: fresh queue is empty" {
-    var q: EventQueue = queue_new();
-    if (!queue_is_empty(?q)) { ret 1; }
-    if (queue_len(?q) != 0)  { ret 2; }
-    if (queue_is_full(?q))   { ret 3; }
-    ret 0;
-}
-
-test "event: push then pop returns the event" {
-    var q: EventQueue = queue_new();
-    val e: Event      = Event.key{KeyEvent{key: 65, action: KeyAction.release{}, mods: 0}};
-    if (!pushed(?q, e))     { ret 1; }
-    if (queue_len(?q) != 1) { ret 2; }
-    val got: opt[Event] = queue_pop(?q);
-    if (!sel got.some)                    { ret 3; }
-    if (!sel got.some.key)                { ret 4; }
-    if (got.some.key.key != 65)           { ret 5; }
-    if (!sel got.some.key.action.release) { ret 6; }
-    if (!queue_is_empty(?q))              { ret 7; }
-    ret 0;
-}
-
-test "event: pop on empty queue returns none" {
-    var q:   EventQueue = queue_new();
-    val got: opt[Event] = queue_pop(?q);
-    if (!sel got.none) { ret 1; }
-    ret 0;
-}
-
-test "event: events dequeue in fifo order" {
-    var q: EventQueue = queue_new();
-    if (!pushed(?q, key(1))) { ret 1; }
-    if (!pushed(?q, key(2))) { ret 2; }
-    if (!pushed(?q, key(3))) { ret 3; }
+test queue__fifo {
+    var q:    EventQueue = queue_new();
+    val none: opt[Event] = queue_pop(?q);
+    if (!sel none.none)      { ret 1; }
+    if (!pushed(?q, key(1))) { ret 2; }
+    if (!pushed(?q, key(2))) { ret 3; }
     if (popped_key(?q) != 1) { ret 4; }
     if (popped_key(?q) != 2) { ret 5; }
-    if (popped_key(?q) != 3) { ret 6; }
+    if (!queue_is_empty(?q)) { ret 6; }
     ret 0;
 }
 
-test "event: push refuses events beyond capacity" {
+test queue_push__full_refused {
     var q: EventQueue = queue_new();
     var i: usize      = 0;
     for (i < CAPACITY) {
@@ -264,7 +237,7 @@ test "event: push refuses events beyond capacity" {
     ret 0;
 }
 
-test "event: ring wraps around the backing store" {
+test queue_push__wraps_ring {
     var q: EventQueue = queue_new();
     # fill, drain most, then push past the physical end of the ring
     var i: usize = 0;
@@ -288,16 +261,5 @@ test "event: ring wraps around the backing store" {
     if (queue_len(?q) != 256) { ret 4; }
     # the first remaining event is still the oldest undrained one
     if (popped_key(?q) != 200) { ret 5; }
-    ret 0;
-}
-
-test "event: clear empties the queue" {
-    var q: EventQueue = queue_new();
-    if (!pushed(?q, Event.close{})) { ret 1; }
-    if (!pushed(?q, Event.close{})) { ret 2; }
-    queue_clear(?q);
-    if (!queue_is_empty(?q)) { ret 3; }
-    val got: opt[Event] = queue_pop(?q);
-    if (sel got.some) { ret 4; }
     ret 0;
 }

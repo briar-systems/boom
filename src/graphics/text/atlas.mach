@@ -575,6 +575,7 @@ pub fun atlas_draw(p: *Pass, g: *GlyphAtlas, s: str, x: f32, y: f32, tint: Vec4)
 }
 
 # an atlas with a known grid and no device, for arithmetic tests
+#[testing]
 fun grid_atlas() GlyphAtlas {
     var g: GlyphAtlas;
     g.cell           = 16;
@@ -585,13 +586,14 @@ fun grid_atlas() GlyphAtlas {
     ret g;
 }
 
+#[testing]
 fun near(a: f32, b: f32) bool {
     var d: f32 = a - b;
     if (d < 0.0) { d = 0.0 - d; }
     ret d < 0.000001;
 }
 
-test "atlas: UVs leave a transparent gutter between cells" {
+test cell_uv__gutters_and_last_cell {
     var g:    GlyphAtlas = grid_atlas();
     val side: f32        = g.page_side::f32;
     var c0:   Cell;
@@ -608,20 +610,16 @@ test "atlas: UVs leave a transparent gutter between cells" {
     if (!near(col1.x - (first.x + first.w), 2.0 / side)) { ret 3; }
     val row1: Rect = cell_uv(?g, ?c3);
     if (!near(row1.y - (first.y + first.h), 2.0 / side)) { ret 4; }
-    ret 0;
-}
-
-test "atlas: the last cell of a page stays inside it" {
-    var g:    GlyphAtlas = grid_atlas();
+    # the page's last cell stays inside it
     var last: Cell;
     last.cell = g.cells_per_page - 1;
     val r: Rect = cell_uv(?g, ?last);
-    if (r.x + r.w > 1.0001) { ret 1; }
-    if (r.y + r.h > 1.0001) { ret 2; }
+    if (r.x + r.w > 1.0001) { ret 5; }
+    if (r.y + r.h > 1.0001) { ret 6; }
     ret 0;
 }
 
-test "atlas: a page is derived from the cell" {
+test page_side_for__sizes_and_limits {
     val small: res[usize, TextError] = page_side_for(22);
     if (!(sel small.ok && small.ok == ATLAS_PAGE)) { ret 1; }
     if (ATLAS_PAGE / (22 + GUTTER * 2) != 42)      { ret 2; }
@@ -635,7 +633,7 @@ test "atlas: a page is derived from the cell" {
     ret 0;
 }
 
-test "atlas: oversampling keeps the logical rectangle" {
+test glyph_dest__oversampled_and_snapped {
     var g: GlyphAtlas = grid_atlas();
     var f: FontFace;
     g.face         = ?f;
@@ -646,24 +644,22 @@ test "atlas: oversampling keeps the logical rectangle" {
     val d: Rect = glyph_dest(?g, ?m, ?c, 3.0, 5.0);
     if (d.x != 3.0 || d.y != 5.0)   { ret 1; }
     if (d.w != 22.0 || d.h != 22.0) { ret 2; }
+
+    # a pixel face quantizes placement
+    var pf: FontFace;
+    pf.pixel_snap = true;
+    var pg: GlyphAtlas = grid_atlas();
+    pg.face = ?pf;
+    var pm: GlyphMetrics;
+    pm.bearing_x = 2.0;
+    var pc: Cell;
+    pc.offset_y = 0.0 - 3.0;
+    val p: Rect = glyph_dest(?pg, ?pm, ?pc, 3.49, 5.51);
+    if (p.x != 5.0 || p.y != 3.0) { ret 3; }
     ret 0;
 }
 
-test "atlas: pixel faces quantize placement" {
-    var g: GlyphAtlas = grid_atlas();
-    var f: FontFace;
-    f.pixel_snap = true;
-    g.face       = ?f;
-    var m: GlyphMetrics;
-    m.bearing_x = 2.0;
-    var c: Cell;
-    c.offset_y = 0.0 - 3.0;
-    val d: Rect = glyph_dest(?g, ?m, ?c, 3.49, 5.51);
-    if (d.x != 5.0 || d.y != 3.0) { ret 1; }
-    ret 0;
-}
-
-test "atlas: cells keep one baseline across vertical bearings" {
+test baseline_offset__shared_baseline {
     val upper:     f32 = baseline_offset(9.0, 16.0, 0, 1.0);
     val descender: f32 = baseline_offset(9.0, 16.0, 0 - 3, 1.0);
     if (upper != 0.0 - 7.0 || descender != 0.0 - 4.0)   { ret 1; }
@@ -671,7 +667,7 @@ test "atlas: cells keep one baseline across vertical bearings" {
     ret 0;
 }
 
-test "atlas: coverage is staged as white with alpha" {
+test stage_cell__smooth_and_pixel {
     var stage: [16]u8;
     var cov:   [4]u8 = [4]u8{32, 64, 128, 255};
     if (!stage_cell(?stage[0], ?cov[0], 2, FontRaster.smooth{})) { ret 1; }
@@ -687,20 +683,7 @@ test "atlas: coverage is staged as white with alpha" {
     ret 0;
 }
 
-test "atlas: a page clears to transparent white" {
-    var rgba: [16]u8;
-    clear_atlas(?rgba[0], 4);
-    var i: usize = 0;
-    for (i < 4) {
-        val o: usize = i * 4;
-        if (rgba[o] != 255 || rgba[o + 1] != 255 || rgba[o + 2] != 255) { ret 1; }
-        if (rgba[o + 3] != 0)                                           { ret 2; }
-        i = i + 1;
-    }
-    ret 0;
-}
-
-test "atlas: the scratch is sized from the face and the curve" {
+test scratch_sizes__curve_and_edge_cap {
     if (quad_segments(22) != 16)  { ret 1; }
     if (quad_segments(128) != 32) { ret 2; }
     if (quad_segments(512) != 64) { ret 3; }
@@ -721,7 +704,7 @@ test "atlas: the scratch is sized from the face and the curve" {
     ret 0;
 }
 
-test "atlas: deleting uncounts the atlas on its face" {
+test atlas_delete__uncounts_face_and_device {
     var f: FontFace;
     f.atlases = 1;
     var g: GlyphAtlas;

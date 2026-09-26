@@ -1,0 +1,233 @@
+# The boom skeletal-animation example: load an animated glTF and play it.
+#
+# A standalone consumer of boom that shows the animation surface: model_load
+# returns a Model (a skinned mesh, its skeleton, and named clips) with mach-gltf
+# fully hidden, model_player binds a player to a named clip, and each frame
+# advances the player and draws it with pass_draw_skinned. The asset is a
+# two-bone bar (assets/bar.glb) whose "bend" clip rocks the top half back and
+# forth; the whole model turns slowly so the bend reads in 3D. Run it from this
+# directory so the relative asset path resolves.
+#
+# The game authors no glTF, no skinning matrices, and no shaders. Passing a Pose
+# to pass_draw_skinned is what selects the skinned pipeline; the renderer
+# uploads the pose's joint matrices to the storage buffer its vertex stage
+# reads. Nothing here imports vk, mach-glfw, or mach-gltf.
+
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_user;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use gfx: boom.graphics;
+use gm:  boom.math;
+use boom.window.WindowMode;
+use allo: std.allocator;
+use std.chrono.duration.MILLISECOND;
+use std.chrono.duration.SECOND;
+use std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.error.err;
+use std.types.result.res;
+
+# The game's own state, carried through ctx.user.
+# ---
+# renderer:  the window's renderer, which owns the device the model was loaded
+#            against
+# model:     the loaded model: skinned mesh, skeleton, and the "bend" clip
+# player:    playback of the "bend" clip, advanced each tick
+# material:  the base colour the model draws with
+# camera:    the 3D viewpoint
+# transform: the model's placement, turned slowly each tick
+# ready:     whether init succeeded; draw is skipped if not
+rec Game {
+    renderer:  gfx.Renderer;
+    model:     gfx.Model;
+    player:    gfx.AnimationPlayer;
+    material:  gfx.Material;
+    camera:    gfx.Camera;
+    transform: gm.Transform;
+    ready:     u8;
+}
+
+# The fixed update step in seconds, matching the 60 Hz config below.
+val DT: f32 = 0.0166667;
+
+# tear the renderer down, and treat a refusal as the bug it is: a refusal means
+# something this game created was never deleted
+fun renderer_down(ctx: *Context, r: *gfx.Renderer) {
+    val down: err[gfx.Error] = gfx.renderer_dnit(r);
+    if (sel down.err) {
+        print.eprintlnf("renderer refused to shut down: {}", gfx.error_message(down.err));
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready = 0;
+
+    val w: i32 = ctx.window.width;
+    val h: i32 = ctx.window.height;
+
+    val ri: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel ri.err) {
+        print.eprintlnf("renderer init error: {}", gfx.error_message(ri.err));
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+
+    val loaded: res[gfx.Model, gfx.Error] = gfx.model_load(d, "assets/bar.glb");
+    if (sel loaded.err) {
+        print.eprintlnf("model load error: {}", gfx.error_message(loaded.err));
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.model = loaded.ok;
+
+    val pl: res[gfx.AnimationPlayer, gfx.Error] = gfx.model_player(?g.model, "bend");
+    if (sel pl.err) {
+        print.eprintlnf("model player error: {}", gfx.error_message(pl.err));
+        gfx.model_delete(d, ?g.model);
+        renderer_down(ctx, ?g.renderer);
+        context_fail(ctx, 1);
+        ret;
+    }
+    g.player = pl.ok;
+
+    # No texture, so the renderer's white texel is bound and the model comes out
+    # as this colour under the directional light.
+    g.material = gfx.material();
+    gfx.material_set_color(?g.material, gm.vec4(0.70, 0.75, 0.92, 1.0));
+
+    val aspect: f32 = w::f32 / h::f32;
+    g.camera = gfx.camera_perspective(
+        gm.vec3(2.6, 1.8, 3.6),
+        gm.vec3(0.0, 1.0, 0.0),
+        gm.radians(55.0),
+        aspect,
+        0.1,
+        100.0,
+    );
+
+    g.transform = gm.transform_identity();
+    g.ready     = 1;
+}
+
+# Accumulated turn angle in radians, advanced each fixed tick.
+var turn: f32 = 0.0;
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    gfx.animation_player_advance(?g.player, DT);
+    turn                 = turn + 0.01;
+    g.transform.rotation = gm.quat_from_axis_angle(gm.vec3(0.0, 1.0, 0.0), turn);
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) {
+        # Minimized: nothing to draw into, and the aspect would divide by zero.
+        ret;
+    }
+    # The window is resizable, so the aspect ratio is not fixed at init.
+    g.camera.aspect = w / h;
+
+    # A frame that did not open is a swapchain that went out of date and was
+    # rebuilt, which happens on every resize. Skipping the frame is the correct
+    # response; drawing into it is not possible.
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        print.eprintlnf("begin frame error: {}", gfx.error_message(br.err));
+        context_fail(ctx, 1);
+        ret;
+    }
+    if (!br.ok) {
+        ret;
+    }
+
+    var scene: gfx.PassDesc = gfx.pass_scene(?g.camera);
+    var pass:  gfx.Pass     = gfx.pass_begin(?g.renderer, ?scene);
+    gfx.pass_draw_skinned_material(?pass, ?g.model.mesh, ?g.material, ?g.player.pose, ?g.transform);
+    gfx.pass_end(?pass);
+
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel er.err) {
+        print.eprintlnf("end frame error: {}", gfx.error_message(er.err));
+        context_fail(ctx, 1);
+    }
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (g.ready == 0) {
+        ret;
+    }
+    val released: err[allo.Error] = gfx.model_delete(gfx.renderer_device(?g.renderer), ?g.model);
+    if (sel released.err) {
+        print.eprintln("the model's clips could not be released");
+        context_fail(ctx, 1);
+    }
+    renderer_down(ctx, ?g.renderer);
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    var game: Game;
+
+    var app: App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     960,
+        height:    540,
+        title:     "boom skeletal animation: a two-bone bend",
+        fixed_dt:  SECOND / 60,
+        max_frame: 250 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    val ran: res[i64, EngineError] = run(?ctx, ?app);
+    # the f_dnit hook released the renderer inside run, so the window is free
+    val closed: err[ContextError] = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf("shutdown refused: {}", context_error_message(closed.err));
+        ret 1;
+    }
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    ret ran.ok;
+}

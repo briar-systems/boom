@@ -22,8 +22,6 @@ use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec4;
 use std.types.bool.bool;
-use std.types.bool.false;
-use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.string.str;
@@ -163,24 +161,19 @@ pub fun material_texture_named(m: *Material, name: str) opt[*Texture] {
 }
 
 # whether a binding was accepted
+#[testing]
 fun bound(r: err[MaterialError]) bool {
     ret sel r.ok;
 }
 
 # whether a lookup found exactly this texture, or found none when expected is nil
+#[testing]
 fun names(found: opt[*Texture], expected: *Texture) bool {
     if (expected == nil) { ret sel found.none; }
     ret sel found.some && found.some == expected;
 }
 
-test "material: base color defaults to white" {
-    var m: Material = material();
-    if (m.base_color[0] != 1.0 || m.base_color[3] != 1.0) { ret 1; }
-    if (m.texture_count != 0)                             { ret 2; }
-    ret 0;
-}
-
-test "material: texture bindings fill then reject overflow" {
+test material_add_texture__refuses_past_max {
     var t: Texture;
     var m: Material = material();
     var i: i32      = 0;
@@ -196,30 +189,7 @@ test "material: texture bindings fill then reject overflow" {
     ret 0;
 }
 
-test "material: texture bindings default to nearest and may request linear" {
-    var a: Texture;
-    var b: Texture;
-    var m: Material = material();
-    if (!bound(material_add_texture(?m, "albedo", ?a)))                                 { ret 1; }
-    if (!bound(material_add_texture_filtered(?m, "field", ?b, TextureFilter.linear{}))) { ret 2; }
-    if (!sel m.textures[0].filter.nearest)                                              { ret 3; }
-    if (!sel m.textures[1].filter.linear)                                               { ret 4; }
-    ret 0;
-}
-
-test "material: an untextured material names no texture" {
-    var m: Material = material();
-    # none rather than a dangling first entry, so the renderer writes the
-    # uniform binding alone instead of a sampler pointing at nothing.
-    if (!names(material_texture(?m), nil)) { ret 1; }
-
-    var t: Texture;
-    if (!bound(material_add_texture(?m, "base", ?t))) { ret 2; }
-    if (!names(material_texture(?m), ?t))             { ret 3; }
-    ret 0;
-}
-
-test "material: a named lookup finds the binding it names" {
+test material_texture__lookup_by_slot_and_name {
     # The built-in programs read slot zero, so the other slots are only ever
     # reachable by name. A lookup that returned slot zero regardless would make
     # a custom pipeline bind the albedo as its normal map, which renders as a
@@ -227,8 +197,13 @@ test "material: a named lookup finds the binding it names" {
     var albedo: Texture;
     var normal: Texture;
     var m:      Material = material();
-    if (!bound(material_add_texture(?m, "albedo", ?albedo))) { ret 1; }
-    if (!bound(material_add_texture(?m, "normal", ?normal))) { ret 2; }
+    # none rather than a dangling first entry, so the renderer writes the
+    # uniform binding alone instead of a sampler pointing at nothing.
+    if (!names(material_texture(?m), nil))                                                    { ret 7; }
+    if (!bound(material_add_texture(?m, "albedo", ?albedo)))                                  { ret 1; }
+    if (!bound(material_add_texture_filtered(?m, "normal", ?normal, TextureFilter.linear{}))) { ret 2; }
+    if (!sel m.textures[0].filter.nearest)                                                    { ret 8; }
+    if (!sel m.textures[1].filter.linear)                                                     { ret 9; }
 
     if (!names(material_texture_named(?m, "albedo"), ?albedo)) { ret 3; }
     if (!names(material_texture_named(?m, "normal"), ?normal)) { ret 4; }
