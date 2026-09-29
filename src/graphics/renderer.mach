@@ -502,7 +502,9 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
 #
 # false means the driver offered no sRGB surface format, so the linear values
 # the shaders write reach the display un-encoded and everything looks darker
-# than it was authored. Nothing can be done about it inside the renderer; a
+# than it was authored. A draw list's colours are the exception: they are sRGB
+# and are decoded only when the surface encodes, so they display as authored
+# either way. Nothing can be done about it inside the renderer; a
 # game that wants to tell the player, or to log it, asks here.
 # ---
 # r:   the renderer
@@ -2111,6 +2113,7 @@ pub fun batch_flush(p: *Pass) {
     val first: u32           = p.batch.first;
     val block: usize         = p.batch.block;
     val tex:   opt[*Texture] = p.batch.texture;
+    val space: ColorSpace    = p.batch.space;
     # The run is closed before anything that can fail, so an early return below
     # cannot leave it open to be drawn a second time by the next flush.
     batch_reset(?p.batch);
@@ -2119,8 +2122,13 @@ pub fun batch_flush(p: *Pass) {
     if (sel taken.none) { ret; }
     val slot: usize = taken.some;
 
+    # A draw list's colours are sRGB and the surface encodes on write, so the
+    # fragment stage decodes them first or they are encoded twice. A surface
+    # that does not encode displays what is written, so they pass through.
     var u: ScreenUniforms;
     u.projection = p.projection;
+    u.decode     = vec4(0.0, 0.0, 0.0, 0.0);
+    if (sel space.srgb && r.srgb) { u.decode = vec4(1.0, 0.0, 0.0, 0.0); }
     # COUNTED, NOT SILENT. A draw whose uniforms could not be uploaded must not
     # be recorded, and refusing to record it is correct; saying nothing about it
     # is what made a stage that did not run indistinguishable from a shading
@@ -2202,11 +2210,11 @@ pub fun batch_flush(p: *Pass) {
 # texture:      what these vertices sample, or none for the white texel
 # vertices:     vertex data in the shared 2D layout
 # vertex_count: how many vertices
-fun batch_append(p: *Pass, texture: opt[*Texture], vertices: *u8, vertex_count: usize) {
+fun batch_append(p: *Pass, texture: opt[*Texture], space: ColorSpace, vertices: *u8, vertex_count: usize) {
     val r: *Renderer = p.renderer;
     if (vertex_count == 0) { ret; }
 
-    if (batch_breaks(?p.batch, texture)) { batch_flush(p); }
+    if (batch_breaks(?p.batch, texture, space)) { batch_flush(p); }
 
     val stride: usize           = r.ui_format.stride::usize;
     val pushed: opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, vertices,
@@ -2229,6 +2237,7 @@ fun batch_append(p: *Pass, texture: opt[*Texture], vertices: *u8, vertex_count: 
     if (!p.batch.open) {
         p.batch.open    = true;
         p.batch.texture = texture;
+        p.batch.space   = space;
         p.batch.block   = span.block;
         p.batch.first   = span.first;
         p.batch.count   = 0;
@@ -2928,7 +2937,7 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: opt[*Texture], dest: Rect, src: R
 
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
-    batch_append(p, texture, (?v[0]):~*u8, SPRITE_VERTICES);
+    batch_append(p, texture, ColorSpace.linear{}, (?v[0]):~*u8, SPRITE_VERTICES);
 }
 
 # submit a whole tile field as one run of quads
@@ -2971,7 +2980,7 @@ pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: 
     var cur: TileCursor = tile_cursor(?span);
     for (!tilemap_done(?cur, ?span)) {
         val n: usize = tilemap_expand(layer, sheet, ?span, ?cur, tint, ?v[0], TILEMAP_CHUNK);
-        if (n > 0) { batch_append(p, sheet.texture, (?v[0]):~*u8, n * SPRITE_VERTICES); }
+        if (n > 0) { batch_append(p, sheet.texture, ColorSpace.linear{}, (?v[0]):~*u8, n * SPRITE_VERTICES); }
     }
 }
 
@@ -2992,6 +3001,13 @@ pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: 
 # overlay pass places geometry in window pixels and one in a scene pass places it
 # in world units.
 #
+# THE COLOURS ARE sRGB, AUTHORED FOR DISPLAY, which is what blit emits. On a
+# surface that encodes sRGB the fragment stage decodes them to linear first, so
+# the encode on write gives back exactly the authored value rather than
+# brightening it a second time; on one that does not, they are written as they
+# are. Either way a colour displays as authored. A game's own 2D shader drawing
+# a list reads that decision from the screen block's decode member.
+#
 # A count that is not a multiple of three is refused: a partial triangle is a
 # caller bug, and passing it on draws whatever the arena held next.
 # ---
@@ -3006,10 +3022,10 @@ pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture:
         r.dropped = r.dropped + 1;
         ret;
     }
-    # Appended to the same run sprites use. A draw list and a sprite are the
-    # same thing to the batcher, so UI drawn over sprites from the same atlas
-    # coalesces into one draw instead of breaking the run.
-    batch_append(p, texture, vertices:~*u8, vertex_count::usize);
+    # Appended through the same batcher sprites use, but never into a sprite's
+    # run: a draw list's colours are sRGB and a sprite's tint is linear, and
+    # which one the fragment stage decodes is per draw.
+    batch_append(p, texture, ColorSpace.srgb{}, vertices:~*u8, vertex_count::usize);
 }
 
 # how many draws this frame's vertex arena refused for want of room

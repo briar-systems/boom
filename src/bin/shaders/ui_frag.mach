@@ -8,8 +8,30 @@
 #
 # There is no tint uniform. The colour is per vertex, because one draw covers a
 # whole draw list and a panel's background, border and text differ inside it.
+#
+# A DRAW LIST'S COLOURS ARE sRGB, A SPRITE'S TINT IS LINEAR. blit authors its
+# colours for display, and the surface encodes sRGB on write, so writing them
+# through unchanged encodes them a second time and washes the UI out. The draw
+# says which it is in screen.decode, and this stage decodes to linear light
+# before the surface encodes back. The decode is per fragment rather than per
+# vertex so a gradient interpolates in the space it was authored in.
 
+use sh:  shader.math;
 use tex: shader.texture;
+
+# The immediate-mode block. See src/bin/shaders/ui_vert.mach; only decode is
+# read here, and it is 1 in its first lane when the vertex colours are sRGB and
+# the surface encodes, else 0.
+rec Screen {
+    projection_0: f32x4;
+    projection_1: f32x4;
+    projection_2: f32x4;
+    projection_3: f32x4;
+    decode:       f32x4;
+}
+
+#[uniform(0, 0)]
+var screen: Screen;
 
 #[sampler(0, 1)]
 var atlas: tex.Sampler2D;
@@ -24,5 +46,12 @@ var out_colour: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {
-    out_colour = tex.sample_2d(atlas, in_uv) * in_colour;
+    val c:  f32x3 = f32x3{in_colour[0], in_colour[1], in_colour[2]};
+    val lo: f32x3 = c / f32x3{12.92, 12.92, 12.92};
+    val hi: f32x3 = sh.pow_3(sh.max_3((c + f32x3{0.055, 0.055, 0.055}) / f32x3{1.055, 1.055, 1.055},
+        f32x3{0.0, 0.0, 0.0}), f32x3{2.4, 2.4, 2.4});
+    val lin: f32x3 = sh.mix_3(lo, hi, sh.step_3(f32x3{0.04045, 0.04045, 0.04045}, c));
+    val d:   f32   = screen.decode[0];
+    val rgb: f32x3 = sh.mix_3(c, lin, f32x3{d, d, d});
+    out_colour = tex.sample_2d(atlas, in_uv) * f32x4{rgb[0], rgb[1], rgb[2], in_colour[3]};
 }
