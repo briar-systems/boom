@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-29
+
+### Fixed
+- **Breaking.** A draw list's colours display as authored on an sRGB surface
+  (#206). blit authors its vertex colours for display, and the ui fragment
+  stage wrote them unchanged to an sRGB swapchain, which encoded them a second
+  time, so `#141417` displayed as `#50555f`. `ui_frag` now decodes a draw
+  list's rgb to linear, per fragment, when the surface encodes, and alpha is
+  untouched. `ScreenUniforms` gains a `decode: Vec4` member, 1 in x when the
+  run's colours are sRGB and the renderer is sRGB, and a game's own 2D shader
+  drawing a list reads that decision from it. `Batch2D` records the
+  `ColorSpace` of its run, and `batch_breaks` takes the incoming run's space
+  and breaks on a change, so a draw list and a sprite from the same atlas no
+  longer coalesce into one draw. Sprite and tile tints stay linear.
+  Translucent UI still blends in linear light on an sRGB attachment. The
+  vulkan demo checks that the surface target reads back its draw list's exact
+  bytes.
+
 ## [0.33.0] - 2026-09-26
 
 ### Changed
