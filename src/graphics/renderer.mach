@@ -61,6 +61,7 @@ use boom.graphics.batch.sprite_expand;
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_invalidate;
 use boom.graphics.buffer.buffer_map;
 use boom.graphics.cache.PROGRAM_MESH;
 use boom.graphics.cache.PROGRAM_SKINNED;
@@ -3766,7 +3767,9 @@ pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize
     if (sel ready.none) { ret false; }
     val mapped: res[ptr, Error] = buffer_map(?rb.slots[ready.some], ?r.vk);
     if (sel mapped.err) { ret false; }
-    mem.copy[u8](out, mapped.ok:~*u8, rb.len);
+    val seen: err[Error] = buffer_invalidate(?rb.slots[ready.some], ?r.vk);
+    if (sel seen.err) { ret false; }
+    mem.raw_copy(out::ptr, mapped.ok, rb.len);
     rb.taken = rb.serial[ready.some];
     ret true;
 }

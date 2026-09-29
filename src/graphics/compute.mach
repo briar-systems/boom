@@ -33,6 +33,8 @@ use boom.graphics.buffer.buffer_barrier_all;
 use boom.graphics.buffer.buffer_copy_at;
 use boom.graphics.buffer.buffer_dnit;
 use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_init_prefer;
+use boom.graphics.buffer.buffer_invalidate;
 use boom.graphics.buffer.buffer_map;
 use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.oneshot_begin;
@@ -192,8 +194,8 @@ pub fun storage_buffer_read(d: *Device, b: *StorageBuffer, offset: usize, out: *
 
     val v:       *Vk        = d.vk;
     var staging: Buffer;
-    val sr:      err[Error] = buffer_init(?staging, v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
-        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    val sr:      err[Error] = buffer_init_prefer(?staging, v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
     if (sel sr.err) { ret sr; }
     val cr: err[Error] = buffer_copy_at(v, d.pool, ?b.buffer, offset::u64, ?staging, 0, len::u64);
     if (sel cr.err) {
@@ -205,7 +207,12 @@ pub fun storage_buffer_read(d: *Device, b: *StorageBuffer, offset: usize, out: *
         buffer_dnit(?staging, v);
         ret err[Error].err{mapped.err};
     }
-    mem.copy[u8](out, mapped.ok:~*u8, len);
+    val seen: err[Error] = buffer_invalidate(?staging, v);
+    if (sel seen.err) {
+        buffer_dnit(?staging, v);
+        ret seen;
+    }
+    mem.raw_copy(out::ptr, mapped.ok, len);
     buffer_dnit(?staging, v);
     ret err[Error].ok{};
 }
@@ -391,7 +398,7 @@ fun compute_release(c: *Compute, v: *Vk) {
 # landed, so a game asking every frame sees what the GPU held
 # MAX_FRAMES_IN_FLIGHT frames ago, and never waits for it.
 # ---
-# slots:  host-visible staging, one per frame in flight
+# slots:  host-visible staging, cached where the device offers it, one per frame in flight
 # serial: the renderer frame each slot's copy was recorded in, zero when none
 # taken:  the frame of the newest copy already handed back
 # len:    bytes per copy
@@ -415,8 +422,9 @@ pub fun readback(rb: *Readback, d: *Device, len: usize) err[Error] {
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
         rb.serial[i] = 0;
-        val br: err[Error] = buffer_init(?rb.slots[i], v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
-            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        # cached, so the host reads it at memory speed rather than across the bus
+        val br: err[Error] = buffer_init_prefer(?rb.slots[i], v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
         if (sel br.err) {
             var j: usize = 0;
             for (j < i) {
