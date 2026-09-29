@@ -37,23 +37,23 @@ rec Palette {
 #[uniform(0, 0)]
 var matrices: Matrices;
 #[storage(0, 3)]
-var palette: Palette;
+var palette:  Palette;
 
 #[input(0)]
 var in_position: f32x3;
 #[input(1)]
-var in_normal: f32x3;
+var in_normal:   f32x3;
 #[input(2)]
-var in_uv: f32x2;
+var in_uv:       f32x2;
 #[input(5)]
-var in_joints: u32x4;
+var in_joints:   u32x4;
 #[input(6)]
-var in_weights: f32x4;
+var in_weights:  f32x4;
 
 #[output(0)]
 var out_normal: f32x3;
 #[output(1)]
-var out_uv: f32x2;
+var out_uv:     f32x2;
 
 #[builtin("position")]
 var position: f32x4;
