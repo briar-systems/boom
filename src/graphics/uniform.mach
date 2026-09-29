@@ -61,19 +61,23 @@ pub rec TintUniforms {
     colour: Vec4;
 }
 
-# What the immediate-mode vertex stage reads.
+# What the immediate-mode stages read.
 #
-# Only a projection. An immediate-mode draw list arrives already placed, in
-# pixels, so there is no model matrix to send and nothing else varies per draw:
-# the colour is per vertex and one draw covers the whole list.
+# A projection and one flag. An immediate-mode draw list arrives already placed,
+# in pixels, so there is no model matrix to send, and the colour is per vertex
+# because one draw covers the whole list. What does vary per draw is the space
+# those colours were authored in: a draw list's are sRGB, a sprite's tint is
+# linear, and the fragment stage has to know which to decode.
 #
-# Deliberately the same 64 bytes as one matrix, and the smallest uniform block
-# boom uploads. It still occupies a whole aligned slot, because a uniform
-# descriptor's buffer offset must satisfy minUniformBufferOffsetAlignment.
+# It occupies a whole aligned slot, because a uniform descriptor's buffer offset
+# must satisfy minUniformBufferOffsetAlignment.
 # ---
 # projection: pixels to clip space, column-major
+# decode:     x is 1 when the fragment stage decodes the vertex colours from
+#             sRGB to linear, 0 when they are already linear; y, z, w unused
 pub rec ScreenUniforms {
     projection: Mat4;
+    decode:     Vec4;
 }
 
 # Convert an atlas rect in pixels to the UV vec4 the shader reads.

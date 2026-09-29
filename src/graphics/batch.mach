@@ -32,6 +32,7 @@
 # which coalesces the case games actually produce -- runs of sprites from one
 # sheet -- and never reorders anything.
 
+use boom.graphics.image.ColorSpace;
 use boom.graphics.sprite.Rect;
 use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
@@ -72,12 +73,15 @@ pub val SPRITE_FLOATS: usize = SPRITE_VERTICES * VERTEX_FLOATS;
 #          so a run cannot span two of them.
 # count:   vertices accumulated so far
 # open:    whether a run has been started at all
+# space:   the space the run's vertex colours were authored in: srgb for a draw
+#          list, linear for a sprite's or a tile's tint
 pub rec Batch2D {
     texture: opt[*Texture];
     first:   u32;
     block:   usize;
     count:   u32;
     open:    bool;
+    space:   ColorSpace;
 }
 
 # Forget any open run, without drawing it.
@@ -87,16 +91,19 @@ pub fun batch_reset(b: *Batch2D) {
     b.block   = 0;
     b.count   = 0;
     b.open    = false;
+    b.space   = ColorSpace.linear{};
 }
 
 # Whether appending geometry for `texture` has to draw the open run first.
 #
 # A run that is not open has nothing to draw. A run sampling a different texture
 # has to be drawn now to keep submission order, since the new geometry must land
-# on top of it rather than beside it.
-pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture]) bool {
-    if (!b.open)      { ret false; }
-    if (b.count == 0) { ret false; }
+# on top of it rather than beside it. So does one whose vertex colours are in a
+# different space, because whether the fragment stage decodes them is per draw.
+pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture], space: ColorSpace) bool {
+    if (!b.open)                            { ret false; }
+    if (b.count == 0)                       { ret false; }
+    if (sel b.space.srgb != sel space.srgb) { ret true; }
     ret !same_texture(b.texture, texture);
 }
 
@@ -237,22 +244,24 @@ test sprite_expand__uvs_and_tint {
     ret 0;
 }
 
-test batch_breaks__on_texture_change {
+test batch_breaks__on_texture_or_colour_space_change {
     var a: Texture;
     var b: Texture;
     var t: Batch2D;
     batch_reset(?t);
 
     # Nothing accumulated yet, so there is nothing to break.
-    if (batch_breaks(?t, opt[*Texture].some{?a})) { ret 1; }
+    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{})) { ret 1; }
 
     t.open    = true;
     t.texture = opt[*Texture].some{?a};
     t.count   = 6;
-    if (batch_breaks(?t, opt[*Texture].some{?a}))  { ret 2; }
-    if (!batch_breaks(?t, opt[*Texture].some{?b})) { ret 3; }
+    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}))  { ret 2; }
+    if (!batch_breaks(?t, opt[*Texture].some{?b}, ColorSpace.linear{})) { ret 3; }
     # none is the white texel, which is a different texture from any other.
-    if (!batch_breaks(?t, opt[*Texture].none{})) { ret 4; }
+    if (!batch_breaks(?t, opt[*Texture].none{}, ColorSpace.linear{})) { ret 4; }
+    # a draw list's sRGB colours cannot share a draw with a linear tint
+    if (!batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.srgb{})) { ret 5; }
     ret 0;
 }
 

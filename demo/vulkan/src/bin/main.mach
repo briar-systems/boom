@@ -121,6 +121,14 @@ val COVERED_R: u8 = 16;
 # from both so the bilinear edge between two cells cannot land on either side
 # by mistake.
 val SPRITE_EDGE: usize = 8;
+
+# The draw list's authored colours, as bytes: red for the triangle holding the
+# rectangle's top-right half and for the one holding its bottom-left half, and
+# the green and blue both share. A draw list's colours are sRGB, so a surface
+# that encodes on write must give these back exactly, not brightened.
+val UI_HI_R:     u8    = 77;
+val UI_LO_R:     u8    = 230;
+val UI_GB:       u8    = 20;
 val SPRITE_SIZE: usize = 64;
 val LIGHT_R:     u8    = 160;
 val DARK_R:      u8    = 100;
@@ -482,6 +490,9 @@ fun build_skinned_cube(bytes: *u8, verts: *f32) {
 # exactly the right place at exactly the right size, so the position and area
 # checks cannot see the difference and this is what does.
 #
+# The colours are whole bytes over 255, as blit authors them, so what reaches a
+# surface-format target can be compared with what was written byte for byte.
+#
 # The uvs are all zero, which addresses the renderer's 1x1 white texel when no
 # texture is bound, so `colour * texel` is the flat colour.
 fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
@@ -491,24 +502,24 @@ fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
     # First triangle: top-left, top-right, bottom-right.
     xs[0] = x;
     ys[0] = y;
-    rs[0] = 0.30;
+    rs[0] = UI_HI_R::f32 / 255.0;
     xs[1] = x + w;
     ys[1] = y;
-    rs[1] = 0.30;
+    rs[1] = UI_HI_R::f32 / 255.0;
     xs[2] = x + w;
     ys[2] = y + h;
-    rs[2] = 0.30;
+    rs[2] = UI_HI_R::f32 / 255.0;
     # Second: top-left, bottom-right, bottom-left. Shares the diagonal, so the
     # two tile the rectangle with no gap and no overlap.
     xs[3] = x;
     ys[3] = y;
-    rs[3] = 0.90;
+    rs[3] = UI_LO_R::f32 / 255.0;
     xs[4] = x + w;
     ys[4] = y + h;
-    rs[4] = 0.90;
+    rs[4] = UI_LO_R::f32 / 255.0;
     xs[5] = x;
     ys[5] = y + h;
-    rs[5] = 0.90;
+    rs[5] = UI_LO_R::f32 / 255.0;
 
     var i: usize = 0;
     for (i < 6) {
@@ -518,8 +529,8 @@ fun build_ui_quad(v: *f32, x: f32, y: f32, w: f32, h: f32) {
         v[b + 2] = 0.0;
         v[b + 3] = 0.0;
         v[b + 4] = rs[i];
-        v[b + 5] = 0.10;
-        v[b + 6] = 0.10;
+        v[b + 5] = UI_GB::f32 / 255.0;
+        v[b + 6] = UI_GB::f32 / 255.0;
         v[b + 7] = 1.0;
         i        = i + 1;
     }
@@ -1439,6 +1450,24 @@ fun main(argc: i64, argv: **u8) i64 {
     }
     p.printlnf("ok   the vertex colour varies across the list: red {} against {}",
         shot[lo_o + red], shot[hi_o + red]);
+
+    # The check target is in the surface's format, so these are the bytes the
+    # window would hold. blit authors its colours for display, and a surface
+    # that encodes sRGB brightens a colour written through unchanged, which is
+    # how a #141417 backdrop came to display as #50555f. Whether or not the
+    # surface encodes, the authored bytes are what must come back.
+    val blue: usize = 2 - red;
+    if (shot[lo_o + red] != UI_LO_R || shot[lo_o + 1] != UI_GB || shot[lo_o + blue] != UI_GB
+        || shot[hi_o + red] != UI_HI_R || shot[hi_o + 1] != UI_GB || shot[hi_o + blue] != UI_GB) {
+        p.printlnf("FAIL triangles: the list reads back as {} {} {} and {} {} {}; authored {} {} {} and {} {} {}",
+            shot[lo_o + red], shot[lo_o + 1], shot[lo_o + blue],
+            shot[hi_o + red], shot[hi_o + 1], shot[hi_o + blue],
+            UI_LO_R, UI_GB, UI_GB, UI_HI_R, UI_GB, UI_GB);
+        gfx.render_target_delete(d, ?check);
+        ret 1;
+    }
+    p.printlnf("ok   the draw list reads back exactly as authored: {} {} {} and {} {} {}",
+        UI_LO_R, UI_GB, UI_GB, UI_HI_R, UI_GB, UI_GB);
 
     gfx.render_target_delete(d, ?check);
 

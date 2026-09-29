@@ -15,13 +15,16 @@
 # draw covers a whole draw list, and a panel's background, its border and its
 # text are different colours inside it.
 
-# The projection, as its four columns. See src/bin/shaders/mesh_vert.mach for why a
-# matrix arrives as columns and why the product is a combination of them.
+# The projection, as its four columns, then whether the fragment stage decodes
+# the vertex colours from sRGB. See src/bin/shaders/mesh_vert.mach for why a
+# matrix arrives as columns and why the product is a combination of them, and
+# src/bin/shaders/ui_frag.mach for the decode.
 rec Screen {
     projection_0: f32x4;
     projection_1: f32x4;
     projection_2: f32x4;
     projection_3: f32x4;
+    decode:       f32x4;
 }
 
 #[uniform(0, 0)]
