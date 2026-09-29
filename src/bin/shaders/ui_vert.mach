@@ -33,12 +33,12 @@ var screen: Screen;
 #[input(0)]
 var in_position: f32x2;
 #[input(1)]
-var in_uv: f32x2;
+var in_uv:       f32x2;
 #[input(3)]
-var in_colour: f32x4;
+var in_colour:   f32x4;
 
 #[output(0)]
-var out_uv: f32x2;
+var out_uv:     f32x2;
 #[output(1)]
 var out_colour: f32x4;
 

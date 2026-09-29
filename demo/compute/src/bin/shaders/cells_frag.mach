@@ -1,0 +1,10 @@
+# Every live cell in plain red, so a covered pixel is told from the black clear
+# by its hue.
+
+#[output(0)]
+var out_colour: f32x4;
+
+#[stage("fragment")]
+fun frag_main() {
+    out_colour = f32x4{1.0, 0.0, 0.0, 1.0};
+}

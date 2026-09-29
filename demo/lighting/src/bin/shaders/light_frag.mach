@@ -51,7 +51,7 @@ rec Scene {
 #[sampler(0, 1)]
 var packed: tex.Sampler2D;
 #[uniform(0, 4)]
-var scene: Scene;
+var scene:  Scene;
 
 #[input(0)]
 var in_uv: f32x2;

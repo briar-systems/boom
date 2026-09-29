@@ -108,7 +108,8 @@ pub rec Vk {
 # a window carrying a GL context cannot back a Vulkan surface.
 pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     v.ready = false;
-    v.live  = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0};
+    v.live  = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0,
+        buffers: 0, computes: 0};
 
     if (!glfw.vulkan_supported()) {
         ret err[Error].err{Error.loader{LoaderError.unavailable{}}};
@@ -359,7 +360,7 @@ fun pick_physical(v: *Vk) err[Error] {
 
 # the queue families a device offers for drawing and for presenting
 # ---
-# graphics: the first graphics-capable family, if any
+# graphics: the first family that can both draw and compute, if any
 # present:  the first family that can present to the surface, if any
 rec Families {
     graphics: opt[u32];
@@ -382,11 +383,15 @@ fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
     if (count < cap) { cap = count; }
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?cap, ?props[0]);
 
+    val want:          u32  = vk.QUEUE_GRAPHICS_BIT | vk.QUEUE_COMPUTE_BIT;
     var have_graphics: bool = false;
     var have_present:  bool = false;
     var i:             u32  = 0;
     for (i < cap) {
-        if (!have_graphics && (props[i].queueFlags & vk.QUEUE_GRAPHICS_BIT) != 0) {
+        # compute on the graphics queue, so a dispatch and the draws that read
+        # its results are ordered by one command buffer and its barriers. a
+        # device with graphics always has such a family.
+        if (!have_graphics && (props[i].queueFlags & want) == want) {
             f.graphics    = opt[u32].some{i};
             have_graphics = true;
         }

@@ -76,6 +76,11 @@
 # (boom.graphics.error) whose cases name the layer that refused and carry what
 # it knew, and error_message renders a line for any of them. Geometry math
 # comes from boom.math. Consumers import this as `use boom.graphics;`.
+#
+# COMPUTE RUNS IN THE SAME FRAME AS THE DRAWS. A game's state can live in
+# StorageBuffers on the GPU, be stepped by a Compute stage dispatched between
+# passes, and be drawn straight from those buffers by pass_draw_storage, with
+# the renderer placing every barrier. boom.graphics.compute has the contract.
 
 fwd boom.graphics.error.Error;
 fwd boom.graphics.error.VkCall;
@@ -369,6 +374,40 @@ fwd boom.graphics.renderer.renderer_storage_capacity;
 fwd boom.graphics.renderer.renderer_storage_used;
 fwd boom.graphics.renderer.renderer_storage_buffers;
 fwd boom.graphics.renderer.renderer_storage_refused;
+
+# Compute and a game's own storage buffers. A StorageBuffer lives on the GPU; a
+# Compute is a stage dispatched over it with renderer_dispatch; a pass draws
+# straight from it with pass_draw_storage; a Readback brings a little of it
+# back without a stall. A stage finds the buffers a call lists at STORAGE_SET,
+# the one at index n at binding n. Every dispatch, update and readback is
+# recorded between passes and ordered against the draws by the renderer, so a
+# game never states a barrier. See boom.graphics.compute.
+fwd boom.graphics.pipeline.STORAGE_SET;
+fwd boom.graphics.pipeline.MAX_STORAGE_BINDINGS;
+fwd boom.graphics.compute.MAX_STORAGE_SETS;
+fwd boom.graphics.compute.DISPATCH_ARGS_BYTES;
+fwd boom.graphics.compute.DRAW_ARGS_BYTES;
+fwd boom.graphics.compute.StorageBuffer;
+fwd boom.graphics.compute.storage_buffer;
+fwd boom.graphics.compute.storage_buffer_size;
+fwd boom.graphics.compute.storage_buffer_upload;
+fwd boom.graphics.compute.storage_buffer_read;
+fwd boom.graphics.compute.storage_buffer_delete;
+fwd boom.graphics.compute.Compute;
+fwd boom.graphics.compute.compute;
+fwd boom.graphics.compute.compute_delete;
+fwd boom.graphics.compute.Readback;
+fwd boom.graphics.compute.readback;
+fwd boom.graphics.compute.readback_len;
+fwd boom.graphics.compute.readback_delete;
+fwd boom.graphics.renderer.renderer_dispatch;
+fwd boom.graphics.renderer.renderer_dispatch_indirect;
+fwd boom.graphics.renderer.renderer_buffer_update;
+fwd boom.graphics.renderer.renderer_readback;
+fwd boom.graphics.renderer.renderer_readback_take;
+fwd boom.graphics.renderer.pass_draw_storage;
+fwd boom.graphics.renderer.pass_draw_storage_indirect;
+fwd boom.graphics.spirv.COMPUTE_ENTRY;
 
 fwd boom.graphics.text.typeface.Typeface;
 fwd boom.graphics.text.typeface.typeface_from_bytes;
