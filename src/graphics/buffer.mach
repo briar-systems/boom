@@ -186,10 +186,55 @@ pub fun buffer_dnit(b: *Buffer, v: *Vk) {
 # command buffer is a throughput refinement that matters when uploads happen
 # every frame, which is not the case for assets loaded once.
 pub fun buffer_copy(v: *Vk, pool: vk.CommandPool, src: *Buffer, dst: *Buffer, size: u64) err[Error] {
-    if (size > src.size || size > dst.size) {
+    ret buffer_copy_at(v, pool, src, 0, dst, 0, size);
+}
+
+# Copy a range between buffers on the GPU, waiting for the copy to finish.
+#
+# Fenced on both sides against everything else on the queue: the copy reads
+# only after earlier submissions' writes are visible, and later submissions see
+# what it wrote. A storage buffer a dispatch wrote in a frame still in flight is
+# read correctly this way, and one uploaded here is read correctly by the next
+# frame's draws.
+pub fun buffer_copy_at(v: *Vk, pool: vk.CommandPool, src: *Buffer, src_offset: u64,
+    dst: *Buffer, dst_offset: u64, size: u64) err[Error] {
+    if (src_offset > src.size || size > src.size - src_offset
+        || dst_offset > dst.size || size > dst.size - dst_offset) {
         ret err[Error].err{Error.buffer{BufferError.overrun{size}}};
     }
 
+    val begun: res[vk.CommandBuffer, Error] = oneshot_begin(v, pool);
+    if (sel begun.err) { ret err[Error].err{begun.err}; }
+    val cmd: vk.CommandBuffer = begun.ok;
+
+    buffer_barrier_all(cmd);
+    var region: vk.BufferCopy;
+    region.srcOffset = src_offset;
+    region.dstOffset = dst_offset;
+    region.size      = size;
+    vk.vkCmdCopyBuffer(cmd, src.handle, dst.handle, 1, ?region);
+    buffer_barrier_all(cmd);
+
+    ret oneshot_submit(v, pool, cmd);
+}
+
+# A full memory dependency between everything recorded before it and
+# everything after, on this queue.
+#
+# Coarse on purpose: it is used around one-shot transfers that already stall the
+# queue, where naming the exact stages saves nothing and a missed one is a race.
+pub fun buffer_barrier_all(cmd: vk.CommandBuffer) {
+    var mb: vk.MemoryBarrier;
+    mb.sType         = vk.STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.pNext         = nil;
+    mb.srcAccessMask = vk.ACCESS_MEMORY_WRITE_BIT;
+    mb.dstAccessMask = vk.ACCESS_MEMORY_READ_BIT | vk.ACCESS_MEMORY_WRITE_BIT;
+    vk.vkCmdPipelineBarrier(cmd, vk.PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        vk.PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, ?mb, 0, nil, 0, nil);
+}
+
+# Allocate and begin a one-shot command buffer from the upload pool.
+pub fun oneshot_begin(v: *Vk, pool: vk.CommandPool) res[vk.CommandBuffer, Error] {
     var cmd: vk.CommandBuffer;
     var ai:  vk.CommandBufferAllocateInfo;
     ai.sType              = vk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -199,7 +244,7 @@ pub fun buffer_copy(v: *Vk, pool: vk.CommandPool, src: *Buffer, dst: *Buffer, si
     ai.commandBufferCount = 1;
     val allocated: i32 = vk.vkAllocateCommandBuffers(v.device, ?ai, ?cmd);
     if (allocated != vk.SUCCESS) {
-        ret err[Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
+        ret res[vk.CommandBuffer, Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
     }
 
     var bi: vk.CommandBufferBeginInfo;
@@ -210,18 +255,17 @@ pub fun buffer_copy(v: *Vk, pool: vk.CommandPool, src: *Buffer, dst: *Buffer, si
     val begun: i32 = vk.vkBeginCommandBuffer(cmd, ?bi);
     if (begun != vk.SUCCESS) {
         vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
-        ret err[Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
+        ret res[vk.CommandBuffer, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
     }
+    ret res[vk.CommandBuffer, Error].ok{cmd};
+}
 
-    var region: vk.BufferCopy;
-    region.srcOffset = 0;
-    region.dstOffset = 0;
-    region.size      = size;
-    vk.vkCmdCopyBuffer(cmd, src.handle, dst.handle, 1, ?region);
-
-    val ended: i32 = vk.vkEndCommandBuffer(cmd);
+# End, submit and wait for a one-shot command buffer, then free it.
+pub fun oneshot_submit(v: *Vk, pool: vk.CommandPool, cmd: vk.CommandBuffer) err[Error] {
+    var c:     vk.CommandBuffer = cmd;
+    val ended: i32              = vk.vkEndCommandBuffer(c);
     if (ended != vk.SUCCESS) {
-        vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
+        vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
         ret err[Error].err{vk_failed(VkCall.end_command_buffer{}, ended)};
     }
 
@@ -232,20 +276,19 @@ pub fun buffer_copy(v: *Vk, pool: vk.CommandPool, src: *Buffer, dst: *Buffer, si
     si.pWaitSemaphores      = nil;
     si.pWaitDstStageMask    = nil;
     si.commandBufferCount   = 1;
-    si.pCommandBuffers      = ?cmd;
+    si.pCommandBuffers      = ?c;
     si.signalSemaphoreCount = 0;
     si.pSignalSemaphores    = nil;
 
     val submitted: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, nil);
     if (submitted != vk.SUCCESS) {
-        vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
+        vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
         ret err[Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
     }
     # Freeing the command buffer while it is executing is invalid, so the wait
     # is not optional here even though it stalls the queue.
     vk.vkQueueWaitIdle(v.graphics_queue);
-    vk.vkFreeCommandBuffers(v.device, pool, 1, ?cmd);
-
+    vk.vkFreeCommandBuffers(v.device, pool, 1, ?c);
     ret err[Error].ok{};
 }
 
