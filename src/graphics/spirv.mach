@@ -70,6 +70,8 @@ pub val UI_FRAG_SPV: [_]u8;
 pub val VERTEX_ENTRY: str = "vert_main";
 # The entry point name every boom fragment stage uses.
 pub val FRAGMENT_ENTRY: str = "frag_main";
+# The entry point name a compute stage boom dispatches uses.
+pub val COMPUTE_ENTRY: str = "comp_main";
 
 test spirv__modules_whole_and_shader_capability_only {
     # #[embed] carries whatever the artifact produced, so the magic is checked.

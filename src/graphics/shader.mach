@@ -33,6 +33,10 @@
 # A shader declares only what it reads. Binding 4 is where a game's shading
 # parameters go, and it is the reason this is usable for lighting rather than
 # only for shading with constants baked in.
+#
+# A game's own storage buffers arrive in a second set, STORAGE_SET, at the
+# bindings a pass_draw_storage call lists them in, so a vertex stage can pull
+# what a compute dispatch wrote without it passing through the CPU.
 
 use boom.graphics.depth.DepthConvention;
 use boom.graphics.depth.depth_convention_same;
@@ -48,7 +52,7 @@ use boom.graphics.pipeline.PipelineDesc;
 use boom.graphics.pipeline.SetLayout;
 use boom.graphics.pipeline.pipeline_desc_3d;
 use boom.graphics.pipeline.pipeline_dnit;
-use boom.graphics.pipeline.pipeline_init_depth;
+use boom.graphics.pipeline.pipeline_init_sets;
 use boom.graphics.pipeline.set_layout_full;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vertex.vertex_format_eq;
@@ -180,11 +184,11 @@ pub fun shader_pipeline(s: *Shader, v: *Vk, pass: vk.RenderPass,
 
     val n:   usize      = s.count;
     var lay: SetLayout  = set_layout_full();
-    val r:   err[Error] = pipeline_init_depth(?s.built[n].pipeline, v, pass,
+    val r:   err[Error] = pipeline_init_sets(?s.built[n].pipeline, v, pass,
         compatibility.color_count,
         f, ?s.desc, depth,
         s.vert, s.vlen,
-        s.frag, s.flen, ?lay);
+        s.frag, s.flen, ?lay, true);
     if (sel r.err) { ret res[*Pipeline, Error].err{r.err}; }
 
     s.built[n].compatibility = @compatibility;
