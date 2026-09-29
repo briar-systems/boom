@@ -78,6 +78,21 @@ use boom.graphics.camera.camera_view;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.camera2d.camera2d_visible;
+use boom.graphics.compute.Compute;
+use boom.graphics.compute.DISPATCH_ARGS_BYTES;
+use boom.graphics.compute.DRAW_ARGS_BYTES;
+use boom.graphics.compute.Readback;
+use boom.graphics.compute.StorageBuffer;
+use boom.graphics.compute.StorageSets;
+use boom.graphics.compute.readback_ready;
+use boom.graphics.compute.storage_barrier;
+use boom.graphics.compute.storage_bindings_valid;
+use boom.graphics.compute.storage_fits;
+use boom.graphics.compute.storage_sets_begin_frame;
+use boom.graphics.compute.storage_sets_dnit;
+use boom.graphics.compute.storage_sets_init;
+use boom.graphics.compute.storage_sets_take;
+use boom.graphics.compute.storage_words;
 use boom.graphics.depth.DepthConvention;
 use boom.graphics.descriptor.COLOUR_OFFSET;
 use boom.graphics.descriptor.Descriptors;
@@ -99,14 +114,17 @@ use boom.graphics.descriptor.descriptors_write_slot_at;
 use boom.graphics.device.Device;
 use boom.graphics.device.device_dnit;
 use boom.graphics.device.device_init;
+use boom.graphics.error.BufferError;
 use boom.graphics.error.Capacity;
 use boom.graphics.error.Error;
 use boom.graphics.error.MeshError;
 use boom.graphics.error.RendererError;
+use boom.graphics.error.ShaderError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.frame.FrameLoop;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
 use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
 use boom.graphics.frame.frame_begin_pass;
@@ -136,6 +154,7 @@ use boom.graphics.mesh.mesh_release_retired;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_one;
 use boom.graphics.pipeline.Pipeline;
+use boom.graphics.pipeline.STORAGE_SET;
 use boom.graphics.pipeline.pipeline_bind_region;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_pipeline;
@@ -193,6 +212,8 @@ use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
 use boom.graphics.uniform.TintUniforms;
+use boom.graphics.vertex.VertexFormat;
+use boom.graphics.vertex.vertex_format;
 use boom.graphics.vertex.vertex_format_eq;
 use boom.graphics.vertex.vertex_format_is_skinned;
 use boom.graphics.vertex.vertex_format_skinned;
@@ -260,6 +281,7 @@ rec PendingMeshUpload {
 # white:       a 1x1 opaque white texture, bound when a draw has no texture of
 #              its own, since every fragment stage samples
 # store:       the frame's storage buffer, the bulk data a game's own shading reads
+# sets:        the per-frame descriptor sets binding a game's storage buffers
 # width:       the target width in pixels
 # height:      the target height in pixels
 # frame_index: which in-flight frame is being recorded
@@ -275,6 +297,9 @@ rec PendingMeshUpload {
 #              pipeline is missing its final encode and output is dark
 # present:     the present mode that was asked for, which the surface may not have
 #              honoured; the one in use lives on the swapchain
+# passes:      passes begun and not yet ended, which compute may not interleave with
+# serial:      frames begun since the renderer came up
+# completed:   the newest frame the GPU is known to have finished
 # Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:          glfw.Window;
@@ -290,6 +315,7 @@ pub rec Renderer {
     white:           Texture;
     stream:          VertexStream;
     store:           FrameStorage;
+    sets:            StorageSets;
     retired:         [2]RetiredMeshes;
     uploads:         [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
     upload_count:    usize;
@@ -305,6 +331,9 @@ pub rec Renderer {
     draws:           usize;
     srgb:            bool;
     present:         PresentMode;
+    passes:          usize;
+    serial:          u64;
+    completed:       u64;
     ready_vk:        bool;
     ready_dev:       bool;
     ready_swap:      bool;
@@ -316,6 +345,7 @@ pub rec Renderer {
     ready_white:     bool;
     ready_stream:    bool;
     ready_store:     bool;
+    ready_sets:      bool;
 }
 
 # initialize a renderer against a window
@@ -367,6 +397,9 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.culled          = 0;
     r.draws           = 0;
     r.present         = present;
+    r.passes          = 0;
+    r.serial          = 0;
+    r.completed       = 0;
     r.ready_vk        = false;
     r.ready_dev       = false;
     r.ready_swap      = false;
@@ -378,6 +411,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.ready_white     = false;
     r.ready_stream    = false;
     r.ready_store     = false;
+    r.ready_sets      = false;
 
     val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
@@ -494,6 +528,14 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
         ret sto_r;
     }
     r.ready_store = true;
+
+    # The sets that bind a game's storage buffers to a dispatch or a draw.
+    val sets_r: err[Error] = storage_sets_init(?r.sets, ?r.vk);
+    if (sel sets_r.err) {
+        renderer_rollback(r);
+        ret sets_r;
+    }
+    r.ready_sets = true;
 
     ret err[Error].ok{};
 }
@@ -1164,6 +1206,13 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
     # the write mark is rewound, so a frame that needed room for forty lights
     # does not allocate for them again.
     storage_begin_frame(?r.store, r.frame_index);
+    storage_sets_begin_frame(?r.sets, ?r.vk, r.frame_index);
+    # The fence just waited on retired the frame that last used this one's
+    # command buffer, and the queue retires frames in order, so every frame up
+    # to that one is finished. That is what makes a readback's bytes safe.
+    r.serial = r.serial + 1;
+    if (r.serial > MAX_FRAMES_IN_FLIGHT::u64) { r.completed = r.serial - MAX_FRAMES_IN_FLIGHT::u64; }
+    r.passes  = 0;
     r.drawing = true;
     ret res[bool, Error].ok{true};
 }
@@ -1212,6 +1261,11 @@ pub fun renderer_end_frame(r: *Renderer) err[Error] {
 # r: the renderer to drain
 pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
+    # every frame submitted has retired; the open one was never submitted
+    if (r.drawing) {
+        if (r.serial > 0) { r.completed = r.serial - 1; }
+    }
+    or { r.completed = r.serial; }
 }
 
 # read the window back: arm a copy of this frame's image into out
@@ -1405,6 +1459,10 @@ fun renderer_rollback(r: *Renderer) {
         release_retired_meshes(r, 1);
     }
 
+    if (r.ready_sets) {
+        storage_sets_dnit(?r.sets, ?r.vk);
+        r.ready_sets = false;
+    }
     if (r.ready_store) {
         storage_dnit(?r.store, ?r.vk);
         r.ready_store = false;
@@ -1881,6 +1939,7 @@ fun window_load_colour(clear: opt[Vec4]) Vec4 {
 # ret: the open pass, passed to draw calls and pass_end
 pub fun pass_begin(r: *Renderer, d: *PassDesc) Pass {
     var p: Pass = pass_resolve(r, d);
+    r.passes = r.passes + 1;
 
     if (sel d.target.none) {
         val step: WindowStep = window_step(r.frame.window, sel d.clear.some);
@@ -2037,6 +2096,7 @@ pub fun pass_end(p: *Pass) {
     # the batcher has been recorded nowhere, and a render pass that ends without
     # it drops it silently.
     batch_flush(p);
+    if (p.renderer.passes > 0) { p.renderer.passes = p.renderer.passes - 1; }
 
     if (sel p.target.none) { ret; }
     vk.vkCmdEndRenderPass(p.cmd);
@@ -3176,8 +3236,6 @@ pub fun renderer_storage_refused(r: *Renderer) usize {
 # a renderer needs a device and a surface, so these cover the pure parts:
 # the pass projections and the dropped-draw accounting.
 
-use boom.graphics.vertex.VertexFormat;
-
 test pass_overlay__maps_pixels_to_clip {
     var r: Renderer;
     r.width  = 800;
@@ -3520,4 +3578,341 @@ test pass_set_region__bounds {
 #[testing]
 fun region_set(r: err[Error]) bool {
     ret sel r.ok;
+}
+
+# ------------------------------------------------------------------ compute
+#
+# A dispatch, a buffer update and a readback are recorded between passes, in
+# the order the game calls them, into the same command buffer as the draws. See
+# boom.graphics.compute for why that ordering is all a game has to get right.
+
+# whether compute or a buffer transfer may be recorded now
+fun between_passes(r: *Renderer) err[Error] {
+    if (!r.drawing)    { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    if (r.passes != 0) { ret err[Error].err{Error.renderer{RendererError.pass_open{}}}; }
+    ret err[Error].ok{};
+}
+
+# Step out of the window's render pass for work that cannot run inside one.
+#
+# The window pass stays open between window passes, so a dispatch after one is
+# still inside it. It is ended here and resumed through its loading variant,
+# the excursion an offscreen pass already takes, and a window never begun this
+# frame is left for its first pass to begin with its own clear.
+fun outside_begin(r: *Renderer) bool {
+    ret frame_suspend_pass(?r.frame);
+}
+
+fun outside_end(r: *Renderer, resume: bool) {
+    if (resume) { frame_resume_pass(?r.frame, ?r.swap); }
+}
+
+fun frame_command(r: *Renderer) vk.CommandBuffer {
+    ret r.frame.frames[r.frame_index].command;
+}
+
+# Dispatch a compute stage over x by y by z workgroups.
+#
+# The buffers are bound at STORAGE_SET, the one at index n at binding n. What
+# the dispatch writes is visible to every pass, dispatch and readback recorded
+# after it, and it sees everything recorded before it, including what earlier
+# frames still in flight drew from the same buffers.
+#
+# Recorded between passes: refused while one is open, and outside a frame.
+# ---
+# r:       the renderer, with a frame open
+# c:       the compute stage
+# buffers: the storage buffers it binds, at most MAX_STORAGE_BINDINGS
+# count:   how many
+# x, y, z: workgroup counts; the stage's #[workgroup] sizes each group
+# ret: ok, or why nothing was recorded
+pub fun renderer_dispatch(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
+    x: u32, y: u32, z: u32) err[Error] {
+    ret dispatch(r, c, buffers, count, x, y, z, nil, 0);
+}
+
+# Dispatch a compute stage with its workgroup counts read from a buffer.
+#
+# The counts are three u32 at offset in args, which an earlier dispatch may have
+# written: a simulation sizes its next step by what the last one found active,
+# without the CPU reading the count.
+# ---
+# args:   the buffer holding the counts
+# offset: their byte offset, a multiple of four
+pub fun renderer_dispatch_indirect(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
+    args: *StorageBuffer, offset: usize) err[Error] {
+    if (args == nil) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    ret dispatch(r, c, buffers, count, 0, 0, 0, args, offset);
+}
+
+fun dispatch(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
+    x: u32, y: u32, z: u32, args: *StorageBuffer, offset: usize) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err)         { ret open; }
+    if (c == nil || !c.ready) { ret err[Error].err{Error.shader{ShaderError.undeclared{}}}; }
+    val bound: err[Error] = storage_bindings_valid(buffers, count);
+    if (sel bound.err) { ret bound; }
+    if (args != nil) {
+        if (!args.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+        val fits: err[Error] = storage_words(args.buffer.size::usize, offset, DISPATCH_ARGS_BYTES);
+        if (sel fits.err) { ret fits; }
+    }
+
+    val taken: opt[vk.DescriptorSet] = storage_sets_take(?r.sets, ?r.vk, r.frame_index, buffers, count);
+    if (sel taken.none) {
+        r.dropped = r.dropped + 1;
+        ret err[Error].err{Error.full{Capacity.storage_sets{}}};
+    }
+    var set:    vk.DescriptorSet = taken.some;
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    storage_barrier(cmd, 0, 0);
+    vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
+    vk.vkCmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.layout, STORAGE_SET, 1, ?set, 0, nil);
+    if (args != nil) { vk.vkCmdDispatchIndirect(cmd, args.buffer.handle, offset::u64); }
+    or               { vk.vkCmdDispatch(cmd, x, y, z); }
+    storage_barrier(cmd, 0, 0);
+    outside_end(r, resume);
+    ret err[Error].ok{};
+}
+
+# The most bytes one vkCmdUpdateBuffer carries.
+val UPDATE_CHUNK: usize = 65536;
+
+# Write bytes into a storage buffer as part of the frame.
+#
+# Recorded in order with the dispatches and draws around it, so a parameter
+# block written here before a dispatch is what that dispatch reads, and one
+# written after it is not. The bytes are copied into the command buffer as this
+# returns, so src may be reused at once. For a frame's small writes, a step's
+# parameters or a cleared flag list; seeding a large buffer is
+# storage_buffer_upload.
+# ---
+# r:      the renderer, with a frame open and no pass open
+# b:      the buffer
+# offset: the byte offset, a multiple of four
+# src:    the bytes
+# len:    how many, a multiple of four
+pub fun renderer_buffer_update(r: *Renderer, b: *StorageBuffer, offset: usize, src: *u8, len: usize) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err)                                   { ret open; }
+    if (b == nil || !b.ready || src == nil || len == 0) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    val fits: err[Error] = storage_words(b.buffer.size::usize, offset, len);
+    if (sel fits.err) { ret fits; }
+
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    storage_barrier(cmd, 0, 0);
+    var done: usize = 0;
+    for (done < len) {
+        var n: usize = len - done;
+        if (n > UPDATE_CHUNK) { n = UPDATE_CHUNK; }
+        vk.vkCmdUpdateBuffer(cmd, b.buffer.handle, (offset + done)::u64, n::u64, (?src[done]):~ptr);
+        done = done + n;
+    }
+    storage_barrier(cmd, 0, 0);
+    outside_end(r, resume);
+    ret err[Error].ok{};
+}
+
+# Copy readback_len bytes of a storage buffer at offset into a readback.
+#
+# Nothing waits. The copy runs with the frame, after everything recorded before
+# it, and renderer_readback_take hands it back once the renderer knows that
+# frame has finished, MAX_FRAMES_IN_FLIGHT frames later. A game that takes
+# before it asks again, each frame, sees every copy.
+# ---
+# r:      the renderer, with a frame open and no pass open
+# rb:     the readback
+# b:      the buffer to copy from
+# offset: the byte offset to copy from
+pub fun renderer_readback(r: *Renderer, rb: *Readback, b: *StorageBuffer, offset: usize) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err)                                   { ret open; }
+    if (rb == nil || !rb.ready || b == nil || !b.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    val fits: err[Error] = storage_fits(b.buffer.size::usize, offset, rb.len);
+    if (sel fits.err) { ret fits; }
+
+    val slot:   usize            = r.frame_index;
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    storage_barrier(cmd, 0, 0);
+    var region: vk.BufferCopy;
+    region.srcOffset = offset::u64;
+    region.dstOffset = 0;
+    region.size      = rb.len::u64;
+    vk.vkCmdCopyBuffer(cmd, b.buffer.handle, rb.slots[slot].handle, 1, ?region);
+    # the host reads it once the fence says the frame is done
+    storage_barrier(cmd, vk.PIPELINE_STAGE_HOST_BIT, vk.ACCESS_HOST_READ_BIT);
+    outside_end(r, resume);
+    rb.serial[slot] = r.serial;
+    ret err[Error].ok{};
+}
+
+# Take the newest readback copy that has landed and not been taken.
+#
+# False when none has, which is every call for the first MAX_FRAMES_IN_FLIGHT
+# frames after the first renderer_readback, and when out is shorter than
+# readback_len. Never waits.
+# ---
+# r:   the renderer the copies were recorded on
+# rb:  the readback
+# out: where the bytes land
+# len: its size, at least readback_len
+# ret: whether out now holds a newer copy
+pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize) bool {
+    if (rb == nil || !rb.ready || out == nil || len < rb.len) { ret false; }
+    val ready: opt[usize] = readback_ready(rb, r.completed);
+    if (sel ready.none) { ret false; }
+    val mapped: res[ptr, Error] = buffer_map(?rb.slots[ready.some], ?r.vk);
+    if (sel mapped.err) { ret false; }
+    mem.copy[u8](out, mapped.ok:~*u8, rb.len);
+    rb.taken = rb.serial[ready.some];
+    ret true;
+}
+
+# Draw vertices by instances with a game's shader pulling its geometry from
+# storage buffers.
+#
+# There is no mesh and no vertex input: the vertex stage places each vertex from
+# its vertex_index and instance_index and what it reads at STORAGE_SET, the
+# buffer at index n arriving at binding n. That is the draw a simulation's state
+# takes straight from the buffers its dispatches wrote, with nothing crossing to
+# the CPU. Set 0 is the draw's slot as for pass_draw_shaded, so the transform
+# block, the material's textures and the pass_set_user block are all there.
+#
+# Not culled: the pass cannot know where pulled geometry lands. Refusals are
+# counted in renderer_dropped.
+# ---
+# p:         the open pass
+# buffers:   the storage buffers the stages read, at most MAX_STORAGE_BINDINGS
+# count:     how many
+# vertices:  vertices per instance
+# instances: instances
+# mat:       the material whose colour and textures set 0 carries
+# t:         the model transform
+# sh:        the game's shader
+pub fun pass_draw_storage(p: *Pass, buffers: **StorageBuffer, count: usize,
+    vertices: u32, instances: u32, mat: *Material, t: *Transform, sh: *Shader) {
+    if (vertices == 0 || instances == 0) { ret; }
+    pass_draw_pulled(p, buffers, count, vertices, instances, nil, 0, mat, t, sh);
+}
+
+# pass_draw_storage with its counts read from a buffer: vertex count, instance
+# count, first vertex and first instance, four u32 at offset in args, which a
+# dispatch may have written. A simulation draws exactly what its step left live
+# without the CPU reading how much that was.
+pub fun pass_draw_storage_indirect(p: *Pass, buffers: **StorageBuffer, count: usize,
+    args: *StorageBuffer, offset: usize, mat: *Material, t: *Transform, sh: *Shader) {
+    if (args == nil) {
+        p.renderer.dropped = p.renderer.dropped + 1;
+        ret;
+    }
+    pass_draw_pulled(p, buffers, count, 0, 0, args, offset, mat, t, sh);
+}
+
+fun pass_draw_pulled(p: *Pass, buffers: **StorageBuffer, count: usize,
+    vertices: u32, instances: u32, args: *StorageBuffer, offset: usize,
+    mat: *Material, t: *Transform, sh: *Shader) {
+    val r: *Renderer = p.renderer;
+    if (!pulled_valid(buffers, count, args, offset, mat, t, sh)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    batch_flush(p);
+
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) { ret; }
+    val slot: usize = taken.some;
+
+    var model:    Mat4 = transform_matrix(t);
+    var vp:       Mat4 = mat4_mul(?p.projection, ?p.view);
+    var mvp:      Mat4 = mat4_mul(?vp, ?model);
+    var uniforms: MeshUniforms;
+    uniforms.mvp   = mvp;
+    uniforms.model = model;
+    if (!descriptors_write_slot(?r.desc, r.frame_index, slot,
+        (?uniforms):~*u8, $size_of(MeshUniforms))) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    if (!write_surface_slot(p, slot, opt[*Material].some{mat}, material_texture(mat),
+        mat.base_color)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+
+    var none: VertexFormat          = vertex_format();
+    val pipe: res[*Pipeline, Error] = surface_pipeline(p, ?none, PROGRAM_MESH, opt[*Shader].some{sh});
+    if (sel pipe.err) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    val set: opt[vk.DescriptorSet] = storage_sets_take(?r.sets, ?r.vk, r.frame_index, buffers, count);
+    if (sel set.none) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
+        p.region_width::u32, p.region_height::u32);
+    if (!descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot)) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var bound: vk.DescriptorSet = set.some;
+    vk.vkCmdBindDescriptorSets(p.cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, pipe.ok.layout,
+        STORAGE_SET, 1, ?bound, 0, nil);
+    if (args != nil) {
+        vk.vkCmdDrawIndirect(p.cmd, args.buffer.handle, offset::u64, 1, DRAW_ARGS_BYTES::u32);
+    }
+    or { vk.vkCmdDraw(p.cmd, vertices, instances, 0, 0); }
+    r.draws = r.draws + 1;
+}
+
+# whether a pulled draw names everything it needs
+fun pulled_valid(buffers: **StorageBuffer, count: usize, args: *StorageBuffer, offset: usize,
+    mat: *Material, t: *Transform, sh: *Shader) bool {
+    if (mat == nil || t == nil || sh == nil) { ret false; }
+    val bound: err[Error] = storage_bindings_valid(buffers, count);
+    if (sel bound.err) { ret false; }
+    if (args == nil)   { ret true; }
+    if (!args.ready)   { ret false; }
+    val fits: err[Error] = storage_words(args.buffer.size::usize, offset, DRAW_ARGS_BYTES);
+    ret sel fits.ok;
+}
+
+test compute__refused_outside_frame_and_inside_pass {
+    # nothing may be recorded outside a frame, and a dispatch between a pass's
+    # draws would split the pass's render pass under it
+    var r: Renderer;
+    r.drawing = false;
+    r.passes  = 0;
+    val closed: err[Error] = between_passes(?r);
+    if (!(sel closed.err && (sel closed.err.renderer && sel closed.err.renderer.no_frame))) { ret 1; }
+    r.drawing = true;
+    r.passes  = 1;
+    val inside: err[Error] = between_passes(?r);
+    if (!(sel inside.err && (sel inside.err.renderer && sel inside.err.renderer.pass_open))) { ret 2; }
+    r.passes = 0;
+    val between: err[Error] = between_passes(?r);
+    if (!sel between.ok) { ret 3; }
+    ret 0;
+}
+
+test pulled_valid__indirect_args_checked {
+    var mat:  Material;
+    var t:    Transform = transform_identity();
+    var sh:   Shader;
+    var args: StorageBuffer;
+    args.ready       = true;
+    args.buffer.size = 32;
+    if (!pulled_valid(nil, 0, nil, 0, ?mat, ?t, ?sh))    { ret 1; }
+    if (!pulled_valid(nil, 0, ?args, 16, ?mat, ?t, ?sh)) { ret 2; }
+    # four u32 past offset 20 overrun a 32-byte buffer
+    if (pulled_valid(nil, 0, ?args, 20, ?mat, ?t, ?sh)) { ret 3; }
+    if (pulled_valid(nil, 0, ?args, 2, ?mat, ?t, ?sh))  { ret 4; }
+    args.ready = false;
+    if (pulled_valid(nil, 0, ?args, 0, ?mat, ?t, ?sh)) { ret 5; }
+    if (pulled_valid(nil, 0, nil, 0, nil, ?t, ?sh))    { ret 6; }
+    ret 0;
 }
