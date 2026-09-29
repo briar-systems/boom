@@ -2208,6 +2208,7 @@ pub fun batch_flush(p: *Pass) {
 # ---
 # p:            the open pass
 # texture:      what these vertices sample, or none for the white texel
+# space:        what the vertex colours were authored in, srgb for a draw list
 # vertices:     vertex data in the shared 2D layout
 # vertex_count: how many vertices
 fun batch_append(p: *Pass, texture: opt[*Texture], space: ColorSpace, vertices: *u8, vertex_count: usize) {
