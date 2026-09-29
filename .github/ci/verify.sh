@@ -65,3 +65,11 @@ done
 timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
   ./demo/vulkan/out/linux-x86_64/debug/bin/vulkan --require-readback
 echo "vulkan example passed with the window read back"
+
+# the compute example steps a pool of cells on the GPU twice, once from counts
+# the first step wrote, reads the pool and the activity flags back, and counts
+# the pixels a draw pulled straight from the pool covered
+timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
+  ./demo/compute/out/linux-x86_64/debug/bin/compute
+echo "compute example passed"
+
