@@ -65,21 +65,21 @@ use std.types.string.str;
 use std.types.string.str_equals;
 
 #[embed("{artifact.shader-quad_vert.out}")]
-val QUAD_VERT_SPV: [_]u8;
+val QUAD_VERT_SPV:   [_]u8;
 #[embed("{artifact.shader-sprite_vert.out}")]
 val SPRITE_VERT_SPV: [_]u8;
 #[embed("{artifact.shader-gbuf_frag.out}")]
-val GBUF_FRAG_SPV: [_]u8;
+val GBUF_FRAG_SPV:   [_]u8;
 #[embed("{artifact.shader-light_frag.out}")]
-val LIGHT_FRAG_SPV: [_]u8;
+val LIGHT_FRAG_SPV:  [_]u8;
 #[embed("{artifact.shader-fwd_frag.out}")]
-val FWD_FRAG_SPV: [_]u8;
+val FWD_FRAG_SPV:    [_]u8;
 #[embed("{artifact.shader-copy_frag.out}")]
-val COPY_FRAG_SPV: [_]u8;
+val COPY_FRAG_SPV:   [_]u8;
 #[embed("{artifact.shader-bloom_frag.out}")]
-val BLOOM_FRAG_SPV: [_]u8;
+val BLOOM_FRAG_SPV:  [_]u8;
 #[embed("{artifact.shader-two_frag.out}")]
-val TWO_FRAG_SPV: [_]u8;
+val TWO_FRAG_SPV:    [_]u8;
 
 # The G-buffer's size. The design says 960x540 targets presented at integer
 # scale; this is half that and presented at two, which keeps the readback

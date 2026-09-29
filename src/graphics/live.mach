@@ -18,6 +18,8 @@ use std.types.size.usize;
 # targets:  RenderTarget handles
 # fonts:    Font handles, and a GlyphAtlas made without a Font
 # shaders:  Shader handles that have built a pipeline
+# buffers:  StorageBuffer and Readback handles
+# computes: Compute handles
 pub rec Live {
     textures: usize;
     meshes:   usize;
@@ -25,10 +27,13 @@ pub rec Live {
     targets:  usize;
     fonts:    usize;
     shaders:  usize;
+    buffers:  usize;
+    computes: usize;
 }
 
 # whether any resource is still held
 pub fun live_any(l: Live) bool {
     ret l.textures != 0 || l.meshes != 0 || l.models != 0
-        || l.targets != 0 || l.fonts != 0 || l.shaders != 0;
+        || l.targets != 0 || l.fonts != 0 || l.shaders != 0
+        || l.buffers != 0 || l.computes != 0;
 }

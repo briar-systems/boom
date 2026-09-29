@@ -31,9 +31,9 @@ var atlas: tex.Sampler2D;
 var in_uv: f32x2;
 
 #[output(0)]
-var out_albedo: f32x4;
+var out_albedo:   f32x4;
 #[output(1)]
-var out_packed: f32x4;
+var out_packed:   f32x4;
 #[output(2)]
 var out_material: f32x4;
 #[output(3)]

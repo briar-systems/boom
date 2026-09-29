@@ -40,7 +40,7 @@ var atlas: tex.Sampler2D;
 var scene: Scene;
 
 #[input(0)]
-var in_uv: f32x2;
+var in_uv:    f32x2;
 #[input(1)]
 var in_world: f32x3;
 

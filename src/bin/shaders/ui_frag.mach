@@ -37,7 +37,7 @@ var screen: Screen;
 var atlas: tex.Sampler2D;
 
 #[input(0)]
-var in_uv: f32x2;
+var in_uv:     f32x2;
 #[input(1)]
 var in_colour: f32x4;
 

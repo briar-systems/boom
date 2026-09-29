@@ -23,7 +23,7 @@
 use tex: shader.texture;
 
 #[sampler(0, 1)]
-var first: tex.Sampler2D;
+var first:  tex.Sampler2D;
 #[sampler(0, 5)]
 var second: tex.Sampler2D;
 
