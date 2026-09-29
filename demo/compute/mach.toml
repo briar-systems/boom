@@ -1,7 +1,8 @@
 [project]
 id = "compute"
 version = "0.1.0"
-mach = "^6"
+# a compute stage needs mach 6.7
+mach = "^6.7"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
