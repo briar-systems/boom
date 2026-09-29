@@ -495,9 +495,12 @@ fwd boom.graphics.frame.frame_dnit;
 
 fwd boom.graphics.buffer.Buffer;
 fwd boom.graphics.buffer.pick_memory_type;
+fwd boom.graphics.buffer.pick_memory_type_prefer;
 fwd boom.graphics.buffer.buffer_init;
+fwd boom.graphics.buffer.buffer_init_prefer;
 fwd boom.graphics.buffer.buffer_map;
 fwd boom.graphics.buffer.buffer_unmap;
+fwd boom.graphics.buffer.buffer_invalidate;
 fwd boom.graphics.buffer.buffer_write;
 fwd boom.graphics.buffer.buffer_copy;
 fwd boom.graphics.buffer.buffer_upload;

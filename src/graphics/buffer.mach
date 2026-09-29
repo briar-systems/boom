@@ -25,6 +25,8 @@ use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.vk.Vk;
 use mem: std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
@@ -33,15 +35,17 @@ use vk;
 
 # A buffer and the memory backing it.
 # ---
-# handle: The buffer object.
-# memory: Memory allocated for this buffer alone.
-# size:   Requested size in bytes, not the possibly larger allocation.
-# mapped: Host pointer while mapped, nil otherwise.
+# handle:   The buffer object.
+# memory:   Memory allocated for this buffer alone.
+# size:     Requested size in bytes, not the possibly larger allocation.
+# mapped:   Host pointer while mapped, nil otherwise.
+# coherent: Whether the memory is host-coherent, so host reads need no invalidate.
 pub rec Buffer {
-    handle: vk.Buffer;
-    memory: vk.DeviceMemory;
-    size:   u64;
-    mapped: ptr;
+    handle:   vk.Buffer;
+    memory:   vk.DeviceMemory;
+    size:     u64;
+    mapped:   ptr;
+    coherent: bool;
 }
 
 # Find a memory type satisfying both the resource's mask and the wanted flags.
@@ -65,16 +69,37 @@ pub fun pick_memory_type(props: *vk.PhysicalDeviceMemoryProperties, bits: u32, w
     ret opt[u32].none{};
 }
 
+# Find a memory type carrying want and, where one exists, prefer as well.
+#
+# The preference is a speed, not a requirement: host-cached memory makes CPU
+# reads of GPU results fast, but a device without it still reads correctly from
+# uncached memory.
+pub fun pick_memory_type_prefer(props: *vk.PhysicalDeviceMemoryProperties, bits: u32, want: u32, prefer: u32) opt[u32] {
+    val best: opt[u32] = pick_memory_type(props, bits, want | prefer);
+    if (sel best.some) { ret best; }
+    ret pick_memory_type(props, bits, want);
+}
+
 # Create a buffer and allocate memory for it.
 #
 # One allocation per buffer. Vulkan implementations bound the total number of
 # allocations, so a shipping game eventually needs a suballocator, but that is a
 # change behind this same interface rather than a different one.
 pub fun buffer_init(b: *Buffer, v: *Vk, size: u64, usage: u32, want: u32) err[Error] {
-    b.handle = nil;
-    b.memory = nil;
-    b.mapped = nil;
-    b.size   = 0;
+    ret buffer_init_prefer(b, v, size, usage, want, 0);
+}
+
+# Create a buffer as buffer_init does, in memory that also carries prefer when
+# the device has such a type.
+#
+# A caller preferring memory that may not be host-coherent reads it only after
+# buffer_invalidate.
+pub fun buffer_init_prefer(b: *Buffer, v: *Vk, size: u64, usage: u32, want: u32, prefer: u32) err[Error] {
+    b.handle   = nil;
+    b.memory   = nil;
+    b.mapped   = nil;
+    b.size     = 0;
+    b.coherent = false;
 
     if (!v.ready)  { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
     if (size == 0) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
@@ -101,11 +126,12 @@ pub fun buffer_init(b: *Buffer, v: *Vk, size: u64, usage: u32, want: u32) err[Er
     var props: vk.PhysicalDeviceMemoryProperties;
     vk.vkGetPhysicalDeviceMemoryProperties(v.physical, ?props);
 
-    val index: opt[u32] = pick_memory_type(?props, req.memoryTypeBits, want);
+    val index: opt[u32] = pick_memory_type_prefer(?props, req.memoryTypeBits, want, prefer);
     if (sel index.none) {
         buffer_dnit(b, v);
         ret err[Error].err{Error.device{DeviceError.no_memory_type{}}};
     }
+    b.coherent = (props.memoryTypes[index.some].propertyFlags & vk.MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 
     var ai: vk.MemoryAllocateInfo;
     ai.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -148,6 +174,24 @@ pub fun buffer_map(b: *Buffer, v: *Vk) res[ptr, Error] {
     ret res[ptr, Error].ok{b.mapped};
 }
 
+# Make what the device wrote to a mapped buffer visible to host reads.
+#
+# Nothing to do on host-coherent memory. On other memory the whole mapping is
+# invalidated, which VK_WHOLE_SIZE keeps within the non-coherent atom rules
+# without knowing the atom size.
+pub fun buffer_invalidate(b: *Buffer, v: *Vk) err[Error] {
+    if (b.coherent || b.mapped == nil) { ret err[Error].ok{}; }
+    var range: vk.MappedMemoryRange;
+    range.sType  = vk.STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.pNext  = nil;
+    range.memory = b.memory;
+    range.offset = 0;
+    range.size   = vk.WHOLE_SIZE;
+    val rc: i32 = vk.vkInvalidateMappedMemoryRanges(v.device, 1, ?range);
+    if (rc != vk.SUCCESS) { ret err[Error].err{vk_failed(VkCall.invalidate_memory{}, rc)}; }
+    ret err[Error].ok{};
+}
+
 # Unmap the buffer's memory.
 pub fun buffer_unmap(b: *Buffer, v: *Vk) {
     if (b.mapped == nil) { ret; }
@@ -164,7 +208,7 @@ pub fun buffer_write(b: *Buffer, v: *Vk, src: *u8, len: u64) err[Error] {
     if (len > b.size) { ret err[Error].err{Error.buffer{BufferError.overrun{len}}}; }
     val dst: res[ptr, Error] = buffer_map(b, v);
     if (sel dst.err) { ret err[Error].err{dst.err}; }
-    mem.copy[u8](dst.ok:~*u8, src, len::usize);
+    mem.raw_copy(dst.ok, src::ptr, len::usize);
     ret err[Error].ok{};
 }
 
@@ -353,5 +397,22 @@ test pick_memory_type__mask_and_flags {
     val coherent: opt[u32] = pick_memory_type(?p, 0b11, want);
     if (!sel coherent.some) { ret 4; }
     if (coherent.some != 1) { ret 5; }
+    ret 0;
+}
+
+test pick_memory_type_prefer__falls_back_to_want {
+    var p: vk.PhysicalDeviceMemoryProperties;
+    p.memoryTypeCount = 2;
+    val visible: u32 = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    p.memoryTypes[0].propertyFlags = visible;
+    p.memoryTypes[1].propertyFlags = vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_CACHED_BIT;
+    # the cached type wins over an earlier uncached one
+    val cached: opt[u32] = pick_memory_type_prefer(?p, 0b11, vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (!sel cached.some) { ret 1; }
+    if (cached.some != 1) { ret 2; }
+    # without a cached type in the mask the wanted one still serves
+    val plain: opt[u32] = pick_memory_type_prefer(?p, 0b01, vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (!sel plain.some) { ret 3; }
+    if (plain.some != 0) { ret 4; }
     ret 0;
 }

@@ -48,6 +48,7 @@ pub tag VkCall: u8 {
     bind_buffer_memory;
     bind_image_memory;
     map_memory;
+    invalidate_memory;
     create_image;
     create_image_view;
     create_sampler;
@@ -351,6 +352,7 @@ fun vk_call_message(call: VkCall) str {
     if (sel call.bind_buffer_memory)           { ret "vkBindBufferMemory failed"; }
     if (sel call.bind_image_memory)            { ret "vkBindImageMemory failed"; }
     if (sel call.map_memory)                   { ret "vkMapMemory failed"; }
+    if (sel call.invalidate_memory)            { ret "vkInvalidateMappedMemoryRanges failed"; }
     if (sel call.create_image)                 { ret "vkCreateImage failed"; }
     if (sel call.create_image_view)            { ret "vkCreateImageView failed"; }
     if (sel call.create_sampler)               { ret "vkCreateSampler failed"; }
