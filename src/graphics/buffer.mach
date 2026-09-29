@@ -208,7 +208,7 @@ pub fun buffer_write(b: *Buffer, v: *Vk, src: *u8, len: u64) err[Error] {
     if (len > b.size) { ret err[Error].err{Error.buffer{BufferError.overrun{len}}}; }
     val dst: res[ptr, Error] = buffer_map(b, v);
     if (sel dst.err) { ret err[Error].err{dst.err}; }
-    mem.copy[u8](dst.ok:~*u8, src, len::usize);
+    mem.raw_copy(dst.ok, src::ptr, len::usize);
     ret err[Error].ok{};
 }
 
