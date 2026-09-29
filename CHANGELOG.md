@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-09-29
+
+### Added
+- Compute on the GPU in the same frame as the draws (#207).
+  `boom.graphics.compute` has `StorageBuffer` (device-local, zero-filled,
+  with one-shot `storage_buffer_upload` and `storage_buffer_read` for load
+  time and tests), `Compute`, a pipeline from a SPIR-V module whose entry is
+  `comp_main`, and `Readback`, one host staging buffer per frame in flight.
+  All three are counted in `Live`, so `renderer_dnit` refuses while they are
+  held. `renderer_buffer_update`, `renderer_dispatch`,
+  `renderer_dispatch_indirect` and `renderer_readback` record between passes,
+  fenced by global memory barriers on each side, and are refused inside a pass
+  or outside a frame. `renderer_readback_take` returns the newest finished
+  copy and never waits. A dispatch or storage draw binds up to
+  `MAX_STORAGE_BINDINGS` (4) buffers at `#[storage(1, n)]`, set 1
+  (`STORAGE_SET`) for compute and graphics alike. `pass_draw_storage` and
+  `pass_draw_storage_indirect` draw from storage buffers with a game shader
+  and no vertex input. `demo/compute` steps, reads back and draws a cell
+  grid, and CI runs it under xvfb.
+
+### Changed
+- The graphics queue is taken from a family that also supports compute, so a
+  device whose graphics family does not compute is refused (#207). A game
+  `Shader`'s pipelines carry set 1 in their layout, and a pipeline for an
+  empty vertex format declares no vertex binding. `buffer_copy` is fenced on
+  both sides.
+- CI seeds mach 6.7.0, the first release that compiles a compute stage, and
+  the five built-in shaders and the `lighting` and `shader` demos are
+  reformatted to its layout, with no other change (#207). The library's own
+  `mach` requirement is unchanged.
+
+### Fixed
+- **Breaking.** A draw list's colours display as authored on an sRGB surface
+  (#206). blit authors its vertex colours for display, and the ui fragment
+  stage wrote them unchanged to an sRGB swapchain, which encoded them a second
+  time, so `#141417` displayed as `#50555f`. `ui_frag` now decodes a draw
+  list's rgb to linear, per fragment, when the surface encodes, and alpha is
+  untouched. `ScreenUniforms` gains a `decode: Vec4` member, 1 in x when the
+  run's colours are sRGB and the renderer is sRGB, and a game's own 2D shader
+  drawing a list reads that decision from it. `Batch2D` records the
+  `ColorSpace` of its run, and `batch_breaks` takes the incoming run's space
+  and breaks on a change, so a draw list and a sprite from the same atlas no
+  longer coalesce into one draw. Sprite and tile tints stay linear.
+  Translucent UI still blends in linear light on an sRGB attachment. The
+  vulkan demo checks that the surface target reads back its draw list's exact
+  bytes.
+
 ## [0.33.0] - 2026-09-26
 
 ### Changed

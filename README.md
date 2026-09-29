@@ -445,11 +445,11 @@ anything else its own source imports directly, under the project id:
 ```toml
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
-ref = "tag/v0.33.0"
+ref = "tag/v0.34.0"
 ```
 
-`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.33.0`
-writes that stanza (`--version ^0.33` declares boom by range instead) and
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.34.0`
+writes that stanza (`--version ^0.34` declares boom by range instead) and
 realizes boom's whole closure one level deep under the consumer's `dep/`. boom
 declares each library by version range, pinned by its gitlink, and mach 5.9
 seeds those transitive ranges from boom's pins. The root's declarations win over every pin beneath them, so a
