@@ -254,7 +254,8 @@ pub fun storage_words(size: usize, offset: usize, len: usize) err[Error] {
 }
 
 # Whether a list of storage buffers can be bound: at most allowed, the device's
-# max_storage_bindings, none of them nil or deleted.
+# max_dispatch_bindings or max_draw_bindings by the kind of call, none of them
+# nil or deleted.
 #
 # Checked before anything is recorded, because a binding naming a destroyed
 # buffer is a descriptor pointing at freed memory, and a binding past the
@@ -310,7 +311,7 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     if (len < 20 || (len % 4) != 0) { ret err[Error].err{Error.shader{ShaderError.spirv_words{len}}}; }
     if (d == nil || !d.ready)       { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
     val v:    *Vk        = d.vk;
-    val fits: err[Error] = storage_bindings_fit(v, spv, len);
+    val fits: err[Error] = storage_bindings_fit(spv, len, v.limits.max_dispatch_bindings);
     if (sel fits.err) { ret fits; }
 
     val er: err[Error] = create_set_layout(v, nil, 0, ?c.empty);
@@ -519,7 +520,7 @@ pub fun storage_sets_init(ss: *StorageSets, v: *Vk) err[Error] {
     # leaves none still allocates empty sets, from a pool with no sizes
     var size: vk.DescriptorPoolSize;
     size.type            = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = (MAX_STORAGE_SETS * v.limits.max_storage_bindings)::u32;
+    size.descriptorCount = (MAX_STORAGE_SETS * v.limits.max_dispatch_bindings)::u32;
     var ci: vk.DescriptorPoolCreateInfo;
     ci.sType         = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.pNext         = nil;

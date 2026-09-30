@@ -152,8 +152,9 @@ pub tag Capacity: u8 {
 # unaligned: an offset or length a GPU copy, update or indirect read needs in
 #            whole four-byte words; carries the offending value
 # bindings:  a nil or deleted storage buffer in a binding list; carries its index
-# too_many:  a binding list longer than the device's max_storage_bindings;
-#            carries the count asked for
+# too_many:  a binding list longer than the device allows for its kind of call,
+#            max_dispatch_bindings or max_draw_bindings; carries the count
+#            asked for
 pub tag BufferError: u8 {
     empty;
     overrun:   u64;
@@ -185,8 +186,9 @@ pub tag ImageError: u8 {
 # spirv_words:     a module is not a whole number of SPIR-V words; carries its byte length
 # undeclared:      a draw named a shader that was never declared or was deleted
 # full:            the shader has built MAX_SHADER_PIPELINES pipelines
-# storage_binding: a stage declares a STORAGE_SET binding past the device's
-#                  max_storage_bindings; carries the binding
+# storage_binding: a stage declares a STORAGE_SET binding past what its kind
+#                  may bind, max_dispatch_bindings for a compute stage and
+#                  max_draw_bindings for a draw's; carries the binding
 pub tag ShaderError: u8 {
     missing_stage;
     spirv_words: usize;
