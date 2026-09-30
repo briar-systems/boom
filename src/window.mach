@@ -697,6 +697,7 @@ pub fun window_set_event_sink(w: *Window, s: *Sink) {
     glfw.get_cursor_pos(handle, ?x, ?y);
     rebase_cursor(s, x, y, ww, wh, fw, fh);
     glfw.set_window_user_pointer(handle, s::ptr);
+    release_queue = s.queue;
 }
 
 # whether the window has been asked to close
@@ -708,9 +709,22 @@ pub fun window_should_close(w: *Window) bool {
     ret glfw.window_should_close(w.handle.some);
 }
 
+# the queue of the sink installed on the window, whose popped drop paths the
+# next poll frees. one window per process, so one queue
+var release_queue: *EventQueue = nil;
+
 # process pending platform events, firing input callbacks
+#
+# first frees the dropped-file paths the consumer popped since the last poll,
+# so a drop event's paths are valid until the next call of this.
 pub fun window_poll() {
+    poll_release();
     glfw.poll_events();
+}
+
+fun poll_release() {
+    if (release_queue == nil) { ret; }
+    queue_release(release_queue);
 }
 
 # destroy the window and shut down GLFW
@@ -726,6 +740,7 @@ pub fun window_close(w: *Window) err[WindowError] {
     if (w.renderers != 0) { ret err[WindowError].err{WindowError.in_use{w.renderers}}; }
     if (sel w.handle.some) {
         glfw.set_window_user_pointer(w.handle.some, nil);
+        release_queue = nil;
         glfw.destroy_window(w.handle.some);
         glfw.terminate();
     }
@@ -982,14 +997,16 @@ test deliver_drop__owned_until_release {
     # the source strings are gone after the callback: the copy is independent
     if (d1.some.drop.paths[0] == one[0]::str) { ret 14; }
 
-    # popped paths stay valid until released
+    # popped paths stay valid until the next poll releases them
+    release_queue = ?q;
     if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 15; }
-    queue_release(?q);
+    if (q.lent == nil)                               { ret 21; }
+    poll_release();
     if (q.lent != nil) { ret 16; }
 
     # an unpopped drop survives a release and is freed by clear
     deliver_drop(?sink, 3, ?many[0]);
-    queue_release(?q);
+    poll_release();
     val d3: opt[Event] = queue_pop(?q);
     if (!sel d3.some)                            { ret 17; }
     if (!sel d3.some.drop)                       { ret 18; }
@@ -997,6 +1014,7 @@ test deliver_drop__owned_until_release {
     deliver_drop(?sink, 1, ?one[0]);
     queue_clear(?q);
     if (q.lent != nil) { ret 20; }
+    release_queue = nil;
     ret 0;
 }
 

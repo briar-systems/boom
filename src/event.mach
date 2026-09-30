@@ -107,9 +107,8 @@ pub rec DropBlock {
 #
 # one event carries every path of one drop, in the order the platform listed
 # them. the paths are owned by the event queue, never by the consumer: they
-# stay valid from the moment the event is popped until the next queue_release,
-# which the engine loop calls right before each window poll, and are freed
-# then. a consumer that wants a path past that point copies it. an event still
+# stay valid from the moment the event is popped until the next window_poll,
+# which releases them before it fetches new events, and are freed then. a consumer that wants a path past that point copies it. an event still
 # queued when that happens is not affected: only popped events are released,
 # and queue_clear frees the ones never popped. because the queue owns the
 # block, copying the event by value copies a borrow, not the ownership.
@@ -246,9 +245,9 @@ pub fun queue_pop(q: *EventQueue) opt[Event] {
 
 # free the paths of every drop event popped since the last release
 #
-# the engine loop calls this right before each window poll. an application
-# running its own loop calls it at the same point. events still queued keep
-# their paths.
+# window_poll calls this for the window's queue, so no event loop has to. it
+# is public only because the window module lives outside this one. events still
+# queued keep their paths.
 # ---
 # q: queue whose lent drop paths are freed
 pub fun queue_release(q: *EventQueue) {

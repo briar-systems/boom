@@ -15,7 +15,6 @@ use boom.app.App;
 use boom.clock.clock_advance;
 use boom.clock.clock_tick;
 use boom.context.Context;
-use boom.event.queue_release;
 use boom.gamepad.gamepad_poll;
 use inp: boom.input;
 use boom.timestep.timestep_add;
@@ -81,8 +80,6 @@ pub fun run(ctx: *Context, app: *App) res[i64, EngineError] {
     invoke(app.f_init, ctx);
 
     for (ctx.running && !window_should_close(?ctx.window)) {
-        # dropped-file paths popped last frame end here, before new ones arrive
-        queue_release(?ctx.events);
         window_poll();
         # Pads have no events to deliver, so they are sampled once per frame
         # here. The edges this produces still belong to a tick, because
