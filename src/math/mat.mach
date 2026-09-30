@@ -387,7 +387,7 @@ test mat4_mul__column_major_composition {
 
 test mat4_from_quat__quarter_turn_about_z {
     # 90 degrees about z sends +x to +y
-    val h: f32  = 0.70710678;
+    val h: f32  = 0.70710677;
     var r: Mat4 = mat4_from_quat(f32x4{0.0, 0.0, h, h});
     val p: Vec3 = mat4_transform_point(?r, vec3(1.0, 0.0, 0.0));
     if (p[0] > 0.001 || p[0] < -0.001) { ret 1; }

@@ -279,8 +279,8 @@ test channel_quat__slerps_between_keyframes {
     values[3] = 1.0;
     values[4] = 0.0;
     values[5] = 0.0;
-    values[6] = 0.70710678;
-    values[7] = 0.70710678;
+    values[6] = 0.70710677;
+    values[7] = 0.70710677;
 
     var ch: Channel;
     ch.joint  = 0;
@@ -297,7 +297,7 @@ test channel_quat__slerps_between_keyframes {
     val mid: Quat = channel_quat(?ch, 1.0);
     if (mid[2] - 0.38268343 > 0.002 || mid[2] - 0.38268343 < 0.0 - 0.002) { ret 2; }
     val q1: Quat = channel_quat(?ch, 2.0);
-    if (q1[2] - 0.70710678 > 0.001 || q1[2] - 0.70710678 < 0.0 - 0.001) { ret 3; }
+    if (q1[2] - 0.70710677 > 0.001 || q1[2] - 0.70710677 < 0.0 - 0.001) { ret 3; }
     ret 0;
 }
 

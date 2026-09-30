@@ -69,7 +69,7 @@ pub fun ray_plane_y(r: *Ray, y: f32, out_p: *Vec3) bool {
 
 test ray_plane_y__hits_ahead_and_at_origin {
     # from 10 up, aimed 45 degrees down, the ground is reached after 10 across
-    val k: f32 = 0.70710678;
+    val k: f32 = 0.70710677;
     var r: Ray = ray(vec3(0.0, 10.0, 0.0), vec3(k, 0.0 - k, 0.0));
     var p: Vec3;
     if (!ray_plane_y(?r, 0.0, ?p)) { ret 1; }
