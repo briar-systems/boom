@@ -248,6 +248,9 @@ fwd boom.graphics.renderer.renderer_end_frame;
 fwd boom.graphics.renderer.renderer_dnit;
 fwd boom.graphics.renderer.renderer_live;
 fwd boom.graphics.renderer.renderer_device;
+# The device's own limits, for sizing compute work. See boom.graphics.limits.
+fwd boom.graphics.limits.Limits;
+fwd boom.graphics.renderer.renderer_limits;
 fwd boom.graphics.renderer.renderer_mesh;
 # Two ways past the cost renderer_mesh pays on the caller's behalf. The
 # with-bounds form skips the per-vertex walk for a caller that already knows the

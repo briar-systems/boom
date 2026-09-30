@@ -113,6 +113,16 @@ fun main(argc: i64, argv: **u8) i64 {
     if (fail("renderer_init", gfx.renderer_init(?r, ?w))) { ret 1; }
     val d: *gfx.Device = gfx.renderer_device(?r);
 
+    # the device's limits are at least what the specification guarantees
+    val lim: gfx.Limits = gfx.renderer_limits(?r);
+    if (lim.max_storage_buffer_range < 134217728 || lim.max_compute_work_group_count[0] < 65535
+        || lim.max_compute_work_group_invocations < 128) {
+        p.printlnf("FAIL renderer_limits: range {} groups {} invocations {}",
+            lim.max_storage_buffer_range, lim.max_compute_work_group_count[0],
+            lim.max_compute_work_group_invocations);
+        ret 1;
+    }
+
     # the pool, seeded with each cell's index
     var a:       gfx.StorageBuffer;
     var b:       gfx.StorageBuffer;
