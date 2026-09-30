@@ -21,6 +21,7 @@ use boom.event.MoveEvent;
 use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
+use boom.event.TextEvent;
 use boom.event.queue_new;
 use boom.event.queue_pop;
 use boom.event.queue_push;
@@ -184,6 +185,16 @@ fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
         inp.input_key_event(s.input, k, sel act.some.press);
     }
     offer(s.queue, Event.key{KeyEvent{key: k, action: act.some, mods: mods}});
+}
+
+fun on_char(handle: ptr, codepoint: u32) {
+    deliver_text(sink_of(glfw.window_from_handle(handle)), codepoint);
+}
+
+# typed text is queue-only: polled Input has no state for it
+fun deliver_text(s: *Sink, codepoint: u32) {
+    if (s == nil) { ret; }
+    offer(s.queue, Event.text{TextEvent{codepoint: codepoint}});
 }
 
 fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
@@ -433,6 +444,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     }
 
     glfw.set_key_callback(win, on_key);
+    glfw.set_char_callback(win, on_char);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_scroll_callback(win, on_scroll);
@@ -870,6 +882,43 @@ test deliver_key__press_edge_and_repeat_queued {
     if (!sel r.some)                   { ret 8; }
     if (!sel r.some.key)               { ret 9; }
     if (!sel r.some.key.action.repeat) { ret 10; }
+    ret 0;
+}
+
+# whether the next queued event is text carrying this codepoint
+#[testing]
+fun popped_text(q: *EventQueue, codepoint: u32) bool {
+    val t: opt[Event] = queue_pop(q);
+    if (!sel t.some)      { ret false; }
+    if (!sel t.some.text) { ret false; }
+    ret t.some.text.codepoint == codepoint;
+}
+
+test deliver_text__ordered_with_keys {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+
+    deliver_key(?sink, glfw.KEY_A, glfw.PRESS, 0);
+    deliver_text(?sink, 0x61);
+    deliver_text(?sink, 0xe9);
+    deliver_text(?sink, 0x20ac);
+    deliver_text(?sink, 0x1f600);
+    deliver_key(?sink, glfw.KEY_A, glfw.RELEASE, 0);
+
+    val k: opt[Event] = queue_pop(?q);
+    if (!sel k.some)     { ret 1; }
+    if (!sel k.some.key) { ret 1; }
+
+    if (!popped_text(?q, 0x61))    { ret 2; }
+    if (!popped_text(?q, 0xe9))    { ret 3; }
+    if (!popped_text(?q, 0x20ac))  { ret 6; }
+    if (!popped_text(?q, 0x1f600)) { ret 7; }
+    val r: opt[Event] = queue_pop(?q);
+    if (!sel r.some)                    { ret 4; }
+    if (!sel r.some.key)                { ret 4; }
+    if (!sel r.some.key.action.release) { ret 5; }
+    deliver_text(nil, 0x61);
     ret 0;
 }
 
