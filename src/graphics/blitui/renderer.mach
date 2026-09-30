@@ -1,0 +1,279 @@
+# The blit renderer: a blit context's draw list, drawn in a boom Pass.
+#
+# blit (briar-systems/blit) builds a frame's UI as one list of textured,
+# coloured triangles in pixel space, divided into runs that each sample one
+# texture: a page of blit's own glyph atlas, or a texture the game owns, named
+# by an opaque handle blit only passes through. This is the boom half of that
+# contract. It mirrors the atlas pages into boom textures and draws every run
+# through pass_draw_triangles_filtered, which appends to the pass's 2D batch.
+#
+# THE HANDLE OF A BOOM TEXTURE IS ITS ADDRESS. blit_texture(?tex) is what a
+# blit Image carries (blit.draw.whole or blit.draw.region take it), and a render
+# target's picture is blit_texture(render_target_texture(?target)). The texture
+# must stay where it is and alive until the pass that draws the frame ends,
+# exactly as for a sprite, since the batch holds that pointer until it flushes.
+# A handle is never 0, which blit reserves for its atlas.
+#
+# NOTHING IS ALLOCATED PER FRAME. The vertices are blit's own buffer, copied
+# into the frame's vertex arena the renderer already reuses, and a run is read
+# field for field. Host memory is touched only when blit opens an atlas page
+# (one boom texture, once), and GPU uploads only when blit wrote glyphs: the
+# dirty rows of a page, whole rows so the upload reads blit's pixels in place.
+#
+# CLIPPING IS ALREADY DONE. blit clips on the CPU: a quad wholly outside its
+# clip emits no vertices, so a run that clipped away entirely has a count of
+# zero and is skipped, and a reserved panel fill that clipped to nothing is
+# collapsed to a zero-area quad, which rasterises no fragments. A frame whose
+# draw list could not grow (blit.context.ok is 0) can end a run on a partial
+# quad, and only its whole triangles are drawn.
+#
+# ANY PASS WILL DO. blit's positions are pixels, so an overlay pass places the
+# UI in window pixels, and one aimed at a RenderTarget draws the UI into a
+# picture. A game draws its 3D passes, then this, then more passes if it likes:
+# nothing here assumes blit is the last thing on screen.
+#
+# COLOURS ARE AUTHORED. Leave blit's set_srgb off: the 2D program already
+# decodes a draw list's colours on a surface that encodes sRGB.
+#
+# LIFETIME. One BlitRenderer per blit context, created against the renderer's
+# Device and deleted before renderer_dnit, which refuses while one lives (it is
+# counted in Live.uis). The context must outlive it. Like a texture, it must stay
+# where it is while a pass that drew it is open.
+
+use batlas: blit.atlas;
+use bctx:   blit.context;
+use bdraw:  blit.draw;
+use boom.graphics.device.Device;
+use boom.graphics.error.Error;
+use boom.graphics.error.Stage;
+use boom.graphics.image.ColorSpace;
+use boom.graphics.material.TextureFilter;
+use boom.graphics.renderer.Pass;
+use boom.graphics.renderer.pass_draw_triangles_filtered;
+use boom.graphics.texture.Texture;
+use boom.graphics.texture.texture_owned;
+use boom.graphics.texture.texture_release_owned;
+use boom.graphics.texture.texture_upload_region;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+# atlas pages mirrored at most, blit's own page limit
+pub val BLIT_PAGES: usize = 16;
+
+# a blit context's atlas mirrored on the GPU, and the means to draw its frames
+# ---
+# d:     device the pages are created against
+# ui:    the blit context this draws, which must outlive it
+# pages: the atlas pages as boom textures, `count` of them live
+# count: pages mirrored so far
+# valid: whether the renderer is live, cleared by blit_renderer_delete
+pub rec BlitRenderer {
+    d:     *Device;
+    ui:    *bctx.Context;
+    pages: [16]Texture;
+    count: usize;
+    valid: bool;
+}
+
+# what one run binds, and how many of its vertices draw
+# ---
+# texture: the texture its uvs address
+# filter:  how that texture is sampled
+# count:   whole-triangle vertices to draw
+rec Binding {
+    texture: *Texture;
+    filter:  TextureFilter;
+    count:   usize;
+}
+
+# The handle a blit Image carries for a boom texture.
+#
+# A render target's colour is blit_texture(render_target_texture(?target)).
+# ---
+# t:   the texture, which must stay where it is and alive while blit draws it
+# ret: the handle to pass to blit.draw.whole or blit.draw.region
+pub fun blit_texture(t: *Texture) u64 {
+    ret t:~u64;
+}
+
+# the texture a handle names
+fun handle_texture(tex: u64) *Texture {
+    ret tex:~*Texture;
+}
+
+# Create a renderer for a blit context.
+#
+# No texture is made yet: the atlas pages are mirrored by the first upload.
+# ---
+# d:   the renderer's device
+# ui:  the blit context to draw, initialised, which must outlive the renderer
+# ret: the renderer, or uninitialized before the device is ready
+pub fun blit_renderer(d: *Device, ui: *bctx.Context) res[BlitRenderer, Error] {
+    var br: BlitRenderer;
+    br.valid = false;
+    if (!d.ready || ui == nil) {
+        ret res[BlitRenderer, Error].err{Error.uninitialized{Stage.upload{}}};
+    }
+    br.d          = d;
+    br.ui         = ui;
+    br.count      = 0;
+    br.valid      = true;
+    d.vk.live.uis = d.vk.live.uis + 1;
+    ret res[BlitRenderer, Error].ok{br};
+}
+
+# Release the mirrored pages.
+#
+# Call before renderer_dnit, which refuses while this is still live.
+# ---
+# br: the renderer, unusable afterward
+pub fun blit_renderer_delete(br: *BlitRenderer) {
+    if (!br.valid) { ret; }
+    for (br.count > 0) {
+        br.count = br.count - 1;
+        texture_release_owned(br.d, ?br.pages[br.count]);
+    }
+    br.valid = false;
+    if (br.d.vk.live.uis > 0) { br.d.vk.live.uis = br.d.vk.live.uis - 1; }
+}
+
+# how many atlas pages are mirrored
+pub fun blit_renderer_pages(br: *BlitRenderer) usize {
+    ret br.count;
+}
+
+# Bring the mirrored atlas up to date with what blit has rasterised.
+#
+# A page blit opened becomes a texture, and a page blit wrote to has its dirty
+# rows uploaded and is marked clean. An upload stalls on the queue, so a game
+# that can calls this after blit.context.end and before renderer_begin_frame;
+# blit_draw calls it too, so a game that does not still draws a current atlas.
+# ---
+# br:  the renderer
+# ret: ok, or the first page that could not be made or written
+pub fun blit_upload(br: *BlitRenderer) err[Error] {
+    if (!br.valid) { ret err[Error].err{Error.uninitialized{Stage.upload{}}}; }
+    val at:   *batlas.Atlas = bctx.atlas_of(br.ui);
+    val side: usize         = batlas.PAGE_SIDE;
+    var n:    usize         = batlas.page_count(at);
+    if (n > BLIT_PAGES) { n = BLIT_PAGES; }
+    var i: usize = 0;
+    for (i < n) {
+        val px: *u8 = batlas.page_pixels(at, i);
+        if (i >= br.count) {
+            val made: res[Texture, Error] = texture_owned(br.d, px, side::i32, side::i32,
+                ColorSpace.linear{});
+            if (sel made.err) { ret err[Error].err{made.err}; }
+            br.pages[i] = made.ok;
+            br.count    = i + 1;
+            batlas.page_clean(at, i);
+            i = i + 1;
+            cnt;
+        }
+        val dirty: batlas.Region = batlas.page_dirty(at, i);
+        if (dirty.x1 > dirty.x0 && dirty.y1 > dirty.y0) {
+            val row:  usize      = dirty.y0::usize * side * 4;
+            val sent: err[Error] = texture_upload_region(br.d, ?br.pages[i], ?px[row],
+                0, dirty.y0::i32, side::i32, (dirty.y1 - dirty.y0)::i32);
+            if (sel sent.err) { ret sent; }
+            batlas.page_clean(at, i);
+        }
+        i = i + 1;
+    }
+    ret err[Error].ok{};
+}
+
+# what a run binds, none when it draws nothing or names a page not mirrored
+fun run_binding(br: *BlitRenderer, run: bctx.Run) opt[Binding] {
+    val count: usize = run.count - run.count % 3;
+    if (count == 0) { ret opt[Binding].none{}; }
+    if (run.tex == bdraw.ATLAS) {
+        if (run.page::usize >= br.count) { ret opt[Binding].none{}; }
+        ret opt[Binding].some{Binding{
+            texture: ?br.pages[run.page],
+            filter:  TextureFilter.nearest{},
+            count:   count,
+        }};
+    }
+    var filter: TextureFilter = TextureFilter.nearest{};
+    if (run.filter == bdraw.FILTER_LINEAR) { filter = TextureFilter.linear{}; }
+    ret opt[Binding].some{Binding{texture: handle_texture(run.tex), filter: filter, count: count}};
+}
+
+# Draw the blit context's finished frame into a pass.
+#
+# Call after blit.context.end. The atlas is brought up to date first, and every
+# run is then appended in blit's paint order, which is layer order.
+# ---
+# br:  the renderer
+# p:   the open pass to draw into
+# ret: ok, or the upload that failed; the runs whose textures exist are drawn either way
+pub fun blit_draw(br: *BlitRenderer, p: *Pass) err[Error] {
+    val up: err[Error] = blit_upload(br);
+    if (!br.valid) { ret up; }
+    val verts: *bdraw.Vert = bctx.draw_verts(br.ui);
+    val n:     usize       = bctx.run_count(br.ui);
+    var i:     usize       = 0;
+    for (i < n) {
+        val run: bctx.Run     = bctx.run_at(br.ui, i);
+        val b:   opt[Binding] = run_binding(br, run);
+        if (sel b.some) {
+            pass_draw_triangles_filtered(p, (?verts[run.start])::ptr, b.some.count::i32,
+                opt[*Texture].some{b.some.texture}, b.some.filter);
+        }
+        i = i + 1;
+    }
+    ret up;
+}
+
+test vert__matches_the_ui_layout {
+    # pass_draw_triangles_filtered reads eight f32 at a 32-byte stride
+    if ($size_of(bdraw.Vert) != 32)      { ret 1; }
+    if ($offset_of(bdraw.Vert, u) != 8)  { ret 2; }
+    if ($offset_of(bdraw.Vert, r) != 16) { ret 3; }
+    if (BLIT_PAGES != batlas.PAGE_MAX)   { ret 4; }
+    ret 0;
+}
+
+test run_binding__atlas_images_and_clipped_runs {
+    var br: BlitRenderer;
+    br.count = 2;
+    var tex: Texture;
+
+    # an atlas run binds its mirrored page, nearest
+    val atlas_run: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 1, layer: 0, start: 0, count: 12, filter: 0};
+    val a:         opt[Binding] = run_binding(?br, atlas_run);
+    if (!sel a.some)                                          { ret 1; }
+    if (a.some.texture != ?br.pages[1] || a.some.count != 12) { ret 2; }
+    if (!sel a.some.filter.nearest)                           { ret 3; }
+
+    # a page not mirrored yet draws nothing rather than the wrong page
+    val late: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 2, layer: 0, start: 0, count: 6, filter: 0};
+    val l:    opt[Binding] = run_binding(?br, late);
+    if (!sel l.none) { ret 4; }
+
+    # a game texture binds through its handle, with the filter blit asked for
+    val img: bctx.Run = bctx.Run{tex: blit_texture(?tex), page: 0, layer: 1, start: 12, count: 6,
+        filter: bdraw.FILTER_LINEAR};
+    val t: opt[Binding] = run_binding(?br, img);
+    if (!sel t.some)                       { ret 5; }
+    if (t.some.texture != ?tex)            { ret 6; }
+    if (!sel t.some.filter.linear)         { ret 7; }
+    if (blit_texture(?tex) == bdraw.ATLAS) { ret 8; }
+
+    # a run clipped away entirely draws nothing, and a partial quad is cut to
+    # whole triangles
+    val gone: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 0, layer: 0, start: 0, count: 0, filter: 0};
+    val g:    opt[Binding] = run_binding(?br, gone);
+    if (!sel g.none) { ret 9; }
+    val torn: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 0, layer: 0, start: 0, count: 10, filter: 0};
+    val c:    opt[Binding] = run_binding(?br, torn);
+    if (!sel c.some)       { ret 10; }
+    if (c.some.count != 9) { ret 11; }
+    ret 0;
+}
