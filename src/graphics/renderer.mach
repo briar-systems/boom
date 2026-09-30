@@ -147,7 +147,9 @@ use boom.graphics.live.Live;
 use boom.graphics.live.live_any;
 use boom.graphics.material.Material;
 use boom.graphics.material.MaterialError;
+use boom.graphics.material.TextureFilter;
 use boom.graphics.material.material_add_texture;
+use boom.graphics.material.material_add_texture_filtered;
 use boom.graphics.material.material_texture;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_bounds_of;
@@ -2183,11 +2185,12 @@ pub fun batch_flush(p: *Pass) {
         ret;
     }
 
-    val count: u32           = p.batch.count;
-    val first: u32           = p.batch.first;
-    val block: usize         = p.batch.block;
-    val tex:   opt[*Texture] = p.batch.texture;
-    val space: ColorSpace    = p.batch.space;
+    val count: u32                = p.batch.count;
+    val first: u32                = p.batch.first;
+    val block: usize              = p.batch.block;
+    val tex:   opt[*Texture]      = p.batch.texture;
+    val space: ColorSpace         = p.batch.space;
+    val filt:  opt[TextureFilter] = p.batch.filter;
     # The run is closed before anything that can fail, so an early return below
     # cannot leave it open to be drawn a second time by the next flush.
     batch_reset(?p.batch);
@@ -2237,7 +2240,7 @@ pub fun batch_flush(p: *Pass) {
     var views2d:    [4]vk.ImageView;
     var samplers2d: [4]vk.Sampler;
     fill_views_batch(r, ?views2d[0], p.mat2d, tex);
-    fill_samplers_mat(r, ?samplers2d[0], p.mat2d);
+    fill_samplers_batch(r, ?samplers2d[0], p.mat2d, filt);
     # A set that was not written must not be bound: the shader would read
     # descriptors nothing filled. The answer used to be discarded here, which is
     # the same silence the uploads above had.
@@ -2283,13 +2286,16 @@ pub fun batch_flush(p: *Pass) {
 # p:            the open pass
 # texture:      what these vertices sample, or none for the white texel
 # space:        what the vertex colours were authored in, srgb for a draw list
+# filter:       how the texture is sampled, or none to leave it to the pass
+#               material, and nearest without one
 # vertices:     vertex data in the shared 2D layout
 # vertex_count: how many vertices
-fun batch_append(p: *Pass, texture: opt[*Texture], space: ColorSpace, vertices: *u8, vertex_count: usize) {
+fun batch_append(p: *Pass, texture: opt[*Texture], space: ColorSpace, filter: opt[TextureFilter],
+    vertices: *u8, vertex_count: usize) {
     val r: *Renderer = p.renderer;
     if (vertex_count == 0) { ret; }
 
-    if (batch_breaks(?p.batch, texture, space)) { batch_flush(p); }
+    if (batch_breaks(?p.batch, texture, space, filter)) { batch_flush(p); }
 
     val stride: usize           = r.ui_format.stride::usize;
     val pushed: opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, vertices,
@@ -2313,6 +2319,7 @@ fun batch_append(p: *Pass, texture: opt[*Texture], space: ColorSpace, vertices: 
         p.batch.open    = true;
         p.batch.texture = texture;
         p.batch.space   = space;
+        p.batch.filter  = filter;
         p.batch.block   = span.block;
         p.batch.first   = span.first;
         p.batch.count   = 0;
@@ -2441,6 +2448,25 @@ fun fill_samplers_mat(r: *Renderer, out: *vk.Sampler, mat: opt[*Material]) {
         if (sel m.textures[i].filter.linear) { out[i] = r.linear; }
         i = i + 1;
     }
+}
+
+# Fill a batched 2D run's samplers.
+#
+# The material chooses as it does for any draw, and a filter the run's draws
+# stated then decides binding 1, because the run's own texture owns that binding
+# (see fill_views_batch) and the draw that named the texture knows how it has to
+# be read. Glyph pages are the case: a vector face places its quads at
+# fractional pixels, and point sampling them there drops or doubles a stroke.
+# ---
+# r:      the renderer, for its samplers
+# out:    MAX_SAMPLERS samplers to fill
+# mat:    the material bound on the pass, if any
+# filter: the filter the run's draws stated, if they stated one
+fun fill_samplers_batch(r: *Renderer, out: *vk.Sampler, mat: opt[*Material], filter: opt[TextureFilter]) {
+    fill_samplers_mat(r, out, mat);
+    if (sel filter.none) { ret; }
+    out[0] = r.nearest;
+    if (sel filter.some.linear) { out[0] = r.linear; }
 }
 
 # write the descriptors shared by every shaded 3D surface
@@ -3001,6 +3027,30 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: opt[*Texture], dest: Rect, src: R
     # A run of sprites sharing a texture becomes one draw and one uniform slot,
     # which is what lets a screenful of them cost what a handful used to. See
     # boom.graphics.batch for why the per-sprite uniform had to go.
+    sprite_append(p, texture, dest, src, tint, opt[TextureFilter].none{});
+}
+
+# Submit a 2D sprite draw sampled with a stated filter.
+#
+# The filter travels with the run like its texture does, so a run breaks where
+# it changes and no material has to be bound to choose it. Boom's glyph atlas
+# draws through this, since its pages are made to be read linearly.
+# ---
+# p:       the open pass
+# texture: the texture to sample, or none for the white texel or the pass
+#          material's atlas
+# dest:    the destination rectangle in pixels
+# src:     the source rectangle in texture space, 0 to 1
+# tint:    the color multiplied into the sample
+# filter:  how the texture is sampled between texels
+pub fun pass_draw_sprite_filtered(p: *Pass, texture: opt[*Texture], dest: Rect, src: Rect, tint: Vec4,
+    filter: TextureFilter) {
+    sprite_append(p, texture, dest, src, tint, opt[TextureFilter].some{filter});
+}
+
+# cull a sprite, or expand it into the open run
+fun sprite_append(p: *Pass, texture: opt[*Texture], dest: Rect, src: Rect, tint: Vec4,
+    filter: opt[TextureFilter]) {
     # Off screen, so not expanded. Checked before sprite_expand rather than
     # after, because the cost this avoids is the six vertices in the frame's
     # arena, not the draw: a large world is mostly off screen, and expanding all
@@ -3012,7 +3062,7 @@ pub fun pass_draw_sprite_uv(p: *Pass, texture: opt[*Texture], dest: Rect, src: R
 
     var v: [48]f32;
     sprite_expand(dest, src, tint, ?v[0]);
-    batch_append(p, texture, ColorSpace.linear{}, (?v[0]):~*u8, SPRITE_VERTICES);
+    batch_append(p, texture, ColorSpace.linear{}, filter, (?v[0]):~*u8, SPRITE_VERTICES);
 }
 
 # submit a whole tile field as one run of quads
@@ -3055,7 +3105,10 @@ pub fun pass_draw_tilemap(p: *Pass, layer: *TileLayer, sheet: *TileSheet, tint: 
     var cur: TileCursor = tile_cursor(?span);
     for (!tilemap_done(?cur, ?span)) {
         val n: usize = tilemap_expand(layer, sheet, ?span, ?cur, tint, ?v[0], TILEMAP_CHUNK);
-        if (n > 0) { batch_append(p, sheet.texture, ColorSpace.linear{}, (?v[0]):~*u8, n * SPRITE_VERTICES); }
+        if (n > 0) {
+            batch_append(p, sheet.texture, ColorSpace.linear{}, opt[TextureFilter].none{},
+                (?v[0]):~*u8, n * SPRITE_VERTICES);
+        }
     }
 }
 
@@ -3100,7 +3153,8 @@ pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture:
     # Appended through the same batcher sprites use, but never into a sprite's
     # run: a draw list's colours are sRGB and a sprite's tint is linear, and
     # which one the fragment stage decodes is per draw.
-    batch_append(p, texture, ColorSpace.srgb{}, vertices:~*u8, vertex_count::usize);
+    batch_append(p, texture, ColorSpace.srgb{}, opt[TextureFilter].none{}, vertices:~*u8,
+        vertex_count::usize);
 }
 
 # how many draws this frame's vertex arena refused for want of room
@@ -3497,6 +3551,44 @@ test fill_views_batch__binding_1_source {
     # colour.
     fill_views_batch(?r, ?views[0], opt[*Material].none{}, opt[*Texture].none{});
     if (views[0] != texture_view(?r.white)) { ret 6; }
+    ret 0;
+}
+
+test fill_samplers_batch__stated_filter_owns_binding_1 {
+    # A glyph run states linear and a pixel face's run states nearest, and no
+    # material is bound for either. The addresses stand in for sampler handles
+    # and are never dereferenced.
+    var r:       Renderer;
+    var handles: [2]u8;
+    r.nearest = (?handles[0]):~vk.Sampler;
+    r.linear  = (?handles[1]):~vk.Sampler;
+
+    var out: [4]vk.Sampler;
+    fill_samplers_batch(?r, ?out[0], opt[*Material].none{},
+        opt[TextureFilter].some{TextureFilter.linear{}});
+    if (out[0] != r.linear)  { ret 1; }
+    if (out[1] != r.nearest) { ret 2; }
+    fill_samplers_batch(?r, ?out[0], opt[*Material].none{},
+        opt[TextureFilter].some{TextureFilter.nearest{}});
+    if (out[0] != r.nearest) { ret 3; }
+
+    # an unstated filter leaves binding 1 to the material, as every sprite had it
+    var sheet: Texture;
+    var mat:   Material;
+    mat.base_color    = vec4(1.0, 1.0, 1.0, 1.0);
+    mat.texture_count = 0;
+    val added: err[MaterialError] = material_add_texture_filtered(?mat, "albedo", ?sheet,
+        TextureFilter.linear{});
+    if (!sel added.ok) { ret 4; }
+    fill_samplers_batch(?r, ?out[0], opt[*Material].some{?mat}, opt[TextureFilter].none{});
+    if (out[0] != r.linear) { ret 5; }
+    fill_samplers_batch(?r, ?out[0], opt[*Material].none{}, opt[TextureFilter].none{});
+    if (out[0] != r.nearest) { ret 6; }
+
+    # a stated filter wins over the material, since the run's texture owns binding 1
+    fill_samplers_batch(?r, ?out[0], opt[*Material].some{?mat},
+        opt[TextureFilter].some{TextureFilter.nearest{}});
+    if (out[0] != r.nearest) { ret 7; }
     ret 0;
 }
 

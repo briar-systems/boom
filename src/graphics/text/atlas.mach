@@ -33,8 +33,9 @@ use boom.graphics.error.Capacity;
 use boom.graphics.error.Error;
 use boom.graphics.error.content.TextError;
 use boom.graphics.image.ColorSpace;
+use boom.graphics.material.TextureFilter;
 use boom.graphics.renderer.Pass;
-use boom.graphics.renderer.pass_draw_sprite_uv;
+use boom.graphics.renderer.pass_draw_sprite_filtered;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.graphics.text.face.FontFace;
@@ -530,6 +531,16 @@ fun glyph_dest(g: *GlyphAtlas, m: *GlyphMetrics, c: *Cell, x: f32, y: f32) Rect 
         g.cell::f32 / g.raster_scale, g.cell::f32 / g.raster_scale);
 }
 
+# How a page is sampled when it is drawn.
+#
+# A vector face places glyphs at fractional pixels, so its coverage is read
+# linearly, which the cell gutter exists for. A pixel face snaps to whole pixels
+# and stores binary coverage, so it is read texel for texel.
+fun atlas_filter(g: *GlyphAtlas) TextureFilter {
+    if (g.face.pixel_snap) { ret TextureFilter.nearest{}; }
+    ret TextureFilter.linear{};
+}
+
 # Draw a string into a pass, returning the pen x after the last glyph.
 #
 # `x`/`y` are the top-left of the line box in the pass's coordinate space,
@@ -550,10 +561,11 @@ pub fun atlas_draw(p: *Pass, g: *GlyphAtlas, s: str, x: f32, y: f32, tint: Vec4)
     val f:      *FontFace = g.face;
     var origin: f32       = x;
     if (f.pixel_snap) { origin = pixel_round(origin); }
-    var pen:  f32   = origin;
-    var line: f32   = y;
-    var i:    usize = 0;
-    val n:    usize = str_len(s);
+    val filter: TextureFilter = atlas_filter(g);
+    var pen:    f32           = origin;
+    var line:   f32           = y;
+    var i:      usize         = 0;
+    val n:      usize         = str_len(s);
     for (i < n) {
         var cp: u32 = 0;
         i = i + text_next(s, i, n, ?cp);
@@ -565,8 +577,8 @@ pub fun atlas_draw(p: *Pass, g: *GlyphAtlas, s: str, x: f32, y: f32, tint: Vec4)
             var m: GlyphMetrics = face_glyph(f, cp);
             var c: Cell         = cell_of(g, ?m);
             if (c.drawn) {
-                pass_draw_sprite_uv(p, opt[*Texture].some{?g.pages[c.page]},
-                    glyph_dest(g, ?m, ?c, pen, line), cell_uv(g, ?c), tint);
+                pass_draw_sprite_filtered(p, opt[*Texture].some{?g.pages[c.page]},
+                    glyph_dest(g, ?m, ?c, pen, line), cell_uv(g, ?c), tint, filter);
             }
             pen = pen + m.advance;
         }
@@ -656,6 +668,19 @@ test glyph_dest__oversampled_and_snapped {
     pc.offset_y = 0.0 - 3.0;
     val p: Rect = glyph_dest(?pg, ?pm, ?pc, 3.49, 5.51);
     if (p.x != 5.0 || p.y != 3.0) { ret 3; }
+    ret 0;
+}
+
+test atlas_filter__vector_linear_pixel_nearest {
+    var f: FontFace;
+    f.pixel_snap = false;
+    var g: GlyphAtlas = grid_atlas();
+    g.face = ?f;
+    val vector: TextureFilter = atlas_filter(?g);
+    if (!sel vector.linear) { ret 1; }
+    f.pixel_snap = true;
+    val pixel: TextureFilter = atlas_filter(?g);
+    if (!sel pixel.nearest) { ret 2; }
     ret 0;
 }
 
