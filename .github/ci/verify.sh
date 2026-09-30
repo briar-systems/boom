@@ -45,7 +45,7 @@ done
 # the tests artifact reaches would drop its tests without a word. the guard
 # runs on this leg's target alone: listing darwin or windows builds glfw's C
 # step, and this leg has no cross toolchain for it (all-targets is off too)
-bash test/selections/verify.sh "$MACH_COMPILER" linux-x86_64
+bash test/selections/verify.sh "$MACH_COMPILER" "$MACH_CI_TARGET"
 
 # unit tests cover the UTF-8 walk and the atlas arithmetic without touching
 # Vulkan. this finite example releases the encoded font before any glyph is
@@ -55,7 +55,7 @@ bash test/selections/verify.sh "$MACH_COMPILER" linux-x86_64
 for font in /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
             /usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf; do
   timeout --signal=TERM --kill-after=5s 30s xvfb-run -a \
-    ./demo/text/out/linux-x86_64/debug/bin/text --font "$font"
+    ./demo/text/out/${MACH_CI_TARGET}/debug/bin/text --font "$font"
   echo "text example passed with $font"
 done
 
@@ -63,13 +63,13 @@ done
 # frame's geometry. lavapipe offers TRANSFER_SRC on its swapchain images, so a
 # skip here means the surface decision went wrong and the flag makes it fail.
 timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
-  ./demo/vulkan/out/linux-x86_64/debug/bin/vulkan --require-readback
+  ./demo/vulkan/out/${MACH_CI_TARGET}/debug/bin/vulkan --require-readback
 echo "vulkan example passed with the window read back"
 
 # the compute example steps a pool of cells on the GPU twice, once from counts
 # the first step wrote, reads the pool and the activity flags back, and counts
 # the pixels a draw pulled straight from the pool covered
 timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
-  ./demo/compute/out/linux-x86_64/debug/bin/compute
+  ./demo/compute/out/${MACH_CI_TARGET}/debug/bin/compute
 echo "compute example passed"
 

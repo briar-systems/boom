@@ -75,6 +75,19 @@ pub rec ResizeEvent {
     height: i32;
 }
 
+# text was typed
+#
+# GLFW reports the unicode codepoint after keyboard layout, shift and dead keys
+# are applied. it is independent of KeyEvent: a key press may produce no text
+# (a modifier, an arrow), one codepoint, or several in a row (an IME commit),
+# and text arrives from the same press that queued the key event, after it.
+# a consumer reading typed text uses text and ignores key for that purpose.
+# ---
+# codepoint: unicode scalar value
+pub rec TextEvent {
+    codepoint: u32;
+}
+
 # one input event
 # ---
 # close:        the window was asked to close
@@ -83,6 +96,7 @@ pub rec ResizeEvent {
 # mouse_move:   the cursor moved
 # scroll:       the scroll wheel moved
 # resize:       the framebuffer was resized
+# text:         a unicode codepoint was typed
 pub tag Event: u8 {
     close;
     key:          KeyEvent;
@@ -90,6 +104,7 @@ pub tag Event: u8 {
     mouse_move:   MoveEvent;
     scroll:       ScrollEvent;
     resize:       ResizeEvent;
+    text:         TextEvent;
 }
 
 # why an event was not queued
