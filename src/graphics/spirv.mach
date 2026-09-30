@@ -16,6 +16,7 @@ use boom.graphics.spirvread.CAP_SHADER;
 use boom.graphics.spirvread.Capabilities;
 use boom.graphics.spirvread.DEC_NON_WRITABLE;
 use boom.graphics.spirvread.MemberOffsets;
+use boom.graphics.spirvread.spv_bindings_end;
 use boom.graphics.spirvread.spv_block_of_binding;
 use boom.graphics.spirvread.spv_capabilities;
 use boom.graphics.spirvread.spv_declares_binding;
@@ -122,6 +123,15 @@ test spirv__stages_declare_exactly_bound_bindings {
         true, false, false, false, false, false)) { ret 4; }
     if (!declares(?UI_FRAG_SPV[0], $length_of(UI_FRAG_SPV),
         true, true, false, false, false, false)) { ret 5; }
+    ret 0;
+}
+
+test spirv__bindings_end_is_highest_per_set {
+    # what storage_bindings_fit sizes a stage by: the highest binding, gaps and
+    # all, and only in the set asked about
+    if (spv_bindings_end(?SKINNED_VERT_SPV[0], $length_of(SKINNED_VERT_SPV), 0) != 4) { ret 1; }
+    if (spv_bindings_end(?LIT_FRAG_SPV[0], $length_of(LIT_FRAG_SPV), 0) != 3)         { ret 2; }
+    if (spv_bindings_end(?SKINNED_VERT_SPV[0], $length_of(SKINNED_VERT_SPV), 1) != 0) { ret 3; }
     ret 0;
 }
 

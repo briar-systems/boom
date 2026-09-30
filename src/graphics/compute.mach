@@ -47,10 +47,11 @@ use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
-use boom.graphics.pipeline.MAX_STORAGE_BINDINGS;
+use boom.graphics.limits.MAX_STORAGE_BINDINGS;
 use boom.graphics.pipeline.STORAGE_SET;
 use boom.graphics.pipeline.create_set_layout;
 use boom.graphics.pipeline.shader_module;
+use boom.graphics.pipeline.storage_bindings_fit;
 use boom.graphics.pipeline.storage_set_layout;
 use boom.graphics.spirv.COMPUTE_ENTRY;
 use boom.graphics.vk.Vk;
@@ -252,14 +253,15 @@ pub fun storage_words(size: usize, offset: usize, len: usize) err[Error] {
     ret storage_fits(size, offset, len);
 }
 
-# Whether a list of storage buffers can be bound: at most MAX_STORAGE_BINDINGS,
-# none of them nil or deleted.
+# Whether a list of storage buffers can be bound: at most allowed, the device's
+# max_storage_bindings, none of them nil or deleted.
 #
 # Checked before anything is recorded, because a binding naming a destroyed
-# buffer is a descriptor pointing at freed memory, and the driver says nothing.
-pub fun storage_bindings_valid(buffers: **StorageBuffer, count: usize) err[Error] {
-    if (count > MAX_STORAGE_BINDINGS) { ret err[Error].err{Error.buffer{BufferError.bindings{count}}}; }
-    if (count > 0 && buffers == nil)  { ret err[Error].err{Error.buffer{BufferError.bindings{count}}}; }
+# buffer is a descriptor pointing at freed memory, and a binding past the
+# layout is one Vulkan leaves undefined, and the driver says nothing of either.
+pub fun storage_bindings_valid(buffers: **StorageBuffer, count: usize, allowed: usize) err[Error] {
+    if (count > allowed)             { ret err[Error].err{Error.buffer{BufferError.too_many{count}}}; }
+    if (count > 0 && buffers == nil) { ret err[Error].err{Error.buffer{BufferError.bindings{count}}}; }
     var i: usize = 0;
     for (i < count) {
         val b: *StorageBuffer = buffers[i];
@@ -307,7 +309,9 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     if (spv == nil)                 { ret err[Error].err{Error.shader{ShaderError.missing_stage{}}}; }
     if (len < 20 || (len % 4) != 0) { ret err[Error].err{Error.shader{ShaderError.spirv_words{len}}}; }
     if (d == nil || !d.ready)       { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
-    val v: *Vk = d.vk;
+    val v:    *Vk        = d.vk;
+    val fits: err[Error] = storage_bindings_fit(v, spv, len);
+    if (sel fits.err) { ret fits; }
 
     val er: err[Error] = create_set_layout(v, nil, 0, ?c.empty);
     if (sel er.err) { ret er; }
@@ -511,9 +515,11 @@ pub fun storage_sets_init(ss: *StorageSets, v: *Vk) err[Error] {
     val lr: err[Error] = storage_set_layout(v, ?ss.layout);
     if (sel lr.err) { ret lr; }
 
+    # sized by the device's count, which every set taken holds; a device that
+    # leaves none still allocates empty sets, from a pool with no sizes
     var size: vk.DescriptorPoolSize;
     size.type            = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    size.descriptorCount = (MAX_STORAGE_SETS * MAX_STORAGE_BINDINGS)::u32;
+    size.descriptorCount = (MAX_STORAGE_SETS * v.limits.max_storage_bindings)::u32;
     var ci: vk.DescriptorPoolCreateInfo;
     ci.sType         = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     ci.pNext         = nil;
@@ -521,7 +527,11 @@ pub fun storage_sets_init(ss: *StorageSets, v: *Vk) err[Error] {
     ci.maxSets       = MAX_STORAGE_SETS::u32;
     ci.poolSizeCount = 1;
     ci.pPoolSizes    = ?size;
-    i                = 0;
+    if (size.descriptorCount == 0) {
+        ci.poolSizeCount = 0;
+        ci.pPoolSizes    = nil;
+    }
+    i = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
         val rc: i32 = vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?ss.pools[i]);
         if (rc != vk.SUCCESS) {
@@ -566,8 +576,8 @@ pub fun storage_sets_take(ss: *StorageSets, v: *Vk, frame: usize,
     }
     ss.used[frame] = ss.used[frame] + 1;
 
-    var infos:  [4]vk.DescriptorBufferInfo;
-    var writes: [4]vk.WriteDescriptorSet;
+    var infos:  [MAX_STORAGE_BINDINGS]vk.DescriptorBufferInfo;
+    var writes: [MAX_STORAGE_BINDINGS]vk.WriteDescriptorSet;
     var i:      usize = 0;
     for (i < count) {
         infos[i].buffer            = buffers[i].buffer.handle;
@@ -660,17 +670,24 @@ test storage_bindings_valid__count_nil_and_deleted {
     list[2] = ?a;
     list[3] = ?b;
     list[4] = ?a;
-    if (!accepted(storage_bindings_valid(?list[0], 2))) { ret 1; }
-    if (!accepted(storage_bindings_valid(nil, 0)))      { ret 2; }
-    if (accepted(storage_bindings_valid(?list[0], 5)))  { ret 3; }
+    if (!accepted(storage_bindings_valid(?list[0], 2, 4))) { ret 1; }
+    if (!accepted(storage_bindings_valid(nil, 0, 4)))      { ret 2; }
+    # past what the device allows is refused with the count, and up to it is not
+    if (!too_many(storage_bindings_valid(?list[0], 5, 4), 5)) { ret 3; }
+    if (!accepted(storage_bindings_valid(?list[0], 5, 5)))    { ret 4; }
     b.ready = false;
-    if (!refused_at(storage_bindings_valid(?list[0], 2), 1)) { ret 4; }
+    if (!refused_at(storage_bindings_valid(?list[0], 2, 4), 1)) { ret 5; }
     ret 0;
 }
 
 #[testing]
 fun refused_at(r: err[Error], index: usize) bool {
     ret sel r.err && (sel r.err.buffer && (sel r.err.buffer.bindings && r.err.buffer.bindings == index));
+}
+
+#[testing]
+fun too_many(r: err[Error], count: usize) bool {
+    ret sel r.err && (sel r.err.buffer && (sel r.err.buffer.too_many && r.err.buffer.too_many == count));
 }
 
 #[testing]

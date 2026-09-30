@@ -151,12 +151,15 @@ pub tag Capacity: u8 {
 # overrun:   a write or copy larger than a buffer; carries the requested bytes
 # unaligned: an offset or length a GPU copy, update or indirect read needs in
 #            whole four-byte words; carries the offending value
-# bindings:  more storage buffers than MAX_STORAGE_BINDINGS, or a nil one
+# bindings:  a nil or deleted storage buffer in a binding list; carries its index
+# too_many:  a binding list longer than the device's max_storage_bindings;
+#            carries the count asked for
 pub tag BufferError: u8 {
     empty;
     overrun:   u64;
     unaligned: u64;
     bindings:  usize;
+    too_many:  usize;
 }
 
 # why an image operation was refused
@@ -178,15 +181,18 @@ pub tag ImageError: u8 {
 
 # why a shader was refused
 # ---
-# missing_stage: a vertex, fragment or compute module is absent
-# spirv_words:   a module is not a whole number of SPIR-V words; carries its byte length
-# undeclared:    a draw named a shader that was never declared or was deleted
-# full:          the shader has built MAX_SHADER_PIPELINES pipelines
+# missing_stage:   a vertex, fragment or compute module is absent
+# spirv_words:     a module is not a whole number of SPIR-V words; carries its byte length
+# undeclared:      a draw named a shader that was never declared or was deleted
+# full:            the shader has built MAX_SHADER_PIPELINES pipelines
+# storage_binding: a stage declares a STORAGE_SET binding past the device's
+#                  max_storage_bindings; carries the binding
 pub tag ShaderError: u8 {
     missing_stage;
     spirv_words: usize;
     undeclared;
     full;
+    storage_binding: u32;
 }
 
 # why a pipeline or its layout was refused
@@ -414,7 +420,8 @@ fun capacity_message(e: Capacity) str {
 fun buffer_message(e: BufferError) str {
     if (sel e.empty)     { ret "cannot create a zero-sized buffer"; }
     if (sel e.unaligned) { ret "a GPU buffer offset or length is not a multiple of four bytes"; }
-    if (sel e.bindings)  { ret "too many storage buffers bound, or one is missing"; }
+    if (sel e.bindings)  { ret "a storage buffer in the binding list is missing or deleted"; }
+    if (sel e.too_many)  { ret "more storage buffers bound than the device allows (see renderer_limits)"; }
     ret "a write or copy exceeds the buffer";
 }
 
@@ -431,6 +438,9 @@ fun shader_message(e: ShaderError) str {
     if (sel e.missing_stage) { ret "a shader needs a vertex and a fragment module, a compute one its module"; }
     if (sel e.spirv_words)   { ret "a shader module must be a whole number of SPIR-V words"; }
     if (sel e.undeclared)    { ret "the shader was never declared"; }
+    if (sel e.storage_binding) {
+        ret "a stage declares a storage binding past what the device allows (see renderer_limits)";
+    }
     ret "the shader has built as many pipelines as it may hold";
 }
 
