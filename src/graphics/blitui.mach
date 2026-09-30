@@ -1,0 +1,32 @@
+# blit (briar-systems/blit) drawn by boom, with TrueType text
+#
+# Two pieces, each usable alone. BlitGlyphs is a blit glyph source over a boom
+# Typeface, so blit's text is TrueType at whatever interface scale blit asks
+# for. BlitRenderer draws a blit context's frame in a boom Pass: blit's atlas
+# pages become boom textures, and a blit Image names a boom Texture by the
+# handle blit_texture returns. blit itself depends on nothing of boom's.
+#
+# A frame, after blit.context.end:
+#
+#     blitui.blit_upload(?ui_renderer);          # optional, before the frame
+#     ...scene passes...
+#     var overlay: gfx.Pass = gfx.pass_begin(?r, ?desc);   # pass_overlay()
+#     blitui.blit_draw(?ui_renderer, ?overlay);
+#     gfx.pass_end(?overlay);
+#
+# See demo/blit.
+
+fwd boom.graphics.blitui.glyphs.GLYPH_SIDE_MAX;
+fwd boom.graphics.blitui.glyphs.BlitGlyphs;
+fwd boom.graphics.blitui.glyphs.blit_glyphs;
+fwd boom.graphics.blitui.glyphs.blit_glyphs_source;
+fwd boom.graphics.blitui.glyphs.blit_glyphs_delete;
+
+fwd boom.graphics.blitui.renderer.BLIT_PAGES;
+fwd boom.graphics.blitui.renderer.BlitRenderer;
+fwd boom.graphics.blitui.renderer.blit_texture;
+fwd boom.graphics.blitui.renderer.blit_renderer;
+fwd boom.graphics.blitui.renderer.blit_renderer_delete;
+fwd boom.graphics.blitui.renderer.blit_renderer_pages;
+fwd boom.graphics.blitui.renderer.blit_upload;
+fwd boom.graphics.blitui.renderer.blit_draw;

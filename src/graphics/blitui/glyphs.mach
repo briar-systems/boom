@@ -1,0 +1,331 @@
+# A blit glyph source over a boom Typeface: blit's text, drawn in TrueType.
+#
+# blit (briar-systems/blit) owns utf-8 decoding, layout, its glyph cache and
+# its atlas, and asks a blit.glyph.GlyphSource four questions about a face at
+# an interface scale: how tall a line is, what a codepoint measures, how a pair
+# kerns, and what a codepoint's coverage looks like. This answers them from a
+# Typeface through mach-font, so blit stays free of any font dependency and a
+# boom game's blit widgets draw the same TrueType faces its own text does.
+#
+# EVERY ANSWER IS AT pixels * scale. The face is sized once (a line height or
+# an em, per FontSizeMode) and blit's scale multiplies it, so an interface at
+# 200% is rasterised at twice the size rather than stretched from 100%.
+#
+# THE BITMAP IS THE GLYPH'S OWN BOX. A glyph's rect is its outline's bounding
+# box at the scale, rounded out to whole texels, placed against the pen on the
+# baseline, and raster fills exactly that many texels with mach-font's coverage.
+# Nothing is oversampled: blit samples its atlas one texel per pixel.
+#
+# LIFETIME. The source borrows its Typeface, which must outlive it: blit_glyphs
+# counts itself on the typeface the way a FontFace does, so typeface_delete
+# refuses with TextError.in_use while the source lives. blit keeps the pointer
+# blit_glyphs_source hands it, so the BlitGlyphs must also stay where it is for
+# as long as a blit context draws from it.
+
+use gly: blit.glyph;
+use boom.graphics.error.Error;
+use boom.graphics.error.content.TextError;
+use boom.graphics.text.atlas.edge_capacity;
+use boom.graphics.text.face.FontRaster;
+use boom.graphics.text.face.FontSizeMode;
+use boom.graphics.text.face.font_scale;
+use boom.graphics.text.face.pixel_round;
+use boom.graphics.text.typeface.Typeface;
+use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.typeface_glyph_bounds;
+use boom.graphics.text.typeface.typeface_hhea;
+use font.error.FontError;
+use fglyf:   font.glyf;
+use fhhea:   font.hhea;
+use fhmtx:   font.hmtx;
+use finfo:   font.info;
+use fraster: font.raster;
+use allo:    std.allocator;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+# The largest bitmap side a glyph is given, in texels.
+#
+# blit refuses a bitmap larger than one of its pages anyway; this keeps a
+# runaway scale from asking mach-font for a bitmap past its u16 sides.
+pub val GLYPH_SIDE_MAX: u32 = 4096;
+
+# a TrueType face as a blit glyph source
+# ---
+# a:         allocator for the raster scratch
+# typeface:  the borrowed typeface, which must outlive this source
+# scale:     design units to pixels at interface scale 1
+# raster:    smooth coverage, or binary coverage at a threshold
+# edges:     flattened-edge scratch, grown the first time a larger glyph needs it
+# edges_cap: edges the scratch holds
+# cov:       coverage scratch for a raster whose stride is not its width
+# cov_cap:   bytes cov holds
+# valid:     whether the source is live, cleared by blit_glyphs_delete
+pub rec BlitGlyphs {
+    a:         *allo.Allocator;
+    typeface:  *Typeface;
+    scale:     f32;
+    raster:    FontRaster;
+    edges:     *fraster.Edge;
+    edges_cap: usize;
+    cov:       *u8;
+    cov_cap:   usize;
+    valid:     bool;
+}
+
+# where one glyph's bitmap sits at one scale
+# ---
+# glyph: glyph index in the typeface
+# s:     design units to pixels at this scale
+# g:     the metrics blit reads
+rec Placement {
+    glyph: u16;
+    s:     f32;
+    g:     gly.Glyph;
+}
+
+# Size a typeface as a blit glyph source.
+# ---
+# a:         allocator for the raster scratch
+# t:         the typeface, which must outlive the source and stay where it is
+# pixels:    the face's size at interface scale 1, a line height or an em per size_mode
+# size_mode: what pixels measures
+# raster:    smooth coverage, or binary coverage at a threshold
+# ret:       the source, or a size or policy error
+pub fun blit_glyphs(a: *allo.Allocator, t: *Typeface, pixels: f32, size_mode: FontSizeMode,
+    raster: FontRaster) res[BlitGlyphs, Error] {
+    var g: BlitGlyphs;
+    g.valid = false;
+    if (t == nil || !t.valid) { ret res[BlitGlyphs, Error].err{Error.text{TextError.empty{}}}; }
+    if (pixels <= 0.0)        { ret res[BlitGlyphs, Error].err{Error.text{TextError.pixel_height{}}}; }
+    if (sel raster.pixel && raster.pixel == 0) {
+        ret res[BlitGlyphs, Error].err{Error.text{TextError.threshold{}}};
+    }
+    val scaled: res[f32, FontError] = font_scale(?t.face, pixels, size_mode);
+    if (sel scaled.err) { ret res[BlitGlyphs, Error].err{font_failed(scaled.err)}; }
+
+    g.a         = a;
+    g.typeface  = t;
+    g.scale     = scaled.ok;
+    g.raster    = raster;
+    g.edges     = nil;
+    g.edges_cap = 0;
+    g.cov       = nil;
+    g.cov_cap   = 0;
+    g.valid     = true;
+    t.faces     = t.faces + 1;
+    ret res[BlitGlyphs, Error].ok{g};
+}
+
+# Release the raster scratch and the hold on the typeface.
+# ---
+# g:   the source, unusable afterward; no blit context may still draw from it
+# ret: ok, or the allocator's refusal
+pub fun blit_glyphs_delete(g: *BlitGlyphs) err[Error] {
+    if (!g.valid) { ret err[Error].ok{}; }
+    g.valid = false;
+    if (g.typeface != nil && g.typeface.faces > 0) { g.typeface.faces = g.typeface.faces - 1; }
+    if (g.edges != nil) {
+        val e: err[allo.Error] = allo.deallocate[fraster.Edge](g.a, g.edges, g.edges_cap);
+        g.edges     = nil;
+        g.edges_cap = 0;
+        if (sel e.err) { ret err[Error].err{Error.alloc{e.err}}; }
+    }
+    if (g.cov != nil) {
+        val c: err[allo.Error] = allo.deallocate[u8](g.a, g.cov, g.cov_cap);
+        g.cov     = nil;
+        g.cov_cap = 0;
+        if (sel c.err) { ret err[Error].err{Error.alloc{c.err}}; }
+    }
+    ret err[Error].ok{};
+}
+
+# The contract blit reads, over this source.
+#
+# Pass it to blit.context.set_glyph_source between frames. It points at g, so g
+# must stay where it is while the context draws from it.
+# ---
+# g:   the source
+# ret: the glyph source
+pub fun blit_glyphs_source(g: *BlitGlyphs) gly.GlyphSource {
+    ret gly.GlyphSource{
+        self:   g::ptr,
+        line:   glyphs_line,
+        glyph:  glyphs_glyph,
+        kern:   glyphs_kern,
+        raster: glyphs_raster,
+    };
+}
+
+# whether metrics stay on whole pixels, as a pixel font's do
+fun snaps(g: *BlitGlyphs) bool {
+    ret sel g.raster.pixel;
+}
+
+fun snap(g: *BlitGlyphs, v: f32) f32 {
+    if (snaps(g)) { ret pixel_round(v); }
+    ret v;
+}
+
+# the smallest whole number of texels covering a non-negative extent
+fun texels(v: f32) u32 {
+    if (v <= 0.0) { ret 0; }
+    val whole: u32 = v::u32;
+    if (whole::f32 < v) { ret whole + 1; }
+    ret whole;
+}
+
+# the glyph a codepoint maps to, none when the typeface lacks it
+fun mapped(t: *Typeface, cp: u32) opt[u16] {
+    val m: res[u16, FontError] = finfo.glyph_index(?t.face, cp);
+    if (sel m.err) { ret opt[u16].none{}; }
+    if (m.ok == 0) { ret opt[u16].none{}; }
+    ret opt[u16].some{m.ok};
+}
+
+# Measure a codepoint at a scale.
+#
+# The bitmap is the outline's box rounded out to whole texels, with its bottom
+# edge on the outline's lowest point, which is where mach-font's render_glyph
+# puts the outline in a bitmap of that size.
+fun place(g: *BlitGlyphs, cp: u32, scale: f32) opt[Placement] {
+    val t:     *Typeface = g.typeface;
+    val glyph: opt[u16]  = mapped(t, cp);
+    if (sel glyph.none) { ret opt[Placement].none{}; }
+    val hm: res[fhmtx.HMetrics, FontError] = finfo.glyph_hmetrics(?t.face, glyph.some);
+    if (sel hm.err) { ret opt[Placement].none{}; }
+    val bounds: res[opt[fglyf.Bounds], FontError] = typeface_glyph_bounds(t, glyph.some);
+    if (sel bounds.err) { ret opt[Placement].none{}; }
+
+    var p: Placement;
+    p.glyph     = glyph.some;
+    p.s         = g.scale * scale;
+    p.g.advance = snap(g, hm.ok.advance::f32 * p.s);
+    if (sel bounds.ok.none) { ret opt[Placement].some{p}; }
+
+    val b: fglyf.Bounds = bounds.ok.some;
+    val w: u32          = texels((b.x_max::f32 - b.x_min::f32) * p.s);
+    val h: u32          = texels((b.y_max::f32 - b.y_min::f32) * p.s);
+    if (w == 0 || h == 0 || w > GLYPH_SIDE_MAX || h > GLYPH_SIDE_MAX) { ret opt[Placement].some{p}; }
+    p.g.w  = w;
+    p.g.h  = h;
+    p.g.x0 = snap(g, b.x_min::f32 * p.s);
+    p.g.y1 = snap(g, -(b.y_min::f32) * p.s);
+    p.g.x1 = p.g.x0 + w::f32;
+    p.g.y0 = p.g.y1 - h::f32;
+    ret opt[Placement].some{p};
+}
+
+# the line metrics at a scale
+fun glyphs_line(self: ptr, scale: f32) gly.LineMetrics {
+    val g:    *BlitGlyphs = self::*BlitGlyphs;
+    val hhea: fhhea.Hhea  = typeface_hhea(g.typeface);
+    val s:    f32         = g.scale * scale;
+    ret gly.LineMetrics{
+        ascent:  snap(g, hhea.ascent::f32 * s),
+        descent: snap(g, -(hhea.descent::f32) * s),
+        gap:     snap(g, hhea.line_gap::f32 * s),
+    };
+}
+
+# what a codepoint measures at a scale, false when the typeface lacks it
+fun glyphs_glyph(self: ptr, cp: u32, scale: f32, out: *gly.Glyph) bool {
+    val p: opt[Placement] = place(self::*BlitGlyphs, cp, scale);
+    if (sel p.none) { ret false; }
+    @out = p.some.g;
+    ret true;
+}
+
+# the pen adjustment between two codepoints at a scale, from the kern table
+fun glyphs_kern(self: ptr, left: u32, right: u32, scale: f32) f32 {
+    val g: *BlitGlyphs = self::*BlitGlyphs;
+    val l: opt[u16]    = mapped(g.typeface, left);
+    val r: opt[u16]    = mapped(g.typeface, right);
+    if (sel l.none) { ret 0.0; }
+    if (sel r.none) { ret 0.0; }
+    val k: res[i16, FontError] = finfo.glyph_kern_advance(?g.typeface.face, l.some, r.some);
+    if (sel k.err) { ret 0.0; }
+    ret snap(g, k.ok::f32 * g.scale * scale);
+}
+
+# make sure the edge scratch admits a glyph of up to `side` texels
+fun reserve_edges(g: *BlitGlyphs, side: usize) bool {
+    val need: usize = edge_capacity(g.typeface.pts_cap, side);
+    if (need <= g.edges_cap) { ret true; }
+    if (g.edges != nil) {
+        val freed: err[allo.Error] = allo.deallocate[fraster.Edge](g.a, g.edges, g.edges_cap);
+        g.edges     = nil;
+        g.edges_cap = 0;
+        if (sel freed.err) { ret false; }
+    }
+    val r: res[*fraster.Edge, allo.Error] = allo.allocate[fraster.Edge](g.a, need);
+    if (sel r.err) { ret false; }
+    g.edges     = r.ok;
+    g.edges_cap = need;
+    ret true;
+}
+
+# make sure the coverage scratch holds n bytes
+fun reserve_cov(g: *BlitGlyphs, n: usize) bool {
+    if (n <= g.cov_cap) { ret true; }
+    if (g.cov != nil) {
+        val freed: err[allo.Error] = allo.deallocate[u8](g.a, g.cov, g.cov_cap);
+        g.cov     = nil;
+        g.cov_cap = 0;
+        if (sel freed.err) { ret false; }
+    }
+    val r: res[*u8, allo.Error] = allo.allocate[u8](g.a, n);
+    if (sel r.err) { ret false; }
+    g.cov     = r.ok;
+    g.cov_cap = n;
+    ret true;
+}
+
+# Write a codepoint's coverage, h rows of w bytes `stride` apart.
+#
+# mach-font writes a tightly packed bitmap, so a stride equal to the width is
+# rendered in place and any other goes through the scratch and is copied out.
+fun glyphs_raster(self: ptr, cp: u32, scale: f32, cov: *u8, stride: usize) bool {
+    val g: *BlitGlyphs    = self::*BlitGlyphs;
+    val p: opt[Placement] = place(g, cp, scale);
+    if (sel p.none) { ret false; }
+    val w: usize = p.some.g.w::usize;
+    val h: usize = p.some.g.h::usize;
+    if (w == 0 || h == 0) { ret true; }
+    if (stride < w)       { ret false; }
+
+    var side: usize = w;
+    if (h > side)                { side = h; }
+    if (!reserve_edges(g, side)) { ret false; }
+    var dst: *u8 = cov;
+    if (stride != w) {
+        if (!reserve_cov(g, w * h)) { ret false; }
+        dst = g.cov;
+    }
+
+    val t:        *Typeface      = g.typeface;
+    val rendered: err[FontError] = finfo.render_glyph(?t.face, p.some.glyph, p.some.s,
+        t.pts, t.pts_cap, t.ends, t.ends_cap, g.edges, g.edges_cap, dst, w::u16, h::u16);
+    if (sel rendered.err) { ret false; }
+
+    var y: usize = 0;
+    for (y < h) {
+        var x: usize = 0;
+        for (x < w) {
+            var c: u8 = dst[y * w + x];
+            if (sel g.raster.pixel) {
+                if (c >= g.raster.pixel) { c = 255; }
+                or                       { c = 0; }
+            }
+            cov[y * stride + x] = c;
+            x                   = x + 1;
+        }
+        y = y + 1;
+    }
+    ret true;
+}

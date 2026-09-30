@@ -315,6 +315,7 @@ fwd boom.graphics.renderer.pass_draw_skinned_material;
 fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
 fwd boom.graphics.renderer.pass_draw_triangles;
+fwd boom.graphics.renderer.pass_draw_triangles_filtered;
 
 # A tile field. The grid's structure is what makes it cheap: the visible
 # rectangle becomes a range of cells, so a world the camera cannot see costs
@@ -472,6 +473,24 @@ fwd boom.graphics.text.text_measure;
 fwd boom.graphics.text.text_height;
 fwd boom.graphics.text.text_lines;
 fwd boom.graphics.text.text_draw;
+
+# blit's widgets over boom. BlitGlyphs is a blit glyph source over a Typeface,
+# so blit's text is TrueType at blit's interface scale; BlitRenderer draws a
+# blit context's frame in any Pass, and blit_texture is the handle a blit Image
+# carries for a boom Texture or a RenderTarget's colour. See boom.graphics.blitui.
+fwd boom.graphics.blitui.GLYPH_SIDE_MAX;
+fwd boom.graphics.blitui.BlitGlyphs;
+fwd boom.graphics.blitui.blit_glyphs;
+fwd boom.graphics.blitui.blit_glyphs_source;
+fwd boom.graphics.blitui.blit_glyphs_delete;
+fwd boom.graphics.blitui.BLIT_PAGES;
+fwd boom.graphics.blitui.BlitRenderer;
+fwd boom.graphics.blitui.blit_texture;
+fwd boom.graphics.blitui.blit_renderer;
+fwd boom.graphics.blitui.blit_renderer_delete;
+fwd boom.graphics.blitui.blit_renderer_pages;
+fwd boom.graphics.blitui.blit_upload;
+fwd boom.graphics.blitui.blit_draw;
 
 fwd boom.graphics.spirv.LIT_FRAG_SPV;
 fwd boom.graphics.spirv.MESH_VERT_SPV;
