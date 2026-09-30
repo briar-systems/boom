@@ -100,8 +100,9 @@ pub val STORAGE_BYTES: usize = 65536;
 #
 # It is also 8.4 million vec4s in a single frame, which is not a light list, a
 # decal list or a tile field but a mistake in the arithmetic that produced the
-# length. A game that genuinely needs more needs the device's own limit queried
-# and the payload split, which is a different design and not one to guess at.
+# length. A game that genuinely needs more needs the device's own limit, which
+# renderer_limits reports, and the payload split, which is a different
+# design and not one to guess at.
 #
 # A request past it is refused and counted rather than clamped, because a
 # clamped one would hand back a buffer that silently holds part of the payload.

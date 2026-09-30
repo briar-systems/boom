@@ -142,6 +142,7 @@ use boom.graphics.image.ColorSpace;
 use boom.graphics.image.image_bytes;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.image.sampler_init;
+use boom.graphics.limits.Limits;
 use boom.graphics.live.Live;
 use boom.graphics.live.live_any;
 use boom.graphics.material.Material;
@@ -565,6 +566,18 @@ pub fun renderer_is_srgb(r: *Renderer) bool {
 # ret: the upload context, valid while the renderer lives
 pub fun renderer_device(r: *Renderer) *Device {
     ret ?r.dev;
+}
+
+# the physical device's limits, read when the device was picked
+#
+# What a game sizes compute work by: maxStorageBufferRange bounds one storage
+# buffer, and the work group counts bound one dispatch. Zeroed until
+# renderer_init succeeds.
+# ---
+# r:   the renderer
+# ret: the limits, by value
+pub fun renderer_limits(r: *Renderer) Limits {
+    ret r.vk.limits;
 }
 
 fun release_mesh_upload(r: *Renderer, upload: *PendingMeshUpload) {

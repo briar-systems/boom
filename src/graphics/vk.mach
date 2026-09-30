@@ -25,6 +25,8 @@ use boom.graphics.error.Error;
 use boom.graphics.error.LoaderError;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.limits.Limits;
+use boom.graphics.limits.limits_from;
 use boom.graphics.live.Live;
 use glfw;
 use gc: glfw.c;
@@ -81,6 +83,7 @@ fun requested_api_version() u32 {
 #                  non-dispatchable handle is 64-bit everywhere; mach-vk types it
 #                  as ptr, so the conversion happens once, here.
 # physical:        The selected physical device.
+# limits:          The selected device's limits, read when it was picked.
 # device:          The logical device.
 # graphics_queue:  Queue for draw submission.
 # present_queue:   Queue for presentation; may equal graphics_queue.
@@ -91,6 +94,7 @@ pub rec Vk {
     instance:        vk.Instance;
     surface:         vk.SurfaceKHR;
     physical:        vk.PhysicalDevice;
+    limits:          Limits;
     device:          vk.Device;
     graphics_queue:  vk.Queue;
     present_queue:   vk.Queue;
@@ -347,7 +351,10 @@ fun pick_physical(v: *Vk) err[Error] {
         val f: Families          = find_families(v, d);
         if (sel f.graphics.some) {
             if (sel f.present.some) {
+                var props: vk.PhysicalDeviceProperties;
+                vk.vkGetPhysicalDeviceProperties(d, ?props);
                 v.physical        = d;
+                v.limits          = limits_from(?props.limits);
                 v.graphics_family = f.graphics.some;
                 v.present_family  = f.present.some;
                 ret err[Error].ok{};

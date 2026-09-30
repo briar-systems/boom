@@ -1,0 +1,68 @@
+# The physical device's limits a game sizes its work by.
+#
+# Read once from VkPhysicalDeviceLimits when a device is picked, and kept by
+# value, so asking costs nothing and cannot fail. A game reads these to decide
+# how large a pool to allocate or how to split a dispatch, rather than
+# assuming the smallest values the specification guarantees.
+#
+# Adding a limit is a field here and a line in limits_from: every reader takes
+# the record whole, so nothing else moves.
+
+use std.types.size.usize;
+use vk;
+
+# The limits, named as Vulkan names them with the prefix dropped.
+# ---
+# max_storage_buffer_range:            Bytes one storage buffer binding may name. The
+#                                      specification guarantees only 128 MiB.
+# max_compute_work_group_count:        Workgroups one dispatch may launch, per axis.
+# max_compute_work_group_invocations:  Invocations one workgroup may hold, across
+#                                      all three of its axes.
+# max_compute_work_group_size:         Invocations one workgroup may hold, per axis.
+# max_compute_shared_memory_size:      Bytes of workgroup-shared memory.
+# min_storage_buffer_offset_alignment: Alignment of a storage buffer binding's offset.
+pub rec Limits {
+    max_storage_buffer_range:            usize;
+    max_compute_work_group_count:        [3]u32;
+    max_compute_work_group_invocations:  u32;
+    max_compute_work_group_size:         [3]u32;
+    max_compute_shared_memory_size:      u32;
+    min_storage_buffer_offset_alignment: usize;
+}
+
+# the limits a device reported
+pub fun limits_from(src: *vk.PhysicalDeviceLimits) Limits {
+    var l: Limits;
+    l.max_storage_buffer_range            = src.maxStorageBufferRange::usize;
+    l.max_compute_work_group_count[0]     = src.maxComputeWorkGroupCount[0];
+    l.max_compute_work_group_count[1]     = src.maxComputeWorkGroupCount[1];
+    l.max_compute_work_group_count[2]     = src.maxComputeWorkGroupCount[2];
+    l.max_compute_work_group_invocations  = src.maxComputeWorkGroupInvocations;
+    l.max_compute_work_group_size[0]      = src.maxComputeWorkGroupSize[0];
+    l.max_compute_work_group_size[1]      = src.maxComputeWorkGroupSize[1];
+    l.max_compute_work_group_size[2]      = src.maxComputeWorkGroupSize[2];
+    l.max_compute_shared_memory_size      = src.maxComputeSharedMemorySize;
+    l.min_storage_buffer_offset_alignment = src.minStorageBufferOffsetAlignment::usize;
+    ret l;
+}
+
+test limits_from__carries_each_limit {
+    var src: vk.PhysicalDeviceLimits;
+    src.maxStorageBufferRange           = 134217728;
+    src.maxComputeWorkGroupCount[0]     = 65535;
+    src.maxComputeWorkGroupCount[1]     = 65534;
+    src.maxComputeWorkGroupCount[2]     = 65533;
+    src.maxComputeWorkGroupInvocations  = 1024;
+    src.maxComputeWorkGroupSize[2]      = 64;
+    src.maxComputeSharedMemorySize      = 32768;
+    src.minStorageBufferOffsetAlignment = 16;
+    val l: Limits = limits_from(?src);
+    if (l.max_storage_buffer_range != 134217728)      { ret 1; }
+    if (l.max_compute_work_group_count[0] != 65535)   { ret 2; }
+    if (l.max_compute_work_group_count[2] != 65533)   { ret 3; }
+    if (l.max_compute_work_group_invocations != 1024) { ret 4; }
+    if (l.max_compute_work_group_size[2] != 64)       { ret 5; }
+    if (l.max_compute_shared_memory_size != 32768)    { ret 6; }
+    if (l.min_storage_buffer_offset_alignment != 16)  { ret 7; }
+    ret 0;
+}
