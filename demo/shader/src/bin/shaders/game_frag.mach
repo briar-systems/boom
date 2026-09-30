@@ -59,9 +59,9 @@ var lights: Lights;
 #[input(0)]
 var in_normal: f32x3;
 #[input(1)]
-var in_uv: f32x2;
+var in_uv:     f32x2;
 #[input(2)]
-var in_world: f32x3;
+var in_world:  f32x3;
 
 #[output(0)]
 var out_colour: f32x4;

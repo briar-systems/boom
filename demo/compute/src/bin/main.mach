@@ -1,0 +1,251 @@
+# A simulation stepped on the GPU and drawn straight from its buffers.
+#
+# The shape of a GPU cellular automaton, at the smallest size that checks
+# itself: a pool of cells in two StorageBuffers, stepped by a Compute stage
+# each generation with the source and destination swapped, a per-workgroup
+# activity flag the CPU reads back without a stall, and the cells drawn by a
+# vertex stage that reads the buffer the step wrote. Nothing but the seed and
+# the step's parameters crosses from the CPU, and nothing but the flags
+# crosses back.
+#
+# Two generations run. The first is a direct dispatch that also writes the
+# arguments the second dispatch and the draw read indirectly; the second is
+# dispatched from them. Each cell is twice its source plus the generation, so
+# after both a cell seeded with i holds 4i + 4, and the host reads the pool back
+# and says so. The draw goes into an offscreen target read back afterwards: a
+# cell holding 2k + 1 covers a quarter of grid square k, so the red pixel count
+# is right only if every value reached the vertex stage.
+#
+# CI runs it under lavapipe:
+#
+#   mach build . && xvfb-run -a ./out/linux-x86_64/debug/bin/compute
+
+use gfx: boom.graphics;
+use gm:  boom.math;
+use boom.window.Window;
+use boom.window.WindowError;
+use boom.window.window_close;
+use boom.window.window_error_message;
+use boom.window.window_open;
+use boom.window.window_poll;
+use p: std.print;
+use std.runtime;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+
+#[embed("{artifact.stage-step_comp.out}")]
+val STEP_SPV:       [_]u8;
+#[embed("{artifact.stage-cells_vert.out}")]
+val CELLS_VERT_SPV: [_]u8;
+#[embed("{artifact.stage-cells_frag.out}")]
+val CELLS_FRAG_SPV: [_]u8;
+
+# cells in the pool, and the workgroups of 64 that step it
+val CELLS:  usize = 256;
+val GROUPS: u32   = 4;
+
+# Control: the draw arguments, the next dispatch's, then one flag per group
+val DRAW_AT:  usize = 0;
+val NEXT_AT:  usize = 16;
+val FLAGS_AT: usize = 32;
+
+# the offscreen target the cells are drawn into, 4 pixels to a grid square
+val SIDE:  i32   = 64;
+val BYTES: usize = 16384;
+
+fun fail(step: str, r: err[gfx.Error]) bool {
+    if (sel r.ok) { ret false; }
+    p.printlnf("FAIL {}: {}", step, gfx.error_message(r.err));
+    ret true;
+}
+
+# Begin a frame, retrying while the swapchain settles.
+fun open_frame(r: *gfx.Renderer) bool {
+    var tries: usize = 0;
+    for (tries < 8) {
+        window_poll();
+        val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(r);
+        if (sel br.err) {
+            p.printlnf("FAIL renderer_begin_frame: {}", gfx.error_message(br.err));
+            ret false;
+        }
+        if (br.ok) { ret true; }
+        tries = tries + 1;
+    }
+    p.println("FAIL renderer_begin_frame: the swapchain never settled");
+    ret false;
+}
+
+fun make(d: *gfx.Device, size: usize, out: *gfx.StorageBuffer) bool {
+    val made: res[gfx.StorageBuffer, gfx.Error] = gfx.storage_buffer(d, size);
+    if (sel made.err) {
+        p.printlnf("FAIL storage_buffer: {}", gfx.error_message(made.err));
+        ret false;
+    }
+    @out = made.ok;
+    ret true;
+}
+
+fun params_for(generation: u32) [4]u32 {
+    var q: [4]u32;
+    q[0] = generation;
+    q[1] = 0;
+    q[2] = 0;
+    q[3] = 0;
+    ret q;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    val opened: res[Window, WindowError] = window_open(SIDE, SIDE, "boom compute");
+    if (sel opened.err) {
+        p.printlnf("FAIL window_open: {}", window_error_message(opened.err));
+        ret 1;
+    }
+    var w: Window = opened.ok;
+    var r: gfx.Renderer;
+    if (fail("renderer_init", gfx.renderer_init(?r, ?w))) { ret 1; }
+    val d: *gfx.Device = gfx.renderer_device(?r);
+
+    # the pool, seeded with each cell's index
+    var a:       gfx.StorageBuffer;
+    var b:       gfx.StorageBuffer;
+    var control: gfx.StorageBuffer;
+    var params:  gfx.StorageBuffer;
+    if (!make(d, CELLS * 4, ?a) || !make(d, CELLS * 4, ?b)
+        || !make(d, 48, ?control) || !make(d, 16, ?params)) { ret 1; }
+    var seed: [256]u32;
+    var i:    usize = 0;
+    for (i < CELLS) {
+        seed[i] = i::u32;
+        i       = i + 1;
+    }
+    if (fail("storage_buffer_upload", gfx.storage_buffer_upload(d, ?a, 0, (?seed[0]):~*u8, CELLS * 4))) { ret 1; }
+
+    var step: gfx.Compute;
+    if (fail("compute", gfx.compute(?step, d, ?STEP_SPV[0], $length_of(STEP_SPV)))) { ret 1; }
+    var cells: gfx.Shader;
+    if (fail("shader", gfx.shader(?cells, ?CELLS_VERT_SPV[0], $length_of(CELLS_VERT_SPV),
+        ?CELLS_FRAG_SPV[0], $length_of(CELLS_FRAG_SPV)))) { ret 1; }
+    gfx.shader_set_state(?cells, gfx.pipeline_desc_2d());
+    var flags: gfx.Readback;
+    if (fail("readback", gfx.readback(?flags, d, 16))) { ret 1; }
+    val tr: res[gfx.RenderTarget, gfx.Error] = gfx.render_target(d, SIDE, SIDE);
+    if (sel tr.err) {
+        p.printlnf("FAIL render_target: {}", gfx.error_message(tr.err));
+        ret 1;
+    }
+    var target: gfx.RenderTarget = tr.ok;
+    var mat:    gfx.Material     = gfx.material();
+    var xf:     gm.Transform     = gm.transform_identity();
+
+    # generation 1: a direct dispatch from a to b, its flags read back, and the
+    # cells drawn from b by the arguments it wrote
+    if (!open_frame(?r)) { ret 1; }
+    var q: [4]u32 = params_for(1);
+    if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?params, 0, (?q[0]):~*u8, 16))) { ret 1; }
+    var first: [4]*gfx.StorageBuffer;
+    first[0] = ?a;
+    first[1] = ?b;
+    first[2] = ?control;
+    first[3] = ?params;
+    if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?first[0], 4, GROUPS, 1, 1))) { ret 1; }
+    if (fail("renderer_readback", gfx.renderer_readback(?r, ?flags, ?control, FLAGS_AT)))        { ret 1; }
+
+    var desc: gfx.PassDesc = gfx.pass_overlay();
+    desc.target = opt[*gfx.RenderTarget].some{?target};
+    desc.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
+    var pass:  gfx.Pass = gfx.pass_begin(?r, ?desc);
+    var drawn: [1]*gfx.StorageBuffer;
+    drawn[0] = ?b;
+    gfx.pass_draw_storage_indirect(?pass, ?drawn[0], 1, ?control, DRAW_AT, ?mat, ?xf, ?cells);
+    gfx.pass_end(?pass);
+    val dropped: usize = gfx.renderer_dropped(?r);
+    if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+    if (dropped != 0) {
+        p.printlnf("FAIL pass_draw_storage_indirect: {} draws dropped", dropped);
+        ret 1;
+    }
+
+    # generation 2: dispatched from the counts generation 1 wrote, b back to a
+    if (!open_frame(?r)) { ret 1; }
+    q = params_for(2);
+    if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?params, 0, (?q[0]):~*u8, 16))) { ret 1; }
+    var second: [4]*gfx.StorageBuffer;
+    second[0] = ?b;
+    second[1] = ?a;
+    second[2] = ?control;
+    second[3] = ?params;
+    if (fail("renderer_dispatch_indirect", gfx.renderer_dispatch_indirect(?r, ?step, ?second[0], 4,
+        ?control, NEXT_AT))) { ret 1; }
+    if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+
+    gfx.renderer_wait_idle(?r);
+    var ok: bool = true;
+
+    var pool: [256]u32;
+    if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?a, 0, (?pool[0]):~*u8, CELLS * 4))) { ret 1; }
+    i = 0;
+    var wrong: usize = 0;
+    for (i < CELLS) {
+        if (pool[i] != (i::u32) * 4 + 4) { wrong = wrong + 1; }
+        i = i + 1;
+    }
+    if (wrong != 0) {
+        p.printlnf("FAIL dispatch: {} of 256 cells differ from 4i + 4 (cell 1 holds {})", wrong, pool[1]);
+        ok = false;
+    }
+    or { p.println("ok   two generations, one indirect, left every cell at 4i + 4"); }
+
+    var seen: [4]u32;
+    if (!gfx.renderer_readback_take(?r, ?flags, (?seen[0]):~*u8, 16)) {
+        p.println("FAIL readback: no copy landed");
+        ok = false;
+    }
+    or (seen[0] != 1 || seen[1] != 1 || seen[2] != 1 || seen[3] != 1) {
+        p.printlnf("FAIL readback: flags {} {} {} {}", seen[0], seen[1], seen[2], seen[3]);
+        ok = false;
+    }
+    or { p.println("ok   every workgroup's flag came back without a stall"); }
+
+    var px: [16384]u8;
+    if (fail("render_target_read", gfx.render_target_read(d, ?target, ?px[0], BYTES))) { ret 1; }
+    var red:   usize = 0;
+    var red_i: usize = 0;
+    if (gfx.render_target_bgra(?target)) { red_i = 2; }
+    i = 0;
+    for (i < BYTES / 4) {
+        if (px[i * 4 + red_i] > 128 && px[i * 4 + 1] < 64) { red = red + 1; }
+        i = i + 1;
+    }
+    # 256 cells, each a 2 by 2 pixel quarter of its own grid square
+    if (red != 1024) {
+        p.printlnf("FAIL draw: {} red pixels where the cells cover 1024", red);
+        ok = false;
+    }
+    or { p.println("ok   the cells were drawn from the buffer the step wrote"); }
+
+    gfx.render_target_delete(d, ?target);
+    gfx.readback_delete(?flags, d);
+    gfx.shader_delete(?cells, d);
+    gfx.compute_delete(?step, d);
+    gfx.storage_buffer_delete(d, ?params);
+    gfx.storage_buffer_delete(d, ?control);
+    gfx.storage_buffer_delete(d, ?b);
+    gfx.storage_buffer_delete(d, ?a);
+    if (fail("renderer_dnit", gfx.renderer_dnit(?r))) { ret 1; }
+    val closed: err[WindowError] = window_close(?w);
+    if (sel closed.err) {
+        p.printlnf("FAIL window_close: {}", window_error_message(closed.err));
+        ret 1;
+    }
+    if (!ok) { ret 1; }
+    p.println("PASS");
+    ret 0;
+}

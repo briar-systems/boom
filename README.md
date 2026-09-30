@@ -396,6 +396,46 @@ joint nodes in TRS form, and rejects cubic-spline samplers. Blending, IK,
 retargeting, a larger or configurable palette, matrix-form joints, and
 morph-target channels are future work.
 
+### Compute
+
+A game's state can live on the GPU, be stepped there, and be drawn from there.
+A `StorageBuffer` is a device-local buffer, a `Compute` is a compute stage
+built into a pipeline, and both are created against the `Device` like any other
+resource. Between passes a frame records `renderer_buffer_update` (a step's
+parameters), `renderer_dispatch` or `renderer_dispatch_indirect` (the step), and
+`renderer_readback` (a few bytes back to the CPU, taken with
+`renderer_readback_take` a couple of frames later, never stalling). A pass then
+draws straight from the buffers with `pass_draw_storage` or
+`pass_draw_storage_indirect`, whose vertex stage places each vertex from its
+`vertex_index`, `instance_index` and the buffers, with no mesh at all.
+
+Every call takes its buffers as a list, and the buffer at index n arrives at
+`#[storage(1, n)]` in whichever stage reads it: `STORAGE_SET` is set 1 for a
+dispatch and a draw alike. The renderer puts a barrier on each side of every
+dispatch, update and readback, so what a dispatch writes is what the passes
+after it draw, and a game never states a stage or an access mask.
+
+```mach
+# once
+var step: gfx.Compute;
+gfx.compute(?step, d, ?STEP_SPV[0], $length_of(STEP_SPV));
+var cells: gfx.StorageBuffer = gfx.storage_buffer(d, bytes).ok;
+
+# each frame, between passes
+gfx.renderer_buffer_update(?r, ?params, 0, (?gen):~*u8, 16);
+gfx.renderer_dispatch(?r, ?step, ?bound[0], 4, groups, 1, 1);
+gfx.renderer_readback(?r, ?flags, ?activity, 0);
+
+# inside a pass
+gfx.pass_draw_storage(?p, ?drawn[0], 1, 6, cell_count, ?mat, ?xf, ?cell_shader);
+```
+
+`demo/compute` steps a pool of cells twice, once from counts the first step
+wrote, reads the pool and its activity flags back, and checks the pixels the
+pulled draw covered. Storage images, workgroup shared memory, barriers inside a
+stage and atomics wait on compiler support
+([mach#4252](https://github.com/briar-systems/mach/issues/4252)).
+
 ## Consuming boom
 
 boom builds on several ecosystem libraries: `std`, `glfw`, `vk`, `audio`,
@@ -405,11 +445,11 @@ anything else its own source imports directly, under the project id:
 ```toml
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
-ref = "tag/v0.33.0"
+ref = "tag/v0.34.0"
 ```
 
-`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.33.0`
-writes that stanza (`--version ^0.33` declares boom by range instead) and
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.34.0`
+writes that stanza (`--version ^0.34` declares boom by range instead) and
 realizes boom's whole closure one level deep under the consumer's `dep/`. boom
 declares each library by version range, pinned by its gitlink, and mach 5.9
 seeds those transitive ranges from boom's pins. The root's declarations win over every pin beneath them, so a

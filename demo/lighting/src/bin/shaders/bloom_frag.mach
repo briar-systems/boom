@@ -21,7 +21,7 @@ rec Args {
 #[sampler(0, 1)]
 var source: tex.Sampler2D;
 #[uniform(0, 4)]
-var args: Args;
+var args:   Args;
 
 #[input(0)]
 var in_uv: f32x2;

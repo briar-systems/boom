@@ -59,8 +59,9 @@ pub val SKINNED_VERT_SPV: [_]u8;
 #[embed("{artifact.shader-ui_vert.out}")]
 pub val UI_VERT_SPV: [_]u8;
 
-# Immediate-mode fragment stage: the atlas texel times the vertex colour. No
-# tint uniform, because one draw covers a whole draw list.
+# Immediate-mode fragment stage: the atlas texel times the vertex colour, which
+# it decodes from sRGB when the screen block at binding 0 says to. No tint
+# uniform, because one draw covers a whole draw list.
 #[align(4)]
 #[embed("{artifact.shader-ui_frag.out}")]
 pub val UI_FRAG_SPV: [_]u8;
@@ -69,6 +70,8 @@ pub val UI_FRAG_SPV: [_]u8;
 pub val VERTEX_ENTRY: str = "vert_main";
 # The entry point name every boom fragment stage uses.
 pub val FRAGMENT_ENTRY: str = "frag_main";
+# The entry point name a compute stage boom dispatches uses.
+pub val COMPUTE_ENTRY: str = "comp_main";
 
 test spirv__modules_whole_and_shader_capability_only {
     # #[embed] carries whatever the artifact produced, so the magic is checked.
@@ -118,7 +121,7 @@ test spirv__stages_declare_exactly_bound_bindings {
     if (!declares(?UI_VERT_SPV[0], $length_of(UI_VERT_SPV),
         true, false, false, false, false, false)) { ret 4; }
     if (!declares(?UI_FRAG_SPV[0], $length_of(UI_FRAG_SPV),
-        false, true, false, false, false, false)) { ret 5; }
+        true, true, false, false, false, false)) { ret 5; }
     ret 0;
 }
 
@@ -150,7 +153,9 @@ test spirv__uniform_blocks_match_cpu_records {
     if (!block_is(?SKINNED_VERT_SPV[0], $length_of(SKINNED_VERT_SPV), 0,
         8, $size_of(SkinnedUniforms))) { ret 2; }
     if (!block_is(?UI_VERT_SPV[0], $length_of(UI_VERT_SPV), 0,
-        4, $size_of(ScreenUniforms))) { ret 3; }
+        5, $size_of(ScreenUniforms))) { ret 3; }
+    if (!block_is(?UI_FRAG_SPV[0], $length_of(UI_FRAG_SPV), 0,
+        5, $size_of(ScreenUniforms))) { ret 5; }
     if (!block_is(?LIT_FRAG_SPV[0], $length_of(LIT_FRAG_SPV), 2,
         1, $size_of(TintUniforms))) { ret 4; }
     ret 0;

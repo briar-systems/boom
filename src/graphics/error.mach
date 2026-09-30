@@ -48,6 +48,7 @@ pub tag VkCall: u8 {
     bind_buffer_memory;
     bind_image_memory;
     map_memory;
+    invalidate_memory;
     create_image;
     create_image_view;
     create_sampler;
@@ -62,6 +63,7 @@ pub tag VkCall: u8 {
     allocate_descriptor_sets;
     create_pipeline_layout;
     create_graphics_pipelines;
+    create_compute_pipelines;
 }
 
 # a Vulkan call that returned a failing VkResult
@@ -140,15 +142,21 @@ pub tag Capacity: u8 {
     mesh_uploads;
     retired_meshes;
     glyph_pages;
+    storage_sets;
 }
 
 # why a buffer operation was refused
 # ---
-# empty:   a buffer of zero bytes
-# overrun: a write or copy larger than a buffer; carries the requested bytes
+# empty:     a buffer of zero bytes
+# overrun:   a write or copy larger than a buffer; carries the requested bytes
+# unaligned: an offset or length a GPU copy, update or indirect read needs in
+#            whole four-byte words; carries the offending value
+# bindings:  more storage buffers than MAX_STORAGE_BINDINGS, or a nil one
 pub tag BufferError: u8 {
     empty;
-    overrun: u64;
+    overrun:   u64;
+    unaligned: u64;
+    bindings:  usize;
 }
 
 # why an image operation was refused
@@ -170,7 +178,7 @@ pub tag ImageError: u8 {
 
 # why a shader was refused
 # ---
-# missing_stage: a vertex or fragment module is absent
+# missing_stage: a vertex, fragment or compute module is absent
 # spirv_words:   a module is not a whole number of SPIR-V words; carries its byte length
 # undeclared:    a draw named a shader that was never declared or was deleted
 # full:          the shader has built MAX_SHADER_PIPELINES pipelines
@@ -210,12 +218,14 @@ pub tag TargetError: u8 {
 # user_block:      a game uniform block empty or larger than USER_BYTES; carries its length
 # no_frame:        an operation that needs an open frame outside one
 # window_readback: the window's images cannot be copied from on this surface
+# pass_open:       compute or a buffer transfer recorded while a pass is open
 pub tag RendererError: u8 {
     no_mesh_upload;
     region;
     user_block: usize;
     no_frame;
     window_readback;
+    pass_open;
 }
 
 # a graphics failure
@@ -342,6 +352,7 @@ fun vk_call_message(call: VkCall) str {
     if (sel call.bind_buffer_memory)           { ret "vkBindBufferMemory failed"; }
     if (sel call.bind_image_memory)            { ret "vkBindImageMemory failed"; }
     if (sel call.map_memory)                   { ret "vkMapMemory failed"; }
+    if (sel call.invalidate_memory)            { ret "vkInvalidateMappedMemoryRanges failed"; }
     if (sel call.create_image)                 { ret "vkCreateImage failed"; }
     if (sel call.create_image_view)            { ret "vkCreateImageView failed"; }
     if (sel call.create_sampler)               { ret "vkCreateSampler failed"; }
@@ -355,6 +366,7 @@ fun vk_call_message(call: VkCall) str {
     if (sel call.create_descriptor_pool)       { ret "vkCreateDescriptorPool failed"; }
     if (sel call.allocate_descriptor_sets)     { ret "vkAllocateDescriptorSets failed"; }
     if (sel call.create_pipeline_layout)       { ret "vkCreatePipelineLayout failed"; }
+    if (sel call.create_compute_pipelines)     { ret "vkCreateComputePipelines failed"; }
     ret "vkCreateGraphicsPipelines failed";
 }
 
@@ -395,11 +407,14 @@ fun capacity_message(e: Capacity) str {
     if (sel e.mesh_uploads)   { ret "the runtime mesh upload queue is full"; }
     if (sel e.retired_meshes) { ret "too many meshes are waiting to be released"; }
     if (sel e.glyph_pages)    { ret "the glyph atlas is full"; }
+    if (sel e.storage_sets)   { ret "the frame's storage binding sets are exhausted"; }
     ret "the descriptor slot ring is full";
 }
 
 fun buffer_message(e: BufferError) str {
-    if (sel e.empty) { ret "cannot create a zero-sized buffer"; }
+    if (sel e.empty)     { ret "cannot create a zero-sized buffer"; }
+    if (sel e.unaligned) { ret "a GPU buffer offset or length is not a multiple of four bytes"; }
+    if (sel e.bindings)  { ret "too many storage buffers bound, or one is missing"; }
     ret "a write or copy exceeds the buffer";
 }
 
@@ -413,7 +428,7 @@ fun image_message(e: ImageError) str {
 }
 
 fun shader_message(e: ShaderError) str {
-    if (sel e.missing_stage) { ret "a shader needs both a vertex and a fragment module"; }
+    if (sel e.missing_stage) { ret "a shader needs a vertex and a fragment module, a compute one its module"; }
     if (sel e.spirv_words)   { ret "a shader module must be a whole number of SPIR-V words"; }
     if (sel e.undeclared)    { ret "the shader was never declared"; }
     ret "the shader has built as many pipelines as it may hold";
@@ -436,5 +451,6 @@ fun renderer_message(e: RendererError) str {
     if (sel e.region)         { ret "the pass region lies outside the pass"; }
     if (sel e.user_block)     { ret "the uniform block is empty or larger than a slot's user region"; }
     if (sel e.no_frame)       { ret "no frame is open"; }
+    if (sel e.pass_open)      { ret "compute and buffer transfers are recorded between passes"; }
     ret "the surface does not offer TRANSFER_SRC, so the window cannot be read back";
 }

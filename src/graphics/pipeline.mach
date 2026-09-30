@@ -50,12 +50,71 @@ use vk;
 # layout:     Pipeline layout, owned here.
 # set_layout: Descriptor set layout, owned here; nil when the pipeline binds
 #             no descriptors.
+# storage:    The STORAGE_SET layout, owned here; nil when the pipeline reads
+#             no game storage buffers.
 # ready:      Whether creation completed.
 pub rec Pipeline {
     handle:     vk.Pipeline;
     layout:     vk.PipelineLayout;
     set_layout: vk.DescriptorSetLayout;
+    storage:    vk.DescriptorSetLayout;
     ready:      bool;
+}
+
+# The descriptor set a game's own storage buffers arrive in.
+#
+# SET 1, IN EVERY STAGE THAT READS ONE. Set 0 is the draw's slot, whose layout
+# is fixed and shared by every graphics pipeline (see set_layout_full), so a
+# game's buffers cannot join it without every draw carrying them. A second set
+# keeps them apart, and using the same number for a compute stage means one
+# declaration, `#[storage(1, n)]`, reads the same buffer whether the stage is
+# the dispatch that writes it or the draw that reads it.
+pub val STORAGE_SET: u32 = 1;
+
+# How many storage buffers one dispatch or draw binds, at bindings 0 up to this.
+#
+# Four is the per-stage storage buffer count Vulkan guarantees, and set 0
+# already spends two of a vertex or fragment stage's on the joint palette and
+# the frame storage, so this is sized to what desktop drivers offer rather than
+# to that floor. A simulation with a source, a destination, a flag buffer and a
+# parameter block fits.
+pub val MAX_STORAGE_BINDINGS: usize = 4;
+
+# Create the STORAGE_SET layout: MAX_STORAGE_BINDINGS storage buffers visible
+# to the vertex, fragment and compute stages.
+#
+# Created per pipeline rather than shared, like the set 0 layout: Vulkan binds a
+# set to any pipeline whose layout for that set is identically defined, so two
+# identical layouts are interchangeable and neither has to outlive the other.
+pub fun storage_set_layout(v: *Vk, out: *vk.DescriptorSetLayout) err[Error] {
+    var bindings: [4]vk.DescriptorSetLayoutBinding;
+    var i:        usize = 0;
+    for (i < MAX_STORAGE_BINDINGS) {
+        bindings[i].binding            = i::u32;
+        bindings[i].descriptorType     = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount    = 1;
+        bindings[i].stageFlags         = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT | vk.SHADER_STAGE_COMPUTE_BIT;
+        bindings[i].pImmutableSamplers = nil;
+        i                              = i + 1;
+    }
+    ret create_set_layout(v, ?bindings[0], MAX_STORAGE_BINDINGS::u32, out);
+}
+
+# Create a descriptor set layout from a list of bindings, which may be empty.
+pub fun create_set_layout(v: *Vk, bindings: *vk.DescriptorSetLayoutBinding, n: u32,
+    out: *vk.DescriptorSetLayout) err[Error] {
+    var ci: vk.DescriptorSetLayoutCreateInfo;
+    ci.sType        = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    ci.pNext        = nil;
+    ci.flags        = 0;
+    ci.bindingCount = n;
+    ci.pBindings    = bindings;
+    val rc: i32 = vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out);
+    if (rc != vk.SUCCESS) {
+        @out = nil;
+        ret err[Error].err{vk_failed(VkCall.create_descriptor_set_layout{}, rc)};
+    }
+    ret err[Error].ok{};
 }
 
 # How a pipeline combines fragment output with an existing colour attachment.
@@ -453,19 +512,7 @@ fun make_set_layout(v: *Vk, l: *SetLayout, out: *vk.DescriptorSetLayout) err[Err
         i = i + 1;
     }
     if (n == 0) { ret err[Error].err{Error.pipeline{PipelineError.no_bindings{}}}; }
-
-    var ci: vk.DescriptorSetLayoutCreateInfo;
-    ci.sType        = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    ci.pNext        = nil;
-    ci.flags        = 0;
-    ci.bindingCount = n;
-    ci.pBindings    = ?bindings[0];
-    val rc: i32 = vk.vkCreateDescriptorSetLayout(v.device, ?ci, nil, out);
-    if (rc != vk.SUCCESS) {
-        @out = nil;
-        ret err[Error].err{vk_failed(VkCall.create_descriptor_set_layout{}, rc)};
-    }
-    ret err[Error].ok{};
+    ret create_set_layout(v, ?bindings[0], n, out);
 }
 
 # Map a public blend mode to the fixed state baked into a Vulkan pipeline.
@@ -514,10 +561,23 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     d: *PipelineDesc, depth: DepthConvention,
     vert: *u8, vlen: usize, frag: *u8, flen: usize,
     layout: *SetLayout) err[Error] {
+    ret pipeline_init_sets(p, v, pass, targets, f, d, depth, vert, vlen, frag, flen, layout, false);
+}
+
+# build a pipeline, with the STORAGE_SET in its layout when storage is set
+#
+# a game's Shader always takes it, so any of its stages may read a game's
+# storage buffers. the built-in programs never read one and do not.
+pub fun pipeline_init_sets(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
+    targets: usize, f: *VertexFormat,
+    d: *PipelineDesc, depth: DepthConvention,
+    vert: *u8, vlen: usize, frag: *u8, flen: usize,
+    layout: *SetLayout, storage: bool) err[Error] {
     p.ready      = false;
     p.handle     = nil;
     p.layout     = nil;
     p.set_layout = nil;
+    p.storage    = nil;
 
     if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
@@ -538,13 +598,26 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
         ret sr;
     }
 
-    var set_layout: vk.DescriptorSetLayout = p.set_layout;
-    var lci:        vk.PipelineLayoutCreateInfo;
+    var set_layouts: [2]vk.DescriptorSetLayout;
+    set_layouts[0] = p.set_layout;
+    var set_count: u32 = 1;
+    if (storage) {
+        val str: err[Error] = storage_set_layout(v, ?p.storage);
+        if (sel str.err) {
+            pipeline_dnit(p, v);
+            vk.vkDestroyShaderModule(v.device, vmod, nil);
+            vk.vkDestroyShaderModule(v.device, fmod, nil);
+            ret str;
+        }
+        set_layouts[STORAGE_SET] = p.storage;
+        set_count                = STORAGE_SET + 1;
+    }
+    var lci: vk.PipelineLayoutCreateInfo;
     lci.sType                  = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     lci.pNext                  = nil;
     lci.flags                  = 0;
-    lci.setLayoutCount         = 1;
-    lci.pSetLayouts            = ?set_layout;
+    lci.setLayoutCount         = set_count;
+    lci.pSetLayouts            = ?set_layouts[0];
     lci.pushConstantRangeCount = 0;
     lci.pPushConstantRanges    = nil;
     val laid: i32 = vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?p.layout);
@@ -588,10 +661,13 @@ pub fun pipeline_init_depth(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     val nattrs: u32 = described.some;
 
     var vi: vk.PipelineVertexInputStateCreateInfo;
-    vi.sType                           = vk.STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vi.pNext                           = nil;
-    vi.flags                           = 0;
-    vi.vertexBindingDescriptionCount   = 1;
+    vi.sType = vk.STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vi.pNext = nil;
+    vi.flags = 0;
+    # a draw that pulls its geometry from storage buffers has no vertex input
+    # at all, and a binding with no attributes behind it is not one
+    vi.vertexBindingDescriptionCount = 1;
+    if (nattrs == 0) { vi.vertexBindingDescriptionCount = 0; }
     vi.pVertexBindingDescriptions      = ?binding;
     vi.vertexAttributeDescriptionCount = nattrs;
     vi.pVertexAttributeDescriptions    = ?attrs[0];
@@ -773,6 +849,10 @@ pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
     if (p.set_layout != nil) {
         vk.vkDestroyDescriptorSetLayout(v.device, p.set_layout, nil);
         p.set_layout = nil;
+    }
+    if (p.storage != nil) {
+        vk.vkDestroyDescriptorSetLayout(v.device, p.storage, nil);
+        p.storage = nil;
     }
     p.ready = false;
 }

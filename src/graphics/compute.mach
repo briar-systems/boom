@@ -1,0 +1,708 @@
+# Compute: storage buffers a game owns, compute pipelines, and the readback of
+# what a dispatch wrote.
+#
+# WHAT THIS IS FOR. A simulation that runs on the GPU keeps its state in
+# buffers the GPU owns, steps it with a compute stage every frame, and draws it
+# straight from those buffers, so the state never crosses to the CPU except for
+# the little the game asks to see. This module is the resources for that: the
+# StorageBuffer the state lives in, the Compute pipeline that steps it, and the
+# Readback that brings a small part of it back. The renderer records them into
+# the frame (renderer_dispatch, renderer_buffer_update, renderer_readback,
+# pass_draw_storage), because only there can they be ordered against the draws.
+#
+# A GAME'S BUFFERS ARRIVE IN STORAGE_SET. A dispatch and a draw both take a list
+# of StorageBuffers, and the buffer at index n of the list is binding n of set 1,
+# so a stage declares `#[storage(1, n)]` whichever kind it is. Set 0 of a draw
+# stays the slot every draw has; set 0 of a compute stage is empty.
+#
+# ORDERING IS THE RENDERER'S, NOT THE GAME'S. Every dispatch, update and
+# readback is recorded between passes in the frame's one command buffer, on the
+# one queue that draws, with a barrier on each side that orders it against
+# every shader, transfer and indirect read before and after it. A game never
+# names a stage or an access mask: a dispatch that writes what a later pass
+# draws is correct because it was recorded first. The barriers are coarser than
+# a hand-tuned renderer would use, which costs a little overlap between a
+# dispatch and the draws around it and buys never racing.
+#
+# WHAT IS NOT HERE YET. Storage images, workgroup shared memory, barriers inside
+# a stage and atomics need compiler support that does not exist yet
+# (briar-systems/mach#4252), so a compute stage reads and writes buffers only.
+
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_barrier_all;
+use boom.graphics.buffer.buffer_copy_at;
+use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_init_prefer;
+use boom.graphics.buffer.buffer_invalidate;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_write;
+use boom.graphics.buffer.oneshot_begin;
+use boom.graphics.buffer.oneshot_submit;
+use boom.graphics.device.Device;
+use boom.graphics.error.BufferError;
+use boom.graphics.error.Error;
+use boom.graphics.error.ShaderError;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.pipeline.MAX_STORAGE_BINDINGS;
+use boom.graphics.pipeline.STORAGE_SET;
+use boom.graphics.pipeline.create_set_layout;
+use boom.graphics.pipeline.shader_module;
+use boom.graphics.pipeline.storage_set_layout;
+use boom.graphics.spirv.COMPUTE_ENTRY;
+use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_wait_idle;
+use mem: std.memory;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
+
+# How many storage binding sets one frame may take: one per dispatch and one per
+# storage draw.
+pub val MAX_STORAGE_SETS: usize = 256;
+
+# The size of the arguments an indirect dispatch reads: three u32 group counts.
+pub val DISPATCH_ARGS_BYTES: usize = 12;
+
+# The size of the arguments an indirect draw reads: vertex count, instance
+# count, first vertex and first instance, four u32.
+pub val DRAW_ARGS_BYTES: usize = 16;
+
+# A buffer on the GPU a game's stages read and write.
+#
+# Device-local, so a stage reads it at full speed, and never mapped: the CPU
+# reaches it through storage_buffer_upload and storage_buffer_read, which stall,
+# or through renderer_buffer_update and renderer_readback, which are recorded in
+# the frame and do not. The same buffer may be bound to a dispatch, bound to a
+# draw, and read as indirect arguments, in any order within a frame.
+# ---
+# buffer: the buffer and its memory
+# ready:  whether it was created and not yet deleted
+pub rec StorageBuffer {
+    buffer: Buffer;
+    ready:  bool;
+}
+
+# Create a storage buffer of size bytes, zero-filled.
+#
+# Zeroed rather than left as whatever the allocation held, because a simulation
+# that forgets to seed a buffer should step from nothing rather than from the
+# last program's memory. Waits for the fill, so this belongs at load time.
+# ---
+# d:    the device, from renderer_device
+# size: bytes, a whole number of four-byte words
+# ret:  the buffer, or why it could not be made
+pub fun storage_buffer(d: *Device, size: usize) res[StorageBuffer, Error] {
+    var b: StorageBuffer;
+    b.ready = false;
+    if (d == nil || !d.ready) { ret res[StorageBuffer, Error].err{Error.uninitialized{Stage.upload{}}}; }
+    if (size == 0)            { ret res[StorageBuffer, Error].err{Error.buffer{BufferError.empty{}}}; }
+    if ((size % 4) != 0)      { ret res[StorageBuffer, Error].err{Error.buffer{BufferError.unaligned{size::u64}}}; }
+
+    val v:  *Vk        = d.vk;
+    val ir: err[Error] = buffer_init(?b.buffer, v, size::u64,
+        vk.BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.BUFFER_USAGE_INDIRECT_BUFFER_BIT
+        | vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
+        | vk.BUFFER_USAGE_TRANSFER_SRC_BIT | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (sel ir.err) { ret res[StorageBuffer, Error].err{ir.err}; }
+
+    val begun: res[vk.CommandBuffer, Error] = oneshot_begin(v, d.pool);
+    if (sel begun.err) {
+        buffer_dnit(?b.buffer, v);
+        ret res[StorageBuffer, Error].err{begun.err};
+    }
+    vk.vkCmdFillBuffer(begun.ok, b.buffer.handle, 0, vk.WHOLE_SIZE, 0);
+    buffer_barrier_all(begun.ok);
+    val sr: err[Error] = oneshot_submit(v, d.pool, begun.ok);
+    if (sel sr.err) {
+        buffer_dnit(?b.buffer, v);
+        ret res[StorageBuffer, Error].err{sr.err};
+    }
+
+    b.ready        = true;
+    v.live.buffers = v.live.buffers + 1;
+    ret res[StorageBuffer, Error].ok{b};
+}
+
+# The buffer's size in bytes.
+pub fun storage_buffer_size(b: *StorageBuffer) usize {
+    if (!b.ready) { ret 0; }
+    ret b.buffer.size::usize;
+}
+
+# Write bytes into a storage buffer, waiting until the GPU holds them.
+#
+# A STALL. Staged and copied on a one-shot command buffer the queue is drained
+# for, which is right for seeding a buffer at load and wrong every frame; a
+# frame's own writes go through renderer_buffer_update, which is recorded in
+# order with the dispatches and draws that read them. Ordered after everything
+# already submitted, so a frame in flight still reading the buffer finishes
+# first.
+# ---
+# d:      the device
+# b:      the buffer
+# offset: the byte offset to write at
+# src:    the bytes
+# len:    how many
+# ret:    ok, or overrun when the range does not fit the buffer
+pub fun storage_buffer_upload(d: *Device, b: *StorageBuffer, offset: usize, src: *u8, len: usize) err[Error] {
+    val checked: err[Error] = storage_range(d, b, offset, len);
+    if (sel checked.err) { ret checked; }
+    if (src == nil)      { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+
+    val v:       *Vk        = d.vk;
+    var staging: Buffer;
+    val sr:      err[Error] = buffer_init(?staging, v, len::u64, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (sel sr.err) { ret sr; }
+    val wr: err[Error] = buffer_write(?staging, v, src, len::u64);
+    if (sel wr.err) {
+        buffer_dnit(?staging, v);
+        ret wr;
+    }
+    val cr: err[Error] = buffer_copy_at(v, d.pool, ?staging, 0, ?b.buffer, offset::u64, len::u64);
+    buffer_dnit(?staging, v);
+    ret cr;
+}
+
+# Read bytes back from a storage buffer, waiting for everything submitted first.
+#
+# A STALL, and a full one: the copy is ordered after every frame already
+# submitted, so it sees what their dispatches wrote, and the CPU waits for it.
+# That is what a test or a save wants. A game watching a flag every frame wants
+# renderer_readback, which costs nothing but latency.
+# ---
+# d:      the device
+# b:      the buffer
+# offset: the byte offset to read from
+# out:    where the bytes land
+# len:    how many
+# ret:    ok, or overrun when the range does not fit the buffer
+pub fun storage_buffer_read(d: *Device, b: *StorageBuffer, offset: usize, out: *u8, len: usize) err[Error] {
+    val checked: err[Error] = storage_range(d, b, offset, len);
+    if (sel checked.err) { ret checked; }
+    if (out == nil)      { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+
+    val v:       *Vk        = d.vk;
+    var staging: Buffer;
+    val sr:      err[Error] = buffer_init_prefer(?staging, v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
+    if (sel sr.err) { ret sr; }
+    val cr: err[Error] = buffer_copy_at(v, d.pool, ?b.buffer, offset::u64, ?staging, 0, len::u64);
+    if (sel cr.err) {
+        buffer_dnit(?staging, v);
+        ret cr;
+    }
+    val mapped: res[ptr, Error] = buffer_map(?staging, v);
+    if (sel mapped.err) {
+        buffer_dnit(?staging, v);
+        ret err[Error].err{mapped.err};
+    }
+    val seen: err[Error] = buffer_invalidate(?staging, v);
+    if (sel seen.err) {
+        buffer_dnit(?staging, v);
+        ret seen;
+    }
+    mem.raw_copy(out::ptr, mapped.ok, len);
+    buffer_dnit(?staging, v);
+    ret err[Error].ok{};
+}
+
+# Delete a storage buffer.
+#
+# Waits for the device first, since a frame in flight may still read it.
+pub fun storage_buffer_delete(d: *Device, b: *StorageBuffer) {
+    if (d == nil || !d.ready || !b.ready) { ret; }
+    vk_wait_idle(d.vk);
+    buffer_dnit(?b.buffer, d.vk);
+    b.ready = false;
+    if (d.vk.live.buffers > 0) { d.vk.live.buffers = d.vk.live.buffers - 1; }
+}
+
+# the range [offset, offset + len) of a live buffer, or why not
+fun storage_range(d: *Device, b: *StorageBuffer, offset: usize, len: usize) err[Error] {
+    if (d == nil || !d.ready) { ret err[Error].err{Error.uninitialized{Stage.upload{}}}; }
+    if (b == nil || !b.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    if (len == 0)             { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    ret storage_fits(b.buffer.size::usize, offset, len);
+}
+
+# whether [offset, offset + len) lies inside size bytes, without overflowing
+pub fun storage_fits(size: usize, offset: usize, len: usize) err[Error] {
+    if (offset > size || len > size - offset) {
+        ret err[Error].err{Error.buffer{BufferError.overrun{(offset + len)::u64}}};
+    }
+    ret err[Error].ok{};
+}
+
+# whether an offset and length a GPU transfer or indirect read takes are whole
+# words inside size bytes
+pub fun storage_words(size: usize, offset: usize, len: usize) err[Error] {
+    if ((offset % 4) != 0) { ret err[Error].err{Error.buffer{BufferError.unaligned{offset::u64}}}; }
+    if ((len % 4) != 0)    { ret err[Error].err{Error.buffer{BufferError.unaligned{len::u64}}}; }
+    ret storage_fits(size, offset, len);
+}
+
+# Whether a list of storage buffers can be bound: at most MAX_STORAGE_BINDINGS,
+# none of them nil or deleted.
+#
+# Checked before anything is recorded, because a binding naming a destroyed
+# buffer is a descriptor pointing at freed memory, and the driver says nothing.
+pub fun storage_bindings_valid(buffers: **StorageBuffer, count: usize) err[Error] {
+    if (count > MAX_STORAGE_BINDINGS) { ret err[Error].err{Error.buffer{BufferError.bindings{count}}}; }
+    if (count > 0 && buffers == nil)  { ret err[Error].err{Error.buffer{BufferError.bindings{count}}}; }
+    var i: usize = 0;
+    for (i < count) {
+        val b: *StorageBuffer = buffers[i];
+        if (b == nil || !b.ready) { ret err[Error].err{Error.buffer{BufferError.bindings{i}}}; }
+        i = i + 1;
+    }
+    ret err[Error].ok{};
+}
+
+# A compute stage, built into a pipeline.
+#
+# Unlike a Shader nothing about a compute pipeline depends on where it is used,
+# so it is built here, once, and a malformed module is reported at the call that
+# supplied it rather than at the first dispatch.
+#
+# The stage's entry point is comp_main, sized by its own #[workgroup], and it
+# reads its buffers at STORAGE_SET. The SPIR-V is not kept.
+# ---
+# pipeline: the compute pipeline
+# layout:   its layout: an empty set 0 and the STORAGE_SET
+# empty:    the empty set 0 layout
+# storage:  the STORAGE_SET layout
+# ready:    whether it was built and not yet deleted
+pub rec Compute {
+    pipeline: vk.Pipeline;
+    layout:   vk.PipelineLayout;
+    empty:    vk.DescriptorSetLayout;
+    storage:  vk.DescriptorSetLayout;
+    ready:    bool;
+}
+
+# Build a compute pipeline from a SPIR-V module.
+# ---
+# c:   the compute to initialise
+# d:   the device, from renderer_device
+# spv: the module's bytes, usually an #[embed]ed artifact
+# len: its length in bytes
+# ret: ok, or why the module or pipeline was refused
+pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
+    c.pipeline = nil;
+    c.layout   = nil;
+    c.empty    = nil;
+    c.storage  = nil;
+    c.ready    = false;
+    if (spv == nil)                 { ret err[Error].err{Error.shader{ShaderError.missing_stage{}}}; }
+    if (len < 20 || (len % 4) != 0) { ret err[Error].err{Error.shader{ShaderError.spirv_words{len}}}; }
+    if (d == nil || !d.ready)       { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
+    val v: *Vk = d.vk;
+
+    val er: err[Error] = create_set_layout(v, nil, 0, ?c.empty);
+    if (sel er.err) { ret er; }
+    val sr: err[Error] = storage_set_layout(v, ?c.storage);
+    if (sel sr.err) {
+        compute_release(c, v);
+        ret sr;
+    }
+
+    var layouts: [2]vk.DescriptorSetLayout;
+    layouts[0]           = c.empty;
+    layouts[STORAGE_SET] = c.storage;
+    var lci: vk.PipelineLayoutCreateInfo;
+    lci.sType                  = vk.STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    lci.pNext                  = nil;
+    lci.flags                  = 0;
+    lci.setLayoutCount         = STORAGE_SET + 1;
+    lci.pSetLayouts            = ?layouts[0];
+    lci.pushConstantRangeCount = 0;
+    lci.pPushConstantRanges    = nil;
+    val laid: i32 = vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?c.layout);
+    if (laid != vk.SUCCESS) {
+        c.layout = nil;
+        compute_release(c, v);
+        ret err[Error].err{vk_failed(VkCall.create_pipeline_layout{}, laid)};
+    }
+
+    var module: vk.ShaderModule;
+    val mr:     err[Error] = shader_module(v, spv, len, ?module);
+    if (sel mr.err) {
+        compute_release(c, v);
+        ret mr;
+    }
+
+    var ci: vk.ComputePipelineCreateInfo;
+    ci.sType                     = vk.STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    ci.pNext                     = nil;
+    ci.flags                     = 0;
+    ci.stage.sType               = vk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.pNext               = nil;
+    ci.stage.flags               = 0;
+    ci.stage.stage               = vk.SHADER_STAGE_COMPUTE_BIT::i32;
+    ci.stage.module              = module;
+    ci.stage.pName               = COMPUTE_ENTRY::*u8;
+    ci.stage.pSpecializationInfo = nil;
+    ci.layout                    = c.layout;
+    ci.basePipelineHandle        = nil;
+    ci.basePipelineIndex         = -1;
+    val rc: i32 = vk.vkCreateComputePipelines(v.device, nil, 1, ?ci, nil, ?c.pipeline);
+    vk.vkDestroyShaderModule(v.device, module, nil);
+    if (rc != vk.SUCCESS) {
+        c.pipeline = nil;
+        compute_release(c, v);
+        ret err[Error].err{vk_failed(VkCall.create_compute_pipelines{}, rc)};
+    }
+
+    c.ready         = true;
+    v.live.computes = v.live.computes + 1;
+    ret err[Error].ok{};
+}
+
+# Delete a compute pipeline, waiting for the device first.
+pub fun compute_delete(c: *Compute, d: *Device) {
+    if (d == nil || !d.ready || !c.ready) { ret; }
+    vk_wait_idle(d.vk);
+    compute_release(c, d.vk);
+    if (d.vk.live.computes > 0) { d.vk.live.computes = d.vk.live.computes - 1; }
+}
+
+fun compute_release(c: *Compute, v: *Vk) {
+    if (c.pipeline != nil) { vk.vkDestroyPipeline(v.device, c.pipeline, nil); }
+    if (c.layout != nil)   { vk.vkDestroyPipelineLayout(v.device, c.layout, nil); }
+    if (c.storage != nil)  { vk.vkDestroyDescriptorSetLayout(v.device, c.storage, nil); }
+    if (c.empty != nil)    { vk.vkDestroyDescriptorSetLayout(v.device, c.empty, nil); }
+    c.pipeline = nil;
+    c.layout   = nil;
+    c.storage  = nil;
+    c.empty    = nil;
+    c.ready    = false;
+}
+
+# A copy of part of a storage buffer, brought back to the CPU without a stall.
+#
+# ONE STAGING BUFFER PER FRAME IN FLIGHT. renderer_readback records a copy into
+# the one the frame being recorded owns, and the bytes are not there until that
+# frame has run, which the renderer knows once it has waited on that frame's
+# fence again. renderer_readback_take hands back the newest copy that has
+# landed, so a game asking every frame sees what the GPU held
+# MAX_FRAMES_IN_FLIGHT frames ago, and never waits for it.
+# ---
+# slots:  host-visible staging, cached where the device offers it, one per frame in flight
+# serial: the renderer frame each slot's copy was recorded in, zero when none
+# taken:  the frame of the newest copy already handed back
+# len:    bytes per copy
+# ready:  whether it was created and not yet deleted
+pub rec Readback {
+    slots:  [2]Buffer;
+    serial: [2]u64;
+    taken:  u64;
+    len:    usize;
+    ready:  bool;
+}
+
+# Create a readback of len bytes.
+pub fun readback(rb: *Readback, d: *Device, len: usize) err[Error] {
+    rb.ready = false;
+    rb.len   = 0;
+    rb.taken = 0;
+    if (d == nil || !d.ready) { ret err[Error].err{Error.uninitialized{Stage.upload{}}}; }
+    if (len == 0)             { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    val v: *Vk   = d.vk;
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        rb.serial[i] = 0;
+        # cached, so the host reads it at memory speed rather than across the bus
+        val br: err[Error] = buffer_init_prefer(?rb.slots[i], v, len::u64, vk.BUFFER_USAGE_TRANSFER_DST_BIT,
+            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT, vk.MEMORY_PROPERTY_HOST_CACHED_BIT);
+        if (sel br.err) {
+            var j: usize = 0;
+            for (j < i) {
+                buffer_dnit(?rb.slots[j], v);
+                j = j + 1;
+            }
+            ret br;
+        }
+        i = i + 1;
+    }
+    rb.len         = len;
+    rb.ready       = true;
+    v.live.buffers = v.live.buffers + 1;
+    ret err[Error].ok{};
+}
+
+# The bytes one readback copies.
+pub fun readback_len(rb: *Readback) usize {
+    ret rb.len;
+}
+
+# Delete a readback, waiting for the device first.
+pub fun readback_delete(rb: *Readback, d: *Device) {
+    if (d == nil || !d.ready || !rb.ready) { ret; }
+    vk_wait_idle(d.vk);
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        buffer_dnit(?rb.slots[i], d.vk);
+        i = i + 1;
+    }
+    rb.ready = false;
+    if (d.vk.live.buffers > 0) { d.vk.live.buffers = d.vk.live.buffers - 1; }
+}
+
+# The slot holding the newest copy recorded no later than completed and newer
+# than the last one taken, if any.
+#
+# Pure, so the rule that decides which bytes a game sees is tested without a
+# device: a copy still in flight is never handed back, and an older one is never
+# handed back after a newer one.
+pub fun readback_ready(rb: *Readback, completed: u64) opt[usize] {
+    var best:   opt[usize] = opt[usize].none{};
+    var serial: u64        = rb.taken;
+    var i:      usize      = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        val s: u64 = rb.serial[i];
+        if (s != 0 && s <= completed && s > serial) {
+            best   = opt[usize].some{i};
+            serial = s;
+        }
+        i = i + 1;
+    }
+    ret best;
+}
+
+# The per-frame descriptor sets that bind a game's storage buffers.
+#
+# ONE POOL PER FRAME IN FLIGHT, RESET WHOLE. A set names the buffers of one
+# dispatch or draw, and it cannot be rewritten while a frame in flight may still
+# bind it, so each frame allocates fresh sets from its own pool and the pool is
+# reset when the frame's fence proves them unused.
+# ---
+# layout: the STORAGE_SET layout sets are allocated against
+# pools:  one pool per frame in flight
+# used:   sets taken from each pool this frame
+# ready:  whether the pools exist
+pub rec StorageSets {
+    layout: vk.DescriptorSetLayout;
+    pools:  [2]vk.DescriptorPool;
+    used:   [2]usize;
+    ready:  bool;
+}
+
+# Create the storage set layout and a pool per frame in flight.
+pub fun storage_sets_init(ss: *StorageSets, v: *Vk) err[Error] {
+    ss.ready  = false;
+    ss.layout = nil;
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        ss.pools[i] = nil;
+        ss.used[i]  = 0;
+        i           = i + 1;
+    }
+    val lr: err[Error] = storage_set_layout(v, ?ss.layout);
+    if (sel lr.err) { ret lr; }
+
+    var size: vk.DescriptorPoolSize;
+    size.type            = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    size.descriptorCount = (MAX_STORAGE_SETS * MAX_STORAGE_BINDINGS)::u32;
+    var ci: vk.DescriptorPoolCreateInfo;
+    ci.sType         = vk.STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    ci.pNext         = nil;
+    ci.flags         = 0;
+    ci.maxSets       = MAX_STORAGE_SETS::u32;
+    ci.poolSizeCount = 1;
+    ci.pPoolSizes    = ?size;
+    i                = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        val rc: i32 = vk.vkCreateDescriptorPool(v.device, ?ci, nil, ?ss.pools[i]);
+        if (rc != vk.SUCCESS) {
+            ss.pools[i] = nil;
+            ss.ready    = true;
+            storage_sets_dnit(ss, v);
+            ret err[Error].err{vk_failed(VkCall.create_descriptor_pool{}, rc)};
+        }
+        i = i + 1;
+    }
+    ss.ready = true;
+    ret err[Error].ok{};
+}
+
+# Free every set a frame took, once its fence has been waited on.
+pub fun storage_sets_begin_frame(ss: *StorageSets, v: *Vk, frame: usize) {
+    if (!ss.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret; }
+    vk.vkResetDescriptorPool(v.device, ss.pools[frame], 0);
+    ss.used[frame] = 0;
+}
+
+# Take a set for this frame naming buffers at bindings 0 up to count.
+#
+# None when the frame has taken MAX_STORAGE_SETS already, which the caller counts
+# as a dropped dispatch or draw. The list is assumed checked by
+# storage_bindings_valid.
+pub fun storage_sets_take(ss: *StorageSets, v: *Vk, frame: usize,
+    buffers: **StorageBuffer, count: usize) opt[vk.DescriptorSet] {
+    if (!ss.ready || frame >= MAX_FRAMES_IN_FLIGHT) { ret opt[vk.DescriptorSet].none{}; }
+    if (ss.used[frame] >= MAX_STORAGE_SETS)         { ret opt[vk.DescriptorSet].none{}; }
+
+    var set:    vk.DescriptorSet;
+    var layout: vk.DescriptorSetLayout = ss.layout;
+    var ai:     vk.DescriptorSetAllocateInfo;
+    ai.sType              = vk.STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.pNext              = nil;
+    ai.descriptorPool     = ss.pools[frame];
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts        = ?layout;
+    if (vk.vkAllocateDescriptorSets(v.device, ?ai, ?set) != vk.SUCCESS) {
+        ret opt[vk.DescriptorSet].none{};
+    }
+    ss.used[frame] = ss.used[frame] + 1;
+
+    var infos:  [4]vk.DescriptorBufferInfo;
+    var writes: [4]vk.WriteDescriptorSet;
+    var i:      usize = 0;
+    for (i < count) {
+        infos[i].buffer            = buffers[i].buffer.handle;
+        infos[i].offset            = 0;
+        infos[i].range             = vk.WHOLE_SIZE;
+        writes[i].sType            = vk.STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].pNext            = nil;
+        writes[i].dstSet           = set;
+        writes[i].dstBinding       = i::u32;
+        writes[i].dstArrayElement  = 0;
+        writes[i].descriptorCount  = 1;
+        writes[i].descriptorType   = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pImageInfo       = nil;
+        writes[i].pBufferInfo      = ?infos[i];
+        writes[i].pTexelBufferView = nil;
+        i                          = i + 1;
+    }
+    if (count > 0) { vk.vkUpdateDescriptorSets(v.device, count::u32, ?writes[0], 0, nil); }
+    ret opt[vk.DescriptorSet].some{set};
+}
+
+# Destroy the pools and the layout.
+pub fun storage_sets_dnit(ss: *StorageSets, v: *Vk) {
+    if (!ss.ready) { ret; }
+    var i: usize = 0;
+    for (i < MAX_FRAMES_IN_FLIGHT) {
+        if (ss.pools[i] != nil) { vk.vkDestroyDescriptorPool(v.device, ss.pools[i], nil); }
+        ss.pools[i] = nil;
+        i           = i + 1;
+    }
+    if (ss.layout != nil) { vk.vkDestroyDescriptorSetLayout(v.device, ss.layout, nil); }
+    ss.layout = nil;
+    ss.ready  = false;
+}
+
+# The barrier recorded on each side of a dispatch or buffer transfer.
+#
+# Every stage that reads or writes a storage buffer, before and after: indirect
+# argument reads, vertex input, vertex and fragment shading, compute and
+# transfer. Before a dispatch it makes earlier draws finish reading what the
+# dispatch overwrites and earlier writes visible to it; after, it makes what the
+# dispatch wrote visible to every later draw, dispatch, indirect read and copy.
+# That is the whole of the ordering contract, and it is why a game never states
+# one. extra_stage and extra_access widen the destination, which a readback
+# does for the host.
+pub fun storage_barrier(cmd: vk.CommandBuffer, extra_stage: u32, extra_access: u32) {
+    val stages: u32 = vk.PIPELINE_STAGE_DRAW_INDIRECT_BIT | vk.PIPELINE_STAGE_VERTEX_INPUT_BIT
+        | vk.PIPELINE_STAGE_VERTEX_SHADER_BIT | vk.PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+        | vk.PIPELINE_STAGE_COMPUTE_SHADER_BIT | vk.PIPELINE_STAGE_TRANSFER_BIT;
+    var mb: vk.MemoryBarrier;
+    mb.sType         = vk.STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.pNext         = nil;
+    mb.srcAccessMask = vk.ACCESS_SHADER_WRITE_BIT | vk.ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = vk.ACCESS_INDIRECT_COMMAND_READ_BIT | vk.ACCESS_VERTEX_ATTRIBUTE_READ_BIT
+        | vk.ACCESS_SHADER_READ_BIT | vk.ACCESS_SHADER_WRITE_BIT
+        | vk.ACCESS_TRANSFER_READ_BIT | vk.ACCESS_TRANSFER_WRITE_BIT | extra_access;
+    vk.vkCmdPipelineBarrier(cmd, stages, stages | extra_stage, 0, 1, ?mb, 0, nil, 0, nil);
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Creating anything here needs a device, which examples/compute exercises under
+# lavapipe. What is pure is the validation in front of every recorded command
+# and the rule for which readback copy a game is handed.
+
+test storage_words__alignment_and_bounds {
+    if (!accepted(storage_words(64, 0, 64))) { ret 1; }
+    if (!accepted(storage_words(64, 60, 4))) { ret 2; }
+    if (accepted(storage_words(64, 2, 4)))   { ret 3; }
+    if (accepted(storage_words(64, 0, 6)))   { ret 4; }
+    if (accepted(storage_words(64, 60, 8)))  { ret 5; }
+    # an offset past the end refuses rather than wrapping the subtraction
+    if (accepted(storage_fits(64, 68, 0))) { ret 6; }
+    ret 0;
+}
+
+#[testing]
+fun accepted(r: err[Error]) bool {
+    ret sel r.ok;
+}
+
+test storage_bindings_valid__count_nil_and_deleted {
+    var a:    StorageBuffer;
+    var b:    StorageBuffer;
+    var list: [5]*StorageBuffer;
+    a.ready = true;
+    b.ready = true;
+    list[0] = ?a;
+    list[1] = ?b;
+    list[2] = ?a;
+    list[3] = ?b;
+    list[4] = ?a;
+    if (!accepted(storage_bindings_valid(?list[0], 2))) { ret 1; }
+    if (!accepted(storage_bindings_valid(nil, 0)))      { ret 2; }
+    if (accepted(storage_bindings_valid(?list[0], 5)))  { ret 3; }
+    b.ready = false;
+    if (!refused_at(storage_bindings_valid(?list[0], 2), 1)) { ret 4; }
+    ret 0;
+}
+
+#[testing]
+fun refused_at(r: err[Error], index: usize) bool {
+    ret sel r.err && (sel r.err.buffer && (sel r.err.buffer.bindings && r.err.buffer.bindings == index));
+}
+
+#[testing]
+fun picked(o: opt[usize], want: usize) bool {
+    ret sel o.some && o.some == want;
+}
+
+#[testing]
+fun nothing(o: opt[usize]) bool {
+    ret sel o.none;
+}
+
+test readback_ready__newest_completed_once {
+    var rb: Readback;
+    rb.taken     = 0;
+    rb.serial[0] = 0;
+    rb.serial[1] = 0;
+    if (!nothing(readback_ready(?rb, 10))) { ret 1; }
+
+    # frame 5 has landed, frame 6 is still in flight
+    rb.serial[0] = 5;
+    rb.serial[1] = 6;
+    if (!picked(readback_ready(?rb, 5), 0)) { ret 2; }
+    rb.taken = 5;
+    # nothing newer has landed, so the same copy is not handed back twice
+    if (!nothing(readback_ready(?rb, 5)))   { ret 3; }
+    if (!picked(readback_ready(?rb, 6), 1)) { ret 4; }
+
+    # both landed: the newer wins, whichever slot holds it
+    rb.taken     = 0;
+    rb.serial[0] = 9;
+    rb.serial[1] = 8;
+    if (!picked(readback_ready(?rb, 9), 0)) { ret 5; }
+    ret 0;
+}
