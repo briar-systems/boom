@@ -30,6 +30,8 @@ use glfw;
 use glfw.c.Vidmode;
 use allo: std.allocator;
 use std.allocator.page;
+use std.print;
+use std.process.env;
 use text: std.text.string;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -659,7 +661,8 @@ pub fun window_clipboard_get(a: *allo.Allocator, w: *Window) res[str, allo.Error
 # replace the clipboard's text
 #
 # the platform copies the text before this returns. a closed window leaves
-# the clipboard untouched.
+# the clipboard untouched. wayland only honours a write while the window has
+# input focus, so a write from an unfocused window may be dropped.
 # ---
 # w:        window the platform clipboard is written through
 # contents: UTF-8 text to place on the clipboard
@@ -1083,5 +1086,40 @@ test window_clipboard__closed_window_reads_empty {
     if (!str_equals(got.ok, "")) { ret 2; }
     val freed: err[allo.Error] = text.str_free(?a, got.ok);
     if (!sel freed.ok) { ret 3; }
+    ret 0;
+}
+
+# set by a check that has a display, so a window that will not open fails there
+# instead of skipping
+fun window_required() bool {
+    var buf: [8]u8;
+    val got: res[opt[usize], env.EnvError] = env.get("BOOM_REQUIRE_WINDOW", ?buf[0], 8);
+    ret sel got.ok && sel got.ok.some;
+}
+
+test window_clipboard__round_trips_utf8 {
+    val opened: res[Window, WindowError] = window_open(64, 64, "boom clipboard test");
+    if (sel opened.err) {
+        if (window_required()) { ret 1; }
+        print.eprintln("skipped: no window can be opened here");
+        ret 0;
+    }
+    var w: Window = opened.ok;
+    var a: allo.Allocator;
+    page.make(?a);
+
+    val sent: str = "héllo ✓ 日本";
+    window_clipboard_set(?w, sent);
+    val got: res[str, allo.Error] = window_clipboard_get(?a, ?w);
+    if (!sel got.ok) { ret 2; }
+    if (!str_equals(got.ok, sent)) {
+        # wayland and some clipboard managers refuse a write from an unfocused window
+        if (window_required()) { ret 3; }
+        print.eprintln("skipped: the platform did not take the clipboard write");
+        ret 0;
+    }
+    val freed: err[allo.Error] = text.str_free(?a, got.ok);
+    if (!sel freed.ok) { ret 4; }
+    window_close(?w);
     ret 0;
 }
