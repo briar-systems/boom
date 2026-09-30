@@ -3160,6 +3160,30 @@ pub fun pass_draw_triangles(p: *Pass, vertices: ptr, vertex_count: i32, texture:
         vertex_count::usize);
 }
 
+# submit a draw list's triangles with the texture sampled by a stated filter
+#
+# pass_draw_triangles leaves the filter to the pass material, which is right for
+# an atlas and wrong for a draw list that also shows the game's own pictures: a
+# UI names, per image, whether it is pixel art to keep crisp or a photograph to
+# smooth (blit's Image carries exactly that). Everything else is the same.
+# ---
+# p:            the open pass
+# vertices:     the vertex data, vertex_count * 32 bytes
+# vertex_count: how many vertices, a multiple of 3
+# texture:      the texture the uvs address, or none for the renderer's white texel
+# filter:       how the texture is sampled between texels
+pub fun pass_draw_triangles_filtered(p: *Pass, vertices: ptr, vertex_count: i32, texture: opt[*Texture],
+    filter: TextureFilter) {
+    val r: *Renderer = p.renderer;
+    if (vertex_count <= 0) { ret; }
+    if ((vertex_count % 3) != 0) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    batch_append(p, texture, ColorSpace.srgb{}, opt[TextureFilter].some{filter}, vertices:~*u8,
+        vertex_count::usize);
+}
+
 # how many draws this frame's vertex arena refused for want of room
 #
 # Separate from renderer_dropped, which counts uniform slots: they run out for
