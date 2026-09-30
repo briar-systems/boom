@@ -573,7 +573,8 @@ pub fun renderer_device(r: *Renderer) *Device {
 # the physical device's limits, read when the device was picked
 #
 # What a game sizes compute work by: maxStorageBufferRange bounds one storage
-# buffer, and the work group counts bound one dispatch. Zeroed until
+# buffer, the work group counts bound one dispatch, and max_storage_bindings is
+# how many buffers one dispatch or storage draw binds. Zeroed until
 # renderer_init succeeds.
 # ---
 # r:   the renderer
@@ -3728,7 +3729,7 @@ fun frame_command(r: *Renderer) vk.CommandBuffer {
 # ---
 # r:       the renderer, with a frame open
 # c:       the compute stage
-# buffers: the storage buffers it binds, at most MAX_STORAGE_BINDINGS
+# buffers: the storage buffers it binds, at most renderer_limits' max_storage_bindings
 # count:   how many
 # x, y, z: workgroup counts; the stage's #[workgroup] sizes each group
 # ret: ok, or why nothing was recorded
@@ -3756,7 +3757,7 @@ fun dispatch(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
     val open: err[Error] = between_passes(r);
     if (sel open.err)         { ret open; }
     if (c == nil || !c.ready) { ret err[Error].err{Error.shader{ShaderError.undeclared{}}}; }
-    val bound: err[Error] = storage_bindings_valid(buffers, count);
+    val bound: err[Error] = storage_bindings_valid(buffers, count, r.vk.limits.max_storage_bindings);
     if (sel bound.err) { ret bound; }
     if (args != nil) {
         if (!args.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
@@ -3893,7 +3894,8 @@ pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize
 # counted in renderer_dropped.
 # ---
 # p:         the open pass
-# buffers:   the storage buffers the stages read, at most MAX_STORAGE_BINDINGS
+# buffers:   the storage buffers the stages read, at most renderer_limits'
+#            max_storage_bindings
 # count:     how many
 # vertices:  vertices per instance
 # instances: instances
@@ -3923,7 +3925,7 @@ fun pass_draw_pulled(p: *Pass, buffers: **StorageBuffer, count: usize,
     vertices: u32, instances: u32, args: *StorageBuffer, offset: usize,
     mat: *Material, t: *Transform, sh: *Shader) {
     val r: *Renderer = p.renderer;
-    if (!pulled_valid(buffers, count, args, offset, mat, t, sh)) {
+    if (!pulled_valid(buffers, count, r.vk.limits.max_storage_bindings, args, offset, mat, t, sh)) {
         r.dropped = r.dropped + 1;
         ret;
     }
@@ -3978,10 +3980,10 @@ fun pass_draw_pulled(p: *Pass, buffers: **StorageBuffer, count: usize,
 }
 
 # whether a pulled draw names everything it needs
-fun pulled_valid(buffers: **StorageBuffer, count: usize, args: *StorageBuffer, offset: usize,
-    mat: *Material, t: *Transform, sh: *Shader) bool {
+fun pulled_valid(buffers: **StorageBuffer, count: usize, allowed: usize, args: *StorageBuffer,
+    offset: usize, mat: *Material, t: *Transform, sh: *Shader) bool {
     if (mat == nil || t == nil || sh == nil) { ret false; }
-    val bound: err[Error] = storage_bindings_valid(buffers, count);
+    val bound: err[Error] = storage_bindings_valid(buffers, count, allowed);
     if (sel bound.err) { ret false; }
     if (args == nil)   { ret true; }
     if (!args.ready)   { ret false; }
@@ -4014,13 +4016,13 @@ test pulled_valid__indirect_args_checked {
     var args: StorageBuffer;
     args.ready       = true;
     args.buffer.size = 32;
-    if (!pulled_valid(nil, 0, nil, 0, ?mat, ?t, ?sh))    { ret 1; }
-    if (!pulled_valid(nil, 0, ?args, 16, ?mat, ?t, ?sh)) { ret 2; }
+    if (!pulled_valid(nil, 0, 4, nil, 0, ?mat, ?t, ?sh))    { ret 1; }
+    if (!pulled_valid(nil, 0, 4, ?args, 16, ?mat, ?t, ?sh)) { ret 2; }
     # four u32 past offset 20 overrun a 32-byte buffer
-    if (pulled_valid(nil, 0, ?args, 20, ?mat, ?t, ?sh)) { ret 3; }
-    if (pulled_valid(nil, 0, ?args, 2, ?mat, ?t, ?sh))  { ret 4; }
+    if (pulled_valid(nil, 0, 4, ?args, 20, ?mat, ?t, ?sh)) { ret 3; }
+    if (pulled_valid(nil, 0, 4, ?args, 2, ?mat, ?t, ?sh))  { ret 4; }
     args.ready = false;
-    if (pulled_valid(nil, 0, ?args, 0, ?mat, ?t, ?sh)) { ret 5; }
-    if (pulled_valid(nil, 0, nil, 0, nil, ?t, ?sh))    { ret 6; }
+    if (pulled_valid(nil, 0, 4, ?args, 0, ?mat, ?t, ?sh)) { ret 5; }
+    if (pulled_valid(nil, 0, 4, nil, 0, nil, ?t, ?sh))    { ret 6; }
     ret 0;
 }

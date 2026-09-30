@@ -196,6 +196,30 @@ pub fun spv_variable_at_binding(m: *u8, len: usize, set: u32, binding: u32) opt[
     ret opt[u32].none{};
 }
 
+# One past the highest binding a module declares in a descriptor set, or 0 when
+# it declares none there.
+#
+# What a layout sized for that set must hold: a shader is free to leave gaps, so
+# the highest binding is the question, not how many there are.
+pub fun spv_bindings_end(m: *u8, len: usize, set: u32) u32 {
+    if (!spv_is_module(m, len)) { ret 0; }
+
+    val words: usize = len / 4;
+    var end:   u32   = 0;
+    var at:    usize = SPV_HEADER_WORDS;
+    for (at < words) {
+        val n: usize = spv_len(m, at);
+        if (n == 0) { ret end; }
+        if (spv_op(m, at) == OP_DECORATE && n >= 4 && spv_word(m, at + 2) == DEC_BINDING) {
+            val binding: u32      = spv_word(m, at + 3);
+            val s:       opt[u32] = spv_decoration_value(m, len, spv_word(m, at + 1), DEC_DESCRIPTOR_SET);
+            if (sel s.some && s.some == set && binding + 1 > end) { end = binding + 1; }
+        }
+        at = at + n;
+    }
+    ret end;
+}
+
 # Whether a module declares any variable at a descriptor set and binding.
 pub fun spv_declares_binding(m: *u8, len: usize, set: u32, binding: u32) bool {
     val v: opt[u32] = spv_variable_at_binding(m, len, set, binding);
