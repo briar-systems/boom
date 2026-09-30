@@ -35,6 +35,9 @@ use glfw;
 use glfw.c.Vidmode;
 use allo: std.allocator;
 use std.allocator.page;
+use std.print;
+use std.process.env;
+use text: std.text.string;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -661,6 +664,35 @@ pub fun window_cursor_captured(w: *Window) bool {
     ret glfw.get_input_mode(w.handle.some, glfw.CURSOR) == glfw.CURSOR_DISABLED;
 }
 
+# the clipboard's text
+#
+# an empty or non-text clipboard, and a closed window, read as the empty
+# string: nothing pasteable is a normal state, not a failure. the copy is the
+# caller's, released with std.text.string.str_free against the same allocator.
+# ---
+# a:   allocator for the copy
+# w:   window the platform clipboard is read through
+# ret: an owned UTF-8 copy, or the allocator's refusal
+pub fun window_clipboard_get(a: *allo.Allocator, w: *Window) res[str, allo.Error] {
+    if (!sel w.handle.some) { ret text.str_dup(a, ""); }
+    val got: opt[str] = glfw.get_clipboard_string();
+    if (!sel got.some) { ret text.str_dup(a, ""); }
+    ret text.str_dup(a, got.some);
+}
+
+# replace the clipboard's text
+#
+# the platform copies the text before this returns. a closed window leaves
+# the clipboard untouched. wayland only honours a write while the window has
+# input focus, so a write from an unfocused window may be dropped.
+# ---
+# w:        window the platform clipboard is written through
+# contents: UTF-8 text to place on the clipboard
+pub fun window_clipboard_set(w: *Window, contents: str) {
+    if (!sel w.handle.some) { ret; }
+    glfw.set_clipboard_string(contents);
+}
+
 # route this window's input into a queue
 #
 # where the platform callbacks deliver input
@@ -1271,5 +1303,53 @@ test window_close__refused_while_renderer_holds {
     w.renderers = 0;
     val freed: err[WindowError] = window_close(?w);
     if (!sel freed.ok) { ret 4; }
+    ret 0;
+}
+
+test window_clipboard__closed_window_reads_empty {
+    var a: allo.Allocator;
+    page.make(?a);
+    var w: Window;
+    window_clipboard_set(?w, "ignored");
+    val got: res[str, allo.Error] = window_clipboard_get(?a, ?w);
+    if (!sel got.ok)             { ret 1; }
+    if (!str_equals(got.ok, "")) { ret 2; }
+    val freed: err[allo.Error] = text.str_free(?a, got.ok);
+    if (!sel freed.ok) { ret 3; }
+    ret 0;
+}
+
+# set by a check that has a display, so a window that will not open fails there
+# instead of skipping
+fun window_required() bool {
+    var buf: [8]u8;
+    val got: res[opt[usize], env.EnvError] = env.get("BOOM_REQUIRE_WINDOW", ?buf[0], 8);
+    ret sel got.ok && sel got.ok.some;
+}
+
+test window_clipboard__round_trips_utf8 {
+    val opened: res[Window, WindowError] = window_open(64, 64, "boom clipboard test");
+    if (sel opened.err) {
+        if (window_required()) { ret 1; }
+        print.eprintln("skipped: no window can be opened here");
+        ret 0;
+    }
+    var w: Window = opened.ok;
+    var a: allo.Allocator;
+    page.make(?a);
+
+    val sent: str = "héllo ✓ 日本";
+    window_clipboard_set(?w, sent);
+    val got: res[str, allo.Error] = window_clipboard_get(?a, ?w);
+    if (!sel got.ok) { ret 2; }
+    if (!str_equals(got.ok, sent)) {
+        # wayland and some clipboard managers refuse a write from an unfocused window
+        if (window_required()) { ret 3; }
+        print.eprintln("skipped: the platform did not take the clipboard write");
+        ret 0;
+    }
+    val freed: err[allo.Error] = text.str_free(?a, got.ok);
+    if (!sel freed.ok) { ret 4; }
+    window_close(?w);
     ret 0;
 }
