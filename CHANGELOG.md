@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-30
+
+### Added
+- More than four storage bindings (#234). A dispatch or storage draw binds as
+  many storage buffers as the device allows, up to a boom-wide cap of 16.
+  `renderer_limits` reports the device's `max_per_stage_descriptor_storage_buffers`
+  and `max_descriptor_set_storage_buffers`, and boom's own
+  `max_dispatch_bindings` and `max_draw_bindings` (#238). A compute stage may
+  bind up to the per-stage limit. A storage draw is capped at that limit less
+  set 0's two storage buffers.
+- Binding past a limit is refused: a list longer than the call's limit with
+  `BufferError.too_many`, and a shader that declares a set 1 binding past it
+  with `ShaderError.storage_binding` when it is built.
+
+### Changed
+- `MAX_STORAGE_BINDINGS` is now 16 and only a cap. Code reads
+  `renderer_limits(...).max_dispatch_bindings` or `max_draw_bindings` instead.
+  `storage_bindings_valid` takes the allowed count, and `BufferError.bindings`
+  now only means a nil or deleted buffer at an index.
+
 ## [0.36.0] - 2026-09-30
 
 ### Added
