@@ -5,12 +5,17 @@
 # frame. push and pop are O(1) and never allocate; a push onto a full
 # queue is refused rather than overwriting unread events.
 
-use inp: boom.input;
+use inp:  boom.input;
+use allo: std.allocator;
+use std.allocator.page;
+use std.memory;
 use std.types.bool.bool;
 use std.types.error.err;
 use std.types.option.opt;
+use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
+use std.types.string.str_len;
 
 # capacity of an EventQueue's backing ring, in events
 pub val CAPACITY: usize = 256;
@@ -88,6 +93,35 @@ pub rec TextEvent {
     codepoint: u32;
 }
 
+# the allocation behind a DropEvent: this header, then the path table, then
+# the path bytes, all in one block
+# ---
+# next: the next lent block, while the queue holds this one until release
+# size: bytes in the whole block
+pub rec DropBlock {
+    next: *DropBlock;
+    size: usize;
+}
+
+# files were dropped on the window
+#
+# one event carries every path of one drop, in the order the platform listed
+# them. the paths are owned by the event queue, never by the consumer: they
+# stay valid from the moment the event is popped until the next window_poll,
+# which releases them before it fetches new events, and are freed then. a consumer that wants a path past that point copies it. an event still
+# queued when that happens is not affected: only popped events are released,
+# and queue_clear frees the ones never popped. because the queue owns the
+# block, copying the event by value copies a borrow, not the ownership.
+# ---
+# count: number of paths
+# paths: count null-terminated UTF-8 paths, valid until the next release
+# block: the owning allocation, for the queue alone
+pub rec DropEvent {
+    count: usize;
+    paths: *str;
+    block: *DropBlock;
+}
+
 # one input event
 # ---
 # close:        the window was asked to close
@@ -97,6 +131,7 @@ pub rec TextEvent {
 # scroll:       the scroll wheel moved
 # resize:       the framebuffer was resized
 # text:         a unicode codepoint was typed
+# drop:         files were dropped on the window
 pub tag Event: u8 {
     close;
     key:          KeyEvent;
@@ -105,6 +140,7 @@ pub tag Event: u8 {
     scroll:       ScrollEvent;
     resize:       ResizeEvent;
     text:         TextEvent;
+    drop:         DropEvent;
 }
 
 # why an event was not queued
@@ -127,10 +163,12 @@ pub fun queue_error_message(e: QueueError) str {
 # events: backing storage
 # head:   index of the oldest queued event
 # len:    number of queued events
+# lent:   drop blocks whose events were popped, freed by the next release
 pub rec EventQueue {
     events: [CAPACITY]Event;
     head:   usize;
     len:    usize;
+    lent:   *DropBlock;
 }
 
 # create an empty event queue
@@ -140,6 +178,7 @@ pub fun queue_new() EventQueue {
     var q: EventQueue;
     q.head = 0;
     q.len  = 0;
+    q.lent = nil;
     ret q;
 }
 
@@ -169,13 +208,18 @@ pub fun queue_is_full(q: *EventQueue) bool {
 
 # append an event to the back of the queue
 #
-# a full queue refuses the event and leaves the queued events untouched.
+# a full queue refuses the event and leaves the queued events untouched. a
+# refused drop event is freed here, since the queue took ownership of its
+# paths on the call either way.
 # ---
 # q:   queue to append to
 # e:   event to enqueue
 # ret: ok, or full when the queue is at capacity
 pub fun queue_push(q: *EventQueue, e: Event) err[QueueError] {
-    if (q.len >= CAPACITY) { ret err[QueueError].err{QueueError.full{}}; }
+    if (q.len >= CAPACITY) {
+        if (sel e.drop) { drop_free(e.drop.block); }
+        ret err[QueueError].err{QueueError.full{}};
+    }
     val slot: usize = (q.head + q.len) % CAPACITY;
     q.events[slot] = e;
     q.len          = q.len + 1;
@@ -191,15 +235,85 @@ pub fun queue_pop(q: *EventQueue) opt[Event] {
     val e: Event = q.events[q.head];
     q.head = (q.head + 1) % CAPACITY;
     q.len  = q.len - 1;
+    # the popped paths stay readable, so the block waits on the lent list
+    if (sel e.drop) {
+        e.drop.block.next = q.lent;
+        q.lent            = e.drop.block;
+    }
     ret opt[Event].some{e};
 }
 
-# discard every queued event
+# free the paths of every drop event popped since the last release
+#
+# window_poll calls this for the window's queue, so no event loop has to. it
+# is public only because the window module lives outside this one. events still
+# queued keep their paths.
+# ---
+# q: queue whose lent drop paths are freed
+pub fun queue_release(q: *EventQueue) {
+    for (q.lent != nil) {
+        val next: *DropBlock = q.lent.next;
+        drop_free(q.lent);
+        q.lent = next;
+    }
+}
+
+# discard every queued event, and free every drop path the queue holds
 # ---
 # q: queue to empty
 pub fun queue_clear(q: *EventQueue) {
+    var i: usize = 0;
+    for (i < q.len) {
+        val e: Event = q.events[(q.head + i) % CAPACITY];
+        if (sel e.drop) { drop_free(e.drop.block); }
+        i = i + 1;
+    }
+    queue_release(q);
     q.head = 0;
     q.len  = 0;
+}
+
+# copy a platform path list into one owned block
+#
+# the platform's paths die when its callback returns, so the event takes its
+# own copy. one allocation holds the header, the path table and the bytes, so
+# freeing is one call and a drop costs one allocation however many files it has.
+# ---
+# count: number of paths
+# paths: count null-terminated paths
+# ret:   the event, whose block the queue owns once it is pushed, or the refusal
+pub fun drop_new(count: usize, paths: **u8) res[DropEvent, allo.Error] {
+    var a: allo.Allocator;
+    page.make(?a);
+    val head: usize = $size_of(DropBlock);
+    var size: usize = head + count * $size_of(str);
+    var i:    usize = 0;
+    for (i < count) {
+        size = size + str_len(paths[i]::str) + 1;
+        i    = i + 1;
+    }
+    val got: res[ptr, allo.Error] = allo.allocate_raw(?a, size, $align_of(DropBlock));
+    if (sel got.err) { ret res[DropEvent, allo.Error].err{got.err}; }
+    val base: usize = got.ok::usize;
+    @(got.ok::*DropBlock) = DropBlock{next: nil, size: size};
+    val table: *str  = (base + head)::*str;
+    var at:    usize = base + head + count * $size_of(str);
+    i = 0;
+    for (i < count) {
+        val n: usize = str_len(paths[i]::str) + 1;
+        memory.raw_copy(at::ptr, paths[i]::ptr, n);
+        table[i] = at::str;
+        at       = at + n;
+        i        = i + 1;
+    }
+    ret res[DropEvent, allo.Error].ok{DropEvent{count: count, paths: table, block: got.ok::*DropBlock}};
+}
+
+# free a drop block
+fun drop_free(b: *DropBlock) {
+    var a: allo.Allocator;
+    page.make(?a);
+    allo.deallocate_raw(?a, b::ptr, b.size, $align_of(DropBlock));
 }
 
 # whether a push was accepted

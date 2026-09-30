@@ -13,6 +13,7 @@
 use boom.clock.Clock;
 use boom.clock.clock_new;
 use boom.event.EventQueue;
+use boom.event.queue_clear;
 use boom.event.queue_new;
 use inp: boom.input;
 use boom.timestep.Timestep;
@@ -159,7 +160,8 @@ pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
     # long after context_init has returned.
     ctx.sink.queue = ?ctx.events;
     ctx.sink.input = ?ctx.input;
-    window_set_event_sink(?ctx.window, ?ctx.sink);
+    val routed: err[WindowError] = window_set_event_sink(?ctx.window, ?ctx.sink);
+    if (sel routed.err) { ret err[ContextError].err{ContextError.window{routed.err}}; }
     ctx.clock   = started.ok;
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.running = true;
@@ -233,6 +235,8 @@ pub fun context_shutdown(ctx: *Context) err[ContextError] {
     val closed: err[WindowError] = window_close(?ctx.window);
     if (sel closed.err) { ret err[ContextError].err{ContextError.window{closed.err}}; }
     ctx.running = false;
+    # frees any dropped-file paths still held by the queue
+    queue_clear(?ctx.events);
     ret err[ContextError].ok{};
 }
 

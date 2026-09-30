@@ -13,6 +13,7 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use boom.event.ButtonEvent;
+use boom.event.DropEvent;
 use boom.event.Event;
 use boom.event.EventQueue;
 use boom.event.KeyAction;
@@ -22,9 +23,13 @@ use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
 use boom.event.TextEvent;
+use boom.event.drop_new;
+use boom.event.queue_clear;
+use boom.event.queue_is_empty;
 use boom.event.queue_new;
 use boom.event.queue_pop;
 use boom.event.queue_push;
+use boom.event.queue_release;
 use inp: boom.input;
 use glfw;
 use glfw.c.Vidmode;
@@ -92,12 +97,14 @@ pub rec ModeCreate {
 # create:     the platform refused to create the window
 # closed:     the window is not open
 # in_use:     the window cannot close while this many renderers hold it
+# alloc:      the sink registry could not grow to hold the window
 pub tag WindowError: u8 {
     init:       glfw.Error;
     no_monitor: ModeRefusal;
     create:     ModeCreate;
     closed;
     in_use: usize;
+    alloc:  allo.Error;
 }
 
 # a one-line description of a window failure, naming the mode where one was refused
@@ -122,6 +129,7 @@ pub fun window_error_message(e: WindowError) str {
         ret "the platform refused to create a window";
     }
     if (sel e.closed) { ret "the window is not open"; }
+    if (sel e.alloc)  { ret "the window's event sink could not be registered"; }
     ret "the window cannot close while a renderer holds it";
 }
 
@@ -200,6 +208,19 @@ fun on_char(handle: ptr, codepoint: u32) {
 fun deliver_text(s: *Sink, codepoint: u32) {
     if (s == nil) { ret; }
     offer(s.queue, Event.text{TextEvent{codepoint: codepoint}});
+}
+
+fun on_drop(handle: ptr, count: i32, paths: **u8) {
+    deliver_drop(sink_of(glfw.window_from_handle(handle)), count, paths);
+}
+
+# dropped paths are queue-only and copied before the callback returns: the
+# queue owns the copy until it is released
+fun deliver_drop(s: *Sink, count: i32, paths: **u8) {
+    if (s == nil || count <= 0 || paths == nil) { ret; }
+    val built: res[DropEvent, allo.Error] = drop_new(count::usize, paths);
+    if (sel built.err) { ret; }
+    offer(s.queue, Event.drop{built.ok});
 }
 
 fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
@@ -450,6 +471,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
 
     glfw.set_key_callback(win, on_key);
     glfw.set_char_callback(win, on_char);
+    glfw.set_drop_callback(win, on_drop);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_scroll_callback(win, on_scroll);
@@ -694,11 +716,13 @@ pub rec Sink {
 
 # route this window's input at the given sink
 # ---
-# w: window to observe; a closed window routes nothing
-# s: sink to receive input; must outlive the window. Its cursor position is
-#    initialized in framebuffer pixels without reporting synthetic motion.
-pub fun window_set_event_sink(w: *Window, s: *Sink) {
-    if (!sel w.handle.some) { ret; }
+# w:   window to observe; a closed window routes nothing and is refused
+# s:   sink to receive input; must outlive the window. Its cursor position is
+#      initialized in framebuffer pixels without reporting synthetic motion.
+# ret: ok, closed for a window that is not open, or alloc when the sink
+#      registry could not grow
+pub fun window_set_event_sink(w: *Window, s: *Sink) err[WindowError] {
+    if (!sel w.handle.some) { ret err[WindowError].err{WindowError.closed{}}; }
     val handle: glfw.Window = w.handle.some;
     var ww:     i32         = 0;
     var wh:     i32         = 0;
@@ -711,6 +735,9 @@ pub fun window_set_event_sink(w: *Window, s: *Sink) {
     glfw.get_cursor_pos(handle, ?x, ?y);
     rebase_cursor(s, x, y, ww, wh, fw, fh);
     glfw.set_window_user_pointer(handle, s::ptr);
+    val registered: err[allo.Error] = register_queue(handle.handle, s.queue);
+    if (sel registered.err) { ret err[WindowError].err{WindowError.alloc{registered.err}}; }
+    ret err[WindowError].ok{};
 }
 
 # whether the window has been asked to close
@@ -722,9 +749,79 @@ pub fun window_should_close(w: *Window) bool {
     ret glfw.window_should_close(w.handle.some);
 }
 
+# one window's event queue, as window_poll must release it
+# ---
+# handle: the window's platform handle
+# queue:  the queue installed on that window
+rec Registered {
+    handle: ptr;
+    queue:  *EventQueue;
+}
+
+# every window with a sink installed, packed in the first registry_len slots.
+# glfwPollEvents services every window, so the poll releases every one of their
+# queues, not one. it grows on demand from the page allocator
+var registry:     *Registered = nil;
+var registry_len: usize       = 0;
+var registry_cap: usize       = 0;
+
+# record the queue a window's sink feeds, replacing the window's earlier entry
+# ---
+# handle: the window's platform handle
+# q:      the queue its sink feeds
+# ret:    ok, or why the registry could not grow
+fun register_queue(handle: ptr, q: *EventQueue) err[allo.Error] {
+    var i: usize = 0;
+    for (i < registry_len) {
+        if (registry[i].handle == handle) {
+            registry[i].queue = q;
+            ret err[allo.Error].ok{};
+        }
+        i = i + 1;
+    }
+    if (registry_len == registry_cap) {
+        var a: allo.Allocator;
+        page.make(?a);
+        var cap: usize = 4;
+        if (registry_cap != 0) { cap = registry_cap * 2; }
+        val grown: res[*Registered, allo.Error] = allo.reallocate[Registered](?a, registry, registry_cap, cap);
+        if (sel grown.err) { ret err[allo.Error].err{grown.err}; }
+        registry     = grown.ok;
+        registry_cap = cap;
+    }
+    registry[registry_len] = Registered{handle: handle, queue: q};
+    registry_len           = registry_len + 1;
+    ret err[allo.Error].ok{};
+}
+
+fun unregister_queue(handle: ptr) {
+    var i: usize = 0;
+    for (i < registry_len) {
+        if (registry[i].handle == handle) {
+            registry_len = registry_len - 1;
+            registry[i]  = registry[registry_len];
+            ret;
+        }
+        i = i + 1;
+    }
+}
+
 # process pending platform events, firing input callbacks
+#
+# first frees the dropped-file paths the consumers popped since the last poll,
+# for every window's queue, so a drop event's paths are valid until the next
+# call of this.
 pub fun window_poll() {
+    poll_release();
     glfw.poll_events();
+}
+
+fun poll_release() {
+    var i: usize = 0;
+    for (i < registry_len) {
+        queue_release(registry[i].queue);
+        i = i + 1;
+    }
 }
 
 # destroy the window and shut down GLFW
@@ -740,6 +837,7 @@ pub fun window_close(w: *Window) err[WindowError] {
     if (w.renderers != 0) { ret err[WindowError].err{WindowError.in_use{w.renderers}}; }
     if (sel w.handle.some) {
         glfw.set_window_user_pointer(w.handle.some, nil);
+        unregister_queue(w.handle.some.handle);
         glfw.destroy_window(w.handle.some);
         glfw.terminate();
     }
@@ -953,6 +1051,138 @@ test deliver_text__ordered_with_keys {
     if (!sel r.some.key)                { ret 4; }
     if (!sel r.some.key.action.release) { ret 5; }
     deliver_text(nil, 0x61);
+    ret 0;
+}
+
+test deliver_drop__owned_until_release {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+
+    var one:  [1]*u8;
+    var many: [3]*u8;
+    one[0]  = "a.png"::*u8;
+    many[0] = "b.txt"::*u8;
+    many[1] = "dir/c d.obj"::*u8;
+    many[2] = "e"::*u8;
+    deliver_key(?sink, glfw.KEY_A, glfw.PRESS, 0);
+    deliver_drop(?sink, 1, ?one[0]);
+    deliver_drop(?sink, 3, ?many[0]);
+    deliver_drop(?sink, 0, ?many[0]);
+    deliver_drop(nil, 1, ?one[0]);
+
+    val k: opt[Event] = queue_pop(?q);
+    if (!sel k.some)     { ret 1; }
+    if (!sel k.some.key) { ret 2; }
+
+    # one event per drop, every path in order
+    val d1: opt[Event] = queue_pop(?q);
+    if (!sel d1.some)                                { ret 3; }
+    if (!sel d1.some.drop)                           { ret 4; }
+    if (d1.some.drop.count != 1)                     { ret 5; }
+    if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 6; }
+
+    val d2: opt[Event] = queue_pop(?q);
+    if (!sel d2.some)                                      { ret 7; }
+    if (!sel d2.some.drop)                                 { ret 8; }
+    if (d2.some.drop.count != 3)                           { ret 9; }
+    if (!str_equals(d2.some.drop.paths[0], "b.txt"))       { ret 10; }
+    if (!str_equals(d2.some.drop.paths[1], "dir/c d.obj")) { ret 11; }
+    if (!str_equals(d2.some.drop.paths[2], "e"))           { ret 12; }
+    if (!queue_is_empty(?q))                               { ret 13; }
+
+    # the source strings are gone after the callback: the copy is independent
+    if (d1.some.drop.paths[0] == one[0]::str) { ret 14; }
+
+    # popped paths stay valid until the next poll releases them
+    if (!registered(1::ptr, ?q))                     { ret 22; }
+    if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 15; }
+    if (q.lent == nil)                               { ret 21; }
+    poll_release();
+    if (q.lent != nil) { ret 16; }
+
+    # an unpopped drop survives a release and is freed by clear
+    deliver_drop(?sink, 3, ?many[0]);
+    poll_release();
+    val d3: opt[Event] = queue_pop(?q);
+    if (!sel d3.some)                            { ret 17; }
+    if (!sel d3.some.drop)                       { ret 18; }
+    if (!str_equals(d3.some.drop.paths[2], "e")) { ret 19; }
+    deliver_drop(?sink, 1, ?one[0]);
+    queue_clear(?q);
+    if (q.lent != nil) { ret 20; }
+    unregister_queue(1::ptr);
+    ret 0;
+}
+
+test poll_release__every_window {
+    var qa:    EventQueue = queue_new();
+    var qb:    EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sa:    Sink       = Sink{queue: ?qa, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var sb:    Sink       = Sink{queue: ?qb, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var one:   [1]*u8;
+    one[0] = "a.png"::*u8;
+
+    if (!registered(2::ptr, ?qa)) { ret 4; }
+    if (!registered(3::ptr, ?qb)) { ret 5; }
+    deliver_drop(?sa, 1, ?one[0]);
+    deliver_drop(?sb, 1, ?one[0]);
+    queue_pop(?qa);
+    queue_pop(?qb);
+    if (qa.lent == nil || qb.lent == nil) { ret 1; }
+
+    poll_release();
+    if (qa.lent != nil || qb.lent != nil) { ret 2; }
+
+    # a closed window's queue is no longer released
+    deliver_drop(?sa, 1, ?one[0]);
+    queue_pop(?qa);
+    unregister_queue(2::ptr);
+    poll_release();
+    if (qa.lent == nil) { ret 3; }
+    unregister_queue(3::ptr);
+    queue_clear(?qa);
+    ret 0;
+}
+
+# whether a queue was registered for a handle
+#[testing]
+fun registered(handle: ptr, q: *EventQueue) bool {
+    val r: err[allo.Error] = register_queue(handle, q);
+    ret sel r.ok;
+}
+
+test register_queue__grows_past_sixteen {
+    var qs: [40]EventQueue;
+    var i:  usize = 0;
+    for (i < 40) {
+        qs[i] = queue_new();
+        val added: err[allo.Error] = register_queue((i + 100)::ptr, ?qs[i]);
+        if (!sel added.ok) { ret 1; }
+        i = i + 1;
+    }
+    # re-registering a window replaces its entry rather than adding one
+    val again: err[allo.Error] = register_queue(100::ptr, ?qs[0]);
+    if (!sel again.ok)      { ret 2; }
+    if (registry_len != 40) { ret 3; }
+
+    var input: inp.Input = inp.input_new();
+    var sink:  Sink      = Sink{queue: ?qs[39], input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var one:   [1]*u8;
+    one[0] = "a.png"::*u8;
+    deliver_drop(?sink, 1, ?one[0]);
+    queue_pop(?qs[39]);
+    if (qs[39].lent == nil) { ret 4; }
+    poll_release();
+    if (qs[39].lent != nil) { ret 5; }
+
+    i = 0;
+    for (i < 40) {
+        unregister_queue((i + 100)::ptr);
+        i = i + 1;
+    }
+    if (registry_len != 0) { ret 6; }
     ret 0;
 }
 
