@@ -697,7 +697,7 @@ pub fun window_set_event_sink(w: *Window, s: *Sink) {
     glfw.get_cursor_pos(handle, ?x, ?y);
     rebase_cursor(s, x, y, ww, wh, fw, fh);
     glfw.set_window_user_pointer(handle, s::ptr);
-    release_queue = s.queue;
+    register_queue(handle.handle, s.queue);
 }
 
 # whether the window has been asked to close
@@ -709,22 +709,62 @@ pub fun window_should_close(w: *Window) bool {
     ret glfw.window_should_close(w.handle.some);
 }
 
-# the queue of the sink installed on the window, whose popped drop paths the
-# next poll frees. one window per process, so one queue
-var release_queue: *EventQueue = nil;
+# how many windows can hold a sink at once
+val MAX_SINKS: usize = 16;
+
+# one window's event queue, as window_poll must release it
+# ---
+# handle: the window's platform handle, null for a free slot
+# queue:  the queue installed on that window
+rec Registered {
+    handle: ptr;
+    queue:  *EventQueue;
+}
+
+# every window with a sink installed. glfwPollEvents services every window, so
+# the poll releases every one of their queues, not one
+var registry: [MAX_SINKS]Registered;
+
+# record the queue a window's sink feeds, replacing the window's earlier entry
+fun register_queue(handle: ptr, q: *EventQueue) {
+    var free: usize = MAX_SINKS;
+    var i:    usize = 0;
+    for (i < MAX_SINKS) {
+        if (registry[i].handle == handle) {
+            registry[i].queue = q;
+            ret;
+        }
+        if (registry[i].handle == nil && free == MAX_SINKS) { free = i; }
+        i = i + 1;
+    }
+    if (free == MAX_SINKS) { ret; }
+    registry[free] = Registered{handle: handle, queue: q};
+}
+
+fun unregister_queue(handle: ptr) {
+    var i: usize = 0;
+    for (i < MAX_SINKS) {
+        if (registry[i].handle == handle) { registry[i] = Registered{handle: nil, queue: nil}; }
+        i = i + 1;
+    }
+}
 
 # process pending platform events, firing input callbacks
 #
-# first frees the dropped-file paths the consumer popped since the last poll,
-# so a drop event's paths are valid until the next call of this.
+# first frees the dropped-file paths the consumers popped since the last poll,
+# for every window's queue, so a drop event's paths are valid until the next
+# call of this.
 pub fun window_poll() {
     poll_release();
     glfw.poll_events();
 }
 
 fun poll_release() {
-    if (release_queue == nil) { ret; }
-    queue_release(release_queue);
+    var i: usize = 0;
+    for (i < MAX_SINKS) {
+        if (registry[i].handle != nil) { queue_release(registry[i].queue); }
+        i = i + 1;
+    }
 }
 
 # destroy the window and shut down GLFW
@@ -740,7 +780,7 @@ pub fun window_close(w: *Window) err[WindowError] {
     if (w.renderers != 0) { ret err[WindowError].err{WindowError.in_use{w.renderers}}; }
     if (sel w.handle.some) {
         glfw.set_window_user_pointer(w.handle.some, nil);
-        release_queue = nil;
+        unregister_queue(w.handle.some.handle);
         glfw.destroy_window(w.handle.some);
         glfw.terminate();
     }
@@ -998,7 +1038,7 @@ test deliver_drop__owned_until_release {
     if (d1.some.drop.paths[0] == one[0]::str) { ret 14; }
 
     # popped paths stay valid until the next poll releases them
-    release_queue = ?q;
+    register_queue(1::ptr, ?q);
     if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 15; }
     if (q.lent == nil)                               { ret 21; }
     poll_release();
@@ -1014,7 +1054,38 @@ test deliver_drop__owned_until_release {
     deliver_drop(?sink, 1, ?one[0]);
     queue_clear(?q);
     if (q.lent != nil) { ret 20; }
-    release_queue = nil;
+    unregister_queue(1::ptr);
+    ret 0;
+}
+
+test poll_release__every_window {
+    var qa:    EventQueue = queue_new();
+    var qb:    EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sa:    Sink       = Sink{queue: ?qa, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var sb:    Sink       = Sink{queue: ?qb, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var one:   [1]*u8;
+    one[0] = "a.png"::*u8;
+
+    register_queue(2::ptr, ?qa);
+    register_queue(3::ptr, ?qb);
+    deliver_drop(?sa, 1, ?one[0]);
+    deliver_drop(?sb, 1, ?one[0]);
+    queue_pop(?qa);
+    queue_pop(?qb);
+    if (qa.lent == nil || qb.lent == nil) { ret 1; }
+
+    poll_release();
+    if (qa.lent != nil || qb.lent != nil) { ret 2; }
+
+    # a closed window's queue is no longer released
+    deliver_drop(?sa, 1, ?one[0]);
+    queue_pop(?qa);
+    unregister_queue(2::ptr);
+    poll_release();
+    if (qa.lent == nil) { ret 3; }
+    unregister_queue(3::ptr);
+    queue_clear(?qa);
     ret 0;
 }
 
