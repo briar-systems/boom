@@ -23,6 +23,7 @@ use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.limits.DRAW_STORAGE_BUFFERS;
+use boom.graphics.limits.Limits;
 use boom.graphics.limits.MAX_STORAGE_BINDINGS;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.spirv.FRAGMENT_ENTRY;
@@ -74,43 +75,58 @@ pub rec Pipeline {
 # the dispatch that writes it or the draw that reads it.
 pub val STORAGE_SET: u32 = 1;
 
-# Create the STORAGE_SET layout: the device's max_storage_bindings storage
-# buffers, at bindings 0 up to that, visible to the vertex, fragment and compute
-# stages.
+# Create the STORAGE_SET layout: the device's max_dispatch_bindings storage
+# buffers, at bindings 0 up to that.
 #
-# How many is the device's, not a constant: Vulkan guarantees four storage
-# buffers per stage and set 0 of a draw already spends DRAW_STORAGE_BUFFERS of
-# them, so a layout sized past what the device reports is invalid usage a
-# driver may accept here and reject elsewhere. Every layout on one device has the
-# same count, so a set taken against one binds to any pipeline built against
-# another.
+# ONE LAYOUT FOR BOTH KINDS, SIZED FOR A DISPATCH. The first max_draw_bindings
+# are visible to the vertex, fragment and compute stages, the rest to compute
+# alone. Vulkan counts a binding against the per-stage limit only in the stages
+# it names, so a draw's vertex and fragment stages see set 0's
+# DRAW_STORAGE_BUFFERS and max_draw_bindings of these, a compute stage sees all
+# of them and no set 0, and each stays within what the device reports. A driver
+# may accept a layout past that here and reject it elsewhere.
+#
+# Every layout on one device is the same, so a set taken against one binds to
+# any pipeline built against another, compute or graphics, and one pool serves
+# both.
 #
 # Created per pipeline rather than shared, like the set 0 layout: Vulkan binds a
 # set to any pipeline whose layout for that set is identically defined, so two
 # identical layouts are interchangeable and neither has to outlive the other.
 pub fun storage_set_layout(v: *Vk, out: *vk.DescriptorSetLayout) err[Error] {
     var bindings: [MAX_STORAGE_BINDINGS]vk.DescriptorSetLayoutBinding;
-    val n:        usize = v.limits.max_storage_bindings;
-    var i:        usize = 0;
-    for (i < n) {
-        bindings[i].binding            = i::u32;
-        bindings[i].descriptorType     = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[i].descriptorCount    = 1;
-        bindings[i].stageFlags         = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT | vk.SHADER_STAGE_COMPUTE_BIT;
-        bindings[i].pImmutableSamplers = nil;
-        i                              = i + 1;
-    }
+    val n:        usize = storage_set_bindings(?v.limits, ?bindings[0]);
     ret create_set_layout(v, ?bindings[0], n::u32, out);
 }
 
-# Whether a stage's STORAGE_SET bindings fit the device's layout.
+# the STORAGE_SET layout's bindings for a device's limits, written to out, which
+# holds MAX_STORAGE_BINDINGS; returns how many
+pub fun storage_set_bindings(l: *Limits, out: *vk.DescriptorSetLayoutBinding) usize {
+    val n: usize = l.max_dispatch_bindings;
+    var i: usize = 0;
+    for (i < n) {
+        out[i].binding         = i::u32;
+        out[i].descriptorType  = vk.DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        out[i].descriptorCount = 1;
+        out[i].stageFlags      = vk.SHADER_STAGE_COMPUTE_BIT;
+        if (i < l.max_draw_bindings) {
+            out[i].stageFlags = vk.SHADER_STAGE_VERTEX_BIT | vk.SHADER_STAGE_FRAGMENT_BIT | vk.SHADER_STAGE_COMPUTE_BIT;
+        }
+        out[i].pImmutableSamplers = nil;
+        i                         = i + 1;
+    }
+    ret n;
+}
+
+# Whether a stage's STORAGE_SET bindings fit what its kind may bind: a compute
+# stage max_dispatch_bindings, a draw's stages max_draw_bindings.
 #
-# A module declaring a binding past max_storage_bindings builds a pipeline
-# against a layout that does not hold it, which Vulkan leaves undefined, so it
-# is refused with the binding it declared rather than handed to the driver.
-pub fun storage_bindings_fit(v: *Vk, spv: *u8, len: usize) err[Error] {
+# A module declaring a binding past that builds a pipeline against a layout that
+# does not hold it for its stage, which Vulkan leaves undefined, so it is
+# refused with the binding it declared rather than handed to the driver.
+pub fun storage_bindings_fit(spv: *u8, len: usize, allowed: usize) err[Error] {
     val end: u32 = spv_bindings_end(spv, len, STORAGE_SET);
-    if (end::usize > v.limits.max_storage_bindings) {
+    if (end::usize > allowed) {
         ret err[Error].err{Error.shader{ShaderError.storage_binding{end - 1}}};
     }
     ret err[Error].ok{};
@@ -598,9 +614,9 @@ pub fun pipeline_init_sets(p: *Pipeline, v: *Vk, pass: vk.RenderPass,
     if (!v.ready) { ret err[Error].err{Error.uninitialized{Stage.device{}}}; }
 
     if (storage) {
-        val vf: err[Error] = storage_bindings_fit(v, vert, vlen);
+        val vf: err[Error] = storage_bindings_fit(vert, vlen, v.limits.max_draw_bindings);
         if (sel vf.err) { ret vf; }
-        val ff: err[Error] = storage_bindings_fit(v, frag, flen);
+        val ff: err[Error] = storage_bindings_fit(frag, flen, v.limits.max_draw_bindings);
         if (sel ff.err) { ret ff; }
     }
 
@@ -886,6 +902,7 @@ pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
 # vertex input derivation, which are pure and are where a wrong answer reaches
 # the shader as silently wrong values rather than as an error.
 
+use boom.graphics.limits.limits_from;
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
 use boom.graphics.vertex.SEMANTIC_POSITION;
 use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
@@ -1024,6 +1041,34 @@ test set_layout_at__keeps_gaps_and_refuses_past_table {
     var e: SetLayout = set_layout();
     if (set_layout_at(?e, MAX_BINDINGS::u32, BINDING_UNIFORM)) { ret 6; }
     if (e.count != 0)                                          { ret 7; }
+    ret 0;
+}
+
+test storage_set_bindings__each_stage_within_minimum {
+    # at the specification's floor of four per stage, a compute stage sees all
+    # four and a draw's vertex and fragment stages see two beside set 0's two
+    var src: vk.PhysicalDeviceLimits;
+    src.maxPerStageDescriptorStorageBuffers = 4;
+    src.maxDescriptorSetStorageBuffers      = 24;
+    var l:        Limits = limits_from(?src);
+    var bindings: [MAX_STORAGE_BINDINGS]vk.DescriptorSetLayoutBinding;
+    val n:        usize  = storage_set_bindings(?l, ?bindings[0]);
+    if (n != 4) { ret 1; }
+    var vert: u32   = DRAW_STORAGE_BUFFERS;
+    var frag: u32   = DRAW_STORAGE_BUFFERS;
+    var comp: u32   = 0;
+    var i:    usize = 0;
+    for (i < n) {
+        if (bindings[i].binding != i::u32)                                { ret 2; }
+        if ((bindings[i].stageFlags & vk.SHADER_STAGE_VERTEX_BIT) != 0)   { vert = vert + 1; }
+        if ((bindings[i].stageFlags & vk.SHADER_STAGE_FRAGMENT_BIT) != 0) { frag = frag + 1; }
+        if ((bindings[i].stageFlags & vk.SHADER_STAGE_COMPUTE_BIT) != 0)  { comp = comp + 1; }
+        i = i + 1;
+    }
+    if (vert != 4 || frag != 4 || comp != 4) { ret 3; }
+    # the bindings a draw may name are the ones its stages see
+    if ((bindings[1].stageFlags & vk.SHADER_STAGE_FRAGMENT_BIT) == 0) { ret 4; }
+    if ((bindings[2].stageFlags & vk.SHADER_STAGE_VERTEX_BIT) != 0)   { ret 5; }
     ret 0;
 }
 
