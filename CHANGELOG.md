@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-30
+
+### Added
+- A `linux-arm64` target (`aarch64`, `linux`, `aapcs64`) on the library, the
+  tests and every demo, built, tested and run natively in CI on
+  `ubuntu-24.04-arm`, where the vulkan, compute and text demos run under
+  xvfb (#215).
+- Text input (#216). `Event.text` carries each unicode codepoint GLFW
+  reports after layout, shift and dead keys, queued in order after the key
+  event of the same press. It is queue-only, with no polled `Input` state.
+- `renderer_limits` returns the physical device's `Limits`, read once when
+  the device is picked (#219): `max_storage_buffer_range`,
+  `max_compute_work_group_count`, `max_compute_work_group_invocations`,
+  `max_compute_work_group_size`, `max_compute_shared_memory_size` and
+  `min_storage_buffer_offset_alignment`. The record is zeroed until
+  `renderer_init` succeeds. The compute demo fails if a device reports less
+  than the Vulkan minimums.
+
+### Changed
+- Dependencies move to mach-glfw 0.10 (`^0.10`), mach-audio 0.11 (`^0.11`)
+  and mach-vk 0.8 (`^0.8`), each of which adds linux aarch64 (#215). The
+  glfw archive is now built position independent.
+
 ## [0.34.0] - 2026-09-29
 
 ### Added
