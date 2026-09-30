@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grid, and CI runs it under xvfb.
 
 ### Changed
+- The audio dependency is pinned at mach-audio 0.10.1, which builds for
+  aarch64 darwin (briar-systems/mach-audio#75). `^0.10` already admits it.
 - The graphics queue is taken from a family that also supports compute, so a
   device whose graphics family does not compute is refused (#207). A game
   `Shader`'s pipelines carry set 1 in their layout, and a pipeline for an
@@ -39,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mach` requirement is unchanged.
 
 ### Fixed
+- A readback is fast (#212). `Readback` slots and `storage_buffer_read`
+  stage in host-cached memory where the device offers it, invalidate a
+  non-coherent mapping before reading, and copy by words, where they copied
+  byte by byte from uncached memory. `buffer_write` copies uploads by words
+  too. `buffer_init_prefer` picks a memory type carrying a preferred property
+  and falls back to the required ones, `buffer_invalidate` is new, and
+  `renderer_readback` and `renderer_readback_take` keep their signatures.
 - **Breaking.** A draw list's colours display as authored on an sRGB surface
   (#206). blit authors its vertex colours for display, and the ui fragment
   stage wrote them unchanged to an sRGB swapchain, which encoded them a second
