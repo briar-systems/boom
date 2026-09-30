@@ -220,7 +220,7 @@ test skeleton_globals__child_listed_before_parent {
     sk.order[0]         = 1;
     sk.order[1]         = 0;
     sk.rest[1].position = vec3(2.0, 3.0, 0.0);
-    sk.rest[1].rotation = f32x4{0.0, 0.0, 0.70710678, 0.70710678};
+    sk.rest[1].rotation = f32x4{0.0, 0.0, 0.70710677, 0.70710677};
     sk.rest[0].position = vec3(1.0, 0.0, 0.0);
     sk.inverse_bind[0]  = mat4_translation(vec3(0.0 - 1.0, 0.0, 0.0));
     var globals: [3]Mat4;

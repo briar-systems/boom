@@ -677,8 +677,8 @@ fun fixture_animated_glb(out: *u8) usize {
     put_f32(?bin[0], 232, 1.0);
     put_f32(?bin[0], 236, 0.0);
     put_f32(?bin[0], 240, 0.0);
-    put_f32(?bin[0], 244, 0.70710678);
-    put_f32(?bin[0], 248, 0.70710678);
+    put_f32(?bin[0], 244, 0.70710677);
+    put_f32(?bin[0], 248, 0.70710677);
     # JOINTS_0 stays zero; indices
     put_u16(?bin[0], 276, 0);
     put_u16(?bin[0], 278, 1);

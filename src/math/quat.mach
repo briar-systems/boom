@@ -120,7 +120,7 @@ test quat_slerp__endpoints_and_midpoint {
     if (r1[2] - b[2] > 0.0001 || r1[2] - b[2] < 0.0 - 0.0001) { ret 2; }
     if (r1[3] - b[3] > 0.0001 || r1[3] - b[3] < 0.0 - 0.0001) { ret 3; }
     val mid:    Quat = quat_slerp(a, b, 0.5);
-    val expect: Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 0.78539815);
+    val expect: Quat = quat_from_axis_angle(f32x4{0.0, 0.0, 1.0, 0.0}, 0.7853981);
     if (mid[2] - expect[2] > 0.001 || mid[2] - expect[2] < 0.0 - 0.001) { ret 4; }
     if (mid[3] - expect[3] > 0.001 || mid[3] - expect[3] < 0.0 - 0.001) { ret 5; }
     ret 0;
