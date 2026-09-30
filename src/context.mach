@@ -13,6 +13,7 @@
 use boom.clock.Clock;
 use boom.clock.clock_new;
 use boom.event.EventQueue;
+use boom.event.queue_clear;
 use boom.event.queue_new;
 use inp: boom.input;
 use boom.timestep.Timestep;
@@ -233,6 +234,8 @@ pub fun context_shutdown(ctx: *Context) err[ContextError] {
     val closed: err[WindowError] = window_close(?ctx.window);
     if (sel closed.err) { ret err[ContextError].err{ContextError.window{closed.err}}; }
     ctx.running = false;
+    # frees any dropped-file paths still held by the queue
+    queue_clear(?ctx.events);
     ret err[ContextError].ok{};
 }
 

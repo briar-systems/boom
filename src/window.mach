@@ -13,6 +13,7 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use boom.event.ButtonEvent;
+use boom.event.DropEvent;
 use boom.event.Event;
 use boom.event.EventQueue;
 use boom.event.KeyAction;
@@ -22,12 +23,17 @@ use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
 use boom.event.TextEvent;
+use boom.event.drop_new;
+use boom.event.queue_clear;
+use boom.event.queue_is_empty;
 use boom.event.queue_new;
 use boom.event.queue_pop;
 use boom.event.queue_push;
+use boom.event.queue_release;
 use inp: boom.input;
 use glfw;
 use glfw.c.Vidmode;
+use allo: std.allocator;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -195,6 +201,19 @@ fun on_char(handle: ptr, codepoint: u32) {
 fun deliver_text(s: *Sink, codepoint: u32) {
     if (s == nil) { ret; }
     offer(s.queue, Event.text{TextEvent{codepoint: codepoint}});
+}
+
+fun on_drop(handle: ptr, count: i32, paths: **u8) {
+    deliver_drop(sink_of(glfw.window_from_handle(handle)), count, paths);
+}
+
+# dropped paths are queue-only and copied before the callback returns: the
+# queue owns the copy until it is released
+fun deliver_drop(s: *Sink, count: i32, paths: **u8) {
+    if (s == nil || count <= 0 || paths == nil) { ret; }
+    val built: res[DropEvent, allo.Error] = drop_new(count::usize, paths);
+    if (sel built.err) { ret; }
+    offer(s.queue, Event.drop{built.ok});
 }
 
 fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
@@ -445,6 +464,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
 
     glfw.set_key_callback(win, on_key);
     glfw.set_char_callback(win, on_char);
+    glfw.set_drop_callback(win, on_drop);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_scroll_callback(win, on_scroll);
@@ -919,6 +939,64 @@ test deliver_text__ordered_with_keys {
     if (!sel r.some.key)                { ret 4; }
     if (!sel r.some.key.action.release) { ret 5; }
     deliver_text(nil, 0x61);
+    ret 0;
+}
+
+test deliver_drop__owned_until_release {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+
+    var one:  [1]*u8;
+    var many: [3]*u8;
+    one[0]  = "a.png"::*u8;
+    many[0] = "b.txt"::*u8;
+    many[1] = "dir/c d.obj"::*u8;
+    many[2] = "e"::*u8;
+    deliver_key(?sink, glfw.KEY_A, glfw.PRESS, 0);
+    deliver_drop(?sink, 1, ?one[0]);
+    deliver_drop(?sink, 3, ?many[0]);
+    deliver_drop(?sink, 0, ?many[0]);
+    deliver_drop(nil, 1, ?one[0]);
+
+    val k: opt[Event] = queue_pop(?q);
+    if (!sel k.some)     { ret 1; }
+    if (!sel k.some.key) { ret 2; }
+
+    # one event per drop, every path in order
+    val d1: opt[Event] = queue_pop(?q);
+    if (!sel d1.some)                                { ret 3; }
+    if (!sel d1.some.drop)                           { ret 4; }
+    if (d1.some.drop.count != 1)                     { ret 5; }
+    if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 6; }
+
+    val d2: opt[Event] = queue_pop(?q);
+    if (!sel d2.some)                                      { ret 7; }
+    if (!sel d2.some.drop)                                 { ret 8; }
+    if (d2.some.drop.count != 3)                           { ret 9; }
+    if (!str_equals(d2.some.drop.paths[0], "b.txt"))       { ret 10; }
+    if (!str_equals(d2.some.drop.paths[1], "dir/c d.obj")) { ret 11; }
+    if (!str_equals(d2.some.drop.paths[2], "e"))           { ret 12; }
+    if (!queue_is_empty(?q))                               { ret 13; }
+
+    # the source strings are gone after the callback: the copy is independent
+    if (d1.some.drop.paths[0] == one[0]::str) { ret 14; }
+
+    # popped paths stay valid until released
+    if (!str_equals(d1.some.drop.paths[0], "a.png")) { ret 15; }
+    queue_release(?q);
+    if (q.lent != nil) { ret 16; }
+
+    # an unpopped drop survives a release and is freed by clear
+    deliver_drop(?sink, 3, ?many[0]);
+    queue_release(?q);
+    val d3: opt[Event] = queue_pop(?q);
+    if (!sel d3.some)                            { ret 17; }
+    if (!sel d3.some.drop)                       { ret 18; }
+    if (!str_equals(d3.some.drop.paths[2], "e")) { ret 19; }
+    deliver_drop(?sink, 1, ?one[0]);
+    queue_clear(?q);
+    if (q.lent != nil) { ret 20; }
     ret 0;
 }
 
