@@ -467,7 +467,7 @@ and a subsystem is reached directly as `use gfx: boom.graphics;`.
 mach dep pull .
 mach build .
 mach test .
-mach test . --lib tests
+mach test . -a tests
 ```
 
 boom requires mach 6 and builds against std 9. mach tests one artifact's
