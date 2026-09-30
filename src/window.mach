@@ -966,6 +966,84 @@ fun monitor_for_window(w: *Window, handle: glfw.Window) opt[glfw.Monitor] {
     ret best;
 }
 
+# the most monitors one window placement considers
+val MAX_MONITORS: usize = 16;
+
+# which of the work areas a rectangle shows the most of, the earliest on a tie,
+# and -1 when it shows none of them
+fun best_overlap(x: i32, y: i32, width: i32, height: i32,
+    areas: *WindowBounds, count: usize) i32 {
+    var best:      i32   = -1;
+    var best_area: i64   = 0;
+    var i:         usize = 0;
+    for (i < count) {
+        val a:       WindowBounds = areas[i];
+        val overlap: i64          = overlap_area(x, y, width, height, a.x, a.y, a.width, a.height);
+        if (overlap > best_area) {
+            best      = i::i32;
+            best_area = overlap;
+        }
+        i = i + 1;
+    }
+    ret best;
+}
+
+# the monitor a rectangle in screen coordinates shows the most of, none when
+# it shows none of them or no monitor is connected
+fun monitor_at(x: i32, y: i32, width: i32, height: i32) opt[glfw.Monitor] {
+    var count:   i32   = 0;
+    val handles: *ptr  = glfw.get_monitors(?count);
+    var areas:   [MAX_MONITORS]WindowBounds;
+    var n:       usize = 0;
+    for (handles != nil && n::i32 < count && n < MAX_MONITORS) {
+        val current: glfw.Monitor = glfw.monitor_from_handle(handles[n]);
+        var ax:      i32          = 0;
+        var ay:      i32          = 0;
+        var aw:      i32          = 0;
+        var ah:      i32          = 0;
+        glfw.get_monitor_workarea(current, ?ax, ?ay, ?aw, ?ah);
+        areas[n] = WindowBounds{x: ax, y: ay, width: aw, height: ah};
+        n        = n + 1;
+    }
+    val at: i32 = best_overlap(x, y, width, height, ?areas[0], n);
+    if (at < 0) { ret opt[glfw.Monitor].none{}; }
+    ret opt[glfw.Monitor].some{glfw.monitor_from_handle(handles[at::usize])};
+}
+
+# the refresh rate of the monitor the window is on now
+#
+# A windowed window is placed by where it is on screen at the call, so dragging
+# it to another display changes the answer. A borderless or fullscreen window
+# is on the monitor it was set to, and on wayland, which does not report where
+# a window is, a windowed one is on the last monitor boom recorded for it.
+#
+# Zero means the rate cannot be known, because the window is closed, no monitor
+# is connected, or the platform reports none for the current mode. It is never
+# a guess, so the caller picks its own fallback.
+# ---
+# w:   window to query
+# ret: the current video mode's refresh rate in hertz, or zero
+pub fun window_refresh_hz(w: *Window) f32 {
+    if (!sel w.handle.some) { ret 0.0; }
+    val handle:  glfw.Window       = w.handle.some;
+    var monitor: opt[glfw.Monitor] = monitor_for_window(w, handle);
+    if (sel w.mode.windowed && !platform_wayland()) {
+        var wx: i32 = 0;
+        var wy: i32 = 0;
+        var ww: i32 = 0;
+        var wh: i32 = 0;
+        glfw.get_window_pos(handle, ?wx, ?wy);
+        glfw.get_window_size(handle, ?ww, ?wh);
+        val at: opt[glfw.Monitor] = monitor_at(wx, wy, ww, wh);
+        if (sel at.some) { monitor = at; }
+    }
+    if (!sel monitor.some) { ret 0.0; }
+    val mode: opt[*Vidmode] = glfw.get_video_mode(monitor.some);
+    if (!sel mode.some)             { ret 0.0; }
+    if (mode.some.refreshRate <= 0) { ret 0.0; }
+    ret mode.some.refreshRate::f32;
+}
+
 fun prefer_retained_monitor(wayland: bool, mode: WindowMode) bool {
     ret wayland || !sel mode.windowed;
 }
@@ -1272,6 +1350,26 @@ test overlap_area__visible_pixels {
     if (overlap_area(1800, 100, 400, 400, 0, 0, 1920, 1080) != 48000)     { ret 1; }
     if (overlap_area(1800, 100, 400, 400, 1920, 0, 1920, 1080) != 112000) { ret 2; }
     if (overlap_area(0, 0, 100, 100, 200, 200, 100, 100) != 0)            { ret 3; }
+    ret 0;
+}
+
+test best_overlap__picks_the_monitor_showing_the_most {
+    var areas: [2]WindowBounds;
+    areas[0] = WindowBounds{x: 0, y: 0, width: 1920, height: 1080};
+    areas[1] = WindowBounds{x: 1920, y: 0, width: 1920, height: 1080};
+    if (best_overlap(100, 100, 400, 400, ?areas[0], 2) != 0)  { ret 1; }
+    if (best_overlap(1800, 100, 400, 400, ?areas[0], 2) != 1) { ret 2; }
+    if (best_overlap(2500, 100, 400, 400, ?areas[0], 2) != 1) { ret 3; }
+    if (best_overlap(1820, 100, 200, 400, ?areas[0], 2) != 0) { ret 4; }
+    if (best_overlap(0, 2000, 400, 400, ?areas[0], 2) != -1)  { ret 5; }
+    if (best_overlap(100, 100, 400, 400, ?areas[0], 0) != -1) { ret 6; }
+    ret 0;
+}
+
+test window_refresh_hz__closed_window_is_unknown {
+    var w: Window;
+    w.handle = opt[glfw.Window].none{};
+    if (window_refresh_hz(?w) != 0.0) { ret 1; }
     ret 0;
 }
 
