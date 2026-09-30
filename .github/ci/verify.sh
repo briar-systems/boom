@@ -73,3 +73,8 @@ timeout --signal=TERM --kill-after=5s 60s xvfb-run -a \
   ./demo/compute/out/${MACH_CI_TARGET}/debug/bin/compute
 echo "compute example passed"
 
+# the clipboard round trip needs a window, so the unit suite skips it without a
+# display. here it has one, and BOOM_REQUIRE_WINDOW makes a refusal a failure
+BOOM_REQUIRE_WINDOW=1 timeout --signal=TERM --kill-after=5s 120s xvfb-run -a \
+  "$MACH_COMPILER" test . --filter window_clipboard__round_trips_utf8
+echo "clipboard round trip passed under xvfb"
