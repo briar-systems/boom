@@ -156,7 +156,7 @@ pub fun options_refusal(pixels: f32, options: FontOptions) opt[TextError] {
     ret opt[TextError].none{};
 }
 
-fun font_scale(face: *finfo.Font, pixels: f32, mode: FontSizeMode) res[f32, FontError] {
+pub fun font_scale(face: *finfo.Font, pixels: f32, mode: FontSizeMode) res[f32, FontError] {
     if (sel mode.em) { ret res[f32, FontError].ok{finfo.scale_for_em_size(face, pixels)}; }
     ret finfo.scale_for_pixel_height(face, pixels);
 }

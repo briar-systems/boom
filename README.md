@@ -436,6 +436,43 @@ pulled draw covered. Storage images, workgroup shared memory, barriers inside a
 stage and atomics wait on compiler support
 ([mach#4252](https://github.com/briar-systems/mach/issues/4252)).
 
+### blit
+
+[blit](https://github.com/briar-systems/blit) builds an immediate-mode UI as a
+draw list and depends on nothing of boom's. `boom.graphics.blitui` is the boom
+half. `BlitGlyphs` is a blit glyph source over a `Typeface`, so blit's text is
+TrueType through mach-font. It is rasterised at the face's size times blit's
+interface scale, so text at 200% is drawn at twice the size, not stretched.
+`BlitRenderer` draws a blit context's finished frame in any `Pass`. It mirrors
+blit's atlas pages into boom textures, uploading only the rows blit wrote. It
+appends each run through `pass_draw_triangles_filtered`, allocating nothing per
+frame. A blit `Image` names a boom texture by `blit_texture(?tex)`, and a render
+target's picture by `blit_texture(gfx.render_target_texture(?target))`. The
+texture must stay put and alive until the pass that draws it ends.
+
+```mach
+# once, against a typeface and the renderer's device
+var glyphs: gfx.BlitGlyphs = gfx.blit_glyphs(?a, ?typeface, 16.0,
+    gfx.FontSizeMode.line_height{}, gfx.FontRaster.smooth{}).ok;
+blit.context.set_glyph_source(?ui, gfx.blit_glyphs_source(?glyphs));
+var ui_renderer: gfx.BlitRenderer = gfx.blit_renderer(d, ?ui).ok;
+
+# each frame: build the UI, upload glyphs before the frame, draw it in a pass
+blit.context.begin(?ui, input, w, h);
+blit.widget.image(?ui, blit.draw.whole(gfx.blit_texture(?tex), blit.draw.FILTER_LINEAR), 64.0, 64.0);
+blit.context.end(?ui);
+gfx.blit_upload(?ui_renderer);
+# ...renderer_begin_frame, scene passes, then an overlay pass:
+gfx.blit_draw(?ui_renderer, ?overlay);
+```
+
+Leave blit's `set_srgb` off. The 2D program decodes a draw list's colours
+itself. Teardown runs from the renderer outward: `blit_renderer_delete`, then
+blit's `context.free`, `blit_glyphs_delete`, and the typeface. `renderer_dnit`
+refuses while a `BlitRenderer` lives, and the typeface refuses while a
+`BlitGlyphs` reads it. `demo/blit` draws a panel over a 3D scene with both
+kinds of image. Its `--check` mode reads back text at 100% and at 200%.
+
 ## Consuming boom
 
 boom builds on several ecosystem libraries: `std`, `glfw`, `vk`, `audio`,

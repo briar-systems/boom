@@ -206,9 +206,18 @@ fun scratch_sizes(m: opt[fmaxp.Maxima], cell: usize) [3]usize {
     val outline:  [2]usize = outline_scratch_sizes(m);
     val points:   usize    = outline[0];
     val contours: usize    = outline[1];
-    var edges:    usize    = points * quad_segments(cell) + 128;
+    ret [3]usize{points, contours, edge_capacity(points, cell)};
+}
+
+# The flattened-edge scratch a glyph of up to `side` raster texels needs.
+# ---
+# points: outline points the scratch admits
+# side:   the larger side of the bitmap, in raster texels
+# ret:    edges, bounded by MAX_EDGES
+pub fun edge_capacity(points: usize, side: usize) usize {
+    var edges: usize = points * quad_segments(side) + 128;
     if (edges > MAX_EDGES) { edges = MAX_EDGES; }
-    ret [3]usize{points, contours, edges};
+    ret edges;
 }
 
 fun scratch_init(g: *GlyphAtlas) err[Error] {

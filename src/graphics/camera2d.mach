@@ -365,7 +365,7 @@ test visible__grows_as_camera_zooms_out {
 test visible__rolled_view_bounds_corners {
     # under a 45 degree roll the bound is (320 + 180) / sqrt(2) on each side
     var c: Camera2D = camera2d(vec2(0.0, 0.0), 1.0);
-    c.rotation = 0.78539816;
+    c.rotation = 0.7853982;
     val v: Rect = camera2d_visible(?c, 320.0, 180.0);
     if (!near_eps(v.w, 353.553, 0.02)) { ret 1; }
     if (!near_eps(v.h, 353.553, 0.02)) { ret 2; }

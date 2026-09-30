@@ -150,12 +150,12 @@ test aabb_transform__rotation_grows_conservatively {
     var b: Aabb = aabb_empty();
     aabb_add(?b, vec3(0.0 - 1.0, 0.0 - 1.0, 0.0 - 1.0));
     aabb_add(?b, vec3(1.0, 1.0, 1.0));
-    val q: Quat = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.78539816);
+    val q: Quat = quat_from_axis_angle(vec3(0.0, 0.0, 1.0), 0.7853982);
     var m: Mat4 = mat4_from_quat(q);
     val t: Aabb = aabb_transform(?b, ?m);
-    if (!near_eps(t.max[0], 1.41421356, 0.001)) { ret 1; }
-    if (!near_eps(t.max[1], 1.41421356, 0.001)) { ret 2; }
-    if (!near_eps(t.max[2], 1.0, 0.001))        { ret 3; }
+    if (!near_eps(t.max[0], 1.4142135, 0.001)) { ret 1; }
+    if (!near_eps(t.max[1], 1.4142135, 0.001)) { ret 2; }
+    if (!near_eps(t.max[2], 1.0, 0.001))       { ret 3; }
     ret 0;
 }
 

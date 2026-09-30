@@ -113,7 +113,7 @@ pub rec Vk {
 pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     v.ready = false;
     v.live  = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0,
-        buffers: 0, computes: 0};
+        buffers: 0, computes: 0, uis: 0};
 
     if (!glfw.vulkan_supported()) {
         ret err[Error].err{Error.loader{LoaderError.unavailable{}}};

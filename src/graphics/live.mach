@@ -20,6 +20,7 @@ use std.types.size.usize;
 # shaders:  Shader handles that have built a pipeline
 # buffers:  StorageBuffer and Readback handles
 # computes: Compute handles
+# uis:      BlitRenderer handles
 pub rec Live {
     textures: usize;
     meshes:   usize;
@@ -29,11 +30,12 @@ pub rec Live {
     shaders:  usize;
     buffers:  usize;
     computes: usize;
+    uis:      usize;
 }
 
 # whether any resource is still held
 pub fun live_any(l: Live) bool {
     ret l.textures != 0 || l.meshes != 0 || l.models != 0
         || l.targets != 0 || l.fonts != 0 || l.shaders != 0
-        || l.buffers != 0 || l.computes != 0;
+        || l.buffers != 0 || l.computes != 0 || l.uis != 0;
 }

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-09-30
+
+### Added
+- `window_refresh_hz` (#247) reads the refresh rate of the display the window
+  is on now, so moving a window to another display changes the answer. Zero
+  means unknown and the caller picks its fallback.
+- A renderer for blit's draw list (#242), exported as `boom.graphics.blitui`.
+  `BlitRenderer` mirrors a blit context's atlas pages into boom textures,
+  uploading only dirty rows, and allocates nothing per frame. `BlitGlyphs`
+  answers blit's glyph source from a boom `Typeface`, so blit text is
+  TrueType and rasterised at the interface scale. Depends on blit 0.9.
+- `pass_draw_triangles_filtered` draws a triangle list with its texture
+  filter named per draw.
+
+### Fixed
+- Virtual paths resolve with `/` on every OS (#251). Windows resolved
+  `res://art/hero.qoi` to `assets\art\hero.qoi`, and a backslash root now
+  converts too. A verbatim `\\?\` root keeps `\` joins, since Windows reads
+  it literally.
+- Float constants are written as the exact values their type stores, which
+  mach 6.8 warns on otherwise. Nothing changes numerically.
+
+### Changed
+- std moves to 9.4.1.
+- CI installs zig with setup-zig, which uses mirrors and caches.
+
 ## [0.38.0] - 2026-09-30
 
 ### Added
