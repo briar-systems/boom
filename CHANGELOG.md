@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-09-30
+
+### Added
+- Clipboard access on the window (#217). `window_clipboard_get(a, w)` returns
+  an owned UTF-8 copy, which reads as an empty string when the clipboard is
+  empty, not text, or the window is closed. `window_clipboard_set(w, text)`
+  writes it. A round trip runs under xvfb on both linux legs in CI.
+- File drop events (#218). `Event.drop` carries the dropped paths, copied
+  into one block the event queue owns. Its paths stay valid until the next
+  `window_poll`, which frees the drops popped since the last poll for every
+  window's queue, so an event loop needs no extra call.
+
+### Changed
+- `window_set_event_sink` returns `err[WindowError]`, with a new
+  `WindowError.alloc` case, since registering a window's queue for drop
+  release can fail to allocate. A closed window returns `closed`.
+  `context_init` reports a failed registration as `ContextError.window`.
+
 ## [0.35.1] - 2026-09-30
 
 ### Fixed
