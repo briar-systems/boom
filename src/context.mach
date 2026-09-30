@@ -160,7 +160,8 @@ pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
     # long after context_init has returned.
     ctx.sink.queue = ?ctx.events;
     ctx.sink.input = ?ctx.input;
-    window_set_event_sink(?ctx.window, ?ctx.sink);
+    val routed: err[WindowError] = window_set_event_sink(?ctx.window, ?ctx.sink);
+    if (sel routed.err) { ret err[ContextError].err{ContextError.window{routed.err}}; }
     ctx.clock   = started.ok;
     ctx.step    = timestep_new(cfg.fixed_dt, cfg.max_frame);
     ctx.running = true;
