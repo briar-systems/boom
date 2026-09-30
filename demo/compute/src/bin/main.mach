@@ -10,7 +10,9 @@
 #
 # Two generations run. The first is a direct dispatch that also writes the
 # arguments the second dispatch and the draw read indirectly; the second is
-# dispatched from them. Each cell is twice its source plus the generation, so
+# dispatched from them. Each step binds five buffers, one past the four Vulkan
+# guarantees, the fifth a rule holding the scale. Each cell is the rule's scale,
+# two, times its source plus the generation, so
 # after both a cell seeded with i holds 4i + 4, and the host reads the pool back
 # and says so. The draw goes into an offscreen target read back afterwards: a
 # cell holding 2k + 1 covers a quarter of grid square k, so the red pixel count
@@ -113,13 +115,19 @@ fun main(argc: i64, argv: **u8) i64 {
     if (fail("renderer_init", gfx.renderer_init(?r, ?w))) { ret 1; }
     val d: *gfx.Device = gfx.renderer_device(?r);
 
-    # the device's limits are at least what the specification guarantees
+    # the device's limits are at least what the specification guarantees, and
+    # it lets a step and a draw bind the five buffers these do, a dispatch never
+    # fewer than a draw
     val lim: gfx.Limits = gfx.renderer_limits(?r);
     if (lim.max_storage_buffer_range < 134217728 || lim.max_compute_work_group_count[0] < 65535
-        || lim.max_compute_work_group_invocations < 128) {
-        p.printlnf("FAIL renderer_limits: range {} groups {} invocations {}",
+        || lim.max_compute_work_group_invocations < 128
+        || lim.max_per_stage_descriptor_storage_buffers < 4
+        || lim.max_draw_bindings < 5 || lim.max_dispatch_bindings < lim.max_draw_bindings
+        || lim.max_dispatch_bindings > gfx.MAX_STORAGE_BINDINGS) {
+        p.printlnf("FAIL renderer_limits: range {} groups {} invocations {} bindings {} dispatch {} draw of {}",
             lim.max_storage_buffer_range, lim.max_compute_work_group_count[0],
-            lim.max_compute_work_group_invocations);
+            lim.max_compute_work_group_invocations, lim.max_dispatch_bindings, lim.max_draw_bindings,
+            lim.max_per_stage_descriptor_storage_buffers);
         ret 1;
     }
 
@@ -128,8 +136,9 @@ fun main(argc: i64, argv: **u8) i64 {
     var b:       gfx.StorageBuffer;
     var control: gfx.StorageBuffer;
     var params:  gfx.StorageBuffer;
+    var rule:    gfx.StorageBuffer;
     if (!make(d, CELLS * 4, ?a) || !make(d, CELLS * 4, ?b)
-        || !make(d, 48, ?control) || !make(d, 16, ?params)) { ret 1; }
+        || !make(d, 48, ?control) || !make(d, 16, ?params) || !make(d, 16, ?rule)) { ret 1; }
     var seed: [256]u32;
     var i:    usize = 0;
     for (i < CELLS) {
@@ -137,6 +146,8 @@ fun main(argc: i64, argv: **u8) i64 {
         i       = i + 1;
     }
     if (fail("storage_buffer_upload", gfx.storage_buffer_upload(d, ?a, 0, (?seed[0]):~*u8, CELLS * 4))) { ret 1; }
+    var scale: [4]u32 = params_for(2);
+    if (fail("storage_buffer_upload", gfx.storage_buffer_upload(d, ?rule, 0, (?scale[0]):~*u8, 16))) { ret 1; }
 
     var step: gfx.Compute;
     if (fail("compute", gfx.compute(?step, d, ?STEP_SPV[0], $length_of(STEP_SPV)))) { ret 1; }
@@ -160,21 +171,43 @@ fun main(argc: i64, argv: **u8) i64 {
     if (!open_frame(?r)) { ret 1; }
     var q: [4]u32 = params_for(1);
     if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?params, 0, (?q[0]):~*u8, 16))) { ret 1; }
-    var first: [4]*gfx.StorageBuffer;
+    var first: [5]*gfx.StorageBuffer;
     first[0] = ?a;
     first[1] = ?b;
     first[2] = ?control;
     first[3] = ?params;
-    if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?first[0], 4, GROUPS, 1, 1))) { ret 1; }
+    first[4] = ?rule;
+
+    # one more buffer than the device allows is refused before anything records
+    var over: [gfx.MAX_STORAGE_BINDINGS + 1]*gfx.StorageBuffer;
+    i = 0;
+    for (i < gfx.MAX_STORAGE_BINDINGS + 1) {
+        over[i] = ?rule;
+        i       = i + 1;
+    }
+    val refused: err[gfx.Error] = gfx.renderer_dispatch(?r, ?step, ?over[0],
+        lim.max_dispatch_bindings + 1, GROUPS, 1, 1);
+    if (!(sel refused.err && (sel refused.err.buffer && (sel refused.err.buffer.too_many
+        && refused.err.buffer.too_many == lim.max_dispatch_bindings + 1)))) {
+        p.println("FAIL renderer_dispatch: a list past max_dispatch_bindings was not refused");
+        ret 1;
+    }
+
+    if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?first[0], 5, GROUPS, 1, 1))) { ret 1; }
     if (fail("renderer_readback", gfx.renderer_readback(?r, ?flags, ?control, FLAGS_AT)))        { ret 1; }
 
     var desc: gfx.PassDesc = gfx.pass_overlay();
     desc.target = opt[*gfx.RenderTarget].some{?target};
     desc.clear  = opt[gm.Vec4].some{gm.vec4(0.0, 0.0, 0.0, 1.0)};
-    var pass:  gfx.Pass = gfx.pass_begin(?r, ?desc);
-    var drawn: [1]*gfx.StorageBuffer;
+    var pass: gfx.Pass = gfx.pass_begin(?r, ?desc);
+    # the draw binds five as well, though its stages read only the first
+    var drawn: [5]*gfx.StorageBuffer;
     drawn[0] = ?b;
-    gfx.pass_draw_storage_indirect(?pass, ?drawn[0], 1, ?control, DRAW_AT, ?mat, ?xf, ?cells);
+    drawn[1] = ?a;
+    drawn[2] = ?control;
+    drawn[3] = ?params;
+    drawn[4] = ?rule;
+    gfx.pass_draw_storage_indirect(?pass, ?drawn[0], 5, ?control, DRAW_AT, ?mat, ?xf, ?cells);
     gfx.pass_end(?pass);
     val dropped: usize = gfx.renderer_dropped(?r);
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
@@ -187,12 +220,13 @@ fun main(argc: i64, argv: **u8) i64 {
     if (!open_frame(?r)) { ret 1; }
     q = params_for(2);
     if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?params, 0, (?q[0]):~*u8, 16))) { ret 1; }
-    var second: [4]*gfx.StorageBuffer;
+    var second: [5]*gfx.StorageBuffer;
     second[0] = ?b;
     second[1] = ?a;
     second[2] = ?control;
     second[3] = ?params;
-    if (fail("renderer_dispatch_indirect", gfx.renderer_dispatch_indirect(?r, ?step, ?second[0], 4,
+    second[4] = ?rule;
+    if (fail("renderer_dispatch_indirect", gfx.renderer_dispatch_indirect(?r, ?step, ?second[0], 5,
         ?control, NEXT_AT))) { ret 1; }
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
 
@@ -211,7 +245,7 @@ fun main(argc: i64, argv: **u8) i64 {
         p.printlnf("FAIL dispatch: {} of 256 cells differ from 4i + 4 (cell 1 holds {})", wrong, pool[1]);
         ok = false;
     }
-    or { p.println("ok   two generations, one indirect, left every cell at 4i + 4"); }
+    or { p.println("ok   two generations of five bindings, one indirect, left every cell at 4i + 4"); }
 
     var seen: [4]u32;
     if (!gfx.renderer_readback_take(?r, ?flags, (?seen[0]):~*u8, 16)) {
@@ -245,6 +279,7 @@ fun main(argc: i64, argv: **u8) i64 {
     gfx.readback_delete(?flags, d);
     gfx.shader_delete(?cells, d);
     gfx.compute_delete(?step, d);
+    gfx.storage_buffer_delete(d, ?rule);
     gfx.storage_buffer_delete(d, ?params);
     gfx.storage_buffer_delete(d, ?control);
     gfx.storage_buffer_delete(d, ?b);

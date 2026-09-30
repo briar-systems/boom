@@ -11,16 +11,64 @@
 use std.types.size.usize;
 use vk;
 
-# The limits, named as Vulkan names them with the prefix dropped.
+# The most storage buffers one dispatch or storage draw binds on any device.
+#
+# Boom's own cap, above whatever a device reports. It sizes the arrays the
+# STORAGE_SET layout and each set's writes are built in, and it keeps a draw's
+# fragment stage well inside the 128 resources maxPerStageResources guarantees:
+# set 0 spends nine, the colour attachments a handful, and this sixteen. A
+# device's own counts are max_dispatch_bindings and max_draw_bindings, which are
+# never more than this.
+pub val MAX_STORAGE_BINDINGS: usize = 16;
+
+# The storage buffers set 0 of every draw already shows its vertex and fragment
+# stages: the joint palette and the frame storage.
+#
+# They count against the same per-stage and per-layout limits as a game's own,
+# because a storage draw's layout carries set 0 and STORAGE_SET together. A
+# compute stage has no set 0, so a dispatch does not pay for them per stage.
+pub val DRAW_STORAGE_BUFFERS: u32 = 2;
+
+# The limits, named as Vulkan names them with the prefix dropped, and the two
+# boom derives from them.
 # ---
-# max_storage_buffer_range:            Bytes one storage buffer binding may name. The
-#                                      specification guarantees only 128 MiB.
-# max_compute_work_group_count:        Workgroups one dispatch may launch, per axis.
-# max_compute_work_group_invocations:  Invocations one workgroup may hold, across
-#                                      all three of its axes.
-# max_compute_work_group_size:         Invocations one workgroup may hold, per axis.
-# max_compute_shared_memory_size:      Bytes of workgroup-shared memory.
-# min_storage_buffer_offset_alignment: Alignment of a storage buffer binding's offset.
+# max_storage_buffer_range:                 Bytes one storage buffer binding may
+#                                           name. The specification guarantees
+#                                           only 128 MiB.
+# max_compute_work_group_count:             Workgroups one dispatch may launch,
+#                                           per axis.
+# max_compute_work_group_invocations:       Invocations one workgroup may hold,
+#                                           across all three of its axes.
+# max_compute_work_group_size:              Invocations one workgroup may hold,
+#                                           per axis.
+# max_compute_shared_memory_size:           Bytes of workgroup-shared memory.
+# min_storage_buffer_offset_alignment:      Alignment of a storage buffer
+#                                           binding's offset.
+# max_per_stage_descriptor_storage_buffers: Storage buffers one stage of a
+#                                           pipeline layout may see. The
+#                                           specification guarantees only 4.
+# max_descriptor_set_storage_buffers:       Storage buffers a whole pipeline
+#                                           layout may hold. The specification
+#                                           guarantees only 24.
+# max_dispatch_bindings:                    Boom's own, not Vulkan's: how many
+#                                           buffers one dispatch may bind on
+#                                           this device. The per-stage limit,
+#                                           since a compute stage has no set 0,
+#                                           and the per-layout limit less
+#                                           DRAW_STORAGE_BUFFERS, since a draw's
+#                                           layout holds the same STORAGE_SET
+#                                           layout beside set 0. Capped at
+#                                           MAX_STORAGE_BINDINGS. A longer list
+#                                           is refused.
+# max_draw_bindings:                        Boom's own: how many buffers one
+#                                           storage draw may bind on this
+#                                           device. Both limits less
+#                                           DRAW_STORAGE_BUFFERS, since its
+#                                           vertex and fragment stages see set
+#                                           0's too, capped at
+#                                           MAX_STORAGE_BINDINGS, and never more
+#                                           than max_dispatch_bindings. A longer
+#                                           list is refused.
 pub rec Limits {
     max_storage_buffer_range:            usize;
     max_compute_work_group_count:        [3]u32;
@@ -28,6 +76,11 @@ pub rec Limits {
     max_compute_work_group_size:         [3]u32;
     max_compute_shared_memory_size:      u32;
     min_storage_buffer_offset_alignment: usize;
+
+    max_per_stage_descriptor_storage_buffers: u32;
+    max_descriptor_set_storage_buffers:       u32;
+    max_dispatch_bindings:                    usize;
+    max_draw_bindings:                        usize;
 }
 
 # the limits a device reported
@@ -43,26 +96,83 @@ pub fun limits_from(src: *vk.PhysicalDeviceLimits) Limits {
     l.max_compute_work_group_size[2]      = src.maxComputeWorkGroupSize[2];
     l.max_compute_shared_memory_size      = src.maxComputeSharedMemorySize;
     l.min_storage_buffer_offset_alignment = src.minStorageBufferOffsetAlignment::usize;
+
+    l.max_per_stage_descriptor_storage_buffers = src.maxPerStageDescriptorStorageBuffers;
+    l.max_descriptor_set_storage_buffers       = src.maxDescriptorSetStorageBuffers;
+    l.max_dispatch_bindings                    = storage_bindings(src.maxPerStageDescriptorStorageBuffers,
+        less_draw(src.maxDescriptorSetStorageBuffers));
+    l.max_draw_bindings = storage_bindings(less_draw(src.maxPerStageDescriptorStorageBuffers),
+        less_draw(src.maxDescriptorSetStorageBuffers));
     ret l;
+}
+
+# a device's count less set 0's storage buffers, never wrapping below zero
+fun less_draw(n: u32) u32 {
+    if (n <= DRAW_STORAGE_BUFFERS) { ret 0; }
+    ret n - DRAW_STORAGE_BUFFERS;
+}
+
+# how many buffers the STORAGE_SET may hold for one kind of call: the tighter of
+# the per-stage and per-layout counts left to it, capped at MAX_STORAGE_BINDINGS
+fun storage_bindings(per_stage: u32, per_layout: u32) usize {
+    var n: u32 = per_stage;
+    if (per_layout < n)                  { n = per_layout; }
+    if (n::usize > MAX_STORAGE_BINDINGS) { ret MAX_STORAGE_BINDINGS; }
+    ret n::usize;
 }
 
 test limits_from__carries_each_limit {
     var src: vk.PhysicalDeviceLimits;
-    src.maxStorageBufferRange           = 134217728;
-    src.maxComputeWorkGroupCount[0]     = 65535;
-    src.maxComputeWorkGroupCount[1]     = 65534;
-    src.maxComputeWorkGroupCount[2]     = 65533;
-    src.maxComputeWorkGroupInvocations  = 1024;
-    src.maxComputeWorkGroupSize[2]      = 64;
-    src.maxComputeSharedMemorySize      = 32768;
-    src.minStorageBufferOffsetAlignment = 16;
+    src.maxStorageBufferRange               = 134217728;
+    src.maxComputeWorkGroupCount[0]         = 65535;
+    src.maxComputeWorkGroupCount[1]         = 65534;
+    src.maxComputeWorkGroupCount[2]         = 65533;
+    src.maxComputeWorkGroupInvocations      = 1024;
+    src.maxComputeWorkGroupSize[2]          = 64;
+    src.maxComputeSharedMemorySize          = 32768;
+    src.minStorageBufferOffsetAlignment     = 16;
+    src.maxPerStageDescriptorStorageBuffers = 8;
+    src.maxDescriptorSetStorageBuffers      = 24;
     val l: Limits = limits_from(?src);
-    if (l.max_storage_buffer_range != 134217728)      { ret 1; }
-    if (l.max_compute_work_group_count[0] != 65535)   { ret 2; }
-    if (l.max_compute_work_group_count[2] != 65533)   { ret 3; }
-    if (l.max_compute_work_group_invocations != 1024) { ret 4; }
-    if (l.max_compute_work_group_size[2] != 64)       { ret 5; }
-    if (l.max_compute_shared_memory_size != 32768)    { ret 6; }
-    if (l.min_storage_buffer_offset_alignment != 16)  { ret 7; }
+    if (l.max_storage_buffer_range != 134217728)         { ret 1; }
+    if (l.max_compute_work_group_count[0] != 65535)      { ret 2; }
+    if (l.max_compute_work_group_count[2] != 65533)      { ret 3; }
+    if (l.max_compute_work_group_invocations != 1024)    { ret 4; }
+    if (l.max_compute_work_group_size[2] != 64)          { ret 5; }
+    if (l.max_compute_shared_memory_size != 32768)       { ret 6; }
+    if (l.min_storage_buffer_offset_alignment != 16)     { ret 7; }
+    if (l.max_per_stage_descriptor_storage_buffers != 8) { ret 8; }
+    if (l.max_descriptor_set_storage_buffers != 24)      { ret 9; }
+    if (l.max_dispatch_bindings != 8)                    { ret 10; }
+    if (l.max_draw_bindings != 6)                        { ret 11; }
+    ret 0;
+}
+
+test limits_from__dispatch_and_draw_bindings {
+    # the specification's floor: a compute stage has no set 0, so a dispatch
+    # keeps all four, while a draw's stages already see set 0's two
+    var src: vk.PhysicalDeviceLimits;
+    src.maxPerStageDescriptorStorageBuffers = 4;
+    src.maxDescriptorSetStorageBuffers      = 24;
+    var l: Limits = limits_from(?src);
+    if (l.max_dispatch_bindings != 4) { ret 1; }
+    if (l.max_draw_bindings != 2)     { ret 2; }
+    # a draw's layout holds set 0 beside the whole STORAGE_SET, so the
+    # per-layout count bounds both less set 0's
+    src.maxPerStageDescriptorStorageBuffers = 1048576;
+    src.maxDescriptorSetStorageBuffers      = 7;
+    l                                       = limits_from(?src);
+    if (l.max_dispatch_bindings != 5) { ret 3; }
+    if (l.max_draw_bindings != 5)     { ret 4; }
+    src.maxDescriptorSetStorageBuffers = 1048576;
+    l                                  = limits_from(?src);
+    if (l.max_dispatch_bindings != MAX_STORAGE_BINDINGS) { ret 5; }
+    if (l.max_draw_bindings != MAX_STORAGE_BINDINGS)     { ret 6; }
+    # a device that cannot hold set 0's own leaves a draw nothing, not a wrapped count
+    src.maxPerStageDescriptorStorageBuffers = 1;
+    src.maxDescriptorSetStorageBuffers      = 24;
+    l                                       = limits_from(?src);
+    if (l.max_dispatch_bindings != 1) { ret 7; }
+    if (l.max_draw_bindings != 0)     { ret 8; }
     ret 0;
 }
