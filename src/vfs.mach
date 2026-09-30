@@ -18,6 +18,9 @@
 #   user://  Writable per-user state such as saves, settings, and logs.
 #            Defaults to the platform's own location, derived at first use.
 #
+# A resolved path is `/`-separated on every OS, root included, since `/` is
+# the separator every supported OS's file API accepts.
+#
 # A bare path with no scheme passes through unchanged. That is the escape hatch
 # for a tool or a test that genuinely means one specific file, and it is
 # deliberately the ugly option so that game code does not reach for it.
@@ -366,8 +369,9 @@ fun root_for(a: *allo.Allocator, vpath: str, end: usize) res[Root, VfsError] {
 # Resolve a virtual path to a filesystem path
 #
 # The result is owned by the caller, allocated from `a` and released with
-# std.text.string.str_free. a path with no scheme is copied through unchanged,
-# so the escape hatch costs a copy and nothing else.
+# std.text.string.str_free. a scheme path resolves `/`-separated, as
+# join_root describes. a path with no scheme is copied through unchanged, so
+# the escape hatch costs a copy and nothing else.
 # ---
 # a:     allocator for the result
 # vpath: virtual path, e.g. `res://art/hero.qoi`
@@ -385,47 +389,72 @@ pub fun vfs_resolve(a: *allo.Allocator, vpath: str) res[str, VfsError] {
     var root:  Root = rr.ok;
     val value: str  = root_value(?root);
 
-    val n:    usize = str_len(vpath);
-    val rest: usize = n - end;
-    val rlen: usize = str_len(value);
+    val result: res[str, allo.Error] = join_root(
+        a, value, (?vpath[end])::str, path.is_separator('\\'::u8));
+    ret finish_resolve(a, ?root, result);
+}
 
-    # A root of "" means the rest is already the whole path, which is what an
-    # absolute user_root override collapses to
-    if (rlen == 0) {
-        val result: res[str, allo.Error] = text.str_dup_range(a, vpath, end, rest);
-        ret finish_resolve(a, ?root, result);
-    }
+# Join a scheme root and the rest of a virtual path into one filesystem path
+#
+# The result is `/`-separated: every separator in the root and the rest is
+# written as `/`, and exactly one joins them whether or not the root carries a
+# trailing one. `/` is the one separator every supported OS's file API accepts,
+# so the result is the same string on every host for the same inputs, and a
+# windows root spelled with backslashes (a platform data directory, `C:\...`,
+# `\\server\share`) does not come out mixing both. whether `\` separates is
+# the host's rule, passed in so both rules are testable anywhere. the exception
+# is a windows verbatim root `\\?\...`, which the file API takes literally and
+# where `/` is an ordinary byte, so it is joined and continued with `\` instead.
+# a root of "" means the rest is already the whole path, which is what an
+# absolute user_root override collapses to.
+# ---
+# a:                   allocator for the result
+# root:                the scheme's root directory
+# rest:                the virtual path after its `://`
+# backslash_separates: whether `\` separates components, true on windows
+# ret:                 the joined path, or the allocator's refusal
+fun join_root(a: *allo.Allocator, root: str, rest: str, backslash_separates: bool) res[str, allo.Error] {
+    val rlen:     usize = str_len(root);
+    val tlen:     usize = str_len(rest);
+    val verbatim: bool  = backslash_separates && rlen >= 4 && root[0] == '\\'
+        && root[1] == '\\' && root[2] == '?' && root[3] == '\\';
+    var out_sep: u8 = '/'::u8;
+    if (verbatim) { out_sep = '\\'::u8; }
 
-    # Join with exactly one separator regardless of whether the root carries a
-    # trailing one, since both spellings are natural for a dev to write
-    var sep: usize = 1;
-    if (path.is_separator(value[rlen - 1]::u8)) { sep = 0; }
+    var sep: usize = 0;
+    if (rlen > 0 && !is_sep(root[rlen - 1]::u8, backslash_separates)) { sep = 1; }
 
-    val br: res[*u8, allo.Error] = allo.allocate[u8](a, rlen + sep + rest + 1);
-    if (sel br.err) { ret finish_resolve(a, ?root, res[str, allo.Error].err{br.err}); }
+    val br: res[*u8, allo.Error] = allo.allocate[u8](a, rlen + sep + tlen + 1);
+    if (sel br.err) { ret res[str, allo.Error].err{br.err}; }
     val buf: *u8 = br.ok;
 
     var o: usize = 0;
     var i: usize = 0;
     for (i < rlen) {
-        buf[o] = value[i]::u8;
+        var c: u8 = root[i]::u8;
+        if (!verbatim && is_sep(c, backslash_separates)) { c = '/'::u8; }
+        buf[o] = c;
         o      = o + 1;
         i      = i + 1;
     }
     if (sep == 1) {
-        buf[o] = path.separator();
+        buf[o] = out_sep;
         o      = o + 1;
     }
     i = 0;
-    for (i < rest) {
-        var c: u8 = vpath[end + i]::u8;
-        if (c == '/'::u8) { c = path.separator(); }
+    for (i < tlen) {
+        var c: u8 = rest[i]::u8;
+        if (is_sep(c, backslash_separates)) { c = out_sep; }
         buf[o] = c;
         o      = o + 1;
         i      = i + 1;
     }
     buf[o] = 0;
-    ret finish_resolve(a, ?root, res[str, allo.Error].ok{buf:~str});
+    ret res[str, allo.Error].ok{buf:~str};
+}
+
+fun is_sep(c: u8, backslash_separates: bool) bool {
+    ret c == '/'::u8 || (backslash_separates && c == '\\'::u8);
 }
 
 # release a resolution's root, reporting the first failure and owning nothing on one
@@ -520,6 +549,13 @@ fun resolves_to(r: res[str, VfsError], expected: str) bool {
     ret sel r.ok && str_equals(r.ok, expected);
 }
 
+# whether join_root produced exactly the expected path
+#[testing]
+fun joins(a: *allo.Allocator, root: str, rest: str, backslash_separates: bool, expected: str) bool {
+    val r: res[str, allo.Error] = join_root(a, root, rest, backslash_separates);
+    ret sel r.ok && str_equals(r.ok, expected);
+}
+
 # whether a user data root was refused as an invalid namespace
 #[testing]
 fun refused_namespace(r: res[str, VfsError]) bool {
@@ -548,6 +584,48 @@ test vfs_resolve__joins_root {
     if (!resolves_to(slash, "assets/hero.qoi"))          { ret 2; }
     if (!resolves_to(top, "/hero.qoi"))                  { ret 3; }
     if (!resolves_to(user, "/tmp/game-state/save1.dat")) { ret 4; }
+    ret 0;
+}
+
+test vfs_resolve__native_roots_join_with_slash {
+    var a: allo.Allocator;
+    page.make(?a);
+    # both separator rules run on every host, so a windows root is tested on linux
+    if (!joins(?a, "C:\\games", "art/hero.qoi", true, "C:/games/art/hero.qoi")) { ret 1; }
+    if (!joins(?a, "C:\\", "hero.qoi", true, "C:/hero.qoi"))                    { ret 2; }
+    if (!joins(?a, "\\\\server\\share\\game", "art/hero.qoi", true,
+        "//server/share/game/art/hero.qoi")) { ret 3; }
+    if (!joins(?a, "C:\\Users\\runner\\AppData\\Roaming", "saves\\1.dat", true,
+        "C:/Users/runner/AppData/Roaming/saves/1.dat")) { ret 4; }
+    # a verbatim root is taken literally, where `/` is not a separator
+    if (!joins(?a, "\\\\?\\C:\\games", "art/hero.qoi", true,
+        "\\\\?\\C:\\games\\art\\hero.qoi")) { ret 5; }
+    # on posix a backslash is a filename byte and stays one
+    if (!joins(?a, "odd\\dir", "a\\b", false, "odd\\dir/a\\b"))  { ret 6; }
+    if (!joins(?a, "", "/abs/save.dat", false, "/abs/save.dat")) { ret 7; }
+    ret 0;
+}
+
+test vfs_resolve__platform_user_root_is_absolute {
+    var a: allo.Allocator;
+    page.make(?a);
+    val saved: str = user_root;
+    user_root = "";
+    val r: res[str, VfsError] = vfs_resolve(?a, "user://save1.dat");
+    user_root = saved;
+    # a host without the platform's data variables has no user root to test
+    if (sel r.err) {
+        if (sel r.err.user_data_unavailable) { ret 0; }
+        ret 1;
+    }
+    if (!path.is_abs(r.ok)) { ret 2; }
+    val n: usize = str_len(r.ok);
+    if (n < 10 || !str_equals((?r.ok[n - 10])::str, "/save1.dat")) { ret 3; }
+    var i: usize = 0;
+    for (i < n) {
+        if (r.ok[i] != '/' && path.is_separator(r.ok[i]::u8)) { ret 4; }
+        i = i + 1;
+    }
     ret 0;
 }
 
