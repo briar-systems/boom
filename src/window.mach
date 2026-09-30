@@ -19,6 +19,7 @@ use boom.event.EventQueue;
 use boom.event.KeyAction;
 use boom.event.KeyEvent;
 use boom.event.MoveEvent;
+use boom.event.PointerEvent;
 use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
@@ -248,6 +249,17 @@ fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
     deliver_cursor(sink_of(w), x, y, ww, wh, fw, fh);
 }
 
+fun on_cursor_enter(handle: ptr, entered: i32) {
+    deliver_pointer(sink_of(glfw.window_from_handle(handle)), entered != 0);
+}
+
+# the pointer entering or leaving, in order with the moves around it
+fun deliver_pointer(s: *Sink, inside: bool) {
+    if (s == nil) { ret; }
+    inp.input_pointer_event(s.input, inside);
+    offer(s.queue, Event.pointer{PointerEvent{inside: inside}});
+}
+
 fun on_scroll(handle: ptr, dx: f64, dy: f64) {
     val s: *Sink = sink_of(glfw.window_from_handle(handle));
     if (s == nil) { ret; }
@@ -474,6 +486,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     glfw.set_drop_callback(win, on_drop);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
+    glfw.set_cursor_enter_callback(win, on_cursor_enter);
     glfw.set_scroll_callback(win, on_scroll);
     glfw.set_framebuffer_size_callback(win, on_framebuffer_size);
 
@@ -718,7 +731,10 @@ pub rec Sink {
 # ---
 # w:   window to observe; a closed window routes nothing and is refused
 # s:   sink to receive input; must outlive the window. Its cursor position is
-#      initialized in framebuffer pixels without reporting synthetic motion.
+#      initialized in framebuffer pixels without reporting synthetic motion,
+#      and its pointer presence from whether the pointer is over the window
+#      now, without queuing an enter: one that arrived before the sink did
+#      was dropped.
 # ret: ok, closed for a window that is not open, or alloc when the sink
 #      registry could not grow
 pub fun window_set_event_sink(w: *Window, s: *Sink) err[WindowError] {
@@ -734,6 +750,7 @@ pub fun window_set_event_sink(w: *Window, s: *Sink) err[WindowError] {
     glfw.get_framebuffer_size(handle, ?fw, ?fh);
     glfw.get_cursor_pos(handle, ?x, ?y);
     rebase_cursor(s, x, y, ww, wh, fw, fh);
+    inp.input_pointer_event(s.input, glfw.get_window_attrib(handle, glfw.HOVERED) != 0);
     glfw.set_window_user_pointer(handle, s::ptr);
     val registered: err[allo.Error] = register_queue(handle.handle, s.queue);
     if (sel registered.err) { ret err[WindowError].err{WindowError.alloc{registered.err}}; }
@@ -1051,6 +1068,42 @@ test deliver_text__ordered_with_keys {
     if (!sel r.some.key)                { ret 4; }
     if (!sel r.some.key.action.release) { ret 5; }
     deliver_text(nil, 0x61);
+    ret 0;
+}
+
+test deliver_pointer__ordered_with_moves {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+
+    inp.input_begin_tick(?input);
+    if (input.pointer_in) { ret 1; }
+
+    deliver_pointer(?sink, true);
+    deliver_cursor(?sink, 10.0, 20.0, 800, 600, 800, 600);
+    inp.input_begin_tick(?input);
+    if (!input.pointer_in) { ret 2; }
+
+    deliver_pointer(?sink, false);
+    inp.input_begin_tick(?input);
+    # leaving keeps the last position inside
+    if (input.pointer_in)                               { ret 3; }
+    if (input.mouse_x != 10.0 || input.mouse_y != 20.0) { ret 4; }
+
+    val a: opt[Event] = queue_pop(?q);
+    if (!sel a.some)            { ret 5; }
+    if (!sel a.some.pointer)    { ret 5; }
+    if (!a.some.pointer.inside) { ret 6; }
+    val m: opt[Event] = queue_pop(?q);
+    if (!sel m.some)            { ret 7; }
+    if (!sel m.some.mouse_move) { ret 7; }
+    val b: opt[Event] = queue_pop(?q);
+    if (!sel b.some)           { ret 8; }
+    if (!sel b.some.pointer)   { ret 8; }
+    if (b.some.pointer.inside) { ret 9; }
+    val none: opt[Event] = queue_pop(?q);
+    if (sel none.some) { ret 10; }
+    deliver_pointer(nil, true);
     ret 0;
 }
 

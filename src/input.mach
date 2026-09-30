@@ -253,6 +253,8 @@ pub rec Gamepad {
 # mouse_dy:     framebuffer-pixel movement accumulated over this tick
 # scroll_x:     horizontal scroll accumulated over this tick
 # scroll_y:     vertical scroll accumulated over this tick
+# pointer_in:   whether the pointer is over the window; false until it enters,
+#               and mouse_x/y are its last position inside only while true
 pub rec Input {
     key_down:     [65]bool;
     key_pressed:  [65]bool;
@@ -266,6 +268,7 @@ pub rec Input {
     mouse_dy:     f64;
     scroll_x:     f64;
     scroll_y:     f64;
+    pointer_in:   bool;
 
     pend_key_down:     [65]bool;
     pend_key_pressed:  [65]bool;
@@ -279,6 +282,7 @@ pub rec Input {
     pend_mouse_dy:     f64;
     pend_scroll_x:     f64;
     pend_scroll_y:     f64;
+    pend_pointer_in:   bool;
 
     pads: [16]Gamepad;
 }
@@ -306,18 +310,20 @@ pub fun input_new() Input {
         i.pend_btn_released[b] = false;
         b                      = b + 1;
     }
-    i.mouse_x       = 0.0;
-    i.mouse_y       = 0.0;
-    i.mouse_dx      = 0.0;
-    i.mouse_dy      = 0.0;
-    i.scroll_x      = 0.0;
-    i.scroll_y      = 0.0;
-    i.pend_mouse_x  = 0.0;
-    i.pend_mouse_y  = 0.0;
-    i.pend_mouse_dx = 0.0;
-    i.pend_mouse_dy = 0.0;
-    i.pend_scroll_x = 0.0;
-    i.pend_scroll_y = 0.0;
+    i.mouse_x         = 0.0;
+    i.mouse_y         = 0.0;
+    i.mouse_dx        = 0.0;
+    i.mouse_dy        = 0.0;
+    i.scroll_x        = 0.0;
+    i.scroll_y        = 0.0;
+    i.pend_mouse_x    = 0.0;
+    i.pend_mouse_y    = 0.0;
+    i.pend_mouse_dx   = 0.0;
+    i.pend_mouse_dy   = 0.0;
+    i.pend_scroll_x   = 0.0;
+    i.pend_scroll_y   = 0.0;
+    i.pointer_in      = false;
+    i.pend_pointer_in = false;
 
     var p: usize = 0;
     for (p < MAX_PADS) {
@@ -408,6 +414,14 @@ pub fun input_mouse_event_with_delta(i: *Input, x: f64, y: f64,
 pub fun input_mouse_rebase(i: *Input, x: f64, y: f64) {
     i.pend_mouse_x = x;
     i.pend_mouse_y = y;
+}
+
+# Record the pointer entering or leaving the window. `inside` is the new state.
+#
+# The position is left as it was: on leave it is the last point inside, which
+# is why a game checks pointer_in before reading mouse_x/y as a pointer.
+pub fun input_pointer_event(i: *Input, inside: bool) {
+    i.pend_pointer_in = inside;
 }
 
 # Record a scroll increment, accumulated over the tick
@@ -528,6 +542,7 @@ pub fun input_begin_tick(i: *Input) {
     i.mouse_dy      = i.pend_mouse_dy;
     i.scroll_x      = i.pend_scroll_x;
     i.scroll_y      = i.pend_scroll_y;
+    i.pointer_in    = i.pend_pointer_in;
     i.pend_mouse_dx = 0.0;
     i.pend_mouse_dy = 0.0;
     i.pend_scroll_x = 0.0;

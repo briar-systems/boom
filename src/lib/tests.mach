@@ -1,5 +1,5 @@
 # the modules whose tests the boom artifact does not reach
-# `mach test . --lib tests` runs them
+# `mach test . -a tests` runs them
 
 use std.runtime;
 

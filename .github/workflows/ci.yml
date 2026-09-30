@@ -1,70 +1,79 @@
 name: CI
 
-# the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
-# one linux leg per architecture on a pull request into dev and into main.
-# the demos are a
-# glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
-# nothing runs on push. cd.yml calls this with heavy: all.
-
 on:
   pull_request:
-  workflow_call:
-    inputs:
-      heavy:
-        type: string
-        default: none
   workflow_dispatch:
     inputs:
-      heavy:
-        description: heavy work to run on this ref
-        type: choice
-        default: none
-        options: [none, all]
+      runners:
+        description: runners to test on, as a JSON array, e.g. ["macos-15", "windows-latest"]
+        type: string
+  workflow_call:
+    inputs:
+      runners:
+        type: string
+      profile:
+        type: string
+        default: debug
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  MACH_VERSION: 6.8.0
+  PROFILE: ${{ inputs.profile || 'debug' }}
+
 jobs:
-  lib:
-    uses: briar-systems/.github/.github/workflows/mach-lib.yml@main
-    with:
-      heavy: ${{ inputs.heavy }}
-      # std 9 requires mach 6, ahead of the family pin (briar-systems/.github#103),
-      # and demo/compute's compute stage needs 6.7
-      mach-version: v6.7.0
-      # mach tests one artifact's closure, so the text fixture, which the
-      # library does not reach, runs under the test-only tests artifact
-      test-selections: '[["--lib", "tests"]]'
-      # the windows and darwin targets need a C cross toolchain for glfw
-      all-targets: false
-      # mach-glfw builds GLFW from source with the host cc, the text example
-      # needs a latin face and a TrueType Han face, and the examples drive
-      # lavapipe under xvfb
-      legs: >-
-        [{"name": "x86_64-linux", "runs-on": "ubuntu-latest", "target": "linux-x86_64",
-          "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
-                  "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
-                  "mesa-vulkan-drivers",
-                  "vulkan-tools", "xvfb", "spirv-tools"]},
-         {"name": "aarch64-linux", "runs-on": "ubuntu-24.04-arm", "target": "linux-arm64",
-          "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
-                  "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
-                  "mesa-vulkan-drivers",
-                  "vulkan-tools", "xvfb", "spirv-tools"]}]
-      # the demos are the only check on the shape of the public API: nothing
-      # inside boom calls it the way a game does. each resolves boom by path, so
-      # its pull copies this branch, and the glob covers a new demo unedited.
-      # they are consumer-shaped roots, so their dependencies resolve as a fresh
-      # `mach init` root's would (update), floating to the newest release each
-      # range admits; a family minor that breaks them is the early signal.
-      subprojects: '[{"path": "demo/*", "deps": "update", "build": true, "test": false}]'
+  # every runner builds every artifact for its own target and tests it
+  test:
+    name: test (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.runners || '["ubuntu-latest"]') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: install mach
+        run: |
+          export MACH_INSTALL_DIR="$RUNNER_TEMP/mach"
+          url="https://raw.githubusercontent.com/briar-systems/mach/v$MACH_VERSION/dist"
+          if [ "$RUNNER_OS" = Windows ]; then
+            pwsh -NoProfile -Command "irm $url/install.ps1 | iex"
+          else
+            curl -fsSL "$url/install.sh" | sh
+          fi
+          echo "$MACH_INSTALL_DIR" >> "$GITHUB_PATH"
+      # mach-glfw builds GLFW from source: x11 and wayland headers on linux, zig on windows
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xorg-dev libwayland-bin libwayland-dev libxkbcommon-dev wayland-protocols
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "zig-x86_64-windows-0.16.0"
+          Invoke-WebRequest "https://ziglang.org/download/0.16.0/$name.zip" -OutFile "$env:RUNNER_TEMP\zig.zip"
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\$name" >> $env:GITHUB_PATH
+      - run: mach dep pull .
+      - if: strategy.job-index == 0
+        run: mach fmt --check .
+      # glfw's C step cannot cross-build darwin (the Apple SDK) or link linux
+      # arm64 from another host, so each runner builds its own target. glfw's
+      # darwin archive is PIC, so a darwin executable linking it is PIE
+      - run: mach test . -a '*' -p "$PROFILE" ${{ runner.os == 'macOS' && '--pie' || '' }}
 
   gate:
     if: always()
-    needs: [lib]
+    needs: [test]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - uses: briar-systems/.github/.github/actions/gate@main
-        with:
-          needs: ${{ toJSON(needs) }}
+      - run: exit ${{ (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) && 1 || 0 }}

@@ -1,41 +1,61 @@
 name: Release
 
-# the family's shared release (briar-systems/.github mach-release.yml): a pushed
-# v* tag is verified against mach.toml and the changelog, runs the full CI with
-# heavy: all, then publishes. boom ships no binaries, so there are no assets. a
-# workflow_dispatch rehearses the same path and deletes its draft.
-
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-# one run per tag: GitHub can deliver a tag push twice, and two runs reaching
-# publish leaves an orphan draft. the second waits, finds the release, and ends
-# green. never cancel, since that could abort a publish part way
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  MACH_VERSION: 6.8.0
+
 jobs:
   verify:
-    uses: briar-systems/.github/.github/workflows/mach-release.yml@main
-    with:
-      stage: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("mach.toml", "rb"))["project"]["version"])')
+          [ "$TAG" = "v$version" ] || { echo "::error::tag $TAG does not match mach.toml version $version"; exit 1; }
 
+  # the hosts this project ships to, tested natively before anything is published
   ci:
     needs: verify
     uses: ./.github/workflows/ci.yml
     with:
-      heavy: all
+      profile: release
+      runners: '["ubuntu-latest", "ubuntu-24.04-arm", "windows-latest", "macos-15-intel"]'
 
+  # boom is a library its consumers build from source, so a release is the tag and its notes
   publish:
     needs: [verify, ci]
-    uses: briar-systems/.github/.github/workflows/mach-release.yml@main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
-    with:
-      stage: publish
+    steps:
+      - uses: actions/checkout@v6
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # a doubled tag push waits on the concurrency group, then finds the release
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "release $TAG already exists"
+            exit 0
+          fi
+          # notes are the changelog section for this version when there is one
+          notes=$(awk -v v="${TAG#v}" '/^## \[/ { on = index($0, "[" v "]") > 0; next } on' CHANGELOG.md 2>/dev/null || true)
+          flags=(--verify-tag --title "$TAG" --draft)
+          [ -n "$notes" ] && flags+=(--notes "$notes") || flags+=(--generate-notes)
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" "${flags[@]}"
+          gh release edit "$TAG" --draft=false

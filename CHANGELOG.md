@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-09-30
+
+### Added
+- Pointer presence (#243). `Input.pointer_in` is false until the pointer
+  enters the window and false again after it leaves, and each enter or leave
+  is queued as `Event.pointer` in order with the moves around it. While
+  `pointer_in` is false, `mouse_x` and `mouse_y` keep the last position
+  inside the window, so an app checks `pointer_in` before treating them as a
+  pointer. Installing the event sink reads whether the pointer is already
+  over the window.
+
+### Changed
+- CI moves to the family's per-repo template: each runner builds and tests
+  its own target, and the release publishes the tag and these notes with no
+  archives.
+
 ## [0.37.0] - 2026-09-30
 
 ### Added
