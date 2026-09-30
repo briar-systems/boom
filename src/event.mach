@@ -80,6 +80,13 @@ pub rec ResizeEvent {
     height: i32;
 }
 
+# the pointer entered or left the window
+# ---
+# inside: true when it entered, false when it left
+pub rec PointerEvent {
+    inside: bool;
+}
+
 # text was typed
 #
 # GLFW reports the unicode codepoint after keyboard layout, shift and dead keys
@@ -132,6 +139,7 @@ pub rec DropEvent {
 # resize:       the framebuffer was resized
 # text:         a unicode codepoint was typed
 # drop:         files were dropped on the window
+# pointer:      the pointer entered or left the window
 pub tag Event: u8 {
     close;
     key:          KeyEvent;
@@ -141,6 +149,7 @@ pub tag Event: u8 {
     resize:       ResizeEvent;
     text:         TextEvent;
     drop:         DropEvent;
+    pointer:      PointerEvent;
 }
 
 # why an event was not queued
