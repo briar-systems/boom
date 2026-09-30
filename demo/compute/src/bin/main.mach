@@ -116,15 +116,17 @@ fun main(argc: i64, argv: **u8) i64 {
     val d: *gfx.Device = gfx.renderer_device(?r);
 
     # the device's limits are at least what the specification guarantees, and
-    # it lets a step bind the five buffers this one does
+    # it lets a step and a draw bind the five buffers these do, a dispatch never
+    # fewer than a draw
     val lim: gfx.Limits = gfx.renderer_limits(?r);
     if (lim.max_storage_buffer_range < 134217728 || lim.max_compute_work_group_count[0] < 65535
         || lim.max_compute_work_group_invocations < 128
         || lim.max_per_stage_descriptor_storage_buffers < 4
-        || lim.max_storage_bindings < 5 || lim.max_storage_bindings > gfx.MAX_STORAGE_BINDINGS) {
-        p.printlnf("FAIL renderer_limits: range {} groups {} invocations {} storage bindings {} of {}",
+        || lim.max_draw_bindings < 5 || lim.max_dispatch_bindings < lim.max_draw_bindings
+        || lim.max_dispatch_bindings > gfx.MAX_STORAGE_BINDINGS) {
+        p.printlnf("FAIL renderer_limits: range {} groups {} invocations {} bindings {} dispatch {} draw of {}",
             lim.max_storage_buffer_range, lim.max_compute_work_group_count[0],
-            lim.max_compute_work_group_invocations, lim.max_storage_bindings,
+            lim.max_compute_work_group_invocations, lim.max_dispatch_bindings, lim.max_draw_bindings,
             lim.max_per_stage_descriptor_storage_buffers);
         ret 1;
     }
@@ -184,10 +186,10 @@ fun main(argc: i64, argv: **u8) i64 {
         i       = i + 1;
     }
     val refused: err[gfx.Error] = gfx.renderer_dispatch(?r, ?step, ?over[0],
-        lim.max_storage_bindings + 1, GROUPS, 1, 1);
+        lim.max_dispatch_bindings + 1, GROUPS, 1, 1);
     if (!(sel refused.err && (sel refused.err.buffer && (sel refused.err.buffer.too_many
-        && refused.err.buffer.too_many == lim.max_storage_bindings + 1)))) {
-        p.println("FAIL renderer_dispatch: a list past max_storage_bindings was not refused");
+        && refused.err.buffer.too_many == lim.max_dispatch_bindings + 1)))) {
+        p.println("FAIL renderer_dispatch: a list past max_dispatch_bindings was not refused");
         ret 1;
     }
 
