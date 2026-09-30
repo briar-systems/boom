@@ -11,6 +11,11 @@ isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
 
+[target.linux-arm64]
+isa = "aarch64"
+os  = "linux"
+abi = "aapcs64"
+
 [target.windows]
 isa = "x86_64"
 os  = "windows"
@@ -52,7 +57,7 @@ default = true
 kind = "bin"
 entry = "bin/main.mach"
 out = "bin/lighting{artifact.suffix}"
-targets = ["linux-x86_64", "windows", "darwin"]
+targets = ["linux-x86_64", "linux-arm64", "windows", "darwin"]
 link = []
 need = ["artifact.shader-*"]
 

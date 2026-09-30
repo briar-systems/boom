@@ -1,7 +1,8 @@
 name: CI
 
 # the family's tiered pipeline (briar-systems/.github mach-lib.yml). boom runs
-# one linux leg on a pull request into dev and into main. the demos are a
+# one linux leg per architecture on a pull request into dev and into main.
+# the demos are a
 # glob subproject, and the SPIR-V and xvfb checks live in .github/ci/verify.sh.
 # nothing runs on push. cd.yml calls this with heavy: all.
 
@@ -40,7 +41,12 @@ jobs:
       # needs a latin face and a TrueType Han face, and the examples drive
       # lavapipe under xvfb
       legs: >-
-        [{"name": "x86_64-linux", "runs-on": "ubuntu-latest",
+        [{"name": "x86_64-linux", "runs-on": "ubuntu-latest", "target": "linux-x86_64",
+          "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
+                  "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
+                  "mesa-vulkan-drivers",
+                  "vulkan-tools", "xvfb", "spirv-tools"]},
+         {"name": "aarch64-linux", "runs-on": "ubuntu-24.04-arm", "target": "linux-arm64",
           "apt": ["xorg-dev", "libwayland-bin", "libwayland-dev", "libxkbcommon-dev",
                   "wayland-protocols", "fonts-dejavu-core", "fonts-droid-fallback",
                   "mesa-vulkan-drivers",
