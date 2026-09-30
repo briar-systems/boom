@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-09-30
+
+### Fixed
+- Text from a vector face renders evenly (#224). Its glyphs are placed at
+  fractional pixels, and their atlas pages were point sampled, which dropped
+  or doubled a stroke depending on where each glyph landed. A 2D draw can now
+  state how its texture is sampled, and `text_draw` samples a vector face's
+  pages linearly and a pixel face's with nearest, as before.
+
 ## [0.35.0] - 2026-09-30
 
 ### Added
