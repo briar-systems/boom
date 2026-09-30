@@ -33,6 +33,7 @@
 # sheet -- and never reorders anything.
 
 use boom.graphics.image.ColorSpace;
+use boom.graphics.material.TextureFilter;
 use boom.graphics.sprite.Rect;
 use boom.graphics.texture.Texture;
 use boom.math.vec.Vec4;
@@ -75,6 +76,8 @@ pub val SPRITE_FLOATS: usize = SPRITE_VERTICES * VERTEX_FLOATS;
 # open:    whether a run has been started at all
 # space:   the space the run's vertex colours were authored in: srgb for a draw
 #          list, linear for a sprite's or a tile's tint
+# filter:  how the run's own texture is sampled, when the draw stated it; none
+#          leaves the choice to the pass material, and nearest without one
 pub rec Batch2D {
     texture: opt[*Texture];
     first:   u32;
@@ -82,6 +85,7 @@ pub rec Batch2D {
     count:   u32;
     open:    bool;
     space:   ColorSpace;
+    filter:  opt[TextureFilter];
 }
 
 # Forget any open run, without drawing it.
@@ -92,6 +96,7 @@ pub fun batch_reset(b: *Batch2D) {
     b.count   = 0;
     b.open    = false;
     b.space   = ColorSpace.linear{};
+    b.filter  = opt[TextureFilter].none{};
 }
 
 # Whether appending geometry for `texture` has to draw the open run first.
@@ -99,12 +104,21 @@ pub fun batch_reset(b: *Batch2D) {
 # A run that is not open has nothing to draw. A run sampling a different texture
 # has to be drawn now to keep submission order, since the new geometry must land
 # on top of it rather than beside it. So does one whose vertex colours are in a
-# different space, because whether the fragment stage decodes them is per draw.
-pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture], space: ColorSpace) bool {
+# different space, because whether the fragment stage decodes them is per draw,
+# and one sampled with a different filter, because the sampler is per draw too.
+pub fun batch_breaks(b: *Batch2D, texture: opt[*Texture], space: ColorSpace,
+    filter: opt[TextureFilter]) bool {
     if (!b.open)                            { ret false; }
     if (b.count == 0)                       { ret false; }
     if (sel b.space.srgb != sel space.srgb) { ret true; }
+    if (!same_filter(b.filter, filter))     { ret true; }
     ret !same_texture(b.texture, texture);
+}
+
+# whether two runs sample with the same filter, an unstated one being its own
+pub fun same_filter(a: opt[TextureFilter], b: opt[TextureFilter]) bool {
+    if (sel a.some) { ret sel b.some && sel a.some.linear == sel b.some.linear; }
+    ret sel b.none;
 }
 
 # whether two runs sample the same texture, the white texel being its own
@@ -244,24 +258,32 @@ test sprite_expand__uvs_and_tint {
     ret 0;
 }
 
-test batch_breaks__on_texture_or_colour_space_change {
+test batch_breaks__on_texture_colour_space_or_filter_change {
     var a: Texture;
     var b: Texture;
     var t: Batch2D;
     batch_reset(?t);
+    val unstated: opt[TextureFilter] = opt[TextureFilter].none{};
+    val linear:   opt[TextureFilter] = opt[TextureFilter].some{TextureFilter.linear{}};
+    val nearest:  opt[TextureFilter] = opt[TextureFilter].some{TextureFilter.nearest{}};
 
     # Nothing accumulated yet, so there is nothing to break.
-    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{})) { ret 1; }
+    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}, unstated)) { ret 1; }
 
     t.open    = true;
     t.texture = opt[*Texture].some{?a};
     t.count   = 6;
-    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}))  { ret 2; }
-    if (!batch_breaks(?t, opt[*Texture].some{?b}, ColorSpace.linear{})) { ret 3; }
+    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}, unstated))  { ret 2; }
+    if (!batch_breaks(?t, opt[*Texture].some{?b}, ColorSpace.linear{}, unstated)) { ret 3; }
     # none is the white texel, which is a different texture from any other.
-    if (!batch_breaks(?t, opt[*Texture].none{}, ColorSpace.linear{})) { ret 4; }
+    if (!batch_breaks(?t, opt[*Texture].none{}, ColorSpace.linear{}, unstated)) { ret 4; }
     # a draw list's sRGB colours cannot share a draw with a linear tint
-    if (!batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.srgb{})) { ret 5; }
+    if (!batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.srgb{}, unstated)) { ret 5; }
+    # the sampler is per draw, so a run cannot change filter part way through
+    if (!batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}, linear)) { ret 6; }
+    t.filter = linear;
+    if (batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}, linear))   { ret 7; }
+    if (!batch_breaks(?t, opt[*Texture].some{?a}, ColorSpace.linear{}, nearest)) { ret 8; }
     ret 0;
 }
 
