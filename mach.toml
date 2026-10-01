@@ -115,7 +115,7 @@ version = "^9.0"
 
 [dep.glfw]
 git = "https://github.com/briar-systems/mach-glfw"
-version = "^0.10"
+ref = "commit/b71ae4dd3884285d00398004908fa6939fc86d98"
 
 [dep.audio]
 git = "https://github.com/briar-systems/mach-audio"
