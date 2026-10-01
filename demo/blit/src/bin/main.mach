@@ -1,11 +1,19 @@
-# blit's widgets over a boom scene, with TrueType text.
+# blit's gallery drawn by boom, with TrueType text.
 #
-# A spinning cube is drawn into the window, and again into a small offscreen
-# target from another angle. Over it, one blit panel: TrueType text drawn by
-# boom's BlitGlyphs source, a few widgets, and two images blit only knows by
-# handle, a boom Texture and the offscreen target's colour. The panel's scale
-# control switches blit's interface scale between 100% and 200%, and the text
-# is rasterised again at the new size rather than stretched.
+# The window hosts blit's own demo gallery (blit demo/gallery, a dependency
+# here): every widget, layout and style blit has, each section beside its
+# code, with the text section's fields to type and compose into. Over it
+# floats one more blit window, boom's own: two images blit only knows by
+# handle, a boom Texture and an offscreen target with a cube spinning in it,
+# a consumer span that hands a rect back to boom, which draws a sprite there
+# in blit's paint order, and a scale control that switches blit's interface
+# scale between 100% and 200%, the text rasterised again at the new size
+# rather than stretched. It counts the frames the loop has drawn.
+#
+# Input reaches blit through gfx.BlitInput, which also serves what blit asks
+# back: the clipboard, the pointer shape and when to draw again. While nothing
+# moves (the spin at zero) and nothing is pending the loop sleeps until input,
+# and the frame count stands still.
 #
 # The font is the DejaVu subset boom's own tests use, embedded from the copy of
 # boom this root resolves under dep/, so the demo runs from anywhere.
@@ -16,9 +24,10 @@
 #                    them back and check what reached the pixels, then exit
 #
 # THE CHECK. Text is drawn white on black into an offscreen target at each
-# scale, next to a blit image of a solid red boom texture and a quad clipped
-# away entirely. At 200% the text must be twice as tall and carry about four
-# times the ink. Its anti-aliased edge pixels must grow about twice, as an
+# scale, next to a blit image of a solid red boom texture, a consumer span boom
+# fills with a solid green sprite, a quad clipped away entirely and a quad
+# whose middle alone survives its scissor. At 200% the text must be twice as
+# tall and carry about four times the ink. Its anti-aliased edge pixels must grow about twice, as an
 # outline rasterised at twice the size does: the same glyphs stretched from
 # 100% would grow them four times over, since every edge texel becomes a two
 # by two block.
@@ -26,11 +35,14 @@
 use bctx:  blit.context;
 use bdraw: blit.draw;
 use binp:  blit.input;
+use blay:  blit.layout;
+use bval:  blit.value;
 use bw:    blit.widget;
 use boom.app.App;
 use boom.context.Config;
 use boom.context.Context;
 use boom.context.ContextError;
+use boom.context.Wake;
 use boom.context.context_error_message;
 use boom.context.context_fail;
 use boom.context.context_init;
@@ -38,13 +50,14 @@ use boom.context.context_set_user;
 use boom.context.context_shutdown;
 use boom.context.context_stop;
 use boom.context.context_user;
+use boom.context.context_wake;
 use boom.engine.EngineError;
 use boom.engine.engine_error_message;
 use boom.engine.run;
 use gfx: boom.graphics;
-use boom.input;
-use gm: boom.math;
+use gm:  boom.math;
 use boom.window.WindowMode;
+use gallery.app;
 use allo: std.allocator;
 use std.allocator.page;
 use std.chrono.duration.MILLISECOND;
@@ -77,6 +90,9 @@ val CHECK_BYTES: usize = 196608;
 val CHECK_SPLIT: i32 = 400;
 val CHECK_TEXT:  str = "Hamburgefonstiv";
 
+# the consumer span the panel and the check place, which boom fills with a sprite
+val SPAN_SPRITE: u64 = 1;
+
 # what the check read back at one scale
 # ---
 # ink:     pixels brighter than half
@@ -84,12 +100,16 @@ val CHECK_TEXT:  str = "Hamburgefonstiv";
 # top:     topmost inked row
 # bottom:  bottom inked row
 # red:     whether the image's centre came out red
+# green:   whether the consumer span's centre came out green
+# cut:     whether the scissored quad drew inside its clip and nowhere else
 rec Shot {
     ink:     usize;
     partial: usize;
     top:     i32;
     bottom:  i32;
     red:     bool;
+    green:   bool;
+    cut:     bool;
 }
 
 rec Game {
@@ -98,12 +118,13 @@ rec Game {
     typeface:  gfx.Typeface;
     glyphs:    gfx.BlitGlyphs;
     ui:        bctx.Context;
+    input:     gfx.BlitInput;
     blit:      gfx.BlitRenderer;
     mesh:      gfx.Mesh;
     checker:   gfx.Texture;
     red:       gfx.Texture;
+    green:     gfx.Texture;
     material:  gfx.Material;
-    camera:    gfx.Camera;
     side:      gfx.Camera;
     transform: gm.Transform;
     view:      gfx.RenderTarget;
@@ -114,8 +135,8 @@ rec Game {
     spin:      f32;
     speed:     f32;
     scale:     usize;
-    show_view: u8;
-    show_cube: u8;
+    frames:    u64;
+    gallery:   app.Gallery;
     check:     bool;
     ready:     bool;
     failures:  usize;
@@ -193,16 +214,15 @@ fun solid_or_checker(g: *Game, d: *gfx.Device, a: [4]u8, b: [4]u8) res[gfx.Textu
 
 fun on_init(ctx: *Context) {
     val g: *Game = context_user(ctx)::*Game;
-    g.ready     = false;
-    g.check     = CHECK;
-    g.scale     = START_SCALE;
-    g.stage     = 0;
-    g.spin      = 0.0;
-    g.speed     = 1.0;
-    g.show_view = 1;
-    g.show_cube = 1;
-    g.failures  = 0;
-    g.shot      = nil;
+    g.ready    = false;
+    g.check    = CHECK;
+    g.scale    = START_SCALE;
+    g.stage    = 0;
+    g.spin     = 0.0;
+    g.speed    = 0.0;
+    g.frames   = 0;
+    g.failures = 0;
+    g.shot     = nil;
     val made: err[allo.Error] = page.make(?g.a);
     if (sel made.err) {
         print.eprintln("could not make the page allocator");
@@ -239,12 +259,19 @@ fun on_init(ctx: *Context) {
         ret;
     }
     bctx.set_glyph_source(?g.ui, gfx.blit_glyphs_source(?g.glyphs));
+    g.input = gfx.blit_input(?g.a, ctx);
     val br: res[gfx.BlitRenderer, gfx.Error] = gfx.blit_renderer(d, ?g.ui);
     if (sel br.err) {
         abort(ctx, "blit renderer error", br.err);
         ret;
     }
     g.blit = br.ok;
+    gfx.blit_renderer_on_span(?g.blit, on_span, g::ptr);
+    if (!app.make(?g.gallery, ?g.a)) {
+        print.eprintln("could not make the gallery");
+        context_fail(ctx, 1);
+        ret;
+    }
 
     var verts:   [192]f32;
     var indices: [36]u32;
@@ -271,6 +298,13 @@ fun on_init(ctx: *Context) {
         ret;
     }
     g.red = rd.ok;
+    val gr: res[gfx.Texture, gfx.Error] = solid_or_checker(g, d, [4]u8{0, 255, 0, 255},
+        [4]u8{0, 255, 0, 255});
+    if (sel gr.err) {
+        abort(ctx, "texture error", gr.err);
+        ret;
+    }
+    g.green = gr.ok;
 
     g.material = gfx.material();
     val added: err[gfx.MaterialError] = gfx.material_add_texture(?g.material, "u_texture0", ?g.checker);
@@ -300,9 +334,6 @@ fun on_init(ctx: *Context) {
     }
     g.shot = sr.ok;
 
-    val aspect: f32 = ctx.window.width::f32 / ctx.window.height::f32;
-    g.camera = gfx.camera_perspective(gm.vec3(0.0, 1.2, 3.2), gm.vec3(0.0, 0.0, 0.0),
-        gm.radians(60.0), aspect, 0.1, 100.0);
     g.side = gfx.camera_perspective(gm.vec3(2.6, 2.4, 0.4), gm.vec3(0.0, 0.0, 0.0),
         gm.radians(50.0), VIEW_W::f32 / VIEW_H::f32, 0.1, 100.0);
     g.transform = gm.transform_identity();
@@ -316,48 +347,62 @@ fun on_tick(ctx: *Context) {
     g.transform.rotation = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), g.spin);
 }
 
-# this frame's blit input, from boom's
-fun ui_input(ctx: *Context) binp.Input {
-    var in: binp.Input;
-    in.mx         = ctx.input.mouse_x::f32;
-    in.my         = ctx.input.mouse_y::f32;
-    in.down       = 0;
-    in.wheel      = ctx.input.scroll_y::f32 * 40.0;
-    in.events_len = 0;
-    in.paste      = nil;
-    if (input.button_down(?ctx.input, input.BUTTON_LEFT)) { in.down = 1; }
-    ret in;
-}
-
 fun apply_scale(g: *Game) {
     if (g.scale == 1) { bctx.set_scale(?g.ui, 2.0); }
     or                { bctx.set_scale(?g.ui, 1.0); }
 }
 
-# the interactive panel
-fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
-    apply_scale(g);
-    bctx.begin(?g.ui, ui_input(ctx), w, h);
-    val ui: *bctx.Context = ?g.ui;
-    val b:  bw.Block      = bw.begin_panel(ui, 16.0, 16.0, bctx.px(ui, 280.0));
-    bw.text(ui, "blit over boom, TrueType text");
-    bw.note(ui, "DejaVu Sans through gfx.BlitGlyphs");
-    var labels: [2]str = [2]str{"100%", "200%"};
-    bw.segmented(ui, ?labels[0], 2, ?g.scale);
-    bw.checkbox(ui, "draw the cube", ?g.show_cube);
-    bw.checkbox(ui, "show the side view", ?g.show_view);
-    bw.slider_f(ui, "spin", ?g.speed, 0.0, 4.0);
-    bw.text(ui, "a boom Texture:");
-    bw.image(ui, bdraw.whole(gfx.blit_texture(?g.checker), bdraw.FILTER_NEAREST),
-        bctx.px(ui, 64.0), bctx.px(ui, 64.0));
-    if (g.show_view != 0) {
+# boom's half of a consumer span: a sprite filling the span's rect
+fun on_span(user: ptr, p: *gfx.Pass, span: gfx.BlitSpan) {
+    val g: *Game = user::*Game;
+    if (span.id != SPAN_SPRITE) { ret; }
+    var tex: *gfx.Texture = ?g.checker;
+    if (g.check) { tex = ?g.green; }
+    gfx.pass_draw_sprite(p, opt[*gfx.Texture].some{tex},
+        gfx.rect(span.x0, span.y0, span.x1 - span.x0, span.y1 - span.y0), gm.vec4(1.0, 1.0, 1.0, 1.0));
+}
+
+# boom's window, floating over the gallery
+fun boom_window(g: *Game) {
+    val ui:  *bctx.Context = ?g.ui;
+    var win: bw.Window     = bw.window("boom", ui.sw - bctx.px(ui, 280.0), bctx.px(ui, 40.0), 0.0, 0.0);
+    win.flags = bw.WINDOW_AUTO_SIZE;
+    val wa: bw.WindowArea = bw.begin_window(ui, win);
+    if (wa.body != 0) {
+        var buf: [32]u8;
+        bw.text(ui, "frames drawn");
+        bw.same_line(ui);
+        bw.text(ui, bval.format(bval.U64, bval.num[u64](g.frames), ?buf[0]));
+        var labels: [2]str = [2]str{"100%", "200%"};
+        bw.segmented(ui, ?labels[0], 2, ?g.scale);
+        bw.slider_f(ui, "spin", ?g.speed, 0.0, 4.0);
         bw.text(ui, "a RenderTarget:");
         val view: u64 = gfx.blit_texture(gfx.render_target_texture(?g.view));
         bw.image(ui, bdraw.whole(view, bdraw.FILTER_LINEAR), bctx.px(ui, VIEW_W::f32),
             bctx.px(ui, VIEW_H::f32));
+        bw.text(ui, "a boom Texture:");
+        bw.image(ui, bdraw.whole(gfx.blit_texture(?g.checker), bdraw.FILTER_NEAREST),
+            bctx.px(ui, 64.0), bctx.px(ui, 64.0));
+        bw.text(ui, "a consumer span boom draws:");
+        val sw: f32       = bctx.px(ui, 96.0);
+        val sh: f32       = bctx.px(ui, 24.0);
+        val at: bctx.Area = bw.place(ui, blay.fixed(sw), blay.fixed(sh), sw, sh);
+        bctx.custom(ui, at.x0, at.y0, at.x1, at.y1, SPAN_SPRITE, 0);
     }
-    bw.end_panel(ui, b);
-    bctx.end(ui);
+    bw.end_window(ui, wa);
+}
+
+# the interface: the gallery, then boom's window over it
+fun build_ui(ctx: *Context, g: *Game, w: f32, h: f32) {
+    apply_scale(g);
+    bctx.begin(?g.ui, gfx.blit_input_frame(?g.input, ctx), w, h);
+    app.ui(?g.ui, (?g.gallery)::ptr);
+    boom_window(g);
+    bctx.end(?g.ui);
+    val served: err[allo.Error] = gfx.blit_input_serve(?g.input, ?g.ui, ctx);
+    if (sel served.err) { print.eprintln("could not copy the clipboard for a paste"); }
+    # a moving picture needs every frame, and blit's request covers the rest
+    if (g.speed > 0.0) { context_wake(ctx, Wake.now{}); }
 }
 
 # the check's frame: text, an image and a quad clipped away entirely
@@ -370,8 +415,13 @@ fun build_check(g: *Game) {
     bctx.text_at(ui, CHECK_TEXT, 8.0, 8.0, white);
     bctx.image_at(ui, bdraw.whole(gfx.blit_texture(?g.red), bdraw.FILTER_NEAREST),
         440.0, 24.0, 480.0, 64.0, white);
+    bctx.custom(ui, 484.0, 24.0, 508.0, 64.0, SPAN_SPRITE, 0);
     bctx.push_clip(ui, 0.0, 0.0, 4.0, 4.0);
     bctx.quad(ui, 100.0, 60.0, 300.0, 90.0, white);
+    bctx.pop_clip(ui);
+    # left whole on the CPU, so only the scissor keeps its ends dark
+    bctx.push_clip(ui, 412.0, 70.0, 428.0, 92.0);
+    bctx.quad(ui, 404.0, 72.0, 436.0, 90.0, white);
     bctx.pop_clip(ui);
     bctx.end(ui);
 }
@@ -397,6 +447,13 @@ fun measure(shot: *u8) Shot {
     }
     val c: usize = (44::usize * CHECK_W::usize + 460) * 4;
     s.red = shot[c] > 200 && shot[c + 1] < 60 && shot[c + 2] < 60;
+    val n: usize = (44::usize * CHECK_W::usize + 496) * 4;
+    s.green = shot[n] < 60 && shot[n + 1] > 200 && shot[n + 2] < 60;
+    val row:   usize = 80::usize * CHECK_W::usize;
+    val left:  u8    = shot[(row + 406) * 4];
+    val mid:   u8    = shot[(row + 420) * 4];
+    val right: u8    = shot[(row + 432) * 4];
+    s.cut = left < 24 && mid > 232 && right < 24;
     ret s;
 }
 
@@ -407,6 +464,8 @@ fun judge(g: *Game) {
     if (two.ink == 0)                 { fail(g, "text at 200% drew no ink"); }
     if (!one.red)                     { fail(g, "the image of a boom texture did not come out red at 100%"); }
     if (!two.red)                     { fail(g, "the image of a boom texture did not come out red at 200%"); }
+    if (!one.green || !two.green)     { fail(g, "the consumer span did not call back into boom to draw green"); }
+    if (!one.cut || !two.cut)         { fail(g, "the scissored quad was not cut to its clip"); }
     if (one.ink == 0 || two.ink == 0) { ret; }
     val h1: i32 = one.bottom - one.top + 1;
     val h2: i32 = two.bottom - two.top + 1;
@@ -419,6 +478,7 @@ fun judge(g: *Game) {
     print.printlnf("PASS: 100% text: {} px of ink, {} rows, {} edge px", one.ink, h1, one.partial);
     print.printlnf("PASS: 200% text: {} px of ink, {} rows, {} edge px", two.ink, h2, two.partial);
     print.println("PASS: a blit image of a boom texture drew its texels");
+    print.println("PASS: a consumer span called back into boom, and a run was cut to its scissor");
     print.printlnf("PASS: {} atlas page(s) mirrored, {} draws dropped",
         gfx.blit_renderer_pages(?g.blit), gfx.renderer_dropped(?g.renderer));
 }
@@ -477,10 +537,10 @@ fun on_draw(ctx: *Context) {
     val w: f32 = ctx.window.width::f32;
     val h: f32 = ctx.window.height::f32;
     if (w <= 0.0 || h <= 0.0) { ret; }
-    g.camera.aspect = w / h;
+    g.frames = g.frames + 1;
 
     # the UI is built and its atlas uploaded before the frame opens
-    build_panel(ctx, g, w, h);
+    build_ui(ctx, g, w, h);
     val up: err[gfx.Error] = gfx.blit_upload(?g.blit);
     if (sel up.err) {
         abort(ctx, "atlas upload error", up.err);
@@ -502,14 +562,11 @@ fun on_draw(ctx: *Context) {
     gfx.pass_draw_material(?side, ?g.mesh, ?g.material, ?g.transform);
     gfx.pass_end(?side);
 
-    var scene_desc: gfx.PassDesc = gfx.pass_scene(?g.camera);
-    var scene:      gfx.Pass     = gfx.pass_begin(?g.renderer, ?scene_desc);
-    if (g.show_cube != 0) { gfx.pass_draw_material(?scene, ?g.mesh, ?g.material, ?g.transform); }
-    gfx.pass_end(?scene);
-
-    var ui_desc: gfx.PassDesc   = gfx.pass_overlay();
-    var ui:      gfx.Pass       = gfx.pass_begin(?g.renderer, ?ui_desc);
-    val drew:    err[gfx.Error] = gfx.blit_draw(?g.blit, ?ui);
+    # the gallery's desk covers the window, and what it uncovers is cleared
+    var ui_desc: gfx.PassDesc = gfx.pass_overlay();
+    ui_desc.clear = opt[gm.Vec4].some{gm.vec4(0.08, 0.09, 0.12, 1.0)};
+    var ui:   gfx.Pass       = gfx.pass_begin(?g.renderer, ?ui_desc);
+    val drew: err[gfx.Error] = gfx.blit_draw(?g.blit, ?ui);
     gfx.pass_end(?ui);
 
     val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
@@ -527,12 +584,16 @@ fun on_dnit(ctx: *Context) {
     allo.deallocate[u8](?g.a, g.shot, CHECK_BYTES);
     gfx.render_target_delete(d, ?g.target);
     gfx.render_target_delete(d, ?g.view);
+    gfx.texture_delete(d, ?g.green);
     gfx.texture_delete(d, ?g.red);
     gfx.texture_delete(d, ?g.checker);
     gfx.mesh_delete(d, ?g.mesh);
     # the renderer before the context it draws, the context before its glyph
     # source, the source before its typeface
     gfx.blit_renderer_delete(?g.blit);
+    if (!app.unmake(?g.gallery, ?g.a)) { print.eprintln("the gallery could not be freed"); }
+    val unbound: err[allo.Error] = gfx.blit_input_delete(?g.input);
+    if (sel unbound.err) { print.eprintln("the blit input could not be freed"); }
     val freed: err[allo.Error] = bctx.free(?g.ui);
     if (sel freed.err) { print.eprintln("the blit context could not be freed"); }
     val gone: err[gfx.Error] = gfx.blit_glyphs_delete(?g.glyphs);
@@ -565,9 +626,9 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var ctx: Context;
     val cfg: Config = Config{
-        width:     960,
-        height:    640,
-        title:     "boom: blit over a scene",
+        width:     1280,
+        height:    800,
+        title:     "boom: the blit gallery",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
         frame_dt:  0,

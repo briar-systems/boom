@@ -87,6 +87,13 @@ Back, or call `context_stop` when the application chooses to quit.
 return. A simulation is application-owned and advanced from the fixed tick, so
 pausing one never requires changing the core loop.
 
+**A frame can let the loop sleep.** By default the loop starts the next frame
+at once. `context_wake(ctx, Wake.input{})` asks it to sleep until a platform
+event arrives, and `Wake.at{t}` until `t` on `ctx.clock.elapsed` or an event,
+whichever is first. The request covers the next frame only, the soonest of a
+frame's requests wins, and a pinned `frame_dt` never sleeps. Gamepads deliver no
+events, so they do not wake a sleeping loop.
+
 ## Graphics
 
 `boom.graphics` is a render facade over the ecosystem libraries: a game draws
@@ -441,14 +448,37 @@ stage and atomics wait on compiler support
 [blit](https://github.com/briar-systems/blit) builds an immediate-mode UI as a
 draw list and depends on nothing of boom's. `boom.graphics.blitui` is the boom
 half. `BlitGlyphs` is a blit glyph source over a `Typeface`, so blit's text is
-TrueType through mach-font. It is rasterised at the face's size times blit's
-interface scale, so text at 200% is drawn at twice the size, not stretched.
+TrueType through mach-font. It does not shape, and it is rasterised at the
+face's size times blit's scale, a text style's size times the interface scale,
+so a heading style and text at 200% are drawn at their size, not stretched.
 `BlitRenderer` draws a blit context's finished frame in any `Pass`. It mirrors
 blit's atlas pages into boom textures, uploading only the rows blit wrote. It
-appends each run through `pass_draw_triangles_filtered`, allocating nothing per
-frame. A blit `Image` names a boom texture by `blit_texture(?tex)`, and a render
+copies blit's indexed list into the frame once with `pass_list` and draws each
+run as a span of its indices with `pass_draw_list`, cut to the run's scissor
+with `pass_set_clip` and blended premultiplied, allocating nothing per frame.
+blit's screen pixels are the framebuffer's, as boom's overlay pass and cursor
+are, so the scissor lands where the run's vertices do on a HiDPI window too. A
+blit `Image` names a boom texture by `blit_texture(?tex)`, and a render
 target's picture by `blit_texture(gfx.render_target_texture(?target))`. The
-texture must stay put and alive until the pass that draws it ends.
+texture must stay put and alive until the pass that draws it ends. A consumer
+span (`blit.context.custom`) calls the handler set by `blit_renderer_on_span`
+with the pass, cut to the span's clip, so the game draws there with boom's own
+pass calls in blit's paint order. The pass's 2D shader, material, user block,
+region and clip are put back after it.
+
+`BlitInput` is blit's host. It fills blit's frame input from the context: the
+clock, the pointer and its presence, every button, both wheels in pixels, typed
+text, key presses and releases with blit's key codes, the held modifiers, and
+the IME's composition in progress as blit's `compose`. After the frame,
+`blit_input_serve` moves copied text to the clipboard, answers a paste in the
+next frame, shows the pointer shape blit asks for, places the IME's candidate
+window at blit's `ime_rect` and keeps the window in a text input context only
+while a field takes text, and hands blit's `next_frame` to `context_wake`, so
+an idle interface sleeps until input. `blit_input_frame` drains `ctx.events`.
+An app that reads the queue itself frames the input with `blit_input_begin`
+and `blit_input_event` instead. On X11 boom asks for on-the-spot input, so the
+composition reaches the field, and the input method places its candidate
+window on its own.
 
 ```mach
 # once, against a typeface and the renderer's device
@@ -456,22 +486,27 @@ var glyphs: gfx.BlitGlyphs = gfx.blit_glyphs(?a, ?typeface, 16.0,
     gfx.FontSizeMode.line_height{}, gfx.FontRaster.smooth{}).ok;
 blit.context.set_glyph_source(?ui, gfx.blit_glyphs_source(?glyphs));
 var ui_renderer: gfx.BlitRenderer = gfx.blit_renderer(d, ?ui).ok;
+var bi: gfx.BlitInput = gfx.blit_input(?a, ctx);
 
-# each frame: build the UI, upload glyphs before the frame, draw it in a pass
-blit.context.begin(?ui, input, w, h);
+# each frame: build the UI, serve the host, upload glyphs, draw it in a pass
+blit.context.begin(?ui, gfx.blit_input_frame(?bi, ctx), w, h);
 blit.widget.image(?ui, blit.draw.whole(gfx.blit_texture(?tex), blit.draw.FILTER_LINEAR), 64.0, 64.0);
 blit.context.end(?ui);
+gfx.blit_input_serve(?bi, ?ui, ctx);
 gfx.blit_upload(?ui_renderer);
 # ...renderer_begin_frame, scene passes, then an overlay pass:
 gfx.blit_draw(?ui_renderer, ?overlay);
 ```
 
-Leave blit's `set_srgb` off. The 2D program decodes a draw list's colours
-itself. Teardown runs from the renderer outward: `blit_renderer_delete`, then
-blit's `context.free`, `blit_glyphs_delete`, and the typeface. `renderer_dnit`
+Leave blit's `set_srgb` off. The UI program decodes a draw list's authored
+colours itself, dividing out the premultiplied alpha first. Teardown runs from the renderer outward: `blit_renderer_delete`, then
+`blit_input_delete` and blit's `context.free`, `blit_glyphs_delete`, and the typeface. `renderer_dnit`
 refuses while a `BlitRenderer` lives, and the typeface refuses while a
-`BlitGlyphs` reads it. `demo/blit` draws a panel over a 3D scene with both
-kinds of image. Its `--check` mode reads back text at 100% and at 200%.
+`BlitGlyphs` reads it. `demo/blit` hosts blit's own gallery, every section of
+it, with a window of boom's over it holding both kinds of image and a consumer
+span. Idle, it draws no frames. Its `--check`
+mode reads back text at 100% and at 200%, a span boom filled and a quad cut to
+its scissor.
 
 ## Consuming boom
 

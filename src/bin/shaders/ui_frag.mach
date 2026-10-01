@@ -15,13 +15,20 @@
 # says which it is in screen.decode, and this stage decodes to linear light
 # before the surface encodes back. The decode is per fragment rather than per
 # vertex so a gradient interpolates in the space it was authored in.
+#
+# AN INDEXED DRAW LIST'S COLOURS ARE PREMULTIPLIED, as blit emits them. The sRGB
+# curve does not commute with the multiply, so a premultiplied colour is divided
+# by its alpha, decoded, and multiplied back, or every antialiased edge comes out
+# darker than the shape it feathers. Its pipeline blends ONE, so a straight
+# texture it samples (a game's own, not blit's atlas) is premultiplied here too.
 
 use sh:  shader.math;
 use tex: shader.texture;
 
 # The immediate-mode block. See src/bin/shaders/ui_vert.mach; only decode is
-# read here, and it is 1 in its first lane when the vertex colours are sRGB and
-# the surface encodes, else 0.
+# read here. Its first lane is 1 when the vertex colours are sRGB and the
+# surface encodes, its second 1 when they are premultiplied, and its third 1
+# when the texel is straight and has to be premultiplied, each else 0.
 rec Screen {
     projection_0: f32x4;
     projection_1: f32x4;
@@ -46,12 +53,20 @@ var out_colour: f32x4;
 
 #[stage("fragment")]
 fun frag_main() {
-    val c:  f32x3 = f32x3{in_colour[0], in_colour[1], in_colour[2]};
+    val a:   f32   = in_colour[3];
+    val pm:  f32   = screen.decode[1];
+    val raw: f32x3 = f32x3{in_colour[0], in_colour[1], in_colour[2]};
+    # a transparent premultiplied colour is black, so the floor only guards the divide
+    val k:  f32   = sh.mix(1.0, 1.0 / sh.max(a, 0.000001), pm);
+    val c:  f32x3 = raw * f32x3{k, k, k};
     val lo: f32x3 = c / f32x3{12.92, 12.92, 12.92};
     val hi: f32x3 = sh.pow_3(sh.max_3((c + f32x3{0.055, 0.055, 0.055}) / f32x3{1.055, 1.055, 1.055},
         f32x3{0.0, 0.0, 0.0}), f32x3{2.4, 2.4, 2.4});
     val lin: f32x3 = sh.mix_3(lo, hi, sh.step_3(f32x3{0.04045, 0.04045, 0.04045}, c));
     val d:   f32   = screen.decode[0];
-    val rgb: f32x3 = sh.mix_3(c, lin, f32x3{d, d, d});
-    out_colour = tex.sample_2d(atlas, in_uv) * f32x4{rgb[0], rgb[1], rgb[2], in_colour[3]};
+    val m:   f32   = sh.mix(1.0, a, pm);
+    val rgb: f32x3 = sh.mix_3(c, lin, f32x3{d, d, d}) * f32x3{m, m, m};
+    val t:   f32x4 = tex.sample_2d(atlas, in_uv);
+    val ta:  f32   = sh.mix(1.0, t[3], screen.decode[2]);
+    out_colour = f32x4{t[0] * ta, t[1] * ta, t[2] * ta, t[3]} * f32x4{rgb[0], rgb[1], rgb[2], a};
 }

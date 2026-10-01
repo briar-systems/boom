@@ -13,6 +13,7 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use boom.event.ButtonEvent;
+use boom.event.ComposeEvent;
 use boom.event.DropEvent;
 use boom.event.Event;
 use boom.event.EventQueue;
@@ -24,6 +25,7 @@ use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
 use boom.event.TextEvent;
+use boom.event.compose_new;
 use boom.event.drop_new;
 use boom.event.queue_clear;
 use boom.event.queue_is_empty;
@@ -165,6 +167,10 @@ pub rec WindowBounds {
 # min_width:          client limit applied when restoring windowed mode
 # min_height:         client limit applied when restoring windowed mode
 # renderers:          how many renderers hold a surface on this window
+# shape:              the pointer shape last set, CURSOR_ARROW at open
+# shape_shown:        whether the platform shows shape rather than the arrow
+# text_input:         whether the window was last put in a text input
+#                     context, none while the platform default applies
 pub rec Window {
     handle:             opt[glfw.Window];
     width:              i32;
@@ -176,9 +182,13 @@ pub rec Window {
     min_width:          i32;
     min_height:         i32;
     renderers:          usize;
+    shape:              CursorShape;
+    shape_shown:        bool;
+    text_input:         opt[bool];
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
+    delivered = true;
     val s: *Sink = sink_of(glfw.window_from_handle(handle));
     deliver_key(s, key, action, mods);
 }
@@ -198,10 +208,11 @@ fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
     if (!sel act.some.repeat) {
         inp.input_key_event(s.input, k, sel act.some.press);
     }
-    offer(s.queue, Event.key{KeyEvent{key: k, action: act.some, mods: mods}});
+    offer(s.queue, Event.key{KeyEvent{key: k, action: act.some, mods: map_mods(mods)}});
 }
 
 fun on_char(handle: ptr, codepoint: u32) {
+    delivered = true;
     deliver_text(sink_of(glfw.window_from_handle(handle)), codepoint);
 }
 
@@ -211,7 +222,27 @@ fun deliver_text(s: *Sink, codepoint: u32) {
     offer(s.queue, Event.text{TextEvent{codepoint: codepoint}});
 }
 
+fun on_preedit(handle: ptr, count: i32, codepoints: *u32,
+    blocks: i32, block_sizes: *i32, focused_block: i32, caret: i32) {
+    delivered = true;
+    deliver_compose(sink_of(glfw.window_from_handle(handle)), count, codepoints, caret);
+}
+
+# the composition is queue-only and copied before the callback returns. its
+# attributed blocks are not carried: the caret is what a text field shows
+fun deliver_compose(s: *Sink, count: i32, codepoints: *u32, caret: i32) {
+    if (s == nil) { ret; }
+    var n:  usize = 0;
+    var at: usize = 0;
+    if (count > 0) { n = count::usize; }
+    if (caret > 0) { at = caret::usize; }
+    val built: res[ComposeEvent, allo.Error] = compose_new(n, codepoints, at);
+    if (sel built.err) { ret; }
+    offer(s.queue, Event.compose{built.ok});
+}
+
 fun on_drop(handle: ptr, count: i32, paths: **u8) {
+    delivered = true;
     deliver_drop(sink_of(glfw.window_from_handle(handle)), count, paths);
 }
 
@@ -225,6 +256,7 @@ fun deliver_drop(s: *Sink, count: i32, paths: **u8) {
 }
 
 fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
+    delivered = true;
     deliver_button(sink_of(glfw.window_from_handle(handle)), button, action, mods);
 }
 
@@ -235,10 +267,11 @@ fun deliver_button(s: *Sink, button: i32, action: i32, mods: i32) {
     if (!sel b.some) { ret; }
     val down: bool = action == glfw.PRESS;
     inp.input_button_event(s.input, b.some, down);
-    offer(s.queue, Event.mouse_button{ButtonEvent{button: b.some, down: down, mods: mods}});
+    offer(s.queue, Event.mouse_button{ButtonEvent{button: b.some, down: down, mods: map_mods(mods)}});
 }
 
 fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
+    delivered = true;
     val w:  glfw.Window = glfw.window_from_handle(handle);
     var ww: i32         = 0;
     var wh: i32         = 0;
@@ -250,6 +283,7 @@ fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
 }
 
 fun on_cursor_enter(handle: ptr, entered: i32) {
+    delivered = true;
     deliver_pointer(sink_of(glfw.window_from_handle(handle)), entered != 0);
 }
 
@@ -261,6 +295,7 @@ fun deliver_pointer(s: *Sink, inside: bool) {
 }
 
 fun on_scroll(handle: ptr, dx: f64, dy: f64) {
+    delivered = true;
     val s: *Sink = sink_of(glfw.window_from_handle(handle));
     if (s == nil) { ret; }
     inp.input_scroll_event(s.input, dx, dy);
@@ -268,12 +303,23 @@ fun on_scroll(handle: ptr, dx: f64, dy: f64) {
 }
 
 fun on_framebuffer_size(handle: ptr, width: i32, height: i32) {
+    delivered = true;
     deliver_resize(sink_of(glfw.window_from_handle(handle)), width, height);
 }
 
 fun deliver_resize(s: *Sink, width: i32, height: i32) {
     if (s == nil) { ret; }
     offer(s.queue, Event.resize{ResizeEvent{width: width, height: height}});
+}
+
+# a close request reaches the loop through window_should_close, and a
+# window whose contents were lost through the frame it wakes
+fun on_close(handle: ptr) {
+    delivered = true;
+}
+
+fun on_refresh(handle: ptr) {
+    delivered = true;
 }
 
 # queue an event from a platform callback
@@ -363,6 +409,13 @@ fun map_key(k: i32) inp.Key {
     if (k == glfw.KEY_RIGHT_SHIFT)             { ret inp.KEY_RIGHT_SHIFT; }
     if (k == glfw.KEY_RIGHT_CONTROL)           { ret inp.KEY_RIGHT_CTRL; }
     if (k == glfw.KEY_RIGHT_ALT)               { ret inp.KEY_RIGHT_ALT; }
+    if (k == glfw.KEY_LEFT_SUPER)              { ret inp.KEY_LEFT_SUPER; }
+    if (k == glfw.KEY_RIGHT_SUPER)             { ret inp.KEY_RIGHT_SUPER; }
+    if (k == glfw.KEY_HOME)                    { ret inp.KEY_HOME; }
+    if (k == glfw.KEY_END)                     { ret inp.KEY_END; }
+    if (k == glfw.KEY_PAGE_UP)                 { ret inp.KEY_PAGE_UP; }
+    if (k == glfw.KEY_PAGE_DOWN)               { ret inp.KEY_PAGE_DOWN; }
+    if (k == glfw.KEY_INSERT)                  { ret inp.KEY_INSERT; }
     ret inp.KEY_UNKNOWN;
 }
 
@@ -379,7 +432,19 @@ fun map_button(b: i32) opt[inp.Button] {
     if (b == glfw.MOUSE_BUTTON_LEFT)   { ret opt[inp.Button].some{inp.BUTTON_LEFT}; }
     if (b == glfw.MOUSE_BUTTON_RIGHT)  { ret opt[inp.Button].some{inp.BUTTON_RIGHT}; }
     if (b == glfw.MOUSE_BUTTON_MIDDLE) { ret opt[inp.Button].some{inp.BUTTON_MIDDLE}; }
+    if (b == glfw.MOUSE_BUTTON_4)      { ret opt[inp.Button].some{inp.BUTTON_X1}; }
+    if (b == glfw.MOUSE_BUTTON_5)      { ret opt[inp.Button].some{inp.BUTTON_X2}; }
     ret opt[inp.Button].none{};
+}
+
+# translate GLFW modifier bits into boom's MOD_* bits, dropping the lock keys
+fun map_mods(m: i32) i32 {
+    var out: i32 = 0;
+    if ((m & glfw.MOD_SHIFT) != 0)   { out = out | inp.MOD_SHIFT; }
+    if ((m & glfw.MOD_CONTROL) != 0) { out = out | inp.MOD_CTRL; }
+    if ((m & glfw.MOD_ALT) != 0)     { out = out | inp.MOD_ALT; }
+    if ((m & glfw.MOD_SUPER) != 0)   { out = out | inp.MOD_SUPER; }
+    ret out;
 }
 
 # open a window
@@ -415,6 +480,9 @@ pub fun window_open(width: i32, height: i32, title: str) res[Window, WindowError
 # ret:    opened Window sized in framebuffer pixels, or why it could not open
 pub fun window_open_mode(width: i32, height: i32, title: str,
     mode: WindowMode) res[Window, WindowError] {
+    # x11 reports the IME's composition only on the spot. over the spot, the
+    # input method draws it itself and no compose event ever arrives
+    glfw.init_hint(glfw.X11_ONTHESPOT, glfw.TRUE);
     val started: err[glfw.Error] = glfw.init();
     if (sel started.err) {
         ret res[Window, WindowError].err{WindowError.init{started.err}};
@@ -484,19 +552,23 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     glfw.set_key_callback(win, on_key);
     glfw.set_char_callback(win, on_char);
     glfw.set_drop_callback(win, on_drop);
+    glfw.set_preedit_callback(win, on_preedit);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_cursor_enter_callback(win, on_cursor_enter);
     glfw.set_scroll_callback(win, on_scroll);
     glfw.set_framebuffer_size_callback(win, on_framebuffer_size);
+    glfw.set_window_close_callback(win, on_close);
+    glfw.set_window_refresh_callback(win, on_refresh);
 
     var fw: i32 = width;
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
     ret res[Window, WindowError].ok{Window{
-        handle:    opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
-        monitor:   monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width: 1, min_height: 1, renderers: 0
+        handle:     opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
+        monitor:    monitor, windowed: restore, windowed_maximized: restore_maximized,
+        min_width:  1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true,
+        text_input: opt[bool].none{}
     }};
 }
 
@@ -677,6 +749,82 @@ pub fun window_cursor_captured(w: *Window) bool {
     ret glfw.get_input_mode(w.handle.some, glfw.CURSOR) == glfw.CURSOR_DISABLED;
 }
 
+# a pointer shape shown over a window's client area
+pub def CursorShape: u8;
+
+pub val CURSOR_ARROW:       CursorShape = 0;
+pub val CURSOR_TEXT:        CursorShape = 1;
+pub val CURSOR_HAND:        CursorShape = 2;
+pub val CURSOR_MOVE:        CursorShape = 3;
+pub val CURSOR_RESIZE_EW:   CursorShape = 4;
+pub val CURSOR_RESIZE_NS:   CursorShape = 5;
+pub val CURSOR_RESIZE_NWSE: CursorShape = 6;
+pub val CURSOR_RESIZE_NESW: CursorShape = 7;
+pub val CURSOR_NOT_ALLOWED: CursorShape = 8;
+
+# One past the highest shape
+pub val CURSOR_SHAPE_COUNT: usize = 9;
+
+# the platform's standard cursors, created on first use and tried once each.
+# glfw owns them until terminate, which window_close calls, so closing forgets
+# them
+var cursors:      [9]ptr;
+var cursor_made:  [9]bool;
+var cursor_tried: [9]bool;
+
+# the GLFW standard cursor a shape names
+fun cursor_token(shape: CursorShape) i32 {
+    if (shape == CURSOR_TEXT)        { ret glfw.IBEAM_CURSOR; }
+    if (shape == CURSOR_HAND)        { ret glfw.POINTING_HAND_CURSOR; }
+    if (shape == CURSOR_MOVE)        { ret glfw.RESIZE_ALL_CURSOR; }
+    if (shape == CURSOR_RESIZE_EW)   { ret glfw.RESIZE_EW_CURSOR; }
+    if (shape == CURSOR_RESIZE_NS)   { ret glfw.RESIZE_NS_CURSOR; }
+    if (shape == CURSOR_RESIZE_NWSE) { ret glfw.RESIZE_NWSE_CURSOR; }
+    if (shape == CURSOR_RESIZE_NESW) { ret glfw.RESIZE_NESW_CURSOR; }
+    if (shape == CURSOR_NOT_ALLOWED) { ret glfw.NOT_ALLOWED_CURSOR; }
+    ret glfw.ARROW_CURSOR;
+}
+
+# show a pointer shape over the window's client area
+#
+# a shape the platform's cursor theme lacks shows the default arrow, and the
+# call reports it. setting the shape last set does nothing.
+# ---
+# w:     open window to change; a closed window is refused
+# shape: a CURSOR_* shape
+# ret:   true when the platform shows the shape
+pub fun window_set_cursor_shape(w: *Window, shape: CursorShape) bool {
+    if (!sel w.handle.some)                 { ret false; }
+    if (shape::usize >= CURSOR_SHAPE_COUNT) { ret false; }
+    if (w.shape == shape)                   { ret w.shape_shown; }
+    val i: usize = shape::usize;
+    if (!cursor_tried[i] && shape != CURSOR_ARROW) {
+        cursor_tried[i] = true;
+        val made: res[glfw.Cursor, glfw.Error] = glfw.create_standard_cursor(cursor_token(shape));
+        if (sel made.ok) {
+            cursors[i]     = made.ok.handle;
+            cursor_made[i] = true;
+        }
+    }
+    w.shape       = shape;
+    w.shape_shown = shape == CURSOR_ARROW || cursor_made[i];
+    if (w.shape_shown && shape != CURSOR_ARROW) {
+        glfw.set_cursor(w.handle.some, opt[glfw.Cursor].some{glfw.Cursor{handle: cursors[i]}});
+    }
+    or {
+        glfw.set_cursor(w.handle.some, opt[glfw.Cursor].none{});
+    }
+    ret w.shape_shown;
+}
+
+# the pointer shape last set on the window
+# ---
+# w:   window to query
+# ret: a CURSOR_* shape, CURSOR_ARROW until one is set
+pub fun window_cursor_shape(w: *Window) CursorShape {
+    ret w.shape;
+}
+
 # the clipboard's text
 #
 # an empty or non-text clipboard, and a closed window, read as the empty
@@ -704,6 +852,64 @@ pub fun window_clipboard_get(a: *allo.Allocator, w: *Window) res[str, allo.Error
 pub fun window_clipboard_set(w: *Window, contents: str) {
     if (!sel w.handle.some) { ret; }
     glfw.set_clipboard_string(contents);
+}
+
+# enter or leave a text input context, such as a focused text field
+#
+# the IME composes only inside one: leaving it ends any composition in
+# progress. a window never told keeps the platform's default, and a call that
+# repeats the current state does nothing.
+# ---
+# w:  window to change; a closed window is left alone
+# on: true while a text field takes text, false once none does
+pub fun window_set_text_input(w: *Window, on: bool) {
+    if (!sel w.handle.some)                               { ret; }
+    if (sel w.text_input.some && w.text_input.some == on) { ret; }
+    glfw.set_text_input_focus(w.handle.some, on);
+    w.text_input = opt[bool].some{on};
+}
+
+# place the IME's candidate window against a rect, normally the caret of the
+# text field taking text
+#
+# x11 places it only while composing over the spot, which boom does not use,
+# so there the input method places it on its own.
+# ---
+# w:      window to change; a closed window is left alone
+# x:      left edge in framebuffer pixels
+# y:      top edge in framebuffer pixels
+# width:  width in framebuffer pixels
+# height: height in framebuffer pixels
+pub fun window_set_ime_rect(w: *Window, x: f64, y: f64, width: f64, height: f64) {
+    if (!sel w.handle.some) { ret; }
+    val handle: glfw.Window = w.handle.some;
+    var ww:     i32         = 0;
+    var wh:     i32         = 0;
+    var fw:     i32         = 0;
+    var fh:     i32         = 0;
+    glfw.get_window_size(handle, ?ww, ?wh);
+    glfw.get_framebuffer_size(handle, ?fw, ?fh);
+    var x0: i32 = 0;
+    var y0: i32 = 0;
+    var x1: i32 = 0;
+    var y1: i32 = 0;
+    window_span(x, x + width, ww, fw, ?x0, ?x1);
+    window_span(y, y + height, wh, fh, ?y0, ?y1);
+    glfw.set_preedit_cursor_rectangle(handle, x0, y0, x1 - x0, y1 - y0);
+}
+
+# a span of framebuffer pixels in window coordinates, widened outward to whole
+# coordinates
+fun window_span(lo: f64, hi: f64, window: i32, framebuffer: i32, out_lo: *i32, out_hi: *i32) {
+    val s: f64 = cursor_scale(window, framebuffer);
+    @out_lo = floor_i32(lo / s);
+    @out_hi = -floor_i32(-(hi / s));
+}
+
+fun floor_i32(v: f64) i32 {
+    val t: i32 = v::i32;
+    if (t::f64 > v) { ret t - 1; }
+    ret t;
 }
 
 # route this window's input into a queue
@@ -775,6 +981,11 @@ rec Registered {
     queue:  *EventQueue;
 }
 
+# whether a callback ran since the last wait began. a platform wakes the wait
+# for events that reach no callback, such as a presented frame's buffer coming
+# back, and the wait sleeps on through those
+var delivered: bool = false;
+
 # every window with a sink installed, packed in the first registry_len slots.
 # glfwPollEvents services every window, so the poll releases every one of their
 # queues, not one. it grows on demand from the page allocator
@@ -833,6 +1044,40 @@ pub fun window_poll() {
     glfw.poll_events();
 }
 
+# process platform events as window_poll does, sleeping until at least one
+# arrives
+#
+# for an app with nothing to draw until input. an event is input, a resize, a
+# close request or a window asking to be redrawn. the platform also wakes for
+# events no callback sees, such as a presented frame's buffer coming back, and
+# the wait sleeps on through those, as it does through glfw's empty event.
+# gamepads deliver no events, so they do not wake it.
+pub fun window_wait() {
+    poll_release();
+    delivered = false;
+    for (!delivered) { glfw.wait_events(); }
+}
+
+# process platform events as window_poll does, sleeping until one arrives or
+# the timeout passes, through the same wakes window_wait sleeps through
+# ---
+# seconds: longest time to sleep; zero or less polls without sleeping
+pub fun window_wait_timeout(seconds: f64) {
+    poll_release();
+    if (seconds <= 0.0) {
+        glfw.poll_events();
+        ret;
+    }
+    delivered = false;
+    val until: f64 = glfw.get_time() + seconds;
+    var left:  f64 = seconds;
+    for (left > 0.0) {
+        glfw.wait_events_timeout(left);
+        if (delivered) { ret; }
+        left = until - glfw.get_time();
+    }
+}
+
 fun poll_release() {
     var i: usize = 0;
     for (i < registry_len) {
@@ -857,11 +1102,21 @@ pub fun window_close(w: *Window) err[WindowError] {
         unregister_queue(w.handle.some.handle);
         glfw.destroy_window(w.handle.some);
         glfw.terminate();
+        forget_cursors();
     }
     w.handle = opt[glfw.Window].none{};
     w.width  = 0;
     w.height = 0;
     ret err[WindowError].ok{};
+}
+
+fun forget_cursors() {
+    var i: usize = 0;
+    for (i < CURSOR_SHAPE_COUNT) {
+        cursor_made[i]  = false;
+        cursor_tried[i] = false;
+        i               = i + 1;
+    }
 }
 
 fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds {
@@ -1109,6 +1364,14 @@ test deliver_key__press_edge_and_repeat_queued {
     if (!sel r.some)                   { ret 8; }
     if (!sel r.some.key)               { ret 9; }
     if (!sel r.some.key.action.repeat) { ret 10; }
+
+    # the platform's modifier bits become boom's, the lock keys dropped
+    deliver_key(?sink, glfw.KEY_HOME, glfw.PRESS, glfw.MOD_CONTROL | glfw.MOD_SUPER | glfw.MOD_NUM_LOCK);
+    val h: opt[Event] = queue_pop(?q);
+    if (!sel h.some)                                       { ret 11; }
+    if (!sel h.some.key)                                   { ret 11; }
+    if (h.some.key.key != inp.KEY_HOME)                    { ret 12; }
+    if (h.some.key.mods != (inp.MOD_CTRL | inp.MOD_SUPER)) { ret 13; }
     ret 0;
 }
 
@@ -1332,6 +1595,14 @@ test deliver_button__unnamed_button_dropped {
     if (!sel e.some.mouse_button)                       { ret 3; }
     if (e.some.mouse_button.button != inp.BUTTON_RIGHT) { ret 4; }
     if (!e.some.mouse_button.down)                      { ret 5; }
+
+    deliver_button(?sink, glfw.MOUSE_BUTTON_5, glfw.PRESS, glfw.MOD_SHIFT);
+    inp.input_begin_tick(?input);
+    if (!inp.button_pressed(?input, inp.BUTTON_X2)) { ret 6; }
+    val x: opt[Event] = queue_pop(?q);
+    if (!sel x.some)                               { ret 7; }
+    if (!sel x.some.mouse_button)                  { ret 7; }
+    if (x.some.mouse_button.mods != inp.MOD_SHIFT) { ret 8; }
     ret 0;
 }
 
@@ -1384,6 +1655,44 @@ test cursor_pixels__follows_framebuffer_scale {
 
     cursor_pixels(100.5, 50.0, 800, 600, 1200, 900, ?x, ?y);
     if (x != 150.75 || y != 75.0) { ret 3; }
+    ret 0;
+}
+
+test window_span__framebuffer_pixels_to_window {
+    var lo: i32 = 0;
+    var hi: i32 = 0;
+    window_span(10.0, 30.5, 800, 800, ?lo, ?hi);
+    if (lo != 10 || hi != 31) { ret 1; }
+    # at 2x a pixel rect halves, widened outward to whole coordinates
+    window_span(101.0, 141.0, 800, 1600, ?lo, ?hi);
+    if (lo != 50 || hi != 71) { ret 2; }
+    window_span(-3.0, 3.0, 800, 1200, ?lo, ?hi);
+    if (lo != -2 || hi != 2) { ret 3; }
+    ret 0;
+}
+
+test deliver_compose__copied_into_the_queue {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var cps:   [2]u32     = [2]u32{0x304B, 0x3093};
+
+    deliver_compose(?sink, 2, ?cps[0], 1);
+    cps[0] = 0;
+    deliver_compose(?sink, 0, nil, 0);
+    deliver_compose(nil, 2, ?cps[0], 1);
+
+    val c: opt[Event] = queue_pop(?q);
+    if (!sel c.some)                                            { ret 1; }
+    if (!sel c.some.compose)                                    { ret 1; }
+    if (c.some.compose.count != 2 || c.some.compose.caret != 1) { ret 2; }
+    if (c.some.compose.codepoints[0] != 0x304B)                 { ret 3; }
+    val ended: opt[Event] = queue_pop(?q);
+    if (!sel ended.some)               { ret 4; }
+    if (!sel ended.some.compose)       { ret 4; }
+    if (ended.some.compose.count != 0) { ret 5; }
+    if (!queue_is_empty(?q))           { ret 6; }
+    queue_clear(?q);
     ret 0;
 }
 

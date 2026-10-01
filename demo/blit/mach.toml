@@ -58,4 +58,9 @@ ref = "tag/v9.0.0"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-ref = "tag/v0.9.0"
+version = "^0.10"
+
+# blit's demo gallery, from the blit checkout boom pins (realized by
+# `mach dep pull .` at boom's root), drawn here by boom's renderer
+[dep.gallery]
+path = "../../dep/blit/demo/gallery"

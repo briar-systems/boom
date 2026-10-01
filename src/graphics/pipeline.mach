@@ -151,13 +151,16 @@ pub fun create_set_layout(v: *Vk, bindings: *vk.DescriptorSetLayoutBinding, n: u
 
 # How a pipeline combines fragment output with an existing colour attachment.
 # ---
-# opaque:       replace the attachment with the fragment output
-# source_alpha: compose the fragment over the attachment using source alpha
-# additive:     add fragment channels to the existing attachment channels
+# opaque:        replace the attachment with the fragment output
+# source_alpha:  compose the fragment over the attachment using source alpha
+# additive:      add fragment channels to the existing attachment channels
+# premultiplied: compose a fragment whose colour is already multiplied by its
+#                alpha over the attachment
 pub tag BlendMode: u8 {
     opaque;
     source_alpha;
     additive;
+    premultiplied;
 }
 
 # What a pipeline needs beyond its shaders and vertex format.
@@ -571,6 +574,11 @@ fun blend_attachment(mode: BlendMode) vk.PipelineColorBlendAttachmentState {
         cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE;
         cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE;
     }
+    or (sel mode.premultiplied) {
+        cb.blendEnable         = vk.TRUE;
+        cb.dstColorBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        cb.dstAlphaBlendFactor = vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    }
     ret cb;
 }
 
@@ -848,6 +856,16 @@ pub fun pipeline_bind(p: *Pipeline, cmd: vk.CommandBuffer, width: u32, height: u
 
 pub fun pipeline_bind_region(p: *Pipeline, cmd: vk.CommandBuffer, x: i32, y: i32,
     width: u32, height: u32) {
+    pipeline_bind_scissored(p, cmd, x, y, width, height, x, y, width, height);
+}
+
+# Bind the pipeline with a viewport and a separate, smaller scissor.
+#
+# The viewport is where the projection lands and the scissor what of it is
+# written, so a clip inside a pass narrows the scissor and leaves the viewport,
+# and with it every vertex's position, where it was.
+pub fun pipeline_bind_scissored(p: *Pipeline, cmd: vk.CommandBuffer, x: i32, y: i32,
+    width: u32, height: u32, sx: i32, sy: i32, swidth: u32, sheight: u32) {
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_GRAPHICS, p.handle);
 
     # A POSITIVE HEIGHT, NOT A FLIPPED VIEWPORT. There are two ways to reach
@@ -868,10 +886,10 @@ pub fun pipeline_bind_region(p: *Pipeline, cmd: vk.CommandBuffer, x: i32, y: i32
     vk.vkCmdSetViewport(cmd, 0, 1, ?vpt);
 
     var sc: vk.Rect2D;
-    sc.offset.x      = x;
-    sc.offset.y      = y;
-    sc.extent.width  = width;
-    sc.extent.height = height;
+    sc.offset.x      = sx;
+    sc.offset.y      = sy;
+    sc.extent.width  = swidth;
+    sc.extent.height = sheight;
     vk.vkCmdSetScissor(cmd, 0, 1, ?sc);
 }
 
@@ -1002,6 +1020,14 @@ test blend_attachment__factors_per_mode {
         || additive.srcAlphaBlendFactor != vk.BLEND_FACTOR_ONE
         || additive.dstAlphaBlendFactor != vk.BLEND_FACTOR_ONE
         || additive.alphaBlendOp != vk.BLEND_OP_ADD) { ret 3; }
+
+    # a premultiplied colour already carries its alpha, so the source is taken whole
+    val pre: vk.PipelineColorBlendAttachmentState = blend_attachment(BlendMode.premultiplied{});
+    if (pre.blendEnable != vk.TRUE
+        || pre.srcColorBlendFactor != vk.BLEND_FACTOR_ONE
+        || pre.dstColorBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+        || pre.srcAlphaBlendFactor != vk.BLEND_FACTOR_ONE
+        || pre.dstAlphaBlendFactor != vk.BLEND_FACTOR_ONE_MINUS_SRC_ALPHA) { ret 4; }
     ret 0;
 }
 

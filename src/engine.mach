@@ -15,6 +15,7 @@ use boom.app.App;
 use boom.clock.clock_advance;
 use boom.clock.clock_tick;
 use boom.context.Context;
+use boom.context.Wake;
 use boom.gamepad.gamepad_poll;
 use inp: boom.input;
 use boom.timestep.timestep_add;
@@ -23,9 +24,17 @@ use boom.timestep.timestep_step;
 use boom.window.window_poll;
 use boom.window.window_refresh_size;
 use boom.window.window_should_close;
+use boom.window.window_wait;
+use boom.window.window_wait_timeout;
+use std.chrono.duration.Duration;
+use std.chrono.duration.SECOND;
+use std.chrono.time.InstantClock;
+use std.chrono.time.instant;
+use std.chrono.time.instant_sub;
 use io_error: std.io.error;
 use std.types.bool.false;
 use std.types.error.err;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.string.str;
 
@@ -60,10 +69,45 @@ fun tick_pending(ctx: *Context, app: *App) {
     }
 }
 
+# what the last frame asked of this one's start, clearing the request for the
+# next frame: at once when nothing asked or the frame delta is pinned
+fun take_wake(ctx: *Context) Wake {
+    val w: opt[Wake] = ctx.wake;
+    ctx.wake = opt[Wake].none{};
+    if (ctx.frame_dt != 0) { ret Wake.now{}; }
+    if (sel w.some)        { ret w.some; }
+    ret Wake.now{};
+}
+
+# take the platform's events, first sleeping as long as the last frame asked
+# (see boom.context.context_wake)
+fun await_events(ctx: *Context) {
+    val w: Wake = take_wake(ctx);
+    if (sel w.now) {
+        window_poll();
+        ret;
+    }
+    if (sel w.input) {
+        window_wait();
+        ret;
+    }
+    if (sel w.at) {
+        # a clock that cannot be read is reported by the clock_tick that follows
+        val now: InstantClock = instant();
+        if (sel now.ok) {
+            val left: Duration = w.at - instant_sub(now.ok, ctx.clock.start);
+            window_wait_timeout(left::f64 / SECOND::f64);
+            ret;
+        }
+    }
+    window_poll();
+}
+
 # drive the app's lifecycle over an initialized context
 #
 # calls f_init once, then loops until the context is stopped or the
-# window is closed: each frame polls input, advances the clock, runs the
+# window is closed: each frame takes input (sleeping first when the last
+# frame asked to, see boom.context.context_wake), advances the clock, runs the
 # fixed-timestep update as many times as the accumulator allows, sets
 # ctx.alpha, and renders via f_draw. calls f_dnit once on exit. absent
 # hooks are skipped. the context status is returned after teardown. a loop
@@ -80,7 +124,7 @@ pub fun run(ctx: *Context, app: *App) res[i64, EngineError] {
     invoke(app.f_init, ctx);
 
     for (ctx.running && !window_should_close(?ctx.window)) {
-        window_poll();
+        await_events(ctx);
         # Pads have no events to deliver, so they are sampled once per frame
         # here. The edges this produces still belong to a tick, because
         # input_begin_tick folds them like every other edge.
@@ -124,6 +168,7 @@ pub fun run(ctx: *Context, app: *App) res[i64, EngineError] {
 use boom.context.context_set_user;
 use boom.context.context_stop;
 use boom.context.context_user;
+use boom.context.context_wake;
 use boom.timestep.timestep_new;
 use std.types.bool.true;
 
@@ -152,5 +197,29 @@ test tick_pending__stop_leaves_backlog {
     tick_pending(?ctx, ?app);
     if (ticks != 1)                 { ret 1; }
     if (ctx.step.accumulator != 25) { ret 2; }
+    ret 0;
+}
+
+test take_wake__an_idle_frame_sleeps_until_input {
+    var ctx: Context;
+    ctx.frame_dt = 0;
+    ctx.wake     = opt[Wake].none{};
+    # an interface with nothing moving asks to sleep, and the loop does
+    context_wake(?ctx, Wake.input{});
+    val idle: Wake = take_wake(?ctx);
+    if (!sel idle.input) { ret 1; }
+    # the request held for one frame: one that asks nothing runs at once
+    val busy: Wake = take_wake(?ctx);
+    if (!sel busy.now) { ret 2; }
+    context_wake(?ctx, Wake.at{7});
+    context_wake(?ctx, Wake.input{});
+    val timed: Wake = take_wake(?ctx);
+    if (!sel timed.at) { ret 3; }
+    if (timed.at != 7) { ret 3; }
+    # a pinned frame delta never sleeps
+    ctx.frame_dt = 10;
+    context_wake(?ctx, Wake.input{});
+    val pinned: Wake = take_wake(?ctx);
+    if (!sel pinned.now) { ret 4; }
     ret 0;
 }

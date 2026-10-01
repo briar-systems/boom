@@ -15,8 +15,8 @@
 # draw covers a whole draw list, and a panel's background, its border and its
 # text are different colours inside it.
 
-# The projection, as its four columns, then whether the fragment stage decodes
-# the vertex colours from sRGB. See src/bin/shaders/mesh_vert.mach for why a
+# The projection, as its four columns, then how the fragment stage decodes the
+# vertex colours and texels. See src/bin/shaders/mesh_vert.mach for why a
 # matrix arrives as columns and why the product is a combination of them, and
 # src/bin/shaders/ui_frag.mach for the decode.
 rec Screen {

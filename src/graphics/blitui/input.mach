@@ -1,0 +1,598 @@
+# The blit input adapter: a boom window as blit's host.
+#
+# blit (briar-systems/blit) never reads a window. Each frame its context takes
+# a blit.input.Input, and after the frame it asks the host for things back:
+# copied text, a paste, a pointer shape, a place for the IME's candidate window
+# and when to draw again. BlitInput is boom's half of that contract.
+#
+#     var bi: gfx.BlitInput = gfx.blit_input(?a, ctx);       # once
+#     # each frame, in f_draw:
+#     bctx.begin(?ui, gfx.blit_input_frame(?bi, ctx), w, h);
+#     ...widgets...
+#     bctx.end(?ui);
+#     gfx.blit_input_serve(?bi, ?ui, ctx);
+#     # at shutdown
+#     gfx.blit_input_delete(?bi);
+#
+# THE CLOCK is the context's frame clock, ctx.clock.elapsed in seconds, so
+# blit's wake times are points on the same clock boom.context.Wake.at measures.
+# blit_input_serve hands blit's next_frame to context_wake: an interface with
+# nothing moving lets the loop sleep until input. A game that draws a moving
+# scene asks for the next frame itself, and the soonest request wins.
+#
+# EVENTS ARE TAKEN FROM THE QUEUE. blit_input_frame drains ctx.events. An app
+# that reads the queue for anything else drains it itself, and frames blit's
+# input with blit_input_begin, then blit_input_event for every event, in order.
+#
+# BUTTONS are both held and events. Each press and release is added to blit's
+# events with the cursor where it happened, so a click that starts and ends
+# between two frames still lands, and down stays the buttons held after the
+# last of them. blit applies one change per button a frame and holds the rest
+# back, asking for the next frame at once through next_frame, which
+# blit_input_serve hands to the loop, so a held-back release arrives without
+# new input.
+#
+# KEYS are blit's codes: a letter is its uppercase character, a digit or space
+# is itself, and Enter, Escape, the arrows and the other editing keys are
+# blit's KEY_* constants. A key blit has no code for (a function key, a
+# modifier) is not passed on, though the modifiers still set the held mods.
+# The held mods are tracked from the modifier keys' own presses and releases,
+# which every platform reports the same way.
+#
+# THE IME composes into blit's focused text field. Each compose event becomes
+# blit's compose, its codepoints as utf-8 kept until the next frame begins and
+# its caret as a byte offset. After the frame, blit_input_serve puts the window
+# in a text input context while blit's ime_rect names a field taking text,
+# placing the candidate window at it, and takes it out once none does, which
+# ends any composition in progress.
+
+use bctx: blit.context;
+use binp: blit.input;
+use boom.context.Context;
+use boom.context.Wake;
+use boom.context.context_wake;
+use boom.event.ComposeEvent;
+use boom.event.Event;
+use boom.event.queue_pop;
+use inp:  boom.input;
+use win:  boom.window;
+use allo: std.allocator;
+use std.chrono.duration.Duration;
+use std.chrono.duration.SECOND;
+use text: std.text.string;
+use std.text.utf8;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+
+# pixels of wheel travel per notch a new BlitInput assumes
+pub val BLIT_WHEEL_STEP: f32 = 40.0;
+
+# held modifier keys, one bit per key, so releasing one side keeps the other
+val HELD_LEFT_SHIFT:  u8 = 1;
+val HELD_RIGHT_SHIFT: u8 = 2;
+val HELD_LEFT_CTRL:   u8 = 4;
+val HELD_RIGHT_CTRL:  u8 = 8;
+val HELD_LEFT_ALT:    u8 = 16;
+val HELD_RIGHT_ALT:   u8 = 32;
+val HELD_LEFT_SUPER:  u8 = 64;
+val HELD_RIGHT_SUPER: u8 = 128;
+
+# blit's frame input, kept from a boom window's events
+# ---
+# input:      the frame's blit input, handed to blit.context.begin
+# a:          allocator backing the input's events and the paste copy
+# wheel_step: pixels of wheel travel per notch the platform reports
+# held:       the modifier keys held, HELD_* bits
+# paste:      the clipboard's text the next or current frame carries, owned
+#             here until the frame after it is served, or nil
+# dropped:    events blit's input had no room for, since creation
+# composed:   the utf-8 texts of the frame's compose events, newest first,
+#             owned here until the next frame begins
+pub rec BlitInput {
+    input:      binp.Input;
+    a:          *allo.Allocator;
+    wheel_step: f32;
+    held:       u8;
+    paste:      str;
+    dropped:    usize;
+    composed:   *Composed;
+}
+
+# one composition's utf-8 text: this header, then the nul-terminated bytes,
+# in one block
+# ---
+# next: the frame's composition before this one
+# size: bytes in the whole block
+pub rec Composed {
+    next: *Composed;
+    size: usize;
+}
+
+# a blit input over a context's window
+#
+# the pointer starts where the window last saw it, present when it is over the
+# window. nothing is allocated until the first keyboard event.
+# ---
+# a:   allocator for the frame's events and the paste copy; must outlive it
+# ctx: the context whose window it serves
+# ret: the adapter, released with blit_input_delete
+pub fun blit_input(a: *allo.Allocator, ctx: *Context) BlitInput {
+    var bi: BlitInput;
+    binp.init(?bi.input, a);
+    bi.a          = a;
+    bi.wheel_step = BLIT_WHEEL_STEP;
+    bi.held       = 0;
+    bi.paste      = nil;
+    bi.dropped    = 0;
+    bi.composed   = nil;
+    # the window's sink set these as it was installed; the queue only carries changes
+    bi.input.present = 0;
+    if (ctx.input.pend_pointer_in) { bi.input.present = 1; }
+    bi.input.mx = ctx.input.pend_mouse_x::f32;
+    bi.input.my = ctx.input.pend_mouse_y::f32;
+    ret bi;
+}
+
+# release a blit input's events and paste copy
+# ---
+# bi:  adapter to release
+# ret: ok, or the allocator's refusal
+pub fun blit_input_delete(bi: *BlitInput) err[allo.Error] {
+    val freed: err[allo.Error] = binp.free(?bi.input);
+    if (sel freed.err) { ret freed; }
+    val composed: err[allo.Error] = drop_composed(bi);
+    if (sel composed.err) { ret composed; }
+    ret drop_paste(bi);
+}
+
+fun drop_composed(bi: *BlitInput) err[allo.Error] {
+    for (bi.composed != nil) {
+        val c: *Composed = bi.composed;
+        bi.composed = c.next;
+        val freed: err[allo.Error] = allo.deallocate_raw(bi.a, c::ptr, c.size, $align_of(Composed));
+        if (sel freed.err) { ret freed; }
+    }
+    ret err[allo.Error].ok{};
+}
+
+# a composition's codepoints as utf-8 owned until the next frame begins, and
+# its caret as a byte offset. a codepoint utf-8 cannot carry becomes U+FFFD
+fun compose_text(bi: *BlitInput, c: ComposeEvent, caret: *usize) res[str, allo.Error] {
+    var bytes: usize = 0;
+    var at:    usize = 0;
+    var i:     usize = 0;
+    var buf:   [4]u8;
+    for (i < c.count) {
+        if (i == c.caret) { at = bytes; }
+        bytes = bytes + encoded(c.codepoints[i], ?buf[0]);
+        i     = i + 1;
+    }
+    if (c.caret >= c.count) { at = bytes; }
+    val head: usize                = $size_of(Composed);
+    val size: usize                = head + bytes + 1;
+    val got:  res[ptr, allo.Error] = allo.allocate_raw(bi.a, size, $align_of(Composed));
+    if (sel got.err) { ret res[str, allo.Error].err{got.err}; }
+    val block: *Composed = got.ok::*Composed;
+    @block      = Composed{next: bi.composed, size: size};
+    bi.composed = block;
+    val out: *u8   = (got.ok::usize + head)::*u8;
+    var n:   usize = 0;
+    i = 0;
+    for (i < c.count) {
+        n = n + encoded(c.codepoints[i], (out::usize + n)::*u8);
+        i = i + 1;
+    }
+    out[n] = 0;
+    @caret = at;
+    ret res[str, allo.Error].ok{out::str};
+}
+
+# write a codepoint's utf-8 into buf, which holds four bytes, and return its length
+fun encoded(cp: u32, buf: *u8) usize {
+    val n: usize = utf8.encode(cp, buf, 4);
+    if (n != 0) { ret n; }
+    ret utf8.encode(utf8.REPLACEMENT, buf, 4);
+}
+
+fun drop_paste(bi: *BlitInput) err[allo.Error] {
+    val s: str = bi.paste;
+    bi.paste       = nil;
+    bi.input.paste = nil;
+    ret text.str_free(bi.a, s);
+}
+
+# start a frame's input: empty the last frame's events and wheel, and carry
+# the clipboard's text when the last frame asked for it
+# ---
+# bi:   adapter to frame
+# time: the frame's time in seconds on the context's clock
+pub fun blit_input_begin(bi: *BlitInput, time: f64) {
+    binp.clear_keys(?bi.input);
+    # the last frame's compositions were copied by blit as it began
+    drop_composed(bi);
+    bi.input.paste   = bi.paste;
+    bi.input.time    = time;
+    bi.input.wheel   = 0.0;
+    bi.input.wheel_x = 0.0;
+    bi.input.mods    = held_mods(bi.held);
+}
+
+# fold one boom event into the frame's input
+# ---
+# bi: adapter being framed (see blit_input_begin)
+# e:  the event, in the order the queue delivered it
+pub fun blit_input_event(bi: *BlitInput, e: Event) {
+    val in: *binp.Input = ?bi.input;
+    if (sel e.mouse_move) {
+        in.mx = e.mouse_move.x::f32;
+        in.my = e.mouse_move.y::f32;
+        ret;
+    }
+    if (sel e.pointer) {
+        in.present = 0;
+        if (e.pointer.inside) { in.present = 1; }
+        ret;
+    }
+    if (sel e.mouse_button) {
+        val bit: u8 = button_bit(e.mouse_button.button);
+        if (bit == 0) { ret; }
+        # the cursor as it stood when the button changed, from the moves before it
+        var kept: bool = false;
+        if (e.mouse_button.down) {
+            in.down = in.down | bit;
+            kept    = binp.press_button(in, bit, in.mx, in.my);
+        }
+        or {
+            in.down = in.down & ~bit;
+            kept    = binp.release_button(in, bit, in.mx, in.my);
+        }
+        if (!kept) { bi.dropped = bi.dropped + 1; }
+        ret;
+    }
+    if (sel e.scroll) {
+        # boom's vertical scroll is positive away from the user, as blit's
+        # wheel is, and its horizontal one positive to the left
+        in.wheel   = in.wheel + e.scroll.dy::f32 * bi.wheel_step;
+        in.wheel_x = in.wheel_x - e.scroll.dx::f32 * bi.wheel_step;
+        ret;
+    }
+    if (sel e.text) {
+        if (!binp.type_text(in, e.text.codepoint)) { bi.dropped = bi.dropped + 1; }
+        ret;
+    }
+    if (sel e.compose) {
+        var kept: bool = false;
+        if (e.compose.count == 0) { kept = binp.compose(in, nil, 0); }
+        or {
+            var caret: usize                = 0;
+            val made:  res[str, allo.Error] = compose_text(bi, e.compose, ?caret);
+            if (sel made.ok) { kept = binp.compose(in, made.ok, caret); }
+        }
+        if (!kept) { bi.dropped = bi.dropped + 1; }
+        ret;
+    }
+    if (sel e.key) {
+        val down: bool = !sel e.key.action.release;
+        bi.held = held_after(bi.held, e.key.key, down);
+        in.mods = held_mods(bi.held);
+        val code: opt[u32] = key_code(e.key.key);
+        if (!sel code.some) { ret; }
+        val mods: u8   = blit_mods(e.key.mods);
+        var kept: bool = false;
+        if (down)  { kept = binp.press_key(in, code.some, mods); }
+        or         { kept = binp.release_key(in, code.some, mods); }
+        if (!kept) { bi.dropped = bi.dropped + 1; }
+    }
+}
+
+# frame blit's input from everything the context's queue holds, draining it
+# ---
+# bi:  adapter to frame
+# ctx: the context whose events and clock it reads
+# ret: the frame's input for blit.context.begin
+pub fun blit_input_frame(bi: *BlitInput, ctx: *Context) binp.Input {
+    blit_input_begin(bi, ctx.clock.elapsed::f64 / SECOND::f64);
+    for (true) {
+        val e: opt[Event] = queue_pop(?ctx.events);
+        if (!sel e.some) { brk; }
+        blit_input_event(bi, e.some);
+    }
+    ret bi.input;
+}
+
+# answer what a finished blit frame asks of the host
+#
+# moves copied text to the window's clipboard, reads the clipboard for the next
+# frame when a widget asked to paste, shows the pointer shape blit asks for,
+# places the IME's candidate window at blit's ime_rect, keeping the window in a
+# text input context only while there is one, and schedules the next frame by
+# blit's next_frame. call it after blit.context.end.
+# ---
+# bi:  adapter whose frame blit finished
+# ui:  the blit context that ran the frame
+# ctx: the context whose window and loop it serves
+# ret: ok, or the allocator's refusal of the paste copy, which skips the paste
+pub fun blit_input_serve(bi: *BlitInput, ui: *bctx.Context, ctx: *Context) err[allo.Error] {
+    val copied: str = bctx.copied(ui);
+    if (copied != nil) { win.window_clipboard_set(?ctx.window, copied); }
+    win.window_set_cursor_shape(?ctx.window, cursor_shape(bctx.cursor(ui)));
+    # blit's pixels are the framebuffer's, as the cursor it was given
+    val ime: opt[bctx.Area] = bctx.ime_rect(ui);
+    if (sel ime.some) {
+        val r: bctx.Area = ime.some;
+        win.window_set_ime_rect(?ctx.window, r.x0::f64, r.y0::f64, (r.x1 - r.x0)::f64, (r.y1 - r.y0)::f64);
+    }
+    win.window_set_text_input(?ctx.window, sel ime.some);
+    schedule(ui, ctx);
+    # the frame that carried the last paste is over
+    val dropped: err[allo.Error] = drop_paste(bi);
+    if (sel dropped.err)       { ret dropped; }
+    if (!bctx.wants_paste(ui)) { ret err[allo.Error].ok{}; }
+    val got: res[str, allo.Error] = win.window_clipboard_get(bi.a, ?ctx.window);
+    if (sel got.err) { ret err[allo.Error].err{got.err}; }
+    bi.paste = got.ok;
+    ret err[allo.Error].ok{};
+}
+
+# ask the loop for the next frame when blit's finished frame wants one
+fun schedule(ui: *bctx.Context, ctx: *Context) {
+    context_wake(ctx, wake_of(bctx.next_frame(ui)));
+}
+
+# the loop's wake for blit's next_frame, whose times are the context clock's seconds
+fun wake_of(next: opt[f64]) Wake {
+    if (!sel next.some)   { ret Wake.input{}; }
+    if (next.some <= 0.0) { ret Wake.now{}; }
+    ret Wake.at{(next.some * SECOND::f64)::Duration};
+}
+
+# blit's BUTTON_* bit for a boom button
+fun button_bit(b: inp.Button) u8 {
+    if (b == inp.BUTTON_LEFT)   { ret binp.BUTTON_LEFT; }
+    if (b == inp.BUTTON_RIGHT)  { ret binp.BUTTON_RIGHT; }
+    if (b == inp.BUTTON_MIDDLE) { ret binp.BUTTON_MIDDLE; }
+    if (b == inp.BUTTON_X1)     { ret binp.BUTTON_X1; }
+    if (b == inp.BUTTON_X2)     { ret binp.BUTTON_X2; }
+    ret 0;
+}
+
+# blit's code for a boom key, none for a key blit does not name
+fun key_code(k: inp.Key) opt[u32] {
+    if (k >= inp.KEY_A && k <= inp.KEY_Z) { ret opt[u32].some{'A' + (k - inp.KEY_A)::u32}; }
+    if (k >= inp.KEY_0 && k <= inp.KEY_9) { ret opt[u32].some{'0' + (k - inp.KEY_0)::u32}; }
+    if (k == inp.KEY_SPACE)               { ret opt[u32].some{' '}; }
+    if (k == inp.KEY_ENTER)               { ret opt[u32].some{binp.KEY_ENTER}; }
+    if (k == inp.KEY_ESCAPE)              { ret opt[u32].some{binp.KEY_ESCAPE}; }
+    if (k == inp.KEY_BACKSPACE)           { ret opt[u32].some{binp.KEY_BACKSPACE}; }
+    if (k == inp.KEY_DELETE)              { ret opt[u32].some{binp.KEY_DELETE}; }
+    if (k == inp.KEY_TAB)                 { ret opt[u32].some{binp.KEY_TAB}; }
+    if (k == inp.KEY_LEFT)                { ret opt[u32].some{binp.KEY_LEFT}; }
+    if (k == inp.KEY_RIGHT)               { ret opt[u32].some{binp.KEY_RIGHT}; }
+    if (k == inp.KEY_UP)                  { ret opt[u32].some{binp.KEY_UP}; }
+    if (k == inp.KEY_DOWN)                { ret opt[u32].some{binp.KEY_DOWN}; }
+    if (k == inp.KEY_HOME)                { ret opt[u32].some{binp.KEY_HOME}; }
+    if (k == inp.KEY_END)                 { ret opt[u32].some{binp.KEY_END}; }
+    if (k == inp.KEY_PAGE_UP)             { ret opt[u32].some{binp.KEY_PAGE_UP}; }
+    if (k == inp.KEY_PAGE_DOWN)           { ret opt[u32].some{binp.KEY_PAGE_DOWN}; }
+    if (k == inp.KEY_INSERT)              { ret opt[u32].some{binp.KEY_INSERT}; }
+    ret opt[u32].none{};
+}
+
+# the HELD_* bit of a modifier key, 0 for any other key
+fun held_bit(k: inp.Key) u8 {
+    if (k == inp.KEY_LEFT_SHIFT)  { ret HELD_LEFT_SHIFT; }
+    if (k == inp.KEY_RIGHT_SHIFT) { ret HELD_RIGHT_SHIFT; }
+    if (k == inp.KEY_LEFT_CTRL)   { ret HELD_LEFT_CTRL; }
+    if (k == inp.KEY_RIGHT_CTRL)  { ret HELD_RIGHT_CTRL; }
+    if (k == inp.KEY_LEFT_ALT)    { ret HELD_LEFT_ALT; }
+    if (k == inp.KEY_RIGHT_ALT)   { ret HELD_RIGHT_ALT; }
+    if (k == inp.KEY_LEFT_SUPER)  { ret HELD_LEFT_SUPER; }
+    if (k == inp.KEY_RIGHT_SUPER) { ret HELD_RIGHT_SUPER; }
+    ret 0;
+}
+
+fun held_after(held: u8, k: inp.Key, down: bool) u8 {
+    val bit: u8 = held_bit(k);
+    if (down) { ret held | bit; }
+    ret held & ~bit;
+}
+
+# blit's MOD_* bits for the modifier keys held
+fun held_mods(held: u8) u8 {
+    var m: u8 = 0;
+    if ((held & (HELD_LEFT_SHIFT | HELD_RIGHT_SHIFT)) != 0) { m = m | binp.MOD_SHIFT; }
+    if ((held & (HELD_LEFT_CTRL | HELD_RIGHT_CTRL)) != 0)   { m = m | binp.MOD_CTRL; }
+    if ((held & (HELD_LEFT_ALT | HELD_RIGHT_ALT)) != 0)     { m = m | binp.MOD_ALT; }
+    if ((held & (HELD_LEFT_SUPER | HELD_RIGHT_SUPER)) != 0) { m = m | binp.MOD_SUPER; }
+    ret m;
+}
+
+# blit's MOD_* bits for boom's
+fun blit_mods(mods: i32) u8 {
+    var m: u8 = 0;
+    if ((mods & inp.MOD_SHIFT) != 0) { m = m | binp.MOD_SHIFT; }
+    if ((mods & inp.MOD_CTRL) != 0)  { m = m | binp.MOD_CTRL; }
+    if ((mods & inp.MOD_ALT) != 0)   { m = m | binp.MOD_ALT; }
+    if ((mods & inp.MOD_SUPER) != 0) { m = m | binp.MOD_SUPER; }
+    ret m;
+}
+
+# boom's pointer shape for blit's CURSOR_* shape
+fun cursor_shape(shape: u8) win.CursorShape {
+    if (shape == binp.CURSOR_TEXT)        { ret win.CURSOR_TEXT; }
+    if (shape == binp.CURSOR_HAND)        { ret win.CURSOR_HAND; }
+    if (shape == binp.CURSOR_MOVE)        { ret win.CURSOR_MOVE; }
+    if (shape == binp.CURSOR_RESIZE_EW)   { ret win.CURSOR_RESIZE_EW; }
+    if (shape == binp.CURSOR_RESIZE_NS)   { ret win.CURSOR_RESIZE_NS; }
+    if (shape == binp.CURSOR_RESIZE_NWSE) { ret win.CURSOR_RESIZE_NWSE; }
+    if (shape == binp.CURSOR_RESIZE_NESW) { ret win.CURSOR_RESIZE_NESW; }
+    if (shape == binp.CURSOR_NOT_ALLOWED) { ret win.CURSOR_NOT_ALLOWED; }
+    ret win.CURSOR_ARROW;
+}
+
+use bfield: blit.field;
+use bw:     blit.widget;
+use boom.event.ButtonEvent;
+use boom.event.KeyAction;
+use boom.event.KeyEvent;
+use boom.event.MoveEvent;
+use boom.event.PointerEvent;
+use boom.event.ScrollEvent;
+use boom.event.TextEvent;
+use std.allocator.page;
+use std.types.string.str_len;
+
+test blit_input_event__fills_the_frame_in_order {
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret 1; }
+    var ctx: Context;
+    ctx.input = inp.input_new();
+    var bi: BlitInput = blit_input(?a, ?ctx);
+    if (bi.input.present != 0) { ret 2; }
+
+    blit_input_begin(?bi, 1.5);
+    blit_input_event(?bi, Event.pointer{PointerEvent{inside: true}});
+    blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 12.0, y: 34.0}});
+    blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_X1, down: true, mods: 0}});
+    blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 20.0, y: 30.0}});
+    blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_X1, down: false, mods: 0}});
+    blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_LEFT, down: true, mods: 0}});
+    blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 12.0, y: 34.0}});
+    blit_input_event(?bi, Event.scroll{ScrollEvent{dx: 1.0, dy: 0.5}});
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_LEFT_SHIFT, action: KeyAction.press{}, mods: 0}});
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_V, action: KeyAction.press{}, mods: inp.MOD_SHIFT}});
+    blit_input_event(?bi, Event.text{TextEvent{codepoint: 'V'}});
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_PAGE_DOWN, action: KeyAction.repeat{}, mods: inp.MOD_SHIFT}});
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_F1, action: KeyAction.press{}, mods: 0}});
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_V, action: KeyAction.release{}, mods: inp.MOD_SHIFT}});
+
+    val in: binp.Input = bi.input;
+    if (in.time != 1.5 || in.present != 1)       { ret 3; }
+    if (in.mx != 12.0 || in.my != 34.0)          { ret 4; }
+    if (in.down != binp.BUTTON_LEFT)             { ret 5; }
+    if (in.wheel != 20.0 || in.wheel_x != -40.0) { ret 6; }
+    if (in.mods != binp.MOD_SHIFT)               { ret 7; }
+    # a press and release in one frame are two events, each where it happened,
+    # and the modifier and the function key carry no blit code
+    if (in.events.len != 7) { ret 8; }
+    val press: binp.Event = in.events.data[0];
+    if (!sel press.down)                                                                     { ret 17; }
+    if (press.down.button != binp.BUTTON_X1 || press.down.x != 12.0 || press.down.y != 34.0) { ret 17; }
+    val release: binp.Event = in.events.data[1];
+    if (!sel release.up)                                                                     { ret 18; }
+    if (release.up.button != binp.BUTTON_X1 || release.up.x != 20.0 || release.up.y != 30.0) { ret 18; }
+    val left: binp.Event = in.events.data[2];
+    if (!(sel left.down && left.down.button == binp.BUTTON_LEFT)) { ret 19; }
+    val first: binp.Event = in.events.data[3];
+    if (!sel first.key)                                            { ret 9; }
+    if (first.key.code != 'V' || first.key.mods != binp.MOD_SHIFT) { ret 9; }
+    val second: binp.Event = in.events.data[4];
+    if (!(sel second.text && second.text == 'V')) { ret 10; }
+    val third: binp.Event = in.events.data[5];
+    if (!(sel third.key && third.key.code == binp.KEY_PAGE_DOWN)) { ret 11; }
+    val fourth: binp.Event = in.events.data[6];
+    if (!(sel fourth.release && fourth.release.code == 'V')) { ret 12; }
+
+    # a new frame empties the events and wheel and keeps what is held
+    blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_LEFT_SHIFT, action: KeyAction.release{}, mods: 0}});
+    blit_input_begin(?bi, 2.0);
+    if (bi.input.events.len != 0 || bi.input.wheel != 0.0)       { ret 13; }
+    if (bi.input.down != binp.BUTTON_LEFT || bi.input.mods != 0) { ret 14; }
+    blit_input_event(?bi, Event.pointer{PointerEvent{inside: false}});
+    if (bi.input.present != 0) { ret 15; }
+
+    val freed: err[allo.Error] = blit_input_delete(?bi);
+    if (sel freed.err) { ret 16; }
+    ret 0;
+}
+
+test blit_input_event__composes_utf8 {
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret 1; }
+    var ctx: Context;
+    ctx.input = inp.input_new();
+    var bi: BlitInput = blit_input(?a, ?ctx);
+
+    # a, an invalid surrogate, a kana and an emoji, the caret before the emoji
+    var cps: [4]u32 = [4]u32{'a', 0xD800, 0x304B, 0x1F600};
+    blit_input_begin(?bi, 0.0);
+    blit_input_event(?bi, Event.compose{ComposeEvent{count: 4, codepoints: ?cps[0], caret: 3, block: nil}});
+    blit_input_event(?bi, Event.compose{ComposeEvent{count: 0, codepoints: nil, caret: 0, block: nil}});
+    if (bi.input.events.len != 2) { ret 2; }
+    val first: binp.Event = bi.input.events.data[0];
+    if (!sel first.preedit) { ret 3; }
+    val t: str = first.preedit.text;
+    # 1 + 3 (U+FFFD) + 3 + 4 bytes, the caret after the kana
+    if (str_len(t) != 11 || first.preedit.caret != 7)                { ret 4; }
+    if (t[0] != 'a' || t[1] != 0xEF || t[4] != 0xE3 || t[7] != 0xF0) { ret 5; }
+    val ended: binp.Event = bi.input.events.data[1];
+    if (!sel ended.preedit)        { ret 6; }
+    if (ended.preedit.text != nil) { ret 6; }
+
+    # the next frame frees the last frame's text
+    blit_input_begin(?bi, 1.0);
+    if (bi.composed != nil) { ret 7; }
+    val freed: err[allo.Error] = blit_input_delete(?bi);
+    if (sel freed.err) { ret 8; }
+    ret 0;
+}
+
+test schedule__an_idle_interface_asks_for_no_frame {
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret 1; }
+    var ui: bctx.Context;
+    val ie: err[allo.Error] = bctx.init(?ui, ?a);
+    if (sel ie.err) { ret 1; }
+    var ctx: Context;
+    ctx.input = inp.input_new();
+    var bi:    BlitInput = blit_input(?a, ?ctx);
+    var buf:   [32]u8;
+    var name:  bfield.Field;
+    var on:    u8        = 0;
+    var level: f32       = 0.5;
+    var frame: usize     = 0;
+    bfield.init(?name, ?buf[0], 32, 0, nil);
+    # a first frame may measure and ask for another, so give it a few to settle
+    for (frame < 4) {
+        blit_input_begin(?bi, frame::f64 * 0.1);
+        bctx.begin(?ui, bi.input, 640.0, 480.0);
+        val b: bw.Block = bw.begin_panel(?ui, 8.0, 8.0, 200.0);
+        bw.text(?ui, "idle");
+        bw.checkbox(?ui, "on", ?on);
+        bw.slider_f(?ui, "level", ?level, 0.0, 1.0);
+        bw.text_field(?ui, "name", ?name, "a name");
+        bw.end_panel(?ui, b);
+        bctx.end(?ui);
+        ctx.wake = opt[Wake].none{};
+        schedule(?ui, ?ctx);
+        frame = frame + 1;
+    }
+    # nothing moved and nothing is pending, so the loop sleeps until input
+    if (!sel ctx.wake.some)       { ret 2; }
+    if (!sel ctx.wake.some.input) { ret 3; }
+    val freed: err[allo.Error] = blit_input_delete(?bi);
+    if (sel freed.err) { ret 4; }
+    val gone: err[allo.Error] = bctx.free(?ui);
+    if (sel gone.err) { ret 4; }
+    ret 0;
+}
+
+test wake_of__maps_blit_next_frame {
+    val idle: Wake = wake_of(opt[f64].none{});
+    if (!sel idle.input) { ret 1; }
+    val now: Wake = wake_of(opt[f64].some{0.0});
+    if (!sel now.now) { ret 2; }
+    val later: Wake = wake_of(opt[f64].some{1.25});
+    if (!sel later.at)              { ret 3; }
+    if (later.at != 1250 * 1000000) { ret 4; }
+    ret 0;
+}

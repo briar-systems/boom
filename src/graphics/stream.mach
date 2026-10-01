@@ -48,6 +48,11 @@
 # and the batcher closes its run when that changes. Blocks double in size so
 # that stays rare: a frame large enough to need several blocks is a frame whose
 # geometry is dominated by one or two big runs, not one split into many.
+#
+# AN INDEXED LIST KEEPS ITS INDICES HERE TOO. Every block is an index buffer as
+# well as a vertex buffer, so a draw list pushes its u32 indices with a stride
+# of four and draws from wherever they landed. Its vertices and its indices are
+# two pushes, so they may sit in different blocks, and each is bound on its own.
 
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_dnit;
@@ -193,7 +198,7 @@ fun block_create(s: *VertexStream, v: *Vk, frame: usize, need: usize) err[Error]
     # flush is invisible on hardware whose host memory happens to be coherent
     # anyway.
     val br: err[Error] = buffer_init(?s.blocks[frame][n].buf, v, size::u64,
-        vk.BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        vk.BUFFER_USAGE_VERTEX_BUFFER_BIT | vk.BUFFER_USAGE_INDEX_BUFFER_BIT,
         vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (sel br.err) { ret br; }
 

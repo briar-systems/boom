@@ -262,12 +262,15 @@ test blit_glyphs__truetype_at_blit_scale {
     if (!sel sourced.ok) { ret 3; }
     var g:   BlitGlyphs      = sourced.ok;
     val src: gly.GlyphSource = blit_glyphs_source(?g);
+    # it does not shape, so blit maps codepoints to glyph ids itself
+    if (src.shape != nil) { ret 23; }
 
     # the typeface is held while the source reads it
     val held: err[Error] = typeface_delete(?t);
     if (!sel held.err) { ret 4; }
 
-    # a line is the face's span at the size, and the scale multiplies it
+    # a line is the face's span at the size, and the scale (a style's size
+    # times the interface scale) multiplies it
     val one: gly.LineMetrics = src.line(src.self, 1.0);
     val two: gly.LineMetrics = src.line(src.self, 2.0);
     if (one.ascent + one.descent != 16.0)                { ret 5; }
