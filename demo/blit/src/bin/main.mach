@@ -3,9 +3,11 @@
 # A spinning cube is drawn into the window, and again into a small offscreen
 # target from another angle. Over it, one blit panel: TrueType text drawn by
 # boom's BlitGlyphs source, a few widgets, and two images blit only knows by
-# handle, a boom Texture and the offscreen target's colour. The panel's scale
-# control switches blit's interface scale between 100% and 200%, and the text
-# is rasterised again at the new size rather than stretched.
+# handle, a boom Texture and the offscreen target's colour. A row of blit's
+# feathered shapes shows its antialiasing, and a consumer span hands a rect of
+# the panel back to boom, which draws a sprite there in blit's paint order. The
+# panel's scale control switches blit's interface scale between 100% and 200%,
+# and the text is rasterised again at the new size rather than stretched.
 #
 # Input reaches blit through gfx.BlitInput, which also serves what blit asks
 # back: the clipboard, the pointer shape and when to draw again. While nothing
@@ -21,9 +23,10 @@
 #                    them back and check what reached the pixels, then exit
 #
 # THE CHECK. Text is drawn white on black into an offscreen target at each
-# scale, next to a blit image of a solid red boom texture and a quad clipped
-# away entirely. At 200% the text must be twice as tall and carry about four
-# times the ink. Its anti-aliased edge pixels must grow about twice, as an
+# scale, next to a blit image of a solid red boom texture, a consumer span boom
+# fills with a solid green sprite, a quad clipped away entirely and a quad
+# whose middle alone survives its scissor. At 200% the text must be twice as
+# tall and carry about four times the ink. Its anti-aliased edge pixels must grow about twice, as an
 # outline rasterised at twice the size does: the same glyphs stretched from
 # 100% would grow them four times over, since every edge texel becomes a two
 # by two block.
@@ -83,6 +86,9 @@ val CHECK_BYTES: usize = 196608;
 val CHECK_SPLIT: i32 = 400;
 val CHECK_TEXT:  str = "Hamburgefonstiv";
 
+# the consumer span the panel and the check place, which boom fills with a sprite
+val SPAN_SPRITE: u64 = 1;
+
 # what the check read back at one scale
 # ---
 # ink:     pixels brighter than half
@@ -90,12 +96,16 @@ val CHECK_TEXT:  str = "Hamburgefonstiv";
 # top:     topmost inked row
 # bottom:  bottom inked row
 # red:     whether the image's centre came out red
+# green:   whether the consumer span's centre came out green
+# cut:     whether the scissored quad drew inside its clip and nowhere else
 rec Shot {
     ink:     usize;
     partial: usize;
     top:     i32;
     bottom:  i32;
     red:     bool;
+    green:   bool;
+    cut:     bool;
 }
 
 rec Game {
@@ -109,6 +119,7 @@ rec Game {
     mesh:      gfx.Mesh;
     checker:   gfx.Texture;
     red:       gfx.Texture;
+    green:     gfx.Texture;
     material:  gfx.Material;
     camera:    gfx.Camera;
     side:      gfx.Camera;
@@ -253,6 +264,7 @@ fun on_init(ctx: *Context) {
         ret;
     }
     g.blit = br.ok;
+    gfx.blit_renderer_on_span(?g.blit, on_span, g::ptr);
 
     var verts:   [192]f32;
     var indices: [36]u32;
@@ -279,6 +291,13 @@ fun on_init(ctx: *Context) {
         ret;
     }
     g.red = rd.ok;
+    val gr: res[gfx.Texture, gfx.Error] = solid_or_checker(g, d, [4]u8{0, 255, 0, 255},
+        [4]u8{0, 255, 0, 255});
+    if (sel gr.err) {
+        abort(ctx, "texture error", gr.err);
+        ret;
+    }
+    g.green = gr.ok;
 
     g.material = gfx.material();
     val added: err[gfx.MaterialError] = gfx.material_add_texture(?g.material, "u_texture0", ?g.checker);
@@ -329,6 +348,34 @@ fun apply_scale(g: *Game) {
     or                { bctx.set_scale(?g.ui, 1.0); }
 }
 
+# a row of blit's feathered shapes, each edge antialiased
+fun shapes(ui: *bctx.Context) {
+    val s:      f32         = bctx.px(ui, 1.0);
+    val x:      f32         = ui.cx;
+    val y:      f32         = ui.cy;
+    val h:      f32         = 28.0 * s;
+    val accent: bdraw.Color = ui.theme.accent;
+    val text:   bdraw.Color = ui.theme.text;
+    val warm:   bdraw.Color = bdraw.hex(0xE8A040, 1.0);
+    bctx.rounded_rect_gradient(ui, x, y, x + 48.0 * s, y + h, bdraw.radii(8.0 * s),
+        bdraw.gradient(x, y, accent, x + 48.0 * s, y + h, warm));
+    bctx.circle(ui, x + 70.0 * s, y + h * 0.5, 13.0 * s, warm);
+    bctx.stroke_circle(ui, x + 104.0 * s, y + h * 0.5, 12.0 * s, 2.0 * s, text);
+    bctx.arc(ui, x + 138.0 * s, y + h * 0.5, 12.0 * s, 0.0, 4.4, 3.0 * s, accent);
+    bctx.line(ui, x + 160.0 * s, y + h - 2.0 * s, x + 200.0 * s, y + 2.0 * s, 1.5 * s, text);
+    bw.space(ui, h + bw.row_gap(ui));
+}
+
+# boom's half of a consumer span: a sprite filling the span's rect
+fun on_span(user: ptr, p: *gfx.Pass, span: gfx.BlitSpan) {
+    val g: *Game = user::*Game;
+    if (span.id != SPAN_SPRITE) { ret; }
+    var tex: *gfx.Texture = ?g.checker;
+    if (g.check) { tex = ?g.green; }
+    gfx.pass_draw_sprite(p, opt[*gfx.Texture].some{tex},
+        gfx.rect(span.x0, span.y0, span.x1 - span.x0, span.y1 - span.y0), gm.vec4(1.0, 1.0, 1.0, 1.0));
+}
+
 # the interactive panel
 fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     apply_scale(g);
@@ -337,6 +384,7 @@ fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     val b:  bw.Block      = bw.begin_panel(ui, 16.0, 16.0, bctx.px(ui, 280.0));
     bw.text(ui, "blit over boom, TrueType text");
     bw.note(ui, "DejaVu Sans through gfx.BlitGlyphs");
+    shapes(ui);
     var labels: [2]str = [2]str{"100%", "200%"};
     bw.segmented(ui, ?labels[0], 2, ?g.scale);
     bw.checkbox(ui, "draw the cube", ?g.show_cube);
@@ -345,6 +393,11 @@ fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     bw.text(ui, "a boom Texture:");
     bw.image(ui, bdraw.whole(gfx.blit_texture(?g.checker), bdraw.FILTER_NEAREST),
         bctx.px(ui, 64.0), bctx.px(ui, 64.0));
+    bw.text(ui, "a consumer span boom draws:");
+    val sw: f32 = bctx.px(ui, 96.0);
+    val sh: f32 = bctx.px(ui, 24.0);
+    bctx.custom(ui, ui.cx, ui.cy, ui.cx + sw, ui.cy + sh, SPAN_SPRITE, 0);
+    bw.space(ui, sh + bw.row_gap(ui));
     if (g.show_view != 0) {
         bw.text(ui, "a RenderTarget:");
         val view: u64 = gfx.blit_texture(gfx.render_target_texture(?g.view));
@@ -369,8 +422,13 @@ fun build_check(g: *Game) {
     bctx.text_at(ui, CHECK_TEXT, 8.0, 8.0, white);
     bctx.image_at(ui, bdraw.whole(gfx.blit_texture(?g.red), bdraw.FILTER_NEAREST),
         440.0, 24.0, 480.0, 64.0, white);
+    bctx.custom(ui, 484.0, 24.0, 508.0, 64.0, SPAN_SPRITE, 0);
     bctx.push_clip(ui, 0.0, 0.0, 4.0, 4.0);
     bctx.quad(ui, 100.0, 60.0, 300.0, 90.0, white);
+    bctx.pop_clip(ui);
+    # left whole on the CPU, so only the scissor keeps its ends dark
+    bctx.push_clip(ui, 412.0, 70.0, 428.0, 92.0);
+    bctx.quad(ui, 404.0, 72.0, 436.0, 90.0, white);
     bctx.pop_clip(ui);
     bctx.end(ui);
 }
@@ -396,6 +454,13 @@ fun measure(shot: *u8) Shot {
     }
     val c: usize = (44::usize * CHECK_W::usize + 460) * 4;
     s.red = shot[c] > 200 && shot[c + 1] < 60 && shot[c + 2] < 60;
+    val n: usize = (44::usize * CHECK_W::usize + 496) * 4;
+    s.green = shot[n] < 60 && shot[n + 1] > 200 && shot[n + 2] < 60;
+    val row:   usize = 80::usize * CHECK_W::usize;
+    val left:  u8    = shot[(row + 406) * 4];
+    val mid:   u8    = shot[(row + 420) * 4];
+    val right: u8    = shot[(row + 432) * 4];
+    s.cut = left < 24 && mid > 232 && right < 24;
     ret s;
 }
 
@@ -406,6 +471,8 @@ fun judge(g: *Game) {
     if (two.ink == 0)                 { fail(g, "text at 200% drew no ink"); }
     if (!one.red)                     { fail(g, "the image of a boom texture did not come out red at 100%"); }
     if (!two.red)                     { fail(g, "the image of a boom texture did not come out red at 200%"); }
+    if (!one.green || !two.green)     { fail(g, "the consumer span did not call back into boom to draw green"); }
+    if (!one.cut || !two.cut)         { fail(g, "the scissored quad was not cut to its clip"); }
     if (one.ink == 0 || two.ink == 0) { ret; }
     val h1: i32 = one.bottom - one.top + 1;
     val h2: i32 = two.bottom - two.top + 1;
@@ -418,6 +485,7 @@ fun judge(g: *Game) {
     print.printlnf("PASS: 100% text: {} px of ink, {} rows, {} edge px", one.ink, h1, one.partial);
     print.printlnf("PASS: 200% text: {} px of ink, {} rows, {} edge px", two.ink, h2, two.partial);
     print.println("PASS: a blit image of a boom texture drew its texels");
+    print.println("PASS: a consumer span called back into boom, and a run was cut to its scissor");
     print.printlnf("PASS: {} atlas page(s) mirrored, {} draws dropped",
         gfx.blit_renderer_pages(?g.blit), gfx.renderer_dropped(?g.renderer));
 }
@@ -526,6 +594,7 @@ fun on_dnit(ctx: *Context) {
     allo.deallocate[u8](?g.a, g.shot, CHECK_BYTES);
     gfx.render_target_delete(d, ?g.target);
     gfx.render_target_delete(d, ?g.view);
+    gfx.texture_delete(d, ?g.green);
     gfx.texture_delete(d, ?g.red);
     gfx.texture_delete(d, ?g.checker);
     gfx.mesh_delete(d, ?g.mesh);

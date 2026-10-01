@@ -1,15 +1,21 @@
 # A blit glyph source over a boom Typeface: blit's text, drawn in TrueType.
 #
 # blit (briar-systems/blit) owns utf-8 decoding, layout, its glyph cache and
-# its atlas, and asks a blit.glyph.GlyphSource four questions about a face at
-# an interface scale: how tall a line is, what a codepoint measures, how a pair
-# kerns, and what a codepoint's coverage looks like. This answers them from a
-# Typeface through mach-font, so blit stays free of any font dependency and a
-# boom game's blit widgets draw the same TrueType faces its own text does.
+# its atlas, and asks a blit.glyph.GlyphSource about a face at a scale: how tall
+# a line is, what a glyph measures, how a pair kerns, and what a glyph's
+# coverage looks like. This answers them from a Typeface through mach-font, so
+# blit stays free of any font dependency and a boom game's blit widgets draw
+# the same TrueType faces its own text does.
+#
+# IT DOES NOT SHAPE. Its shape is nil, so blit maps codepoints to glyph ids one
+# to one and kerns each pair through the kern table: every glyph id this
+# source is asked about is a codepoint.
 #
 # EVERY ANSWER IS AT pixels * scale. The face is sized once (a line height or
-# an em, per FontSizeMode) and blit's scale multiplies it, so an interface at
-# 200% is rasterised at twice the size rather than stretched from 100%.
+# an em, per FontSizeMode) and blit's scale multiplies it. That scale is a text
+# style's size times the interface scale, so one source serves a body style at
+# 1.0 and a heading at 2.0, and an interface at 200% is rasterised at twice the
+# size rather than stretched from 100%.
 #
 # THE BITMAP IS THE GLYPH'S OWN BOX. A glyph's rect is its outline's bounding
 # box at the scale, rounded out to whole texels, placed against the pen on the
@@ -59,7 +65,7 @@ pub val GLYPH_SIDE_MAX: u32 = 4096;
 # ---
 # a:         allocator for the raster scratch
 # typeface:  the borrowed typeface, which must outlive this source
-# scale:     design units to pixels at interface scale 1
+# scale:     design units to pixels at scale 1
 # raster:    smooth coverage, or binary coverage at a threshold
 # edges:     flattened-edge scratch, grown the first time a larger glyph needs it
 # edges_cap: edges the scratch holds
@@ -93,7 +99,7 @@ rec Placement {
 # ---
 # a:         allocator for the raster scratch
 # t:         the typeface, which must outlive the source and stay where it is
-# pixels:    the face's size at interface scale 1, a line height or an em per size_mode
+# pixels:    the face's size at scale 1 (a style of size 1.0 at interface scale 1), a line height or an em per size_mode
 # size_mode: what pixels measures
 # raster:    smooth coverage, or binary coverage at a threshold
 # ret:       the source, or a size or policy error
@@ -159,6 +165,7 @@ pub fun blit_glyphs_source(g: *BlitGlyphs) gly.GlyphSource {
         glyph:  glyphs_glyph,
         kern:   glyphs_kern,
         raster: glyphs_raster,
+        shape:  nil,
     };
 }
 

@@ -38,7 +38,9 @@
 # particle system or a debug overlay: those produce thousands of triangles that
 # are already in the right place, each with its own colour, rebuilt every frame.
 # Those go in one draw, through a per-frame vertex arena, in the layout
-# vertex_format_ui describes. blit emits exactly that layout.
+# vertex_format_ui describes. An indexed list whose colours are premultiplied,
+# as blit emits, goes through pass_list and pass_draw_list instead, a span of
+# its indices at a time, and pass_set_clip cuts any draw to a rect.
 #
 # EVERY SURFACE STATE TAKES A UNIFORM SLOT. A Vulkan draw reads a buffer range
 # that must already hold its values when the command buffer executes, so an
@@ -316,6 +318,10 @@ fwd boom.graphics.renderer.pass_draw_sprite;
 fwd boom.graphics.renderer.pass_draw_sprite_uv;
 fwd boom.graphics.renderer.pass_draw_triangles;
 fwd boom.graphics.renderer.pass_draw_triangles_filtered;
+fwd boom.graphics.renderer.TexelAlpha;
+fwd boom.graphics.renderer.List2D;
+fwd boom.graphics.renderer.pass_list;
+fwd boom.graphics.renderer.pass_draw_list;
 
 # A tile field. The grid's structure is what makes it cheap: the visible
 # rectangle becomes a range of cells, so a world the camera cannot see costs
@@ -351,6 +357,11 @@ fwd boom.graphics.shader.MAX_SHADER_PIPELINES;
 fwd boom.graphics.renderer.pass_set_user;
 fwd boom.graphics.renderer.pass_clear_user;
 fwd boom.graphics.renderer.pass_set_region;
+fwd boom.graphics.renderer.pass_set_clip;
+fwd boom.graphics.renderer.pass_clip;
+fwd boom.graphics.renderer.PassState;
+fwd boom.graphics.renderer.pass_state;
+fwd boom.graphics.renderer.pass_restore;
 fwd boom.graphics.renderer.pass_set_shader;
 fwd boom.graphics.renderer.pass_set_material;
 fwd boom.graphics.renderer.pass_draw_shaded;
@@ -487,10 +498,12 @@ fwd boom.graphics.blitui.blit_glyphs_source;
 fwd boom.graphics.blitui.blit_glyphs_delete;
 fwd boom.graphics.blitui.BLIT_PAGES;
 fwd boom.graphics.blitui.BlitRenderer;
+fwd boom.graphics.blitui.BlitSpan;
 fwd boom.graphics.blitui.blit_texture;
 fwd boom.graphics.blitui.blit_renderer;
 fwd boom.graphics.blitui.blit_renderer_delete;
 fwd boom.graphics.blitui.blit_renderer_pages;
+fwd boom.graphics.blitui.blit_renderer_on_span;
 fwd boom.graphics.blitui.blit_upload;
 fwd boom.graphics.blitui.blit_draw;
 fwd boom.graphics.blitui.BLIT_WHEEL_STEP;
