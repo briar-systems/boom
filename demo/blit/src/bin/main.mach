@@ -34,6 +34,7 @@
 use bctx:  blit.context;
 use bdraw: blit.draw;
 use binp:  blit.input;
+use blay:  blit.layout;
 use bw:    blit.widget;
 use boom.app.App;
 use boom.context.Config;
@@ -351,9 +352,10 @@ fun apply_scale(g: *Game) {
 # a row of blit's feathered shapes, each edge antialiased
 fun shapes(ui: *bctx.Context) {
     val s:      f32         = bctx.px(ui, 1.0);
-    val x:      f32         = ui.cx;
-    val y:      f32         = ui.cy;
     val h:      f32         = 28.0 * s;
+    val at:     bctx.Area   = bw.place(ui, blay.fixed(200.0 * s), blay.fixed(h), 200.0 * s, h);
+    val x:      f32         = at.x0;
+    val y:      f32         = at.y0;
     val accent: bdraw.Color = ui.theme.accent;
     val text:   bdraw.Color = ui.theme.text;
     val warm:   bdraw.Color = bdraw.hex(0xE8A040, 1.0);
@@ -363,7 +365,6 @@ fun shapes(ui: *bctx.Context) {
     bctx.stroke_circle(ui, x + 104.0 * s, y + h * 0.5, 12.0 * s, 2.0 * s, text);
     bctx.arc(ui, x + 138.0 * s, y + h * 0.5, 12.0 * s, 0.0, 4.4, 3.0 * s, accent);
     bctx.line(ui, x + 160.0 * s, y + h - 2.0 * s, x + 200.0 * s, y + 2.0 * s, 1.5 * s, text);
-    bw.space(ui, h + bw.row_gap(ui));
 }
 
 # boom's half of a consumer span: a sprite filling the span's rect
@@ -394,10 +395,10 @@ fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     bw.image(ui, bdraw.whole(gfx.blit_texture(?g.checker), bdraw.FILTER_NEAREST),
         bctx.px(ui, 64.0), bctx.px(ui, 64.0));
     bw.text(ui, "a consumer span boom draws:");
-    val sw: f32 = bctx.px(ui, 96.0);
-    val sh: f32 = bctx.px(ui, 24.0);
-    bctx.custom(ui, ui.cx, ui.cy, ui.cx + sw, ui.cy + sh, SPAN_SPRITE, 0);
-    bw.space(ui, sh + bw.row_gap(ui));
+    val sw: f32       = bctx.px(ui, 96.0);
+    val sh: f32       = bctx.px(ui, 24.0);
+    val at: bctx.Area = bw.place(ui, blay.fixed(sw), blay.fixed(sh), sw, sh);
+    bctx.custom(ui, at.x0, at.y0, at.x1, at.y1, SPAN_SPRITE, 0);
     if (g.show_view != 0) {
         bw.text(ui, "a RenderTarget:");
         val view: u64 = gfx.blit_texture(gfx.render_target_texture(?g.view));
