@@ -7,6 +7,11 @@
 # control switches blit's interface scale between 100% and 200%, and the text
 # is rasterised again at the new size rather than stretched.
 #
+# Input reaches blit through gfx.BlitInput, which also serves what blit asks
+# back: the clipboard, the pointer shape and when to draw again. While nothing
+# moves (the spin at zero, or neither the cube nor the side view shown) the
+# loop sleeps until input instead of redrawing.
+#
 # The font is the DejaVu subset boom's own tests use, embedded from the copy of
 # boom this root resolves under dep/, so the demo runs from anywhere.
 #
@@ -31,6 +36,7 @@ use boom.app.App;
 use boom.context.Config;
 use boom.context.Context;
 use boom.context.ContextError;
+use boom.context.Wake;
 use boom.context.context_error_message;
 use boom.context.context_fail;
 use boom.context.context_init;
@@ -38,12 +44,12 @@ use boom.context.context_set_user;
 use boom.context.context_shutdown;
 use boom.context.context_stop;
 use boom.context.context_user;
+use boom.context.context_wake;
 use boom.engine.EngineError;
 use boom.engine.engine_error_message;
 use boom.engine.run;
 use gfx: boom.graphics;
-use boom.input;
-use gm: boom.math;
+use gm:  boom.math;
 use boom.window.WindowMode;
 use allo: std.allocator;
 use std.allocator.page;
@@ -98,6 +104,7 @@ rec Game {
     typeface:  gfx.Typeface;
     glyphs:    gfx.BlitGlyphs;
     ui:        bctx.Context;
+    input:     gfx.BlitInput;
     blit:      gfx.BlitRenderer;
     mesh:      gfx.Mesh;
     checker:   gfx.Texture;
@@ -239,6 +246,7 @@ fun on_init(ctx: *Context) {
         ret;
     }
     bctx.set_glyph_source(?g.ui, gfx.blit_glyphs_source(?g.glyphs));
+    g.input = gfx.blit_input(?g.a, ctx);
     val br: res[gfx.BlitRenderer, gfx.Error] = gfx.blit_renderer(d, ?g.ui);
     if (sel br.err) {
         abort(ctx, "blit renderer error", br.err);
@@ -316,19 +324,6 @@ fun on_tick(ctx: *Context) {
     g.transform.rotation = gm.quat_from_axis_angle(gm.vec3(0.3, 1.0, 0.15), g.spin);
 }
 
-# this frame's blit input, from boom's
-fun ui_input(ctx: *Context) binp.Input {
-    var in: binp.Input;
-    in.mx         = ctx.input.mouse_x::f32;
-    in.my         = ctx.input.mouse_y::f32;
-    in.down       = 0;
-    in.wheel      = ctx.input.scroll_y::f32 * 40.0;
-    in.events_len = 0;
-    in.paste      = nil;
-    if (input.button_down(?ctx.input, input.BUTTON_LEFT)) { in.down = 1; }
-    ret in;
-}
-
 fun apply_scale(g: *Game) {
     if (g.scale == 1) { bctx.set_scale(?g.ui, 2.0); }
     or                { bctx.set_scale(?g.ui, 1.0); }
@@ -337,7 +332,7 @@ fun apply_scale(g: *Game) {
 # the interactive panel
 fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     apply_scale(g);
-    bctx.begin(?g.ui, ui_input(ctx), w, h);
+    bctx.begin(?g.ui, gfx.blit_input_frame(?g.input, ctx), w, h);
     val ui: *bctx.Context = ?g.ui;
     val b:  bw.Block      = bw.begin_panel(ui, 16.0, 16.0, bctx.px(ui, 280.0));
     bw.text(ui, "blit over boom, TrueType text");
@@ -358,6 +353,10 @@ fun build_panel(ctx: *Context, g: *Game, w: f32, h: f32) {
     }
     bw.end_panel(ui, b);
     bctx.end(ui);
+    val served: err[allo.Error] = gfx.blit_input_serve(?g.input, ui, ctx);
+    if (sel served.err) { print.eprintln("could not copy the clipboard for a paste"); }
+    # a moving picture needs every frame, and blit's request covers the rest
+    if (g.speed > 0.0 && (g.show_cube != 0 || g.show_view != 0)) { context_wake(ctx, Wake.now{}); }
 }
 
 # the check's frame: text, an image and a quad clipped away entirely
@@ -533,6 +532,8 @@ fun on_dnit(ctx: *Context) {
     # the renderer before the context it draws, the context before its glyph
     # source, the source before its typeface
     gfx.blit_renderer_delete(?g.blit);
+    val unbound: err[allo.Error] = gfx.blit_input_delete(?g.input);
+    if (sel unbound.err) { print.eprintln("the blit input could not be freed"); }
     val freed: err[allo.Error] = bctx.free(?g.ui);
     if (sel freed.err) { print.eprintln("the blit context could not be freed"); }
     val gone: err[gfx.Error] = gfx.blit_glyphs_delete(?g.glyphs);
