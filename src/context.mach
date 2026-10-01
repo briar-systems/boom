@@ -32,6 +32,7 @@ use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.string.str;
 
@@ -131,7 +132,8 @@ pub tag Wake: u8 {
 # status:  process status returned by the run loop
 # user:    opaque game-state pointer, nil until set; hooks reach it
 #          through the Context they receive
-# wake:    when the next frame starts, as this frame asked (see context_wake)
+# wake:    when the next frame starts, as this frame asked, none while
+#          nothing has (see context_wake)
 pub rec Context {
     window:  Window;
     clock:   Clock;
@@ -143,7 +145,7 @@ pub rec Context {
     running: bool;
     status:  i64;
     user:    ptr;
-    wake:    Wake;
+    wake:    opt[Wake];
     # Zero means the clock is the wall clock. Non-zero pins every frame's delta
     # to this, which is what makes a run reproducible. See Config.frame_dt.
     frame_dt: Duration;
@@ -163,7 +165,7 @@ pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
     ctx.running  = false;
     ctx.status   = 1;
     ctx.user     = nil;
-    ctx.wake     = Wake.now{};
+    ctx.wake     = opt[Wake].none{};
     ctx.frame_dt = cfg.frame_dt;
     if (!config_is_valid(cfg)) { ret err[ContextError].err{ContextError.config{}}; }
 
@@ -207,7 +209,10 @@ pub fun context_stop(ctx: *Context) {
 # ctx: context to schedule
 # w:   when the next frame should start
 pub fun context_wake(ctx: *Context, w: Wake) {
-    ctx.wake = wake_sooner(ctx.wake, w);
+    val asked: opt[Wake] = ctx.wake;
+    var next:  Wake      = w;
+    if (sel asked.some) { next = wake_sooner(asked.some, w); }
+    ctx.wake = opt[Wake].some{next};
 }
 
 # whichever of two requests starts the next frame first
@@ -341,16 +346,18 @@ test config_is_valid__rejects_invalid_timing {
 
 test context_wake__soonest_request_wins {
     var ctx: Context;
-    ctx.wake = Wake.input{};
+    # a frame starts with nothing asked, so the first request stands alone
+    ctx.wake = opt[Wake].none{};
     context_wake(?ctx, Wake.input{});
-    if (!sel ctx.wake.input) { ret 1; }
+    if (!sel ctx.wake.some)       { ret 1; }
+    if (!sel ctx.wake.some.input) { ret 1; }
     context_wake(?ctx, Wake.at{5});
     context_wake(?ctx, Wake.at{3});
     context_wake(?ctx, Wake.input{});
-    if (!sel ctx.wake.at) { ret 2; }
-    if (ctx.wake.at != 3) { ret 3; }
+    if (!sel ctx.wake.some.at) { ret 2; }
+    if (ctx.wake.some.at != 3) { ret 3; }
     context_wake(?ctx, Wake.now{});
     context_wake(?ctx, Wake.at{1});
-    if (!sel ctx.wake.now) { ret 4; }
+    if (!sel ctx.wake.some.now) { ret 4; }
     ret 0;
 }
