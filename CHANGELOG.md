@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-01
+
+### Added
+- A blit input adapter in blitui (#255): `BlitInput` fills blit's frame input
+  from a boom window, with the clock, pointer and presence, every button,
+  both wheel axes in pixels, typed text, key presses and releases, held
+  modifiers and button events with their positions (#259). It serves blit's
+  clipboard requests and cursor shape, and hands blit's `next_frame` to the
+  engine loop.
+- IME composition in the adapter (#257): a `compose` event carries the IME's
+  in-progress text and caret into blit's text fields, and blit's IME rect
+  places the candidate window, converted from framebuffer pixels to window
+  coordinates. Text input is on only while a blit field takes text.
+- An opt-in wait in the engine loop: `context_wake` lets a frame ask for the
+  next one now, at a time, or on input, the soonest request winning.
+  `window_wait` and `window_wait_timeout` sleep until an event.
+- Mouse buttons X1 and X2, the Home, End, Page Up, Page Down and Insert keys,
+  super as a modifier, and nine standard pointer shapes
+  (`window_set_cursor_shape`).
+- Indexed, scissored drawing for blit's draw list (#256): `pass_list`,
+  `pass_draw_list`, `pass_set_clip`, `pass_state`/`pass_restore`, a
+  premultiplied blend mode and program, and blit consumer spans through
+  `blit_renderer_on_span`.
+
+### Fixed
+- An idle loop sleeps (#263). The engine no longer resets the wake request to
+  now each frame, and window waits keep sleeping through Wayland events that
+  reach no callback, such as the buffer release after each present.
+
+### Changed
+- Breaking: blitui follows blit 0.10's draw contract (indexed, scissored,
+  premultiplied runs) and glyph-source contract (an optional `shape`, `scale`
+  as style size times interface scale). Depends on blit 0.10.1.
+- Depends on mach-glfw 0.11 for IME support.
+- demo/blit hosts blit's demo gallery on boom's renderer and draws nothing
+  while idle.
+
 ## [0.39.0] - 2026-09-30
 
 ### Added
