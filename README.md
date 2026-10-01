@@ -502,8 +502,9 @@ Leave blit's `set_srgb` off. The UI program decodes a draw list's authored
 colours itself, dividing out the premultiplied alpha first. Teardown runs from the renderer outward: `blit_renderer_delete`, then
 `blit_input_delete` and blit's `context.free`, `blit_glyphs_delete`, and the typeface. `renderer_dnit`
 refuses while a `BlitRenderer` lives, and the typeface refuses while a
-`BlitGlyphs` reads it. `demo/blit` draws a panel over a 3D scene with both
-kinds of image, blit's feathered shapes and a consumer span. Its `--check`
+`BlitGlyphs` reads it. `demo/blit` hosts blit's own gallery, every section of
+it, with a window of boom's over it holding both kinds of image and a consumer
+span. Idle, it draws no frames. Its `--check`
 mode reads back text at 100% and at 200%, a span boom filled and a quad cut to
 its scissor.
 
