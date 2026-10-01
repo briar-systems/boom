@@ -32,6 +32,7 @@ use boom.graphics.error.Error;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_eq;
 use boom.graphics.pass.pass_compatibility_one;
+use boom.graphics.pipeline.BlendMode;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.PipelineDesc;
 use boom.graphics.pipeline.SetLayout;
@@ -70,6 +71,10 @@ pub val PROGRAM_SKINNED: Program = 1;
 # after batching is sprites, text and immediate-mode geometry alike. No model
 # matrix and no tint, because one draw covers a whole run.
 pub val PROGRAM_UI: Program = 2;
+# The UI shaders over an indexed draw list whose colours are premultiplied, as
+# blit emits: the same stages, blended ONE, ONE_MINUS_SRC_ALPHA. A pipeline
+# bakes its blend, so this is a program of its own rather than a flag.
+pub val PROGRAM_UI_PREMULTIPLIED: Program = 3;
 
 # The most distinct program-and-layout combinations one renderer keeps.
 #
@@ -144,6 +149,11 @@ fun program_desc(program: Program) PipelineDesc {
     # emitted back to front and its triangles are wound however the emitter
     # happened to, so culling it would drop half of them.
     if (program == PROGRAM_UI) { ret pipeline_desc_2d(); }
+    if (program == PROGRAM_UI_PREMULTIPLIED) {
+        var d: PipelineDesc = pipeline_desc_2d();
+        d.blend = BlendMode.premultiplied{};
+        ret d;
+    }
     ret pipeline_desc_3d();
 }
 
@@ -165,7 +175,7 @@ fun cache_add(c: *PipelineCache, v: *Vk, pass: vk.RenderPass,
         vert = ?SKINNED_VERT_SPV[0];
         vlen = $length_of(SKINNED_VERT_SPV);
     }
-    or (program == PROGRAM_UI) {
+    or (program == PROGRAM_UI || program == PROGRAM_UI_PREMULTIPLIED) {
         vert = ?UI_VERT_SPV[0];
         vlen = $length_of(UI_VERT_SPV);
         frag = ?UI_FRAG_SPV[0];
@@ -279,5 +289,14 @@ test cache_find__matches_every_key {
     c.entries[0].live = false;
     if (!misses(cache_find(?c, PROGRAM_MESH, ?compatibility, ?std_fmt,
         DepthConvention.forward{}))) { ret 7; }
+    ret 0;
+}
+
+test program_desc__premultiplied_ui_differs_only_in_blend {
+    val ui:  PipelineDesc = program_desc(PROGRAM_UI);
+    val pre: PipelineDesc = program_desc(PROGRAM_UI_PREMULTIPLIED);
+    if (!sel ui.blend.source_alpha)                                            { ret 1; }
+    if (!sel pre.blend.premultiplied)                                          { ret 2; }
+    if (pre.cull || pre.depth || pre.cull != ui.cull || pre.depth != ui.depth) { ret 3; }
     ret 0;
 }
