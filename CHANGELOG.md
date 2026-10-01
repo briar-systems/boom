@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0] - 2026-10-01
+
+### Changed
+- Breaking: boom depends on blit `^0.11` (#271), for the #92 epic's follow-ups in briar-systems/blit 0.11.0: a passthrough central dock node for an app's own view behind the docks, keyed toasts anchored to any rect, tab placement in a dock, docked body padding, label overflow and a main menu bar that takes its row from the free area. boom's API carries blit types, so a consumer moves its own blit pin to `^0.11` with boom.
+
+### Fixed
+- The demo manifests no longer set the deprecated `default = true` target key, so demo builds print no manifest warning (#273).
+
 ## [0.40.1] - 2026-10-01
 
 0.40.0 was tagged but never published: its macOS build failed to link. 0.40.1 is the first release with the 0.40.0 changes below.
