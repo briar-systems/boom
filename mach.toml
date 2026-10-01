@@ -1,7 +1,7 @@
 [project]
 id = "boom"
 version = "0.42.0"
-mach = "^6"
+mach = "^6.9"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -139,7 +139,7 @@ version = "^0.8"
 
 [dep.shader]
 git = "https://github.com/briar-systems/mach-shader"
-version = "^0.4"
+version = "^0.5"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
