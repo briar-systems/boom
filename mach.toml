@@ -143,4 +143,4 @@ version = "^0.4"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-version = "^0.10"
+version = "^0.11"
