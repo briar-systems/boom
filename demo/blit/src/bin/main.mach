@@ -365,9 +365,9 @@ fun on_span(user: ptr, p: *gfx.Pass, span: gfx.BlitSpan) {
 # boom's window, floating over the gallery
 fun boom_window(g: *Game) {
     val ui:  *bctx.Context = ?g.ui;
-    var bw0: bw.Window     = bw.window("boom", bctx.px(ui, 560.0), bctx.px(ui, 40.0), 0.0, 0.0);
-    bw0.flags = bw.WINDOW_AUTO_SIZE;
-    val wa: bw.WindowArea = bw.begin_window(ui, bw0);
+    var win: bw.Window     = bw.window("boom", ui.sw - bctx.px(ui, 280.0), bctx.px(ui, 40.0), 0.0, 0.0);
+    win.flags = bw.WINDOW_AUTO_SIZE;
+    val wa: bw.WindowArea = bw.begin_window(ui, win);
     if (wa.body != 0) {
         var buf: [32]u8;
         bw.text(ui, "frames drawn");
@@ -626,8 +626,8 @@ fun main(argc: i64, argv: **u8) i64 {
 
     var ctx: Context;
     val cfg: Config = Config{
-        width:     960,
-        height:    640,
+        width:     1280,
+        height:    800,
         title:     "boom: the blit gallery",
         fixed_dt:  SECOND / 60,
         max_frame: 250 * MILLISECOND,
