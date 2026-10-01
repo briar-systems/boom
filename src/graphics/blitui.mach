@@ -1,6 +1,8 @@
 # blit (briar-systems/blit) drawn by boom, with TrueType text
 #
-# Two pieces, each usable alone. BlitGlyphs is a blit glyph source over a boom
+# Three pieces, each usable alone. BlitInput fills blit's frame input from a
+# boom context's window and serves what blit asks of the host after the frame
+# (see blitui/input.mach). BlitGlyphs is a blit glyph source over a boom
 # Typeface, so blit's text is TrueType at whatever interface scale blit asks
 # for. BlitRenderer draws a blit context's frame in a boom Pass: blit's atlas
 # pages become boom textures, and a blit Image names a boom Texture by the
@@ -30,3 +32,12 @@ fwd boom.graphics.blitui.renderer.blit_renderer_delete;
 fwd boom.graphics.blitui.renderer.blit_renderer_pages;
 fwd boom.graphics.blitui.renderer.blit_upload;
 fwd boom.graphics.blitui.renderer.blit_draw;
+
+fwd boom.graphics.blitui.input.BLIT_WHEEL_STEP;
+fwd boom.graphics.blitui.input.BlitInput;
+fwd boom.graphics.blitui.input.blit_input;
+fwd boom.graphics.blitui.input.blit_input_delete;
+fwd boom.graphics.blitui.input.blit_input_begin;
+fwd boom.graphics.blitui.input.blit_input_event;
+fwd boom.graphics.blitui.input.blit_input_frame;
+fwd boom.graphics.blitui.input.blit_input_serve;

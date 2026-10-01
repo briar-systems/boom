@@ -58,4 +58,4 @@ ref = "tag/v9.0.0"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-ref = "tag/v0.9.0"
+ref = "commit/e8e2b282f3c88474098841e750195019bb1af554"

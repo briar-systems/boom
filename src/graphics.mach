@@ -477,7 +477,9 @@ fwd boom.graphics.text.text_draw;
 # blit's widgets over boom. BlitGlyphs is a blit glyph source over a Typeface,
 # so blit's text is TrueType at blit's interface scale; BlitRenderer draws a
 # blit context's frame in any Pass, and blit_texture is the handle a blit Image
-# carries for a boom Texture or a RenderTarget's colour. See boom.graphics.blitui.
+# carries for a boom Texture or a RenderTarget's colour. BlitInput is blit's
+# frame input from a context's window, and serves what blit asks of the host.
+# See boom.graphics.blitui.
 fwd boom.graphics.blitui.GLYPH_SIDE_MAX;
 fwd boom.graphics.blitui.BlitGlyphs;
 fwd boom.graphics.blitui.blit_glyphs;
@@ -491,6 +493,14 @@ fwd boom.graphics.blitui.blit_renderer_delete;
 fwd boom.graphics.blitui.blit_renderer_pages;
 fwd boom.graphics.blitui.blit_upload;
 fwd boom.graphics.blitui.blit_draw;
+fwd boom.graphics.blitui.BLIT_WHEEL_STEP;
+fwd boom.graphics.blitui.BlitInput;
+fwd boom.graphics.blitui.blit_input;
+fwd boom.graphics.blitui.blit_input_delete;
+fwd boom.graphics.blitui.blit_input_begin;
+fwd boom.graphics.blitui.blit_input_event;
+fwd boom.graphics.blitui.blit_input_frame;
+fwd boom.graphics.blitui.blit_input_serve;
 
 fwd boom.graphics.spirv.LIT_FRAG_SPV;
 fwd boom.graphics.spirv.MESH_VERT_SPV;
