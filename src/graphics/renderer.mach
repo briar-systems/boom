@@ -66,6 +66,7 @@ use boom.graphics.buffer.buffer_map;
 use boom.graphics.cache.PROGRAM_MESH;
 use boom.graphics.cache.PROGRAM_SKINNED;
 use boom.graphics.cache.PROGRAM_UI;
+use boom.graphics.cache.PROGRAM_UI_PREMULTIPLIED;
 use boom.graphics.cache.PipelineCache;
 use boom.graphics.cache.Program;
 use boom.graphics.cache.cache_dnit;
@@ -160,7 +161,7 @@ use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_one;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.STORAGE_SET;
-use boom.graphics.pipeline.pipeline_bind_region;
+use boom.graphics.pipeline.pipeline_bind_scissored;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_pipeline;
 use boom.graphics.skeleton.MAX_JOINTS;
@@ -240,9 +241,11 @@ use boom.math.mat.Mat4;
 use boom.math.mat.mat4_identity;
 use boom.math.mat.mat4_mul;
 use boom.math.mat.mat4_orthographic;
+use boom.math.mat.mat4_project_point;
 use boom.math.transform.Transform;
 use boom.math.transform.transform_identity;
 use boom.math.transform.transform_matrix;
+use boom.math.vec.Vec3;
 use boom.math.vec.Vec4;
 use boom.math.vec.vec3;
 use boom.math.vec.vec4;
@@ -1795,6 +1798,10 @@ pub rec Pass {
     shader2d: opt[*Shader];
     mat2d:    opt[*Material];
 
+    # What every draw is cut to inside the region, in the pass's own units, or
+    # none for the whole region. See pass_set_clip.
+    clip: opt[Rect];
+
     # What this pass can see, resolved once when it opens.
     #
     # Both are derived from the matrices above, so they are built here rather
@@ -2025,6 +2032,7 @@ fun pass_resolve(r: *Renderer, d: *PassDesc) Pass {
     batch_reset(?p.batch);
     p.shader2d = opt[*Shader].none{};
     p.mat2d    = opt[*Material].none{};
+    p.clip     = opt[Rect].none{};
     p.cull     = d.cull;
     p.depth    = d.depth;
     if (sel d.view.scene) {
@@ -2100,6 +2108,159 @@ pub fun pass_set_region(p: *Pass, x: i32, y: i32, width: i32, height: i32) err[E
     p.region_width  = width;
     p.region_height = height;
     ret err[Error].ok{};
+}
+
+# Cut every later draw in the pass to a rect.
+#
+# The rect is in the pass's own units, where its draws are placed: pixels for an
+# overlay, world units for a world pass. It is carried through the projection
+# onto the region the pass draws into, so it scales with a region smaller than
+# the pass, and each edge is rounded to the nearest pixel. It narrows the
+# region and never reaches past it. The open 2D batch is drawn first, under the
+# clip it was appended with.
+# ---
+# p:    the open pass
+# clip: the rect, or none to draw to the whole region again
+pub fun pass_set_clip(p: *Pass, clip: opt[Rect]) {
+    batch_flush(p);
+    p.clip = clip;
+}
+
+# the rect later draws are cut to, none when they reach the whole region
+pub fun pass_clip(p: *Pass) opt[Rect] {
+    ret p.clip;
+}
+
+# a scissor in framebuffer pixels
+# ---
+# x: left edge
+# y: top edge, y down
+# w: width
+# h: height
+rec Scissor {
+    x: i32;
+    y: i32;
+    w: u32;
+    h: u32;
+}
+
+# v clamped to [lo, hi] and rounded to the nearest whole pixel
+fun pixel_edge(v: f32, lo: i32, hi: i32) i32 {
+    var c: f32 = v;
+    if (c < lo::f32) { c = lo::f32; }
+    if (c > hi::f32) { c = hi::f32; }
+    # c is never negative, a region never starting left of zero, so truncation floors
+    ret (c + 0.5)::i32;
+}
+
+# The scissor a draw is cut to: the region, narrowed by the clip.
+#
+# Each corner of the clip goes through the projection to normalised device
+# coordinates and from there onto the viewport the region sets, the same path
+# a vertex takes. A pixel pass over the whole target is the identity, so
+# blit's screen pixels land on the same framebuffer pixels its vertices do.
+# ---
+# projection: the pass projection
+# rx:         region left
+# ry:         region top
+# rw:         region width
+# rh:         region height
+# clip:       the clip in the pass's units, or none
+fun clip_scissor(projection: *Mat4, rx: i32, ry: i32, rw: i32, rh: i32, clip: opt[Rect]) Scissor {
+    if (sel clip.none) { ret Scissor{x: rx, y: ry, w: rw::u32, h: rh::u32}; }
+    val c:  Rect = clip.some;
+    val a:  Vec3 = mat4_project_point(projection, vec3(c.x, c.y, 0.0));
+    val b:  Vec3 = mat4_project_point(projection, vec3(c.x + c.w, c.y + c.h, 0.0));
+    val ax: f32  = rx::f32 + (a[0] + 1.0) * 0.5 * rw::f32;
+    val bx: f32  = rx::f32 + (b[0] + 1.0) * 0.5 * rw::f32;
+    val ay: f32  = ry::f32 + (a[1] + 1.0) * 0.5 * rh::f32;
+    val by: f32  = ry::f32 + (b[1] + 1.0) * 0.5 * rh::f32;
+    var x0: i32  = pixel_edge(ax, rx, rx + rw);
+    var x1: i32  = pixel_edge(bx, rx, rx + rw);
+    var y0: i32  = pixel_edge(ay, ry, ry + rh);
+    var y1: i32  = pixel_edge(by, ry, ry + rh);
+    # a projection may flip either axis, so the corners can arrive swapped
+    if (x1 < x0) {
+        val t: i32 = x0;
+        x0 = x1;
+        x1 = t;
+    }
+    if (y1 < y0) {
+        val t: i32 = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    ret Scissor{x: x0, y: y0, w: (x1 - x0)::u32, h: (y1 - y0)::u32};
+}
+
+# bind a pipeline with the pass's region as the viewport and its clip as the scissor
+fun pass_bind_pipeline(p: *Pass, pipe: *Pipeline) {
+    val sc: Scissor = clip_scissor(?p.projection, p.region_x, p.region_y,
+        p.region_width, p.region_height, p.clip);
+    pipeline_bind_scissored(pipe, p.cmd, p.region_x, p.region_y,
+        p.region_width::u32, p.region_height::u32, sc.x, sc.y, sc.w, sc.h);
+}
+
+# What a pass draws with that a caller can change: its 2D shader and material,
+# its user block, its region and its clip.
+#
+# Code that hands an open pass to someone else's drawing, such as a UI calling
+# back into the game in the middle of its own draws, takes this before and
+# restores it after, so neither sees what the other set.
+# ---
+# shader2d: the 2D shader, see pass_set_shader
+# mat2d:    the 2D material, see pass_set_material
+# user:     the user block, see pass_set_user
+# user_len: its length
+# region_x: region left, see pass_set_region
+# region_y: region top
+# region_w: region width
+# region_h: region height
+# clip:     the clip, see pass_set_clip
+pub rec PassState {
+    shader2d: opt[*Shader];
+    mat2d:    opt[*Material];
+    user:     *u8;
+    user_len: usize;
+    region_x: i32;
+    region_y: i32;
+    region_w: i32;
+    region_h: i32;
+    clip:     opt[Rect];
+}
+
+# what the pass draws with now, for pass_restore
+pub fun pass_state(p: *Pass) PassState {
+    ret PassState{
+        shader2d: p.shader2d,
+        mat2d:    p.mat2d,
+        user:     p.user,
+        user_len: p.user_len,
+        region_x: p.region_x,
+        region_y: p.region_y,
+        region_w: p.region_width,
+        region_h: p.region_height,
+        clip:     p.clip,
+    };
+}
+
+# Put back what pass_state took.
+#
+# The open 2D batch is drawn first, with the state it was appended under.
+# ---
+# p: the open pass the state was taken from
+# s: the state
+pub fun pass_restore(p: *Pass, s: *PassState) {
+    batch_flush(p);
+    p.shader2d      = s.shader2d;
+    p.mat2d         = s.mat2d;
+    p.user          = s.user;
+    p.user_len      = s.user_len;
+    p.region_x      = s.region_x;
+    p.region_y      = s.region_y;
+    p.region_width  = s.region_w;
+    p.region_height = s.region_h;
+    p.clip          = s.clip;
 }
 
 # finish a pass
@@ -2198,17 +2359,49 @@ pub fun batch_flush(p: *Pass) {
     # cannot leave it open to be drawn a second time by the next flush.
     batch_reset(?p.batch);
 
-    val taken: opt[usize] = take_slot(p);
-    if (sel taken.none) { ret; }
-    val slot: usize = taken.some;
-
     # A draw list's colours are sRGB and the surface encodes on write, so the
     # fragment stage decodes them first or they are encoded twice. A surface
     # that does not encode displays what is written, so they pass through.
+    var decode: Vec4 = vec4(0.0, 0.0, 0.0, 0.0);
+    if (sel space.srgb && r.srgb)                                            { decode = vec4(1.0, 0.0, 0.0, 0.0); }
+    if (!bind_screen(p, PROGRAM_UI, p.shader2d, p.mat2d, tex, filt, decode)) { ret; }
+
+    var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
+    if (buf == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var off: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buf, ?off);
+    # firstVertex rather than a per-draw buffer offset, so every run sharing a
+    # block shares one binding.
+    vk.vkCmdDraw(p.cmd, count, 1, first, 0);
+    r.draws = r.draws + 1;
+}
+
+# Take a slot for a screen-space draw, fill it and bind it with its pipeline.
+#
+# What the 2D batch and an indexed draw list share: everything up to binding the
+# buffers and issuing the draw, which is the part that differs.
+# ---
+# p:       the open pass
+# program: the built-in program, when sh is none
+# sh:      a game's own shader, or none for the program
+# mat:     a game's material for the 2D path, or none
+# tex:     what the draw samples, or none for the white texel
+# filt:    how it is sampled, or none to leave it to the material
+# decode:  the fragment stage's decode flags (see ScreenUniforms)
+# ret:     whether the draw may be recorded; a refusal is already counted
+fun bind_screen(p: *Pass, program: Program, sh: opt[*Shader], mat: opt[*Material],
+    tex: opt[*Texture], filt: opt[TextureFilter], decode: Vec4) bool {
+    val r:     *Renderer  = p.renderer;
+    val taken: opt[usize] = take_slot(p);
+    if (sel taken.none) { ret false; }
+    val slot: usize = taken.some;
+
     var u: ScreenUniforms;
     u.projection = p.projection;
-    u.decode     = vec4(0.0, 0.0, 0.0, 0.0);
-    if (sel space.srgb && r.srgb) { u.decode = vec4(1.0, 0.0, 0.0, 0.0); }
+    u.decode     = decode;
     # COUNTED, NOT SILENT. A draw whose uniforms could not be uploaded must not
     # be recorded, and refusing to record it is correct; saying nothing about it
     # is what made a stage that did not run indistinguishable from a shading
@@ -2216,7 +2409,7 @@ pub fun batch_flush(p: *Pass) {
     # held and no validation layer fires.
     if (!descriptors_write_slot(?r.desc, r.frame_index, slot, (?u):~*u8, $size_of(ScreenUniforms))) {
         r.dropped = r.dropped + 1;
-        ret;
+        ret false;
     }
 
     # The game's own block, exactly as the mesh path writes it.
@@ -2234,7 +2427,7 @@ pub fun batch_flush(p: *Pass) {
         if (!descriptors_write_slot_at(?r.desc, r.frame_index, slot, USER_OFFSET,
             p.user, p.user_len)) {
             r.dropped = r.dropped + 1;
-            ret;
+            ret false;
         }
     }
 
@@ -2242,8 +2435,8 @@ pub fun batch_flush(p: *Pass) {
     # tells the descriptor layer binding 2 is not part of this draw.
     var views2d:    [4]vk.ImageView;
     var samplers2d: [4]vk.Sampler;
-    fill_views_batch(r, ?views2d[0], p.mat2d, tex);
-    fill_samplers_batch(r, ?samplers2d[0], p.mat2d, filt);
+    fill_views_batch(r, ?views2d[0], mat, tex);
+    fill_samplers_batch(r, ?samplers2d[0], mat, filt);
     # A set that was not written must not be bound: the shader would read
     # descriptors nothing filled. The answer used to be discarded here, which is
     # the same silence the uploads above had.
@@ -2253,32 +2446,20 @@ pub fun batch_flush(p: *Pass) {
         storage_buffer(?r.store, r.frame_index),
         storage_capacity(?r.store, r.frame_index)::u64)) {
         r.dropped = r.dropped + 1;
-        ret;
+        ret false;
     }
 
-    val pipe: res[*Pipeline, Error] = surface_pipeline(p, ?r.ui_format, PROGRAM_UI, p.shader2d);
+    val pipe: res[*Pipeline, Error] = surface_pipeline(p, ?r.ui_format, program, sh);
     if (sel pipe.err) {
         r.dropped = r.dropped + 1;
-        ret;
+        ret false;
     }
-    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
-        p.region_width::u32, p.region_height::u32);
+    pass_bind_pipeline(p, pipe.ok);
     if (!descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot)) {
         r.dropped = r.dropped + 1;
-        ret;
+        ret false;
     }
-
-    var buf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, block);
-    if (buf == nil) {
-        r.dropped = r.dropped + 1;
-        ret;
-    }
-    var off: u64 = 0;
-    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?buf, ?off);
-    # firstVertex rather than a per-draw buffer offset, so every run sharing a
-    # block shares one binding.
-    vk.vkCmdDraw(p.cmd, count, 1, first, 0);
-    r.draws = r.draws + 1;
+    ret true;
 }
 
 # Add 2D geometry to the open run, drawing it first if it cannot be extended.
@@ -2516,8 +2697,7 @@ fun bind_surface_pipeline(p: *Pass, format: *VertexFormat, program: Program,
     val r:    *Renderer             = p.renderer;
     val pipe: res[*Pipeline, Error] = surface_pipeline(p, format, program, sh);
     if (sel pipe.err) { ret false; }
-    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
-        p.region_width::u32, p.region_height::u32);
+    pass_bind_pipeline(p, pipe.ok);
     ret descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot);
 }
 
@@ -3182,6 +3362,140 @@ pub fun pass_draw_triangles_filtered(p: *Pass, vertices: ptr, vertex_count: i32,
     }
     batch_append(p, texture, ColorSpace.srgb{}, opt[TextureFilter].some{filter}, vertices:~*u8,
         vertex_count::usize);
+}
+
+# What a draw list's texture holds in its texels.
+# ---
+# straight:      colour and alpha apart, as boom loads and renders textures
+# premultiplied: colour already multiplied by alpha, as blit's atlas is
+pub tag TexelAlpha: u8 {
+    straight;
+    premultiplied;
+}
+
+# An indexed 2D draw list in this frame's arena, drawn a span of indices at a
+# time by pass_draw_list.
+#
+# The vertices and the indices are copied once, so a list cut into many runs
+# (a texture change, a scissor change) costs one copy, not one per run. It is
+# good until the frame ends, in any pass of it.
+# ---
+# vblock:  arena block the vertices landed in
+# vfirst:  first vertex within it
+# iblock:  arena block the indices landed in
+# ifirst:  first index within it
+# indices: how many indices the list holds
+pub rec List2D {
+    vblock:  usize;
+    vfirst:  u32;
+    iblock:  usize;
+    ifirst:  u32;
+    indices: usize;
+}
+
+# whether every index names one of n vertices
+fun indices_in_range(indices: *u32, count: usize, n: usize) bool {
+    var i: usize = 0;
+    for (i < count) {
+        if (indices[i]::usize >= n) { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+# Copy an indexed 2D draw list into the frame's arena.
+#
+# The vertices are in the shared 2D layout (vertex_format_ui) with their colours
+# premultiplied, and every index names one of them. A list with an index out of
+# range is refused rather than drawn, since such an index reads past the list
+# into whatever the arena holds next.
+# ---
+# p:            the open pass
+# vertices:     vertex data, vertex_count * 32 bytes
+# vertex_count: how many vertices
+# indices:      u32 indices, three per triangle
+# index_count:  how many indices
+# ret:          the list, or none when it is empty, malformed or the arena is full; a refusal is counted
+pub fun pass_list(p: *Pass, vertices: ptr, vertex_count: usize, indices: *u32,
+    index_count: usize) opt[List2D] {
+    val r: *Renderer = p.renderer;
+    if (vertex_count == 0 || index_count == 0) { ret opt[List2D].none{}; }
+    if (!indices_in_range(indices, index_count, vertex_count)) {
+        r.dropped = r.dropped + 1;
+        ret opt[List2D].none{};
+    }
+    val stride: usize           = r.ui_format.stride::usize;
+    val verts:  opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, vertices:~*u8,
+        vertex_count * stride, stride);
+    if (sel verts.none) {
+        r.dropped = r.dropped + 1;
+        ret opt[List2D].none{};
+    }
+    val idx: opt[StreamSpan] = stream_push(?r.stream, ?r.vk, r.frame_index, indices:~*u8,
+        index_count * 4, 4);
+    if (sel idx.none) {
+        r.dropped = r.dropped + 1;
+        ret opt[List2D].none{};
+    }
+    ret opt[List2D].some{List2D{
+        vblock:  verts.some.block,
+        vfirst:  verts.some.first,
+        iblock:  idx.some.block,
+        ifirst:  idx.some.first,
+        indices: index_count,
+    }};
+}
+
+# Draw a span of a list's indices with one texture.
+#
+# The colours are premultiplied and blended ONE, ONE_MINUS_SRC_ALPHA through the
+# built-in UI program, whatever 2D shader the pass has, since a game's shader
+# blends as it was built to. The draw is cut to the pass clip (pass_set_clip),
+# and the open 2D batch is drawn first, so the span lands on top of it. A span
+# that is not whole triangles or runs past the list is refused and counted.
+# ---
+# p:       the open pass
+# l:       the list, from pass_list this frame
+# start:   first index of the span
+# count:   indices in the span, a multiple of 3
+# texture: what the uvs address, or none for the white texel
+# filter:  how it is sampled
+# space:   what the colours were authored in: srgb is decoded when the surface encodes
+# texels:  whether the texture's texels are straight or premultiplied
+pub fun pass_draw_list(p: *Pass, l: *List2D, start: usize, count: usize, texture: opt[*Texture],
+    filter: TextureFilter, space: ColorSpace, texels: TexelAlpha) {
+    val r: *Renderer = p.renderer;
+    if (count == 0) { ret; }
+    if (count % 3 != 0 || start > l.indices || count > l.indices - start) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    batch_flush(p);
+    # the built-in program writes one colour output, as the batch's does
+    if (p.targets != 1) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var srgb:     f32 = 0.0;
+    var straight: f32 = 0.0;
+    if (sel space.srgb && r.srgb) { srgb = 1.0; }
+    if (sel texels.straight)      { straight = 1.0; }
+    val decode: Vec4 = vec4(srgb, 1.0, straight, 0.0);
+    if (!bind_screen(p, PROGRAM_UI_PREMULTIPLIED, opt[*Shader].none{}, opt[*Material].none{},
+        texture, opt[TextureFilter].some{filter}, decode)) { ret; }
+
+    var vbuf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, l.vblock);
+    val ibuf: vk.Buffer = stream_buffer(?r.stream, r.frame_index, l.iblock);
+    if (vbuf == nil || ibuf == nil) {
+        r.dropped = r.dropped + 1;
+        ret;
+    }
+    var off: u64 = 0;
+    vk.vkCmdBindVertexBuffers(p.cmd, 0, 1, ?vbuf, ?off);
+    vk.vkCmdBindIndexBuffer(p.cmd, ibuf, 0, vk.INDEX_TYPE_UINT32);
+    # the indices count from the list's first vertex, which the vertex offset supplies
+    vk.vkCmdDrawIndexed(p.cmd, count::u32, 1, l.ifirst + start::u32, l.vfirst::i32, 0);
+    r.draws = r.draws + 1;
 }
 
 # how many draws this frame's vertex arena refused for want of room
@@ -3994,8 +4308,7 @@ fun pass_draw_pulled(p: *Pass, buffers: **StorageBuffer, count: usize,
         r.dropped = r.dropped + 1;
         ret;
     }
-    pipeline_bind_region(pipe.ok, p.cmd, p.region_x, p.region_y,
-        p.region_width::u32, p.region_height::u32);
+    pass_bind_pipeline(p, pipe.ok);
     if (!descriptors_bind(?r.desc, p.cmd, pipe.ok.layout, r.frame_index, slot)) {
         r.dropped = r.dropped + 1;
         ret;
@@ -4085,5 +4398,37 @@ test storage_bindings__dispatch_and_draw_at_minimum {
     var sh:  Shader;
     if (pulled_valid(?l, ?list[0], 3, nil, 0, ?mat, ?t, ?sh))  { ret 3; }
     if (!pulled_valid(?l, ?list[0], 2, nil, 0, ?mat, ?t, ?sh)) { ret 4; }
+    ret 0;
+}
+
+test clip_scissor__rounds_scales_and_stays_in_the_region {
+    # a pixel pass over a 200 x 100 target, as pass_overlay builds it
+    var proj: Mat4 = mat4_orthographic(0.0, 200.0, 100.0, 0.0, 0.0 - 1.0, 1.0);
+
+    # no clip is the whole region
+    val whole: Scissor = clip_scissor(?proj, 0, 0, 200, 100, opt[Rect].none{});
+    if (whole.x != 0 || whole.y != 0 || whole.w != 200 || whole.h != 100) { ret 1; }
+
+    # each edge rounds to the nearest pixel, y staying down
+    val c:  opt[Rect] = opt[Rect].some{rect(10.4, 20.6, 30.2, 9.8)};
+    val sc: Scissor   = clip_scissor(?proj, 0, 0, 200, 100, c);
+    if (sc.x != 10 || sc.y != 21 || sc.w != 31 || sc.h != 9) { ret 2; }
+
+    # a region half the pass's size scales the clip onto the framebuffer
+    val half: Scissor = clip_scissor(?proj, 50, 20, 100, 50, opt[Rect].some{rect(20.0, 40.0, 60.0, 20.0)});
+    if (half.x != 60 || half.y != 40 || half.w != 30 || half.h != 10) { ret 3; }
+
+    # a clip past the region is cut to it, and one wholly outside is empty
+    val over: Scissor = clip_scissor(?proj, 0, 0, 200, 100, opt[Rect].some{rect(-20.0, 90.0, 60.0, 40.0)});
+    if (over.x != 0 || over.y != 90 || over.w != 40 || over.h != 10) { ret 4; }
+    val out: Scissor = clip_scissor(?proj, 0, 0, 200, 100, opt[Rect].some{rect(300.0, 10.0, 20.0, 20.0)});
+    if (out.w != 0) { ret 5; }
+    ret 0;
+}
+
+test indices_in_range__refuses_an_index_past_the_vertices {
+    var idx: [6]u32 = [6]u32{0, 1, 2, 2, 3, 0};
+    if (!indices_in_range(?idx[0], 6, 4)) { ret 1; }
+    if (indices_in_range(?idx[0], 6, 3))  { ret 2; }
     ret 0;
 }
