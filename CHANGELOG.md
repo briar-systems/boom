@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0] - 2026-10-01
+
+### Changed
+- blit moves to 0.12 (`^0.12`), which adds a wrapping flow layout (`layout.rows`, `widget.flow`, `begin_flow` / `end_flow`). A consumer that pins blit itself moves its pin to `^0.12` with boom.
+
 ## [0.41.0] - 2026-10-01
 
 ### Changed
