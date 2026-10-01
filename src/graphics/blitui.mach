@@ -6,7 +6,8 @@
 # Typeface, so blit's text is TrueType at whatever interface scale blit asks
 # for. BlitRenderer draws a blit context's frame in a boom Pass: blit's atlas
 # pages become boom textures, and a blit Image names a boom Texture by the
-# handle blit_texture returns. blit itself depends on nothing of boom's.
+# handle blit_texture returns. A blit consumer span calls back into the game
+# through blit_renderer_on_span. blit itself depends on nothing of boom's.
 #
 # A frame, after blit.context.end:
 #
@@ -26,10 +27,12 @@ fwd boom.graphics.blitui.glyphs.blit_glyphs_delete;
 
 fwd boom.graphics.blitui.renderer.BLIT_PAGES;
 fwd boom.graphics.blitui.renderer.BlitRenderer;
+fwd boom.graphics.blitui.renderer.BlitSpan;
 fwd boom.graphics.blitui.renderer.blit_texture;
 fwd boom.graphics.blitui.renderer.blit_renderer;
 fwd boom.graphics.blitui.renderer.blit_renderer_delete;
 fwd boom.graphics.blitui.renderer.blit_renderer_pages;
+fwd boom.graphics.blitui.renderer.blit_renderer_on_span;
 fwd boom.graphics.blitui.renderer.blit_upload;
 fwd boom.graphics.blitui.renderer.blit_draw;
 

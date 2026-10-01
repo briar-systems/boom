@@ -1,39 +1,58 @@
 # The blit renderer: a blit context's draw list, drawn in a boom Pass.
 #
-# blit (briar-systems/blit) builds a frame's UI as one list of textured,
+# blit (briar-systems/blit) builds a frame's UI as one indexed list of textured,
 # coloured triangles in pixel space, divided into runs that each sample one
-# texture: a page of blit's own glyph atlas, or a texture the game owns, named
-# by an opaque handle blit only passes through. This is the boom half of that
-# contract. It mirrors the atlas pages into boom textures and draws every run
-# through pass_draw_triangles_filtered, which appends to the pass's 2D batch.
+# texture under one scissor: a page of blit's own glyph atlas, or a texture the
+# game owns, named by an opaque handle blit only passes through. This is the
+# boom half of that contract. It mirrors the atlas pages into boom textures,
+# copies the list into the frame's arena once (pass_list), and draws each run
+# as a span of its indices (pass_draw_list) cut to the run's scissor.
 #
 # THE HANDLE OF A BOOM TEXTURE IS ITS ADDRESS. blit_texture(?tex) is what a
 # blit Image carries (blit.draw.whole or blit.draw.region take it), and a render
 # target's picture is blit_texture(render_target_texture(?target)). The texture
 # must stay where it is and alive until the pass that draws the frame ends,
-# exactly as for a sprite, since the batch holds that pointer until it flushes.
-# A handle is never 0, which blit reserves for its atlas.
+# exactly as for a sprite. A handle is never 0, which blit reserves for its
+# atlas.
 #
-# NOTHING IS ALLOCATED PER FRAME. The vertices are blit's own buffer, copied
-# into the frame's vertex arena the renderer already reuses, and a run is read
-# field for field. Host memory is touched only when blit opens an atlas page
-# (one boom texture, once), and GPU uploads only when blit wrote glyphs: the
-# dirty rows of a page, whole rows so the upload reads blit's pixels in place.
+# NOTHING IS ALLOCATED PER FRAME. The vertices and indices are blit's own
+# buffers, copied into the frame's arena the renderer already reuses, and a run
+# is read field for field. Host memory is touched only when blit opens an atlas
+# page (one boom texture, once), and GPU uploads only when blit wrote glyphs:
+# the dirty rows of a page, whole rows so the upload reads blit's pixels in
+# place. A page blit evicts and reuses comes back wholly dirty and is uploaded
+# again in full.
 #
-# CLIPPING IS ALREADY DONE. blit clips on the CPU: a quad wholly outside its
-# clip emits no vertices, so a run that clipped away entirely has a count of
-# zero and is skipped, and a reserved panel fill that clipped to nothing is
-# collapsed to a zero-area quad, which rasterises no fragments. A frame whose
-# draw list could not grow (blit.context.ok is 0) can end a run on a partial
-# quad, and only its whole triangles are drawn.
+# EACH RUN IS SCISSORED. blit drops a shape wholly outside its clip on the CPU
+# and leaves the rest whole, so a run carries the clip it was drawn under, in
+# screen pixels. That clip becomes the pass clip (pass_set_clip) for the run,
+# intersected with any clip the game set on the pass. boom's overlay pass and
+# its cursor are both in framebuffer pixels, so blit's screen pixels are the
+# framebuffer's on a HiDPI window too, and the pass clip maps them through the
+# pass's region, rounding each edge to the nearest pixel. A frame whose draw
+# list could not grow (blit.context.ok is 0) can end a run on a partial
+# triangle, and only its whole triangles are drawn.
+#
+# COLOURS AND TEXELS ARE PREMULTIPLIED, and blended ONE, ONE_MINUS_SRC_ALPHA.
+# blit's atlas is premultiplied. A boom texture is straight, so a blit image of
+# one is premultiplied as it is sampled. Leave blit's set_srgb off: the program
+# decodes a draw list's authored colours on a surface that encodes sRGB, and
+# does it on the colour divided by its alpha, so an antialiased edge keeps the
+# colour of the shape it feathers.
+#
+# A CONSUMER SPAN CALLS BACK INTO THE GAME. blit.context.custom places a span
+# that holds no geometry, only an id, a value and a rect in paint order. When
+# blit_draw reaches one it sets the span's scissor and calls the handler set by
+# blit_renderer_on_span with the pass, so the game draws whatever it likes there
+# with boom's own pass calls, cut to the span's clip and painted over by
+# anything blit draws after it. The pass's 2D shader, material, user block,
+# region and clip are put back afterwards. Without a handler a span draws
+# nothing, and a run of a kind this does not know is skipped.
 #
 # ANY PASS WILL DO. blit's positions are pixels, so an overlay pass places the
 # UI in window pixels, and one aimed at a RenderTarget draws the UI into a
 # picture. A game draws its 3D passes, then this, then more passes if it likes:
 # nothing here assumes blit is the last thing on screen.
-#
-# COLOURS ARE AUTHORED. Leave blit's set_srgb off: the 2D program already
-# decodes a draw list's colours on a surface that encodes sRGB.
 #
 # LIFETIME. One BlitRenderer per blit context, created against the renderer's
 # Device and deleted before renderer_dnit, which refuses while one lives (it is
@@ -48,8 +67,17 @@ use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.image.ColorSpace;
 use boom.graphics.material.TextureFilter;
+use boom.graphics.renderer.List2D;
 use boom.graphics.renderer.Pass;
-use boom.graphics.renderer.pass_draw_triangles_filtered;
+use boom.graphics.renderer.PassState;
+use boom.graphics.renderer.TexelAlpha;
+use boom.graphics.renderer.pass_draw_list;
+use boom.graphics.renderer.pass_list;
+use boom.graphics.renderer.pass_restore;
+use boom.graphics.renderer.pass_set_clip;
+use boom.graphics.renderer.pass_state;
+use boom.graphics.sprite.Rect;
+use boom.graphics.sprite.rect;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture_owned;
 use boom.graphics.texture.texture_release_owned;
@@ -65,30 +93,64 @@ use std.types.size.usize;
 # atlas pages mirrored at most, blit's own page limit
 pub val BLIT_PAGES: usize = 16;
 
-# a blit context's atlas mirrored on the GPU, and the means to draw its frames
+# a consumer span blit placed, as the game's handler receives it
 # ---
-# d:     device the pages are created against
-# ui:    the blit context this draws, which must outlive it
-# pages: the atlas pages as boom textures, `count` of them live
-# count: pages mirrored so far
-# valid: whether the renderer is live, cleared by blit_renderer_delete
-pub rec BlitRenderer {
-    d:     *Device;
-    ui:    *bctx.Context;
-    pages: [16]Texture;
-    count: usize;
-    valid: bool;
+# id:   the id the game passed to blit.context.custom
+# data: the value it passed with it
+# x0:   rect left in screen pixels, the pass's own units
+# y0:   rect top, y down
+# x1:   rect right
+# y1:   rect bottom
+pub rec BlitSpan {
+    id:   u64;
+    data: u64;
+    x0:   f32;
+    y0:   f32;
+    x1:   f32;
+    y1:   f32;
 }
 
-# what one run binds, and how many of its vertices draw
+# a blit context's atlas mirrored on the GPU, and the means to draw its frames
+# ---
+# d:         device the pages are created against
+# ui:        the blit context this draws, which must outlive it
+# pages:     the atlas pages as boom textures, `count` of them live
+# count:     pages mirrored so far
+# span:      the game's consumer-span handler, nil to draw spans as nothing
+# span_user: the pointer handed back to span
+# valid:     whether the renderer is live, cleared by blit_renderer_delete
+pub rec BlitRenderer {
+    d:         *Device;
+    ui:        *bctx.Context;
+    pages:     [16]Texture;
+    count:     usize;
+    span:      fun(ptr, *Pass, BlitSpan);
+    span_user: ptr;
+    valid:     bool;
+}
+
+# what one run binds, and how many of its indices draw
 # ---
 # texture: the texture its uvs address
 # filter:  how that texture is sampled
-# count:   whole-triangle vertices to draw
+# alpha:   whether that texture's texels are premultiplied
+# count:   whole-triangle indices to draw
 rec Binding {
     texture: *Texture;
     filter:  TextureFilter;
+    alpha:   TexelAlpha;
     count:   usize;
+}
+
+# what blit_draw does with one run
+# ---
+# skip: nothing, for a run that draws nothing or a kind this does not know
+# draw: draw the run's indices with this binding
+# span: call the game's handler for this span
+tag Step: u8 {
+    skip;
+    draw: Binding;
+    span: BlitSpan;
 }
 
 # The handle a blit Image carries for a boom texture.
@@ -122,6 +184,8 @@ pub fun blit_renderer(d: *Device, ui: *bctx.Context) res[BlitRenderer, Error] {
     br.d          = d;
     br.ui         = ui;
     br.count      = 0;
+    br.span       = nil;
+    br.span_user  = nil;
     br.valid      = true;
     d.vk.live.uis = d.vk.live.uis + 1;
     ret res[BlitRenderer, Error].ok{br};
@@ -145,6 +209,20 @@ pub fun blit_renderer_delete(br: *BlitRenderer) {
 # how many atlas pages are mirrored
 pub fun blit_renderer_pages(br: *BlitRenderer) usize {
     ret br.count;
+}
+
+# Call back into the game for blit's consumer spans.
+#
+# blit_draw calls f(user, pass, span) at each span in paint order, with the
+# pass cut to the span's clip. f draws with boom's own pass calls; what it sets
+# on the pass (2D shader, material, user block, region, clip) is put back after.
+# ---
+# br:   the renderer
+# f:    the handler, or nil to draw spans as nothing
+# user: handed back to f untouched
+pub fun blit_renderer_on_span(br: *BlitRenderer, f: fun(ptr, *Pass, BlitSpan), user: ptr) {
+    br.span      = f;
+    br.span_user = user;
 }
 
 # Bring the mirrored atlas up to date with what blit has rasterised.
@@ -188,7 +266,7 @@ pub fun blit_upload(br: *BlitRenderer) err[Error] {
     ret err[Error].ok{};
 }
 
-# what a run binds, none when it draws nothing or names a page not mirrored
+# what a triangle run binds, none when it draws nothing or names a page not mirrored
 fun run_binding(br: *BlitRenderer, run: bctx.Run) opt[Binding] {
     val count: usize = run.count - run.count % 3;
     if (count == 0) { ret opt[Binding].none{}; }
@@ -197,18 +275,58 @@ fun run_binding(br: *BlitRenderer, run: bctx.Run) opt[Binding] {
         ret opt[Binding].some{Binding{
             texture: ?br.pages[run.page],
             filter:  TextureFilter.nearest{},
+            alpha:   TexelAlpha.premultiplied{},
             count:   count,
         }};
     }
     var filter: TextureFilter = TextureFilter.nearest{};
     if (run.filter == bdraw.FILTER_LINEAR) { filter = TextureFilter.linear{}; }
-    ret opt[Binding].some{Binding{texture: handle_texture(run.tex), filter: filter, count: count}};
+    ret opt[Binding].some{Binding{
+        texture: handle_texture(run.tex),
+        filter:  filter,
+        alpha:   TexelAlpha.straight{},
+        count:   count,
+    }};
+}
+
+# what blit_draw does with a run, by its kind
+fun run_step(br: *BlitRenderer, run: bctx.Run) Step {
+    if (run.kind == bctx.RUN_TRIANGLES) {
+        val b: opt[Binding] = run_binding(br, run);
+        if (sel b.some) { ret Step.draw{b.some}; }
+        ret Step.skip{};
+    }
+    if (run.kind == bctx.RUN_CUSTOM) {
+        ret Step.span{BlitSpan{id: run.id, data: run.data, x0: run.x0, y0: run.y0, x1: run.x1, y1: run.y1}};
+    }
+    ret Step.skip{};
+}
+
+# a run's scissor as a pass clip, cut to the clip the game set on the pass
+fun run_clip(run: bctx.Run, outer: opt[Rect]) Rect {
+    var x0: f32 = run.clip_x0;
+    var y0: f32 = run.clip_y0;
+    var x1: f32 = run.clip_x1;
+    var y1: f32 = run.clip_y1;
+    if (sel outer.some) {
+        val o: Rect = outer.some;
+        if (o.x > x0)       { x0 = o.x; }
+        if (o.y > y0)       { y0 = o.y; }
+        if (o.x + o.w < x1) { x1 = o.x + o.w; }
+        if (o.y + o.h < y1) { y1 = o.y + o.h; }
+    }
+    if (x1 < x0) { x1 = x0; }
+    if (y1 < y0) { y1 = y0; }
+    ret rect(x0, y0, x1 - x0, y1 - y0);
 }
 
 # Draw the blit context's finished frame into a pass.
 #
-# Call after blit.context.end. The atlas is brought up to date first, and every
-# run is then appended in blit's paint order, which is layer order.
+# Call after blit.context.end. The atlas is brought up to date first, the list
+# is copied into the frame once, and every run is then drawn in blit's paint
+# order under its own scissor: a triangle run as a span of the list's indices,
+# a consumer span through the handler (blit_renderer_on_span). The pass is left
+# as it was found.
 # ---
 # br:  the renderer
 # p:   the open pass to draw into
@@ -216,23 +334,38 @@ fun run_binding(br: *BlitRenderer, run: bctx.Run) opt[Binding] {
 pub fun blit_draw(br: *BlitRenderer, p: *Pass) err[Error] {
     val up: err[Error] = blit_upload(br);
     if (!br.valid) { ret up; }
-    val verts: *bdraw.Vert = bctx.draw_verts(br.ui);
-    val n:     usize       = bctx.run_count(br.ui);
-    var i:     usize       = 0;
+    var saved: PassState   = pass_state(p);
+    val list:  opt[List2D] = pass_list(p, bctx.draw_verts(br.ui)::ptr, bctx.draw_count(br.ui),
+        bctx.draw_indices(br.ui), bctx.index_count(br.ui));
+    var l: List2D;
+    if (sel list.some) { l = list.some; }
+    val n: usize = bctx.run_count(br.ui);
+    var i: usize = 0;
     for (i < n) {
-        val run: bctx.Run     = bctx.run_at(br.ui, i);
-        val b:   opt[Binding] = run_binding(br, run);
-        if (sel b.some) {
-            pass_draw_triangles_filtered(p, (?verts[run.start])::ptr, b.some.count::i32,
-                opt[*Texture].some{b.some.texture}, b.some.filter);
+        val run:  bctx.Run = bctx.run_at(br.ui, i);
+        val step: Step     = run_step(br, run);
+        if (sel step.draw) {
+            if (sel list.some) {
+                pass_set_clip(p, opt[Rect].some{run_clip(run, saved.clip)});
+                pass_draw_list(p, ?l, run.start, step.draw.count, opt[*Texture].some{step.draw.texture},
+                    step.draw.filter, ColorSpace.srgb{}, step.draw.alpha);
+            }
+        }
+        or (sel step.span) {
+            if (br.span != nil) {
+                pass_set_clip(p, opt[Rect].some{run_clip(run, saved.clip)});
+                br.span(br.span_user, p, step.span);
+                pass_restore(p, ?saved);
+            }
         }
         i = i + 1;
     }
+    pass_restore(p, ?saved);
     ret up;
 }
 
 test vert__matches_the_ui_layout {
-    # pass_draw_triangles_filtered reads eight f32 at a 32-byte stride
+    # pass_list reads eight f32 at a 32-byte stride
     if ($size_of(bdraw.Vert) != 32)      { ret 1; }
     if ($offset_of(bdraw.Vert, u) != 8)  { ret 2; }
     if ($offset_of(bdraw.Vert, r) != 16) { ret 3; }
@@ -245,35 +378,101 @@ test run_binding__atlas_images_and_clipped_runs {
     br.count = 2;
     var tex: Texture;
 
-    # an atlas run binds its mirrored page, nearest
-    val atlas_run: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 1, layer: 0, start: 0, count: 12, filter: 0};
-    val a:         opt[Binding] = run_binding(?br, atlas_run);
+    # an atlas run binds its mirrored page, nearest, its texels premultiplied
+    var atlas_run: bctx.Run;
+    atlas_run.kind  = bctx.RUN_TRIANGLES;
+    atlas_run.tex   = bdraw.ATLAS;
+    atlas_run.page  = 1;
+    atlas_run.count = 12;
+    val a: opt[Binding] = run_binding(?br, atlas_run);
     if (!sel a.some)                                          { ret 1; }
     if (a.some.texture != ?br.pages[1] || a.some.count != 12) { ret 2; }
     if (!sel a.some.filter.nearest)                           { ret 3; }
+    if (!sel a.some.alpha.premultiplied)                      { ret 12; }
 
     # a page not mirrored yet draws nothing rather than the wrong page
-    val late: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 2, layer: 0, start: 0, count: 6, filter: 0};
-    val l:    opt[Binding] = run_binding(?br, late);
+    var late: bctx.Run = atlas_run;
+    late.page = 2;
+    val l: opt[Binding] = run_binding(?br, late);
     if (!sel l.none) { ret 4; }
 
-    # a game texture binds through its handle, with the filter blit asked for
-    val img: bctx.Run = bctx.Run{tex: blit_texture(?tex), page: 0, layer: 1, start: 12, count: 6,
-        filter: bdraw.FILTER_LINEAR};
+    # a game texture binds through its handle, with the filter blit asked for,
+    # and its straight texels are premultiplied as they are sampled
+    var img: bctx.Run = atlas_run;
+    img.tex    = blit_texture(?tex);
+    img.page   = 0;
+    img.filter = bdraw.FILTER_LINEAR;
     val t: opt[Binding] = run_binding(?br, img);
     if (!sel t.some)                       { ret 5; }
     if (t.some.texture != ?tex)            { ret 6; }
     if (!sel t.some.filter.linear)         { ret 7; }
+    if (!sel t.some.alpha.straight)        { ret 13; }
     if (blit_texture(?tex) == bdraw.ATLAS) { ret 8; }
 
-    # a run clipped away entirely draws nothing, and a partial quad is cut to
-    # whole triangles
-    val gone: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 0, layer: 0, start: 0, count: 0, filter: 0};
-    val g:    opt[Binding] = run_binding(?br, gone);
+    # a run clipped away entirely draws nothing, and a partial triangle is cut
+    # to whole triangles
+    var gone: bctx.Run = atlas_run;
+    gone.page  = 0;
+    gone.count = 0;
+    val g: opt[Binding] = run_binding(?br, gone);
     if (!sel g.none) { ret 9; }
-    val torn: bctx.Run     = bctx.Run{tex: bdraw.ATLAS, page: 0, layer: 0, start: 0, count: 10, filter: 0};
-    val c:    opt[Binding] = run_binding(?br, torn);
+    var torn: bctx.Run = gone;
+    torn.count = 10;
+    val c: opt[Binding] = run_binding(?br, torn);
     if (!sel c.some)       { ret 10; }
     if (c.some.count != 9) { ret 11; }
+    ret 0;
+}
+
+test run_step__draws_triangles_calls_spans_and_skips_the_rest {
+    var br: BlitRenderer;
+    br.count = 1;
+
+    var tri: bctx.Run;
+    tri.kind  = bctx.RUN_TRIANGLES;
+    tri.tex   = bdraw.ATLAS;
+    tri.page  = 0;
+    tri.count = 6;
+    val d: Step = run_step(?br, tri);
+    if (!sel d.draw)       { ret 1; }
+    if (d.draw.count != 6) { ret 1; }
+
+    # a span carries what the game placed it with
+    var span: bctx.Run = tri;
+    span.kind  = bctx.RUN_CUSTOM;
+    span.count = 0;
+    span.id    = 7;
+    span.data  = 42;
+    span.x0    = 1.0;
+    span.y0    = 2.0;
+    span.x1    = 3.0;
+    span.y1    = 4.0;
+    val s: Step = run_step(?br, span);
+    if (!sel s.span)                          { ret 2; }
+    if (s.span.id != 7 || s.span.data != 42)  { ret 3; }
+    if (s.span.x0 != 1.0 || s.span.y1 != 4.0) { ret 4; }
+
+    # a kind blit adds later is skipped, not drawn as triangles
+    var later: bctx.Run = tri;
+    later.kind = 99;
+    val k: Step = run_step(?br, later);
+    if (!sel k.skip) { ret 5; }
+    ret 0;
+}
+
+test run_clip__is_the_run_scissor_inside_the_pass_clip {
+    var run: bctx.Run;
+    run.clip_x0 = 10.0;
+    run.clip_y0 = 20.0;
+    run.clip_x1 = 110.0;
+    run.clip_y1 = 70.0;
+    val own: Rect = run_clip(run, opt[Rect].none{});
+    if (own.x != 10.0 || own.y != 20.0 || own.w != 100.0 || own.h != 50.0) { ret 1; }
+
+    # a clip the game set on the pass narrows it, and one apart from it leaves nothing
+    val cut: Rect = run_clip(run, opt[Rect].some{rect(50.0, 0.0, 200.0, 40.0)});
+    if (cut.x != 50.0 || cut.y != 20.0 || cut.w != 60.0 || cut.h != 20.0) { ret 2; }
+    val apart: Rect = run_clip(run, opt[Rect].some{rect(500.0, 500.0, 10.0, 10.0)});
+    if (apart.w != 0.0 || apart.h != 0.0) { ret 3; }
     ret 0;
 }
