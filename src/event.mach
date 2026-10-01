@@ -35,7 +35,7 @@ pub tag KeyAction: u8 {
 # ---
 # key:    the boom key, KEY_UNKNOWN for a key boom does not name
 # action: press, release, or autorepeat
-# mods:   modifier bits held at the time
+# mods:   the boom.input MOD_* bits held at the time
 pub rec KeyEvent {
     key:    inp.Key;
     action: KeyAction;
@@ -46,7 +46,7 @@ pub rec KeyEvent {
 # ---
 # button: the boom button
 # down:   true when the button went down, false when it came up
-# mods:   modifier bits held at the time
+# mods:   the boom.input MOD_* bits held at the time
 pub rec ButtonEvent {
     button: inp.Button;
     down:   bool;

@@ -113,8 +113,26 @@ pub val KEY_F10: Key = 62;
 pub val KEY_F11: Key = 63;
 pub val KEY_F12: Key = 64;
 
+pub val KEY_HOME:      Key = 65;
+pub val KEY_END:       Key = 66;
+pub val KEY_PAGE_UP:   Key = 67;
+pub val KEY_PAGE_DOWN: Key = 68;
+pub val KEY_INSERT:    Key = 69;
+
+pub val KEY_LEFT_SUPER:  Key = 70;
+pub val KEY_RIGHT_SUPER: Key = 71;
+
 # One past the highest key, sizing the state arrays
-pub val KEY_COUNT: usize = 65;
+pub val KEY_COUNT: usize = 72;
+
+# ---------------------------------------------------------------- modifiers
+
+# modifier bits a key or button event carries, combined with |. super is the
+# windows key, and command on darwin
+pub val MOD_SHIFT: i32 = 1;
+pub val MOD_CTRL:  i32 = 2;
+pub val MOD_ALT:   i32 = 4;
+pub val MOD_SUPER: i32 = 8;
 
 # ------------------------------------------------------------ mouse buttons
 
@@ -124,9 +142,12 @@ pub def Button: i32;
 pub val BUTTON_LEFT:   Button = 0;
 pub val BUTTON_RIGHT:  Button = 1;
 pub val BUTTON_MIDDLE: Button = 2;
+# the side buttons, back and forward by convention
+pub val BUTTON_X1: Button = 3;
+pub val BUTTON_X2: Button = 4;
 
 # One past the highest button, sizing the state arrays
-pub val BUTTON_COUNT: usize = 3;
+pub val BUTTON_COUNT: usize = 5;
 
 # ------------------------------------------------------------------ gamepads
 #
@@ -256,12 +277,12 @@ pub rec Gamepad {
 # pointer_in:   whether the pointer is over the window; false until it enters,
 #               and mouse_x/y are its last position inside only while true
 pub rec Input {
-    key_down:     [65]bool;
-    key_pressed:  [65]bool;
-    key_released: [65]bool;
-    btn_down:     [3]bool;
-    btn_pressed:  [3]bool;
-    btn_released: [3]bool;
+    key_down:     [72]bool;
+    key_pressed:  [72]bool;
+    key_released: [72]bool;
+    btn_down:     [5]bool;
+    btn_pressed:  [5]bool;
+    btn_released: [5]bool;
     mouse_x:      f64;
     mouse_y:      f64;
     mouse_dx:     f64;
@@ -270,12 +291,12 @@ pub rec Input {
     scroll_y:     f64;
     pointer_in:   bool;
 
-    pend_key_down:     [65]bool;
-    pend_key_pressed:  [65]bool;
-    pend_key_released: [65]bool;
-    pend_btn_down:     [3]bool;
-    pend_btn_pressed:  [3]bool;
-    pend_btn_released: [3]bool;
+    pend_key_down:     [72]bool;
+    pend_key_pressed:  [72]bool;
+    pend_key_released: [72]bool;
+    pend_btn_down:     [5]bool;
+    pend_btn_pressed:  [5]bool;
+    pend_btn_released: [5]bool;
     pend_mouse_x:      f64;
     pend_mouse_y:      f64;
     pend_mouse_dx:     f64;

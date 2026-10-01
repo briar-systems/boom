@@ -165,6 +165,8 @@ pub rec WindowBounds {
 # min_width:          client limit applied when restoring windowed mode
 # min_height:         client limit applied when restoring windowed mode
 # renderers:          how many renderers hold a surface on this window
+# shape:              the pointer shape last set, CURSOR_ARROW at open
+# shape_shown:        whether the platform shows shape rather than the arrow
 pub rec Window {
     handle:             opt[glfw.Window];
     width:              i32;
@@ -176,6 +178,8 @@ pub rec Window {
     min_width:          i32;
     min_height:         i32;
     renderers:          usize;
+    shape:              CursorShape;
+    shape_shown:        bool;
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -198,7 +202,7 @@ fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
     if (!sel act.some.repeat) {
         inp.input_key_event(s.input, k, sel act.some.press);
     }
-    offer(s.queue, Event.key{KeyEvent{key: k, action: act.some, mods: mods}});
+    offer(s.queue, Event.key{KeyEvent{key: k, action: act.some, mods: map_mods(mods)}});
 }
 
 fun on_char(handle: ptr, codepoint: u32) {
@@ -235,7 +239,7 @@ fun deliver_button(s: *Sink, button: i32, action: i32, mods: i32) {
     if (!sel b.some) { ret; }
     val down: bool = action == glfw.PRESS;
     inp.input_button_event(s.input, b.some, down);
-    offer(s.queue, Event.mouse_button{ButtonEvent{button: b.some, down: down, mods: mods}});
+    offer(s.queue, Event.mouse_button{ButtonEvent{button: b.some, down: down, mods: map_mods(mods)}});
 }
 
 fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
@@ -363,6 +367,13 @@ fun map_key(k: i32) inp.Key {
     if (k == glfw.KEY_RIGHT_SHIFT)             { ret inp.KEY_RIGHT_SHIFT; }
     if (k == glfw.KEY_RIGHT_CONTROL)           { ret inp.KEY_RIGHT_CTRL; }
     if (k == glfw.KEY_RIGHT_ALT)               { ret inp.KEY_RIGHT_ALT; }
+    if (k == glfw.KEY_LEFT_SUPER)              { ret inp.KEY_LEFT_SUPER; }
+    if (k == glfw.KEY_RIGHT_SUPER)             { ret inp.KEY_RIGHT_SUPER; }
+    if (k == glfw.KEY_HOME)                    { ret inp.KEY_HOME; }
+    if (k == glfw.KEY_END)                     { ret inp.KEY_END; }
+    if (k == glfw.KEY_PAGE_UP)                 { ret inp.KEY_PAGE_UP; }
+    if (k == glfw.KEY_PAGE_DOWN)               { ret inp.KEY_PAGE_DOWN; }
+    if (k == glfw.KEY_INSERT)                  { ret inp.KEY_INSERT; }
     ret inp.KEY_UNKNOWN;
 }
 
@@ -379,7 +390,19 @@ fun map_button(b: i32) opt[inp.Button] {
     if (b == glfw.MOUSE_BUTTON_LEFT)   { ret opt[inp.Button].some{inp.BUTTON_LEFT}; }
     if (b == glfw.MOUSE_BUTTON_RIGHT)  { ret opt[inp.Button].some{inp.BUTTON_RIGHT}; }
     if (b == glfw.MOUSE_BUTTON_MIDDLE) { ret opt[inp.Button].some{inp.BUTTON_MIDDLE}; }
+    if (b == glfw.MOUSE_BUTTON_4)      { ret opt[inp.Button].some{inp.BUTTON_X1}; }
+    if (b == glfw.MOUSE_BUTTON_5)      { ret opt[inp.Button].some{inp.BUTTON_X2}; }
     ret opt[inp.Button].none{};
+}
+
+# translate GLFW modifier bits into boom's MOD_* bits, dropping the lock keys
+fun map_mods(m: i32) i32 {
+    var out: i32 = 0;
+    if ((m & glfw.MOD_SHIFT) != 0)   { out = out | inp.MOD_SHIFT; }
+    if ((m & glfw.MOD_CONTROL) != 0) { out = out | inp.MOD_CTRL; }
+    if ((m & glfw.MOD_ALT) != 0)     { out = out | inp.MOD_ALT; }
+    if ((m & glfw.MOD_SUPER) != 0)   { out = out | inp.MOD_SUPER; }
+    ret out;
 }
 
 # open a window
@@ -496,7 +519,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     ret res[Window, WindowError].ok{Window{
         handle:    opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
         monitor:   monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width: 1, min_height: 1, renderers: 0
+        min_width: 1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true
     }};
 }
 
@@ -677,6 +700,79 @@ pub fun window_cursor_captured(w: *Window) bool {
     ret glfw.get_input_mode(w.handle.some, glfw.CURSOR) == glfw.CURSOR_DISABLED;
 }
 
+# a pointer shape shown over a window's client area
+pub def CursorShape: u8;
+
+pub val CURSOR_ARROW:       CursorShape = 0;
+pub val CURSOR_TEXT:        CursorShape = 1;
+pub val CURSOR_HAND:        CursorShape = 2;
+pub val CURSOR_MOVE:        CursorShape = 3;
+pub val CURSOR_RESIZE_EW:   CursorShape = 4;
+pub val CURSOR_RESIZE_NS:   CursorShape = 5;
+pub val CURSOR_RESIZE_NWSE: CursorShape = 6;
+pub val CURSOR_RESIZE_NESW: CursorShape = 7;
+pub val CURSOR_NOT_ALLOWED: CursorShape = 8;
+
+# One past the highest shape
+pub val CURSOR_SHAPE_COUNT: usize = 9;
+
+# the platform's standard cursors, created on first use. glfw owns them until
+# terminate, which window_close calls, so closing forgets them
+var cursors:     [9]ptr;
+var cursor_made: [9]bool;
+
+# the GLFW standard cursor a shape names
+fun cursor_token(shape: CursorShape) i32 {
+    if (shape == CURSOR_TEXT)        { ret glfw.IBEAM_CURSOR; }
+    if (shape == CURSOR_HAND)        { ret glfw.POINTING_HAND_CURSOR; }
+    if (shape == CURSOR_MOVE)        { ret glfw.RESIZE_ALL_CURSOR; }
+    if (shape == CURSOR_RESIZE_EW)   { ret glfw.RESIZE_EW_CURSOR; }
+    if (shape == CURSOR_RESIZE_NS)   { ret glfw.RESIZE_NS_CURSOR; }
+    if (shape == CURSOR_RESIZE_NWSE) { ret glfw.RESIZE_NWSE_CURSOR; }
+    if (shape == CURSOR_RESIZE_NESW) { ret glfw.RESIZE_NESW_CURSOR; }
+    if (shape == CURSOR_NOT_ALLOWED) { ret glfw.NOT_ALLOWED_CURSOR; }
+    ret glfw.ARROW_CURSOR;
+}
+
+# show a pointer shape over the window's client area
+#
+# a shape the platform's cursor theme lacks shows the default arrow, and the
+# call reports it. setting the shape already shown does nothing.
+# ---
+# w:     open window to change; a closed window is refused
+# shape: a CURSOR_* shape
+# ret:   true when the platform shows the shape
+pub fun window_set_cursor_shape(w: *Window, shape: CursorShape) bool {
+    if (!sel w.handle.some)                 { ret false; }
+    if (shape::usize >= CURSOR_SHAPE_COUNT) { ret false; }
+    if (w.shape == shape && w.shape_shown)  { ret true; }
+    val i: usize = shape::usize;
+    if (!cursor_made[i] && shape != CURSOR_ARROW) {
+        val made: res[glfw.Cursor, glfw.Error] = glfw.create_standard_cursor(cursor_token(shape));
+        if (sel made.ok) {
+            cursors[i]     = made.ok.handle;
+            cursor_made[i] = true;
+        }
+    }
+    w.shape       = shape;
+    w.shape_shown = shape == CURSOR_ARROW || cursor_made[i];
+    if (w.shape_shown && shape != CURSOR_ARROW) {
+        glfw.set_cursor(w.handle.some, opt[glfw.Cursor].some{glfw.Cursor{handle: cursors[i]}});
+    }
+    or {
+        glfw.set_cursor(w.handle.some, opt[glfw.Cursor].none{});
+    }
+    ret w.shape_shown;
+}
+
+# the pointer shape last set on the window
+# ---
+# w:   window to query
+# ret: a CURSOR_* shape, CURSOR_ARROW until one is set
+pub fun window_cursor_shape(w: *Window) CursorShape {
+    ret w.shape;
+}
+
 # the clipboard's text
 #
 # an empty or non-text clipboard, and a closed window, read as the empty
@@ -833,6 +929,29 @@ pub fun window_poll() {
     glfw.poll_events();
 }
 
+# process platform events as window_poll does, sleeping until at least one
+# arrives
+#
+# for an app with nothing to draw until input. gamepads deliver no events, so
+# they do not wake it.
+pub fun window_wait() {
+    poll_release();
+    glfw.wait_events();
+}
+
+# process platform events as window_poll does, sleeping until one arrives or
+# the timeout passes
+# ---
+# seconds: longest time to sleep; zero or less polls without sleeping
+pub fun window_wait_timeout(seconds: f64) {
+    poll_release();
+    if (seconds <= 0.0) {
+        glfw.poll_events();
+        ret;
+    }
+    glfw.wait_events_timeout(seconds);
+}
+
 fun poll_release() {
     var i: usize = 0;
     for (i < registry_len) {
@@ -857,11 +976,20 @@ pub fun window_close(w: *Window) err[WindowError] {
         unregister_queue(w.handle.some.handle);
         glfw.destroy_window(w.handle.some);
         glfw.terminate();
+        forget_cursors();
     }
     w.handle = opt[glfw.Window].none{};
     w.width  = 0;
     w.height = 0;
     ret err[WindowError].ok{};
+}
+
+fun forget_cursors() {
+    var i: usize = 0;
+    for (i < CURSOR_SHAPE_COUNT) {
+        cursor_made[i] = false;
+        i              = i + 1;
+    }
 }
 
 fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds {
@@ -1109,6 +1237,14 @@ test deliver_key__press_edge_and_repeat_queued {
     if (!sel r.some)                   { ret 8; }
     if (!sel r.some.key)               { ret 9; }
     if (!sel r.some.key.action.repeat) { ret 10; }
+
+    # the platform's modifier bits become boom's, the lock keys dropped
+    deliver_key(?sink, glfw.KEY_HOME, glfw.PRESS, glfw.MOD_CONTROL | glfw.MOD_SUPER | glfw.MOD_NUM_LOCK);
+    val h: opt[Event] = queue_pop(?q);
+    if (!sel h.some)                                       { ret 11; }
+    if (!sel h.some.key)                                   { ret 11; }
+    if (h.some.key.key != inp.KEY_HOME)                    { ret 12; }
+    if (h.some.key.mods != (inp.MOD_CTRL | inp.MOD_SUPER)) { ret 13; }
     ret 0;
 }
 
@@ -1332,6 +1468,14 @@ test deliver_button__unnamed_button_dropped {
     if (!sel e.some.mouse_button)                       { ret 3; }
     if (e.some.mouse_button.button != inp.BUTTON_RIGHT) { ret 4; }
     if (!e.some.mouse_button.down)                      { ret 5; }
+
+    deliver_button(?sink, glfw.MOUSE_BUTTON_5, glfw.PRESS, glfw.MOD_SHIFT);
+    inp.input_begin_tick(?input);
+    if (!inp.button_pressed(?input, inp.BUTTON_X2)) { ret 6; }
+    val x: opt[Event] = queue_pop(?q);
+    if (!sel x.some)                               { ret 7; }
+    if (!sel x.some.mouse_button)                  { ret 7; }
+    if (x.some.mouse_button.mods != inp.MOD_SHIFT) { ret 8; }
     ret 0;
 }
 
