@@ -448,14 +448,23 @@ stage and atomics wait on compiler support
 [blit](https://github.com/briar-systems/blit) builds an immediate-mode UI as a
 draw list and depends on nothing of boom's. `boom.graphics.blitui` is the boom
 half. `BlitGlyphs` is a blit glyph source over a `Typeface`, so blit's text is
-TrueType through mach-font. It is rasterised at the face's size times blit's
-interface scale, so text at 200% is drawn at twice the size, not stretched.
+TrueType through mach-font. It does not shape, and it is rasterised at the
+face's size times blit's scale, a text style's size times the interface scale,
+so a heading style and text at 200% are drawn at their size, not stretched.
 `BlitRenderer` draws a blit context's finished frame in any `Pass`. It mirrors
 blit's atlas pages into boom textures, uploading only the rows blit wrote. It
-appends each run through `pass_draw_triangles_filtered`, allocating nothing per
-frame. A blit `Image` names a boom texture by `blit_texture(?tex)`, and a render
+copies blit's indexed list into the frame once with `pass_list` and draws each
+run as a span of its indices with `pass_draw_list`, cut to the run's scissor
+with `pass_set_clip` and blended premultiplied, allocating nothing per frame.
+blit's screen pixels are the framebuffer's, as boom's overlay pass and cursor
+are, so the scissor lands where the run's vertices do on a HiDPI window too. A
+blit `Image` names a boom texture by `blit_texture(?tex)`, and a render
 target's picture by `blit_texture(gfx.render_target_texture(?target))`. The
-texture must stay put and alive until the pass that draws it ends.
+texture must stay put and alive until the pass that draws it ends. A consumer
+span (`blit.context.custom`) calls the handler set by `blit_renderer_on_span`
+with the pass, cut to the span's clip, so the game draws there with boom's own
+pass calls in blit's paint order. The pass's 2D shader, material, user block,
+region and clip are put back after it.
 
 `BlitInput` is blit's host. It fills blit's frame input from the context: the
 clock, the pointer and its presence, every button, both wheels in pixels, typed
@@ -485,12 +494,14 @@ gfx.blit_upload(?ui_renderer);
 gfx.blit_draw(?ui_renderer, ?overlay);
 ```
 
-Leave blit's `set_srgb` off. The 2D program decodes a draw list's colours
-itself. Teardown runs from the renderer outward: `blit_renderer_delete`, then
+Leave blit's `set_srgb` off. The UI program decodes a draw list's authored
+colours itself, dividing out the premultiplied alpha first. Teardown runs from the renderer outward: `blit_renderer_delete`, then
 `blit_input_delete` and blit's `context.free`, `blit_glyphs_delete`, and the typeface. `renderer_dnit`
 refuses while a `BlitRenderer` lives, and the typeface refuses while a
 `BlitGlyphs` reads it. `demo/blit` draws a panel over a 3D scene with both
-kinds of image. Its `--check` mode reads back text at 100% and at 200%.
+kinds of image, blit's feathered shapes and a consumer span. Its `--check`
+mode reads back text at 100% and at 200%, a span boom filled and a quad cut to
+its scissor.
 
 ## Consuming boom
 
