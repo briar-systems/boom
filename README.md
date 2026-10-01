@@ -468,13 +468,17 @@ region and clip are put back after it.
 
 `BlitInput` is blit's host. It fills blit's frame input from the context: the
 clock, the pointer and its presence, every button, both wheels in pixels, typed
-text, key presses and releases with blit's key codes, and the held modifiers.
-After the frame, `blit_input_serve` moves copied text to the clipboard, answers
-a paste in the next frame, shows the pointer shape blit asks for and hands
-blit's `next_frame` to `context_wake`, so an idle interface sleeps until input.
-`blit_input_frame` drains `ctx.events`. An app that reads the queue itself
-frames the input with `blit_input_begin` and `blit_input_event` instead. The
-IME is not served yet ([#257](https://github.com/briar-systems/boom/issues/257)).
+text, key presses and releases with blit's key codes, the held modifiers, and
+the IME's composition in progress as blit's `compose`. After the frame,
+`blit_input_serve` moves copied text to the clipboard, answers a paste in the
+next frame, shows the pointer shape blit asks for, places the IME's candidate
+window at blit's `ime_rect` and keeps the window in a text input context only
+while a field takes text, and hands blit's `next_frame` to `context_wake`, so
+an idle interface sleeps until input. `blit_input_frame` drains `ctx.events`.
+An app that reads the queue itself frames the input with `blit_input_begin`
+and `blit_input_event` instead. On X11 boom asks for on-the-spot input, so the
+composition reaches the field, and the input method places its candidate
+window on its own.
 
 ```mach
 # once, against a typeface and the renderer's device
