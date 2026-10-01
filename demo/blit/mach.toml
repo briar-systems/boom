@@ -6,7 +6,6 @@ src = "src"
 out = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-default = true
 isa = "x86_64"
 os  = "linux"
 abi = "sysv64"
@@ -58,7 +57,7 @@ ref = "tag/v9.0.0"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-version = "^0.10"
+version = "^0.11"
 
 # blit's demo gallery, from the blit checkout boom pins (realized by
 # `mach dep pull .` at boom's root), drawn here by boom's renderer
