@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.1] - 2026-10-01
+
+0.40.0 was tagged but never published: its macOS build failed to link. 0.40.1 is the first release with the 0.40.0 changes below.
+
+### Fixed
+- boom links on macOS again (#267). It requires mach-glfw 0.11.2, which attributes the darwin imports its IME support added (`CFLocaleCopyPreferredLanguages`, `CFMakeCollectable`, `objc_autorelease`).
+
 ## [0.40.0] - 2026-10-01
 
 ### Added
