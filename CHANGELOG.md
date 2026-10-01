@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-01
+
+### Changed
+- Requires mach 6.9, and mach-shader moves to 0.5 (`^0.5`). mach 6.9 no longer accepts the 6-operand image handle mach-shader 0.4 uses, so boom 0.42 stops building under it. mach-shader 0.5 brings compute shared memory, barriers, atomics and subgroup operations to boom's shaders. A consumer that pins mach-shader itself moves its pin to `^0.5` with boom.
+
 ## [0.42.0] - 2026-10-01
 
 ### Changed
