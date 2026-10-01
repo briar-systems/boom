@@ -24,6 +24,14 @@
 # that reads the queue for anything else drains it itself, and frames blit's
 # input with blit_input_begin, then blit_input_event for every event, in order.
 #
+# BUTTONS are both held and events. Each press and release is added to blit's
+# events with the cursor where it happened, so a click that starts and ends
+# between two frames still lands, and down stays the buttons held after the
+# last of them. blit applies one change per button a frame and holds the rest
+# back, asking for the next frame at once through next_frame, which
+# blit_input_serve hands to the loop, so a held-back release arrives without
+# new input.
+#
 # KEYS are blit's codes: a letter is its uppercase character, a digit or space
 # is itself, and Enter, Escape, the arrows and the other editing keys are
 # blit's KEY_* constants. A key blit has no code for (a function key, a
@@ -161,8 +169,18 @@ pub fun blit_input_event(bi: *BlitInput, e: Event) {
     }
     if (sel e.mouse_button) {
         val bit: u8 = button_bit(e.mouse_button.button);
-        if (e.mouse_button.down) { in.down = in.down | bit; }
-        or                       { in.down = in.down & ~bit; }
+        if (bit == 0) { ret; }
+        # the cursor as it stood when the button changed, from the moves before it
+        var kept: bool = false;
+        if (e.mouse_button.down) {
+            in.down = in.down | bit;
+            kept    = binp.press_button(in, bit, in.mx, in.my);
+        }
+        or {
+            in.down = in.down & ~bit;
+            kept    = binp.release_button(in, bit, in.mx, in.my);
+        }
+        if (!kept) { bi.dropped = bi.dropped + 1; }
         ret;
     }
     if (sel e.scroll) {
@@ -343,8 +361,10 @@ test blit_input_event__fills_the_frame_in_order {
     blit_input_event(?bi, Event.pointer{PointerEvent{inside: true}});
     blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 12.0, y: 34.0}});
     blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_X1, down: true, mods: 0}});
-    blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_LEFT, down: true, mods: 0}});
+    blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 20.0, y: 30.0}});
     blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_X1, down: false, mods: 0}});
+    blit_input_event(?bi, Event.mouse_button{ButtonEvent{button: inp.BUTTON_LEFT, down: true, mods: 0}});
+    blit_input_event(?bi, Event.mouse_move{MoveEvent{x: 12.0, y: 34.0}});
     blit_input_event(?bi, Event.scroll{ScrollEvent{dx: 1.0, dy: 0.5}});
     blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_LEFT_SHIFT, action: KeyAction.press{}, mods: 0}});
     blit_input_event(?bi, Event.key{KeyEvent{key: inp.KEY_V, action: KeyAction.press{}, mods: inp.MOD_SHIFT}});
@@ -359,16 +379,25 @@ test blit_input_event__fills_the_frame_in_order {
     if (in.down != binp.BUTTON_LEFT)             { ret 5; }
     if (in.wheel != 20.0 || in.wheel_x != -40.0) { ret 6; }
     if (in.mods != binp.MOD_SHIFT)               { ret 7; }
-    # the modifier and the function key carry no blit code
-    if (in.events.len != 4) { ret 8; }
-    val first: binp.Event = in.events.data[0];
+    # a press and release in one frame are two events, each where it happened,
+    # and the modifier and the function key carry no blit code
+    if (in.events.len != 7) { ret 8; }
+    val press: binp.Event = in.events.data[0];
+    if (!sel press.down)                                                                     { ret 17; }
+    if (press.down.button != binp.BUTTON_X1 || press.down.x != 12.0 || press.down.y != 34.0) { ret 17; }
+    val release: binp.Event = in.events.data[1];
+    if (!sel release.up)                                                                     { ret 18; }
+    if (release.up.button != binp.BUTTON_X1 || release.up.x != 20.0 || release.up.y != 30.0) { ret 18; }
+    val left: binp.Event = in.events.data[2];
+    if (!(sel left.down && left.down.button == binp.BUTTON_LEFT)) { ret 19; }
+    val first: binp.Event = in.events.data[3];
     if (!sel first.key)                                            { ret 9; }
     if (first.key.code != 'V' || first.key.mods != binp.MOD_SHIFT) { ret 9; }
-    val second: binp.Event = in.events.data[1];
+    val second: binp.Event = in.events.data[4];
     if (!(sel second.text && second.text == 'V')) { ret 10; }
-    val third: binp.Event = in.events.data[2];
+    val third: binp.Event = in.events.data[5];
     if (!(sel third.key && third.key.code == binp.KEY_PAGE_DOWN)) { ret 11; }
-    val fourth: binp.Event = in.events.data[3];
+    val fourth: binp.Event = in.events.data[6];
     if (!(sel fourth.release && fourth.release.code == 'V')) { ret 12; }
 
     # a new frame empties the events and wheel and keeps what is held
