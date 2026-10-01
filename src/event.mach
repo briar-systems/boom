@@ -100,8 +100,9 @@ pub rec TextEvent {
     codepoint: u32;
 }
 
-# the allocation behind a DropEvent: this header, then the path table, then
-# the path bytes, all in one block
+# the allocation behind a DropEvent or a ComposeEvent: this header, then the
+# event's data (a drop's path table and path bytes, a composition's
+# codepoints), all in one block
 # ---
 # next: the next lent block, while the queue holds this one until release
 # size: bytes in the whole block
@@ -129,6 +130,26 @@ pub rec DropEvent {
     block: *DropBlock;
 }
 
+# the IME's composition in progress changed
+#
+# the composition is text an input method is building that is not typed yet,
+# shown at the caret of the text field taking it. a count of zero ends it,
+# committed or cancelled, and can also arrive when none was in progress.
+# committed text arrives as TextEvents. the codepoints are owned by the event
+# queue, as a DropEvent's paths are: valid from the moment the event is popped
+# until the next window_poll.
+# ---
+# count:      codepoints in the composition, 0 when it ended
+# codepoints: count unicode scalar values, nil when count is 0
+# caret:      the caret as a codepoint index into the composition, at most count
+# block:      the owning allocation, for the queue alone, nil when count is 0
+pub rec ComposeEvent {
+    count:      usize;
+    codepoints: *u32;
+    caret:      usize;
+    block:      *DropBlock;
+}
+
 # one input event
 # ---
 # close:        the window was asked to close
@@ -140,6 +161,7 @@ pub rec DropEvent {
 # text:         a unicode codepoint was typed
 # drop:         files were dropped on the window
 # pointer:      the pointer entered or left the window
+# compose:      the IME's composition in progress changed
 pub tag Event: u8 {
     close;
     key:          KeyEvent;
@@ -150,6 +172,7 @@ pub tag Event: u8 {
     text:         TextEvent;
     drop:         DropEvent;
     pointer:      PointerEvent;
+    compose:      ComposeEvent;
 }
 
 # why an event was not queued
@@ -218,15 +241,15 @@ pub fun queue_is_full(q: *EventQueue) bool {
 # append an event to the back of the queue
 #
 # a full queue refuses the event and leaves the queued events untouched. a
-# refused drop event is freed here, since the queue took ownership of its
-# paths on the call either way.
+# refused drop or compose event is freed here, since the queue took ownership
+# of its block on the call either way.
 # ---
 # q:   queue to append to
 # e:   event to enqueue
 # ret: ok, or full when the queue is at capacity
 pub fun queue_push(q: *EventQueue, e: Event) err[QueueError] {
     if (q.len >= CAPACITY) {
-        if (sel e.drop) { drop_free(e.drop.block); }
+        block_free(event_block(e));
         ret err[QueueError].err{QueueError.full{}};
     }
     val slot: usize = (q.head + q.len) % CAPACITY;
@@ -244,15 +267,16 @@ pub fun queue_pop(q: *EventQueue) opt[Event] {
     val e: Event = q.events[q.head];
     q.head = (q.head + 1) % CAPACITY;
     q.len  = q.len - 1;
-    # the popped paths stay readable, so the block waits on the lent list
-    if (sel e.drop) {
-        e.drop.block.next = q.lent;
-        q.lent            = e.drop.block;
+    # the popped event's data stays readable, so its block waits on the lent list
+    val b: *DropBlock = event_block(e);
+    if (b != nil) {
+        b.next = q.lent;
+        q.lent = b;
     }
     ret opt[Event].some{e};
 }
 
-# free the paths of every drop event popped since the last release
+# free the blocks of every drop and compose event popped since the last release
 #
 # window_poll calls this for the window's queue, so no event loop has to. it
 # is public only because the window module lives outside this one. events still
@@ -262,19 +286,18 @@ pub fun queue_pop(q: *EventQueue) opt[Event] {
 pub fun queue_release(q: *EventQueue) {
     for (q.lent != nil) {
         val next: *DropBlock = q.lent.next;
-        drop_free(q.lent);
+        block_free(q.lent);
         q.lent = next;
     }
 }
 
-# discard every queued event, and free every drop path the queue holds
+# discard every queued event, and free every block the queue holds
 # ---
 # q: queue to empty
 pub fun queue_clear(q: *EventQueue) {
     var i: usize = 0;
     for (i < q.len) {
-        val e: Event = q.events[(q.head + i) % CAPACITY];
-        if (sel e.drop) { drop_free(e.drop.block); }
+        block_free(event_block(q.events[(q.head + i) % CAPACITY]));
         i = i + 1;
     }
     queue_release(q);
@@ -318,8 +341,42 @@ pub fun drop_new(count: usize, paths: **u8) res[DropEvent, allo.Error] {
     ret res[DropEvent, allo.Error].ok{DropEvent{count: count, paths: table, block: got.ok::*DropBlock}};
 }
 
-# free a drop block
-fun drop_free(b: *DropBlock) {
+# copy a platform composition into one owned block
+#
+# an empty composition owns nothing, and its caret is 0.
+# ---
+# count:      codepoints in the composition, 0 when it ended
+# codepoints: count codepoints, read only for the call
+# caret:      the caret as a codepoint index, clamped to count
+# ret:        the event, whose block the queue owns once it is pushed, or the refusal
+pub fun compose_new(count: usize, codepoints: *u32, caret: usize) res[ComposeEvent, allo.Error] {
+    if (count == 0 || codepoints == nil) {
+        ret res[ComposeEvent, allo.Error].ok{ComposeEvent{count: 0, codepoints: nil, caret: 0, block: nil}};
+    }
+    var a: allo.Allocator;
+    page.make(?a);
+    val head: usize                = $size_of(DropBlock);
+    val size: usize                = head + count * $size_of(u32);
+    val got:  res[ptr, allo.Error] = allo.allocate_raw(?a, size, $align_of(DropBlock));
+    if (sel got.err) { ret res[ComposeEvent, allo.Error].err{got.err}; }
+    @(got.ok::*DropBlock) = DropBlock{next: nil, size: size};
+    val cps: *u32 = (got.ok::usize + head)::*u32;
+    memory.raw_copy(cps::ptr, codepoints::ptr, count * $size_of(u32));
+    var at: usize = caret;
+    if (at > count) { at = count; }
+    ret res[ComposeEvent, allo.Error].ok{ComposeEvent{count: count, codepoints: cps, caret: at, block: got.ok::*DropBlock}};
+}
+
+# the block an event owns, nil for an event that owns none
+fun event_block(e: Event) *DropBlock {
+    if (sel e.drop)    { ret e.drop.block; }
+    if (sel e.compose) { ret e.compose.block; }
+    ret nil;
+}
+
+# free an event's block, nil for none
+fun block_free(b: *DropBlock) {
+    if (b == nil) { ret; }
     var a: allo.Allocator;
     page.make(?a);
     allo.deallocate_raw(?a, b::ptr, b.size, $align_of(DropBlock));
@@ -399,5 +456,33 @@ test queue_push__wraps_ring {
     if (queue_len(?q) != 256) { ret 4; }
     # the first remaining event is still the oldest undrained one
     if (popped_key(?q) != 200) { ret 5; }
+    ret 0;
+}
+
+test compose_new__copies_and_lends {
+    var src:  [3]u32                        = [3]u32{0x304B, 0x306A, 'x'};
+    val made: res[ComposeEvent, allo.Error] = compose_new(3, ?src[0], 9);
+    if (sel made.err) { ret 1; }
+    src[0] = 0;
+    var q: EventQueue = queue_new();
+    if (!pushed(?q, Event.compose{made.ok})) { ret 2; }
+    val e: opt[Event] = queue_pop(?q);
+    if (!sel e.some)         { ret 3; }
+    if (!sel e.some.compose) { ret 3; }
+    val c: ComposeEvent = e.some.compose;
+    # the copy is the queue's, and the caret is clamped to the composition
+    if (c.count != 3 || c.caret != 3)                        { ret 4; }
+    if (c.codepoints[0] != 0x304B || c.codepoints[2] != 'x') { ret 5; }
+    if (q.lent != c.block)                                   { ret 6; }
+    queue_release(?q);
+    if (q.lent != nil) { ret 7; }
+
+    # an ended composition owns nothing
+    val ended: res[ComposeEvent, allo.Error] = compose_new(0, nil, 4);
+    if (sel ended.err)                                { ret 8; }
+    if (ended.ok.block != nil || ended.ok.caret != 0) { ret 9; }
+    if (!pushed(?q, Event.compose{ended.ok}))         { ret 10; }
+    val none: opt[Event] = queue_pop(?q);
+    if (!sel none.some || q.lent != nil) { ret 11; }
     ret 0;
 }

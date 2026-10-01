@@ -13,6 +13,7 @@
 # the back door, which is what this engine otherwise avoids everywhere.
 
 use boom.event.ButtonEvent;
+use boom.event.ComposeEvent;
 use boom.event.DropEvent;
 use boom.event.Event;
 use boom.event.EventQueue;
@@ -24,6 +25,7 @@ use boom.event.QueueError;
 use boom.event.ResizeEvent;
 use boom.event.ScrollEvent;
 use boom.event.TextEvent;
+use boom.event.compose_new;
 use boom.event.drop_new;
 use boom.event.queue_clear;
 use boom.event.queue_is_empty;
@@ -167,6 +169,8 @@ pub rec WindowBounds {
 # renderers:          how many renderers hold a surface on this window
 # shape:              the pointer shape last set, CURSOR_ARROW at open
 # shape_shown:        whether the platform shows shape rather than the arrow
+# text_input:         whether the window was last put in a text input
+#                     context, none while the platform default applies
 pub rec Window {
     handle:             opt[glfw.Window];
     width:              i32;
@@ -180,6 +184,7 @@ pub rec Window {
     renderers:          usize;
     shape:              CursorShape;
     shape_shown:        bool;
+    text_input:         opt[bool];
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
@@ -213,6 +218,24 @@ fun on_char(handle: ptr, codepoint: u32) {
 fun deliver_text(s: *Sink, codepoint: u32) {
     if (s == nil) { ret; }
     offer(s.queue, Event.text{TextEvent{codepoint: codepoint}});
+}
+
+fun on_preedit(handle: ptr, count: i32, codepoints: *u32,
+    blocks: i32, block_sizes: *i32, focused_block: i32, caret: i32) {
+    deliver_compose(sink_of(glfw.window_from_handle(handle)), count, codepoints, caret);
+}
+
+# the composition is queue-only and copied before the callback returns. its
+# attributed blocks are not carried: the caret is what a text field shows
+fun deliver_compose(s: *Sink, count: i32, codepoints: *u32, caret: i32) {
+    if (s == nil) { ret; }
+    var n:  usize = 0;
+    var at: usize = 0;
+    if (count > 0) { n = count::usize; }
+    if (caret > 0) { at = caret::usize; }
+    val built: res[ComposeEvent, allo.Error] = compose_new(n, codepoints, at);
+    if (sel built.err) { ret; }
+    offer(s.queue, Event.compose{built.ok});
 }
 
 fun on_drop(handle: ptr, count: i32, paths: **u8) {
@@ -438,6 +461,9 @@ pub fun window_open(width: i32, height: i32, title: str) res[Window, WindowError
 # ret:    opened Window sized in framebuffer pixels, or why it could not open
 pub fun window_open_mode(width: i32, height: i32, title: str,
     mode: WindowMode) res[Window, WindowError] {
+    # x11 reports the IME's composition only on the spot. over the spot, the
+    # input method draws it itself and no compose event ever arrives
+    glfw.init_hint(glfw.X11_ONTHESPOT, glfw.TRUE);
     val started: err[glfw.Error] = glfw.init();
     if (sel started.err) {
         ret res[Window, WindowError].err{WindowError.init{started.err}};
@@ -507,6 +533,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     glfw.set_key_callback(win, on_key);
     glfw.set_char_callback(win, on_char);
     glfw.set_drop_callback(win, on_drop);
+    glfw.set_preedit_callback(win, on_preedit);
     glfw.set_mouse_button_callback(win, on_mouse_button);
     glfw.set_cursor_pos_callback(win, on_cursor_pos);
     glfw.set_cursor_enter_callback(win, on_cursor_enter);
@@ -517,9 +544,10 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     var fh: i32 = height;
     glfw.get_framebuffer_size(win, ?fw, ?fh);
     ret res[Window, WindowError].ok{Window{
-        handle:    opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
-        monitor:   monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width: 1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true
+        handle:     opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
+        monitor:    monitor, windowed: restore, windowed_maximized: restore_maximized,
+        min_width:  1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true,
+        text_input: opt[bool].none{}
     }};
 }
 
@@ -803,6 +831,64 @@ pub fun window_clipboard_get(a: *allo.Allocator, w: *Window) res[str, allo.Error
 pub fun window_clipboard_set(w: *Window, contents: str) {
     if (!sel w.handle.some) { ret; }
     glfw.set_clipboard_string(contents);
+}
+
+# enter or leave a text input context, such as a focused text field
+#
+# the IME composes only inside one: leaving it ends any composition in
+# progress. a window never told keeps the platform's default, and a call that
+# repeats the current state does nothing.
+# ---
+# w:  window to change; a closed window is left alone
+# on: true while a text field takes text, false once none does
+pub fun window_set_text_input(w: *Window, on: bool) {
+    if (!sel w.handle.some)                               { ret; }
+    if (sel w.text_input.some && w.text_input.some == on) { ret; }
+    glfw.set_text_input_focus(w.handle.some, on);
+    w.text_input = opt[bool].some{on};
+}
+
+# place the IME's candidate window against a rect, normally the caret of the
+# text field taking text
+#
+# x11 places it only while composing over the spot, which boom does not use,
+# so there the input method places it on its own.
+# ---
+# w:      window to change; a closed window is left alone
+# x:      left edge in framebuffer pixels
+# y:      top edge in framebuffer pixels
+# width:  width in framebuffer pixels
+# height: height in framebuffer pixels
+pub fun window_set_ime_rect(w: *Window, x: f64, y: f64, width: f64, height: f64) {
+    if (!sel w.handle.some) { ret; }
+    val handle: glfw.Window = w.handle.some;
+    var ww:     i32         = 0;
+    var wh:     i32         = 0;
+    var fw:     i32         = 0;
+    var fh:     i32         = 0;
+    glfw.get_window_size(handle, ?ww, ?wh);
+    glfw.get_framebuffer_size(handle, ?fw, ?fh);
+    var x0: i32 = 0;
+    var y0: i32 = 0;
+    var x1: i32 = 0;
+    var y1: i32 = 0;
+    window_span(x, x + width, ww, fw, ?x0, ?x1);
+    window_span(y, y + height, wh, fh, ?y0, ?y1);
+    glfw.set_preedit_cursor_rectangle(handle, x0, y0, x1 - x0, y1 - y0);
+}
+
+# a span of framebuffer pixels in window coordinates, widened outward to whole
+# coordinates
+fun window_span(lo: f64, hi: f64, window: i32, framebuffer: i32, out_lo: *i32, out_hi: *i32) {
+    val s: f64 = cursor_scale(window, framebuffer);
+    @out_lo = floor_i32(lo / s);
+    @out_hi = -floor_i32(-(hi / s));
+}
+
+fun floor_i32(v: f64) i32 {
+    val t: i32 = v::i32;
+    if (t::f64 > v) { ret t - 1; }
+    ret t;
 }
 
 # route this window's input into a queue
@@ -1532,6 +1618,44 @@ test cursor_pixels__follows_framebuffer_scale {
 
     cursor_pixels(100.5, 50.0, 800, 600, 1200, 900, ?x, ?y);
     if (x != 150.75 || y != 75.0) { ret 3; }
+    ret 0;
+}
+
+test window_span__framebuffer_pixels_to_window {
+    var lo: i32 = 0;
+    var hi: i32 = 0;
+    window_span(10.0, 30.5, 800, 800, ?lo, ?hi);
+    if (lo != 10 || hi != 31) { ret 1; }
+    # at 2x a pixel rect halves, widened outward to whole coordinates
+    window_span(101.0, 141.0, 800, 1600, ?lo, ?hi);
+    if (lo != 50 || hi != 71) { ret 2; }
+    window_span(-3.0, 3.0, 800, 1200, ?lo, ?hi);
+    if (lo != -2 || hi != 2) { ret 3; }
+    ret 0;
+}
+
+test deliver_compose__copied_into_the_queue {
+    var q:     EventQueue = queue_new();
+    var input: inp.Input  = inp.input_new();
+    var sink:  Sink       = Sink{queue: ?q, input: ?input, cursor_x: 0.0, cursor_y: 0.0, cursor_known: false};
+    var cps:   [2]u32     = [2]u32{0x304B, 0x3093};
+
+    deliver_compose(?sink, 2, ?cps[0], 1);
+    cps[0] = 0;
+    deliver_compose(?sink, 0, nil, 0);
+    deliver_compose(nil, 2, ?cps[0], 1);
+
+    val c: opt[Event] = queue_pop(?q);
+    if (!sel c.some)                                            { ret 1; }
+    if (!sel c.some.compose)                                    { ret 1; }
+    if (c.some.compose.count != 2 || c.some.compose.caret != 1) { ret 2; }
+    if (c.some.compose.codepoints[0] != 0x304B)                 { ret 3; }
+    val ended: opt[Event] = queue_pop(?q);
+    if (!sel ended.some)               { ret 4; }
+    if (!sel ended.some.compose)       { ret 4; }
+    if (ended.some.compose.count != 0) { ret 5; }
+    if (!queue_is_empty(?q))           { ret 6; }
+    queue_clear(?q);
     ret 0;
 }
 
