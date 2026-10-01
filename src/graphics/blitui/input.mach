@@ -329,7 +329,7 @@ pub fun blit_input_serve(bi: *BlitInput, ui: *bctx.Context, ctx: *Context) err[a
         win.window_set_ime_rect(?ctx.window, r.x0::f64, r.y0::f64, (r.x1 - r.x0)::f64, (r.y1 - r.y0)::f64);
     }
     win.window_set_text_input(?ctx.window, sel ime.some);
-    context_wake(ctx, wake_of(bctx.next_frame(ui)));
+    schedule(ui, ctx);
     # the frame that carried the last paste is over
     val dropped: err[allo.Error] = drop_paste(bi);
     if (sel dropped.err)       { ret dropped; }
@@ -338,6 +338,11 @@ pub fun blit_input_serve(bi: *BlitInput, ui: *bctx.Context, ctx: *Context) err[a
     if (sel got.err) { ret err[allo.Error].err{got.err}; }
     bi.paste = got.ok;
     ret err[allo.Error].ok{};
+}
+
+# ask the loop for the next frame when blit's finished frame wants one
+fun schedule(ui: *bctx.Context, ctx: *Context) {
+    context_wake(ctx, wake_of(bctx.next_frame(ui)));
 }
 
 # the loop's wake for blit's next_frame, whose times are the context clock's seconds
@@ -431,6 +436,8 @@ fun cursor_shape(shape: u8) win.CursorShape {
     ret win.CURSOR_ARROW;
 }
 
+use bfield: blit.field;
+use bw:     blit.widget;
 use boom.event.ButtonEvent;
 use boom.event.KeyAction;
 use boom.event.KeyEvent;
@@ -535,6 +542,47 @@ test blit_input_event__composes_utf8 {
     if (bi.composed != nil) { ret 7; }
     val freed: err[allo.Error] = blit_input_delete(?bi);
     if (sel freed.err) { ret 8; }
+    ret 0;
+}
+
+test schedule__an_idle_interface_asks_for_no_frame {
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret 1; }
+    var ui: bctx.Context;
+    val ie: err[allo.Error] = bctx.init(?ui, ?a);
+    if (sel ie.err) { ret 1; }
+    var ctx: Context;
+    ctx.input = inp.input_new();
+    var bi:    BlitInput = blit_input(?a, ?ctx);
+    var buf:   [32]u8;
+    var name:  bfield.Field;
+    var on:    u8        = 0;
+    var level: f32       = 0.5;
+    var frame: usize     = 0;
+    bfield.init(?name, ?buf[0], 32, 0, nil);
+    # a first frame may measure and ask for another, so give it a few to settle
+    for (frame < 4) {
+        blit_input_begin(?bi, frame::f64 * 0.1);
+        bctx.begin(?ui, bi.input, 640.0, 480.0);
+        val b: bw.Block = bw.begin_panel(?ui, 8.0, 8.0, 200.0);
+        bw.text(?ui, "idle");
+        bw.checkbox(?ui, "on", ?on);
+        bw.slider_f(?ui, "level", ?level, 0.0, 1.0);
+        bw.text_field(?ui, "name", ?name, "a name");
+        bw.end_panel(?ui, b);
+        bctx.end(?ui);
+        ctx.wake = opt[Wake].none{};
+        schedule(?ui, ?ctx);
+        frame = frame + 1;
+    }
+    # nothing moved and nothing is pending, so the loop sleeps until input
+    if (!sel ctx.wake.some)       { ret 2; }
+    if (!sel ctx.wake.some.input) { ret 3; }
+    val freed: err[allo.Error] = blit_input_delete(?bi);
+    if (sel freed.err) { ret 4; }
+    val gone: err[allo.Error] = bctx.free(?ui);
+    if (sel gone.err) { ret 4; }
     ret 0;
 }
 

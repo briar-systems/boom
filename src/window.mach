@@ -188,6 +188,7 @@ pub rec Window {
 }
 
 fun on_key(handle: ptr, key: i32, scancode: i32, action: i32, mods: i32) {
+    delivered = true;
     val s: *Sink = sink_of(glfw.window_from_handle(handle));
     deliver_key(s, key, action, mods);
 }
@@ -211,6 +212,7 @@ fun deliver_key(s: *Sink, key: i32, action: i32, mods: i32) {
 }
 
 fun on_char(handle: ptr, codepoint: u32) {
+    delivered = true;
     deliver_text(sink_of(glfw.window_from_handle(handle)), codepoint);
 }
 
@@ -222,6 +224,7 @@ fun deliver_text(s: *Sink, codepoint: u32) {
 
 fun on_preedit(handle: ptr, count: i32, codepoints: *u32,
     blocks: i32, block_sizes: *i32, focused_block: i32, caret: i32) {
+    delivered = true;
     deliver_compose(sink_of(glfw.window_from_handle(handle)), count, codepoints, caret);
 }
 
@@ -239,6 +242,7 @@ fun deliver_compose(s: *Sink, count: i32, codepoints: *u32, caret: i32) {
 }
 
 fun on_drop(handle: ptr, count: i32, paths: **u8) {
+    delivered = true;
     deliver_drop(sink_of(glfw.window_from_handle(handle)), count, paths);
 }
 
@@ -252,6 +256,7 @@ fun deliver_drop(s: *Sink, count: i32, paths: **u8) {
 }
 
 fun on_mouse_button(handle: ptr, button: i32, action: i32, mods: i32) {
+    delivered = true;
     deliver_button(sink_of(glfw.window_from_handle(handle)), button, action, mods);
 }
 
@@ -266,6 +271,7 @@ fun deliver_button(s: *Sink, button: i32, action: i32, mods: i32) {
 }
 
 fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
+    delivered = true;
     val w:  glfw.Window = glfw.window_from_handle(handle);
     var ww: i32         = 0;
     var wh: i32         = 0;
@@ -277,6 +283,7 @@ fun on_cursor_pos(handle: ptr, x: f64, y: f64) {
 }
 
 fun on_cursor_enter(handle: ptr, entered: i32) {
+    delivered = true;
     deliver_pointer(sink_of(glfw.window_from_handle(handle)), entered != 0);
 }
 
@@ -288,6 +295,7 @@ fun deliver_pointer(s: *Sink, inside: bool) {
 }
 
 fun on_scroll(handle: ptr, dx: f64, dy: f64) {
+    delivered = true;
     val s: *Sink = sink_of(glfw.window_from_handle(handle));
     if (s == nil) { ret; }
     inp.input_scroll_event(s.input, dx, dy);
@@ -295,12 +303,23 @@ fun on_scroll(handle: ptr, dx: f64, dy: f64) {
 }
 
 fun on_framebuffer_size(handle: ptr, width: i32, height: i32) {
+    delivered = true;
     deliver_resize(sink_of(glfw.window_from_handle(handle)), width, height);
 }
 
 fun deliver_resize(s: *Sink, width: i32, height: i32) {
     if (s == nil) { ret; }
     offer(s.queue, Event.resize{ResizeEvent{width: width, height: height}});
+}
+
+# a close request reaches the loop through window_should_close, and a
+# window whose contents were lost through the frame it wakes
+fun on_close(handle: ptr) {
+    delivered = true;
+}
+
+fun on_refresh(handle: ptr) {
+    delivered = true;
 }
 
 # queue an event from a platform callback
@@ -539,6 +558,8 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     glfw.set_cursor_enter_callback(win, on_cursor_enter);
     glfw.set_scroll_callback(win, on_scroll);
     glfw.set_framebuffer_size_callback(win, on_framebuffer_size);
+    glfw.set_window_close_callback(win, on_close);
+    glfw.set_window_refresh_callback(win, on_refresh);
 
     var fw: i32 = width;
     var fh: i32 = height;
@@ -960,6 +981,11 @@ rec Registered {
     queue:  *EventQueue;
 }
 
+# whether a callback ran since the last wait began. a platform wakes the wait
+# for events that reach no callback, such as a presented frame's buffer coming
+# back, and the wait sleeps on through those
+var delivered: bool = false;
+
 # every window with a sink installed, packed in the first registry_len slots.
 # glfwPollEvents services every window, so the poll releases every one of their
 # queues, not one. it grows on demand from the page allocator
@@ -1021,15 +1047,19 @@ pub fun window_poll() {
 # process platform events as window_poll does, sleeping until at least one
 # arrives
 #
-# for an app with nothing to draw until input. gamepads deliver no events, so
-# they do not wake it.
+# for an app with nothing to draw until input. an event is input, a resize, a
+# close request or a window asking to be redrawn. the platform also wakes for
+# events no callback sees, such as a presented frame's buffer coming back, and
+# the wait sleeps on through those, as it does through glfw's empty event.
+# gamepads deliver no events, so they do not wake it.
 pub fun window_wait() {
     poll_release();
-    glfw.wait_events();
+    delivered = false;
+    for (!delivered) { glfw.wait_events(); }
 }
 
 # process platform events as window_poll does, sleeping until one arrives or
-# the timeout passes
+# the timeout passes, through the same wakes window_wait sleeps through
 # ---
 # seconds: longest time to sleep; zero or less polls without sleeping
 pub fun window_wait_timeout(seconds: f64) {
@@ -1038,7 +1068,14 @@ pub fun window_wait_timeout(seconds: f64) {
         glfw.poll_events();
         ret;
     }
-    glfw.wait_events_timeout(seconds);
+    delivered = false;
+    val until: f64 = glfw.get_time() + seconds;
+    var left:  f64 = seconds;
+    for (left > 0.0) {
+        glfw.wait_events_timeout(left);
+        if (delivered) { ret; }
+        left = until - glfw.get_time();
+    }
 }
 
 fun poll_release() {

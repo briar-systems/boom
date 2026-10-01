@@ -143,4 +143,4 @@ version = "^0.4"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-ref = "commit/5f1799014b021d1b85fbe2fc4aa50d933adacc3c"
+ref = "commit/aa0c77e31ce8949526bbdb12e0cb52827b0a8130"
