@@ -91,6 +91,7 @@ use boom.graphics.compute.batch_plan;
 use boom.graphics.compute.readback_ready;
 use boom.graphics.compute.storage_barrier;
 use boom.graphics.compute.storage_bindings_valid;
+use boom.graphics.compute.storage_buffer_alloc;
 use boom.graphics.compute.storage_fits;
 use boom.graphics.compute.storage_sets_begin_frame;
 use boom.graphics.compute.storage_sets_dnit;
@@ -4049,9 +4050,10 @@ fun region_set(r: err[Error]) bool {
 
 # ------------------------------------------------------------------ compute
 #
-# A dispatch, a buffer update and a readback are recorded between passes, in
-# the order the game calls them, into the same command buffer as the draws. See
-# boom.graphics.compute for why that ordering is all a game has to get right.
+# A dispatch, a buffer's creation or update and a readback are recorded between
+# passes, in the order the game calls them, into the same command buffer as the
+# draws. See boom.graphics.compute for why that ordering is all a game has to
+# get right.
 
 # whether compute or a buffer transfer may be recorded now
 fun between_passes(r: *Renderer) err[Error] {
@@ -4152,6 +4154,33 @@ fun dispatch_valid(l: *Limits, buffers: **StorageBuffer, count: usize, args: *St
     if (args == nil)   { ret err[Error].ok{}; }
     if (!args.ready)   { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
     ret storage_words(args.buffer.size::usize, offset, DISPATCH_ARGS_BYTES);
+}
+
+# Create a storage buffer of size bytes, zero-filled as part of the frame.
+#
+# The fill is recorded here, behind a barrier, so everything recorded after it
+# in the frame sees the zeroes: an update seeding part of it, a dispatch writing
+# it, a draw or a readback. Nothing waits, so a game that grows its state while
+# frames are in flight makes the larger buffers here and uses them at once;
+# storage_buffer is the same buffer made outside a frame, at the cost of
+# draining the queue. Delete it with storage_buffer_delete as any other.
+# ---
+# r:    the renderer, with a frame open and no pass open
+# size: bytes, a whole number of four-byte words
+# ret:  the buffer, or why it could not be made, in which case nothing was
+#       recorded
+pub fun renderer_storage_buffer(r: *Renderer, size: usize) res[StorageBuffer, Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err) { ret res[StorageBuffer, Error].err{open.err}; }
+    val made: res[StorageBuffer, Error] = storage_buffer_alloc(renderer_device(r), size);
+    if (sel made.err) { ret made; }
+
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    vk.vkCmdFillBuffer(cmd, made.ok.buffer.handle, 0, vk.WHOLE_SIZE, 0);
+    barrier(r, cmd, 0, 0);
+    outside_end(r, resume);
+    ret made;
 }
 
 # The most bytes one vkCmdUpdateBuffer carries.
@@ -4504,6 +4533,9 @@ test compute__refused_outside_frame_and_inside_pass {
     r.passes  = 0;
     val closed: err[Error] = between_passes(?r);
     if (!(sel closed.err && (sel closed.err.renderer && sel closed.err.renderer.no_frame))) { ret 1; }
+    # a buffer made outside a frame would have no command buffer to fill it
+    val unmade: res[StorageBuffer, Error] = renderer_storage_buffer(?r, 16);
+    if (!(sel unmade.err && (sel unmade.err.renderer && sel unmade.err.renderer.no_frame))) { ret 4; }
     r.drawing = true;
     r.passes  = 1;
     val inside: err[Error] = between_passes(?r);
