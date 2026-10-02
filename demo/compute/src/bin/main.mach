@@ -16,7 +16,9 @@
 # after both a cell seeded with i holds 4i + 4, and the host reads the pool back
 # and says so. The draw goes into an offscreen target read back afterwards: a
 # cell holding 2k + 1 covers a quarter of grid square k, so the red pixel count
-# is right only if every value reached the vertex stage.
+# is right only if every value reached the vertex stage. GPU timers bracket the
+# first dispatch and the draw, and their durations are taken once the frame has
+# finished.
 #
 # CI runs it under lavapipe:
 #
@@ -30,6 +32,7 @@ use boom.window.window_close;
 use boom.window.window_error_message;
 use boom.window.window_open;
 use boom.window.window_poll;
+use std.chrono.duration.Duration;
 use p: std.print;
 use std.runtime;
 use std.types.bool.bool;
@@ -92,6 +95,12 @@ fun make(d: *gfx.Device, size: usize, out: *gfx.StorageBuffer) bool {
     }
     @out = made.ok;
     ret true;
+}
+
+# a timer's duration, or -1 when none was handed back
+fun took(o: opt[Duration]) Duration {
+    if (sel o.some) { ret o.some; }
+    ret -1;
 }
 
 fun params_for(generation: u32) [4]u32 {
@@ -163,8 +172,24 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
     var target: gfx.RenderTarget = tr.ok;
-    var mat:    gfx.Material     = gfx.material();
-    var xf:     gm.Transform     = gm.transform_identity();
+
+    # a device whose queue writes no timestamps says so, and refuses a timer
+    var timed:     bool = lim.timestamp_valid_bits != 0;
+    var step_time: gfx.GpuTimer;
+    var draw_time: gfx.GpuTimer;
+    if (timed) {
+        if (fail("renderer_timer", gfx.renderer_timer(?r, ?step_time))) { ret 1; }
+        if (fail("renderer_timer", gfx.renderer_timer(?r, ?draw_time))) { ret 1; }
+    }
+    or {
+        val none: err[gfx.Error] = gfx.renderer_timer(?r, ?step_time);
+        if (!(sel none.err && (sel none.err.renderer && sel none.err.renderer.no_timestamps))) {
+            p.println("FAIL renderer_timer: a device without timestamps did not refuse");
+            ret 1;
+        }
+    }
+    var mat: gfx.Material = gfx.material();
+    var xf:  gm.Transform = gm.transform_identity();
 
     # generation 1: a direct dispatch from a to b, its flags read back, and the
     # cells drawn from b by the arguments it wrote
@@ -193,7 +218,17 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
 
+    if (timed) {
+        # an end with no begin in the frame is refused
+        val early: err[gfx.Error] = gfx.renderer_timer_end(?r, ?step_time);
+        if (!(sel early.err && (sel early.err.renderer && sel early.err.renderer.timer_range))) {
+            p.println("FAIL renderer_timer_end: an end without a begin was not refused");
+            ret 1;
+        }
+        if (fail("renderer_timer_begin", gfx.renderer_timer_begin(?r, ?step_time))) { ret 1; }
+    }
     if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?first[0], 5, GROUPS, 1, 1))) { ret 1; }
+    if (timed && fail("renderer_timer_end", gfx.renderer_timer_end(?r, ?step_time)))             { ret 1; }
     if (fail("renderer_readback", gfx.renderer_readback(?r, ?flags, ?control, FLAGS_AT)))        { ret 1; }
 
     var desc: gfx.PassDesc = gfx.pass_overlay();
@@ -207,7 +242,9 @@ fun main(argc: i64, argv: **u8) i64 {
     drawn[2] = ?control;
     drawn[3] = ?params;
     drawn[4] = ?rule;
+    if (timed && fail("pass_timer_begin", gfx.pass_timer_begin(?pass, ?draw_time))) { ret 1; }
     gfx.pass_draw_storage_indirect(?pass, ?drawn[0], 5, ?control, DRAW_AT, ?mat, ?xf, ?cells);
+    if (timed && fail("pass_timer_end", gfx.pass_timer_end(?pass, ?draw_time))) { ret 1; }
     gfx.pass_end(?pass);
     val dropped: usize = gfx.renderer_dropped(?r);
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
@@ -257,6 +294,28 @@ fun main(argc: i64, argv: **u8) i64 {
         ok = false;
     }
     or { p.println("ok   every workgroup's flag came back without a stall"); }
+
+    if (timed) {
+        val stepped: Duration      = took(gfx.renderer_timer_take(?r, ?step_time));
+        val drew:    Duration      = took(gfx.renderer_timer_take(?r, ?draw_time));
+        val again:   opt[Duration] = gfx.renderer_timer_take(?r, ?step_time);
+        if (stepped < 0 || drew < 0) {
+            p.println("FAIL renderer_timer_take: a finished frame's range was not handed back");
+            ok = false;
+        }
+        or (stepped == 0) {
+            p.println("FAIL renderer_timer_take: the dispatch took no time");
+            ok = false;
+        }
+        or (sel again.some) {
+            p.println("FAIL renderer_timer_take: one range was handed back twice");
+            ok = false;
+        }
+        or { p.printlnf("ok   the dispatch took {} ns and the draw {} ns on the GPU", stepped, drew); }
+        gfx.renderer_timer_delete(?r, ?draw_time);
+        gfx.renderer_timer_delete(?r, ?step_time);
+    }
+    or { p.println("ok   the device writes no timestamps, and a timer was refused"); }
 
     var px: [16384]u8;
     if (fail("render_target_read", gfx.render_target_read(d, ?target, ?px[0], BYTES))) { ret 1; }
