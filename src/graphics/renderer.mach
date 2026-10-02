@@ -4335,7 +4335,7 @@ test storage_bindings__dispatch_and_draw_at_minimum {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l:   Limits = limits_from(?src);
+    var l:   Limits = limits_from(?src, 0);
     var buf: StorageBuffer;
     buf.ready = true;
     var list: [4]*StorageBuffer;

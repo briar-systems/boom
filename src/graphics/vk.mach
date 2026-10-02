@@ -390,7 +390,7 @@ fun pick_physical(v: *Vk) err[Error] {
                 var props: vk.PhysicalDeviceProperties;
                 vk.vkGetPhysicalDeviceProperties(d, ?props);
                 v.physical        = d;
-                v.limits          = limits_from(?props.limits);
+                v.limits          = limits_from(?props.limits, f.timestamp_bits);
                 v.graphics_family = f.graphics.some;
                 v.present_family  = f.present.some;
                 ret err[Error].ok{};
@@ -403,11 +403,13 @@ fun pick_physical(v: *Vk) err[Error] {
 
 # the queue families a device offers for drawing and for presenting
 # ---
-# graphics: the first family that can both draw and compute, if any
-# present:  the first family that can present to the surface, if any
+# graphics:       the first family that can both draw and compute, if any
+# present:        the first family that can present to the surface, if any
+# timestamp_bits: the graphics family's timestampValidBits, zero without one
 rec Families {
-    graphics: opt[u32];
-    present:  opt[u32];
+    graphics:       opt[u32];
+    present:        opt[u32];
+    timestamp_bits: u32;
 }
 
 # Resolve a graphics-capable and a present-capable family on a device.
@@ -415,7 +417,7 @@ rec Families {
 # They are resolved independently because they are not required to be the same
 # family, even though on most hardware they are.
 fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
-    var f: Families = Families{graphics: opt[u32].none{}, present: opt[u32].none{}};
+    var f: Families = Families{graphics: opt[u32].none{}, present: opt[u32].none{}, timestamp_bits: 0};
 
     var count: u32 = 0;
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?count, nil);
@@ -435,8 +437,9 @@ fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
         # its results are ordered by one command buffer and its barriers. a
         # device with graphics always has such a family.
         if (!have_graphics && (props[i].queueFlags & want) == want) {
-            f.graphics    = opt[u32].some{i};
-            have_graphics = true;
+            f.graphics       = opt[u32].some{i};
+            f.timestamp_bits = props[i].timestampValidBits;
+            have_graphics    = true;
         }
         if (!have_present) {
             var supported: u32 = 0;

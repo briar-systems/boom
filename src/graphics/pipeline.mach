@@ -1084,7 +1084,7 @@ test storage_set_bindings__each_stage_within_minimum {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l:        Limits = limits_from(?src);
+    var l:        Limits = limits_from(?src, 0);
     var bindings: [MAX_STORAGE_BINDINGS]vk.DescriptorSetLayoutBinding;
     val n:        usize  = storage_set_bindings(?l, ?bindings[0]);
     if (n != 4) { ret 1; }
