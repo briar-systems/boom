@@ -64,6 +64,7 @@ pub tag VkCall: u8 {
     create_pipeline_layout;
     create_graphics_pipelines;
     create_compute_pipelines;
+    create_query_pool;
 }
 
 # a Vulkan call that returned a failing VkResult
@@ -133,6 +134,8 @@ pub tag Stage: u8 {
 # mesh_uploads:    the runtime mesh upload queue
 # retired_meshes:  no longer produced: deleted objects wait on a queue that grows
 # glyph_pages:     a face's glyph atlas pages
+# storage_sets:    the per-frame descriptor sets that bind storage buffers
+# timers:          the renderer's GPU timers, MAX_TIMERS
 pub tag Capacity: u8 {
     pipelines;
     descriptor_sets;
@@ -143,6 +146,7 @@ pub tag Capacity: u8 {
     retired_meshes;
     glyph_pages;
     storage_sets;
+    timers;
 }
 
 # why a buffer operation was refused
@@ -229,7 +233,11 @@ pub tag TargetError: u8 {
 # user_block:      a game uniform block empty or larger than USER_BYTES; carries its length
 # no_frame:        an operation that needs an open frame outside one
 # window_readback: the window's images cannot be copied from on this surface
-# pass_open:       compute or a buffer transfer recorded while a pass is open
+# pass_open:       compute, a buffer transfer or a renderer timer recorded while
+#                  a pass is open
+# no_timestamps:   a GPU timer on a device whose queue writes no timestamps
+# timer_range:     a timer begun twice in one frame, or ended without being
+#                  begun in it
 pub tag RendererError: u8 {
     no_mesh_upload;
     region;
@@ -237,6 +245,8 @@ pub tag RendererError: u8 {
     no_frame;
     window_readback;
     pass_open;
+    no_timestamps;
+    timer_range;
 }
 
 # a graphics failure
@@ -378,6 +388,7 @@ fun vk_call_message(call: VkCall) str {
     if (sel call.allocate_descriptor_sets)     { ret "vkAllocateDescriptorSets failed"; }
     if (sel call.create_pipeline_layout)       { ret "vkCreatePipelineLayout failed"; }
     if (sel call.create_compute_pipelines)     { ret "vkCreateComputePipelines failed"; }
+    if (sel call.create_query_pool)            { ret "vkCreateQueryPool failed"; }
     ret "vkCreateGraphicsPipelines failed";
 }
 
@@ -419,6 +430,7 @@ fun capacity_message(e: Capacity) str {
     if (sel e.retired_meshes) { ret "too many meshes are waiting to be released"; }
     if (sel e.glyph_pages)    { ret "the glyph atlas is full"; }
     if (sel e.storage_sets)   { ret "the frame's storage binding sets are exhausted"; }
+    if (sel e.timers)         { ret "every GPU timer is taken"; }
     ret "the descriptor slot ring is full";
 }
 
@@ -467,6 +479,8 @@ fun renderer_message(e: RendererError) str {
     if (sel e.region)         { ret "the pass region lies outside the pass"; }
     if (sel e.user_block)     { ret "the uniform block is empty or larger than a slot's user region"; }
     if (sel e.no_frame)       { ret "no frame is open"; }
-    if (sel e.pass_open)      { ret "compute and buffer transfers are recorded between passes"; }
+    if (sel e.pass_open)      { ret "compute, buffer transfers and renderer timers are recorded between passes"; }
+    if (sel e.no_timestamps)  { ret "this device's queue cannot write timestamps (see renderer_limits)"; }
+    if (sel e.timer_range)    { ret "a timer is begun once and then ended once in a frame"; }
     ret "the surface does not offer TRANSFER_SRC, so the window cannot be read back";
 }

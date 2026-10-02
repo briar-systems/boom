@@ -290,6 +290,19 @@ fwd boom.graphics.renderer.renderer_culled;
 # A full stall of the graphics pipeline, for tooling that coordinates several
 # readbacks or measures what the GPU did. See render_target_read.
 fwd boom.graphics.renderer.renderer_wait_idle;
+# GPU timers: how long a range of recorded work took on the GPU, read back a
+# few frames later without a stall. renderer_limits' timestamp_valid_bits is
+# zero on a device whose queue cannot write timestamps, and renderer_timer
+# refuses there. See boom.graphics.timer.
+fwd boom.graphics.timer.MAX_TIMERS;
+fwd boom.graphics.timer.GpuTimer;
+fwd boom.graphics.renderer.renderer_timer;
+fwd boom.graphics.renderer.renderer_timer_delete;
+fwd boom.graphics.renderer.renderer_timer_begin;
+fwd boom.graphics.renderer.renderer_timer_end;
+fwd boom.graphics.renderer.pass_timer_begin;
+fwd boom.graphics.renderer.pass_timer_end;
+fwd boom.graphics.renderer.renderer_timer_take;
 # Reading the window itself, for tooling that checks what a frame put on
 # screen. The copy is taken from the frame being ended, since a presented image
 # is the presentation engine's; a surface may not offer it at all. See
