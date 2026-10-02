@@ -80,12 +80,14 @@ use boom.graphics.camera.camera_view;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.camera2d.camera2d_visible;
+use boom.graphics.compute.BufferWrite;
 use boom.graphics.compute.Compute;
 use boom.graphics.compute.DISPATCH_ARGS_BYTES;
 use boom.graphics.compute.DRAW_ARGS_BYTES;
 use boom.graphics.compute.Readback;
 use boom.graphics.compute.StorageBuffer;
 use boom.graphics.compute.StorageSets;
+use boom.graphics.compute.batch_plan;
 use boom.graphics.compute.readback_ready;
 use boom.graphics.compute.storage_barrier;
 use boom.graphics.compute.storage_bindings_valid;
@@ -125,8 +127,8 @@ use boom.graphics.error.ShaderError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.frame.FrameBegin;
 use boom.graphics.frame.FrameLoop;
-use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
 use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
 use boom.graphics.frame.frame_begin_pass;
@@ -155,13 +157,14 @@ use boom.graphics.material.material_add_texture_filtered;
 use boom.graphics.material.material_texture;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_bounds_of;
+use boom.graphics.mesh.mesh_delete;
 use boom.graphics.mesh.mesh_draw;
-use boom.graphics.mesh.mesh_release_retired;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_one;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.STORAGE_SET;
 use boom.graphics.pipeline.pipeline_bind_scissored;
+use boom.graphics.retire.retire_pending;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_pipeline;
 use boom.graphics.skeleton.MAX_JOINTS;
@@ -170,6 +173,14 @@ use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.graphics.sprite.rect_overlaps;
+use boom.graphics.staging.FrameStaging;
+use boom.graphics.staging.staging_begin_frame;
+use boom.graphics.staging.staging_buffer;
+use boom.graphics.staging.staging_dnit;
+use boom.graphics.staging.staging_init;
+use boom.graphics.staging.staging_mapped;
+use boom.graphics.staging.staging_regions;
+use boom.graphics.staging.staging_take;
 use boom.graphics.storage.FrameStorage;
 use boom.graphics.storage.storage_begin_frame;
 use boom.graphics.storage.storage_buffer;
@@ -214,6 +225,16 @@ use boom.graphics.tilemap.tilemap_all;
 use boom.graphics.tilemap.tilemap_done;
 use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.tilemap.tilemap_span;
+use boom.graphics.timer.GpuTimer;
+use boom.graphics.timer.Timers;
+use boom.graphics.timer.timer_create;
+use boom.graphics.timer.timer_delete;
+use boom.graphics.timer.timer_take;
+use boom.graphics.timer.timer_write_begin;
+use boom.graphics.timer.timer_write_end;
+use boom.graphics.timer.timers_begin_frame;
+use boom.graphics.timer.timers_dnit;
+use boom.graphics.timer.timers_init;
 use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
@@ -251,6 +272,8 @@ use boom.math.vec.vec3;
 use boom.math.vec.vec4;
 use boom.window.Window;
 use glfw;
+use allo: std.allocator;
+use std.chrono.duration.Duration;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -261,13 +284,7 @@ use std.types.result.res;
 use std.types.size.usize;
 use vk;
 
-pub val MAX_RETIRED_MESHES:       usize = 1024;
 pub val MAX_PENDING_MESH_UPLOADS: usize = 1024;
-
-rec RetiredMeshes {
-    meshes: [1024]Mesh;
-    count:  usize;
-}
 
 rec PendingMeshUpload {
     vertex_staging: Buffer;
@@ -289,6 +306,7 @@ rec PendingMeshUpload {
 # white:       a 1x1 opaque white texture, bound when a draw has no texture of
 #              its own, since every fragment stage samples
 # store:       the frame's storage buffer, the bulk data a game's own shading reads
+# staging:     the per-frame staging a batch of buffer writes is copied through
 # sets:        the per-frame descriptor sets binding a game's storage buffers
 # width:       the target width in pixels
 # height:      the target height in pixels
@@ -301,13 +319,13 @@ rec PendingMeshUpload {
 #              counted separately so the two are told apart
 # culled:      draws skipped this frame because they were outside the view
 # draws:       draw calls recorded this frame, after batching
+# barriers:    storage barriers recorded this frame, two per dispatch, update,
+#              batch and readback
 # srgb:        whether the surface encodes sRGB on write; false means the colour
 #              pipeline is missing its final encode and output is dark
 # present:     the present mode that was asked for, which the surface may not have
 #              honoured; the one in use lives on the swapchain
 # passes:      passes begun and not yet ended, which compute may not interleave with
-# serial:      frames begun since the renderer came up
-# completed:   the newest frame the GPU is known to have finished
 # Readiness flags record which owned stages are live for partial unwind.
 pub rec Renderer {
     window:          glfw.Window;
@@ -323,8 +341,9 @@ pub rec Renderer {
     white:           Texture;
     stream:          VertexStream;
     store:           FrameStorage;
+    staging:         FrameStaging;
     sets:            StorageSets;
-    retired:         [2]RetiredMeshes;
+    timers:          Timers;
     uploads:         [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
     upload_count:    usize;
     upload_reserved: usize;
@@ -337,11 +356,10 @@ pub rec Renderer {
     refused:         usize;
     culled:          usize;
     draws:           usize;
+    barriers:        usize;
     srgb:            bool;
     present:         PresentMode;
     passes:          usize;
-    serial:          u64;
-    completed:       u64;
     ready_vk:        bool;
     ready_dev:       bool;
     ready_swap:      bool;
@@ -354,6 +372,7 @@ pub rec Renderer {
     ready_stream:    bool;
     ready_store:     bool;
     ready_sets:      bool;
+    ready_timers:    bool;
 }
 
 # initialize a renderer against a window
@@ -388,26 +407,20 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     if (sel window.handle.none) { ret err[Error].err{Error.uninitialized{Stage.window{}}}; }
     val width:  i32 = window.width;
     val height: i32 = window.height;
-    r.window      = window.handle.some;
-    r.width       = width;
-    r.height      = height;
-    r.drawing     = false;
-    r.frame_index = 0;
-    var retire_frame: usize = 0;
-    for (retire_frame < 2) {
-        r.retired[retire_frame].count = 0;
-        retire_frame                  = retire_frame + 1;
-    }
+    r.window          = window.handle.some;
+    r.width           = width;
+    r.height          = height;
+    r.drawing         = false;
+    r.frame_index     = 0;
     r.upload_count    = 0;
     r.upload_reserved = 0;
     r.dropped         = 0;
     r.refused         = 0;
     r.culled          = 0;
     r.draws           = 0;
+    r.barriers        = 0;
     r.present         = present;
     r.passes          = 0;
-    r.serial          = 0;
-    r.completed       = 0;
     r.ready_vk        = false;
     r.ready_dev       = false;
     r.ready_swap      = false;
@@ -420,6 +433,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.ready_stream    = false;
     r.ready_store     = false;
     r.ready_sets      = false;
+    staging_init(?r.staging);
 
     val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
@@ -544,6 +558,14 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
         ret sets_r;
     }
     r.ready_sets = true;
+
+    # The timestamp pool GPU timers write into, when the queue writes them.
+    val tim_r: err[Error] = timers_init(?r.timers, ?r.vk);
+    if (sel tim_r.err) {
+        renderer_rollback(r);
+        ret tim_r;
+    }
+    r.ready_timers = true;
 
     ret err[Error].ok{};
 }
@@ -1050,7 +1072,7 @@ fun renderer_rebuild(r: *Renderer, width: i32, height: i32,
         ret err[Error].ok{};
     }
 
-    vk.vkDeviceWaitIdle(r.vk.device);
+    vk_wait_idle(?r.vk);
     frame_release_targets(?r.frame, ?r.vk);
     val sr: err[Error] = swapchain_rebuild(?r.swap, ?r.vk, width::u32, height::u32, r.present);
     if (sel sr.err) { ret sr; }
@@ -1165,16 +1187,20 @@ pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
 #
 # waits for the frame's fence, acquires a swapchain image, begins the
 # render pass, and resets the uniform ring. false when the swapchain was out
-# of date and was rebuilt, or the window is minimized, in which case the caller
-# should skip drawing and try again next frame; that is a resize, not an error.
+# of date and was rebuilt, the window is minimized, or the frame's fence timed
+# out, in which case the caller should skip drawing and try again next frame;
+# none of those is an error. A timed-out slot is left untouched, so its rings,
+# staging and timer queries are not rewound while the GPU may still use them,
+# and a lost device is an error instead.
 # ---
 # r:   renderer to begin on
 # ret: whether a frame was opened, or the failure that prevented one
 pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
-    r.dropped = 0;
-    r.refused = 0;
-    r.culled  = 0;
-    r.draws   = 0;
+    r.dropped  = 0;
+    r.refused  = 0;
+    r.culled   = 0;
+    r.draws    = 0;
+    r.barriers = 0;
     collect_mesh_uploads(r);
 
     # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
@@ -1205,17 +1231,18 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
         if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
     }
 
-    val br: res[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap);
-    if (sel br.err) { ret br; }
+    val br: res[FrameBegin, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap);
+    if (sel br.err) { ret res[bool, Error].err{br.err}; }
 
-    if (!br.ok) {
+    # A slot whose fence timed out is not reused, so nothing below runs for it.
+    if (sel br.ok.busy) { ret res[bool, Error].ok{false}; }
+    if (sel br.ok.stale) {
         val rr: err[Error] = renderer_rebuild(r, fw, fh, true);
         if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
         ret res[bool, Error].ok{false};
     }
 
     r.frame_index = r.frame.current;
-    release_retired_meshes(r, r.frame_index);
     # The frame's fence has been waited on, so every slot this frame owns is
     # free again. Without this the ring runs out after MAX_SLOTS total draws
     # rather than MAX_SLOTS per frame.
@@ -1228,12 +1255,11 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
     # the write mark is rewound, so a frame that needed room for forty lights
     # does not allocate for them again.
     storage_begin_frame(?r.store, r.frame_index);
+    staging_begin_frame(?r.staging, r.frame_index);
     storage_sets_begin_frame(?r.sets, ?r.vk, r.frame_index);
-    # The fence just waited on retired the frame that last used this one's
-    # command buffer, and the queue retires frames in order, so every frame up
-    # to that one is finished. That is what makes a readback's bytes safe.
-    r.serial = r.serial + 1;
-    if (r.serial > MAX_FRAMES_IN_FLIGHT::u64) { r.completed = r.serial - MAX_FRAMES_IN_FLIGHT::u64; }
+    # Timers read what this slot's last frame measured before its queries are
+    # reset, and the reset is recorded here because no pass is open yet.
+    timers_begin_frame(?r.timers, ?r.vk, frame_command(r), r.frame_index, r.vk.retire.completed);
     r.passes  = 0;
     r.drawing = true;
     ret res[bool, Error].ok{true};
@@ -1283,11 +1309,6 @@ pub fun renderer_end_frame(r: *Renderer) err[Error] {
 # r: the renderer to drain
 pub fun renderer_wait_idle(r: *Renderer) {
     vk_wait_idle(?r.vk);
-    # every frame submitted has retired; the open one was never submitted
-    if (r.drawing) {
-        if (r.serial > 0) { r.completed = r.serial - 1; }
-    }
-    or { r.completed = r.serial; }
 }
 
 # read the window back: arm a copy of this frame's image into out
@@ -1344,43 +1365,24 @@ pub fun renderer_window_bgra(r: *Renderer) bool {
         || r.swap.format == vk.FORMAT_B8G8R8A8_UNORM;
 }
 
-# retire a mesh when this frame's fence next proves its last use complete
+# release a mesh once every frame that may draw it has finished
 #
-# refused, leaving the mesh as it was, when the renderer never came up or too
-# many meshes already wait on this frame's fence.
+# The same release as mesh_delete, which no longer waits either: both queue the
+# mesh's buffers on the device's frame clock. Kept for callers written against
+# it, and refused only when the renderer never came up.
 pub fun renderer_retire_mesh(r: *Renderer, m: *Mesh) err[Error] {
     if (!r.ready_dev) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
-    val frame: usize = r.frame_index;
-    val count: usize = r.retired[frame].count;
-    if (count >= MAX_RETIRED_MESHES) { ret err[Error].err{Error.full{Capacity.retired_meshes{}}}; }
-    r.retired[frame].meshes[count] = @m;
-    r.retired[frame].count         = count + 1;
-    # ownership passes to the renderer, which releases it on the fence
-    if (r.vk.live.meshes > 0) { r.vk.live.meshes = r.vk.live.meshes - 1; }
-    m.vertices.handle = nil;
-    m.vertices.memory = nil;
-    m.vertices.size   = 0;
-    m.vertices.mapped = nil;
-    m.indices.handle  = nil;
-    m.indices.memory  = nil;
-    m.indices.size    = 0;
-    m.indices.mapped  = nil;
-    m.index_count     = 0;
+    mesh_delete(?r.dev, m);
     ret err[Error].ok{};
 }
 
+# device objects deleted and still waiting for a frame that may use them
+#
+# Every kind, not only meshes: a mesh is two buffers and their memory. Zero
+# once the frames in flight at the last delete have all finished.
 pub fun renderer_retired_meshes(r: *Renderer) usize {
-    ret r.retired[0].count + r.retired[1].count;
-}
-
-fun release_retired_meshes(r: *Renderer, frame: usize) {
-    if (r == nil || !r.ready_dev || frame >= 2) { ret; }
-    var i: usize = 0;
-    for (i < r.retired[frame].count) {
-        mesh_release_retired(?r.dev, ?r.retired[frame].meshes[i]);
-        i = i + 1;
-    }
-    r.retired[frame].count = 0;
+    if (!r.ready_vk) { ret 0; }
+    ret retire_pending(?r.vk.retire);
 }
 
 # how many draws were refused this frame
@@ -1430,6 +1432,16 @@ pub fun renderer_draws(r: *Renderer) usize {
     ret r.draws;
 }
 
+# Storage barriers recorded in the most recent frame.
+#
+# Two for every dispatch, buffer update, batch and readback. A count that tracks
+# how many regions a frame writes rather than how many calls it makes means the
+# writes are not batched: renderer_buffer_update_batch puts one pair around all
+# of them.
+pub fun renderer_barriers(r: *Renderer) usize {
+    ret r.barriers;
+}
+
 # Draws skipped in the most recent frame for being outside the view.
 #
 # The number that says whether culling is doing anything. Zero in a large scene
@@ -1444,11 +1456,11 @@ pub fun renderer_culled(r: *Renderer) usize {
 #
 # REFUSED WHILE THE GAME STILL HOLDS A RESOURCE. Every texture, mesh, model,
 # font, target and shader is created against this renderer's device and its
-# delete waits on that device, so after this they would wait on nothing and
-# free against nothing. The device counts what the game holds by kind, and the
-# refusal carries those counts, leaving the renderer as it was. The window is
-# closed after this, never before: it counts the renderers holding a surface
-# on it and refuses the same way.
+# delete queues it on that device's frames, so after this it would queue on
+# nothing and free against nothing. The device counts what the game holds by
+# kind, and the refusal carries those counts, leaving the renderer as it was.
+# The window is closed after this, never before: it counts the renderers
+# holding a surface on it and refuses the same way.
 # ---
 # r:   renderer to shut down; must not be used after a successful return
 # ret: ok, or in_use with what the game still holds
@@ -1467,7 +1479,7 @@ fun renderer_rollback(r: *Renderer) {
     if (r == nil) { ret; }
 
     # A live device may still be reading any of the later stages.
-    if (r.ready_dev) { vk.vkDeviceWaitIdle(r.vk.device); }
+    if (r.ready_dev) { vk_wait_idle(?r.vk); }
 
     if (r.ready_dev) {
         for (r.upload_count > 0) {
@@ -1477,10 +1489,13 @@ fun renderer_rollback(r: *Renderer) {
         # Staging still held by an open reservation dies with the device; the
         # budget it charged has to die with it.
         r.upload_reserved = 0;
-        release_retired_meshes(r, 0);
-        release_retired_meshes(r, 1);
     }
 
+    if (r.ready_timers) {
+        timers_dnit(?r.timers, ?r.vk);
+        r.ready_timers = false;
+    }
+    if (r.ready_dev) { staging_dnit(?r.staging, ?r.vk); }
     if (r.ready_sets) {
         storage_sets_dnit(?r.sets, ?r.vk);
         r.ready_sets = false;
@@ -1621,14 +1636,19 @@ test renderer__window_readback_follows_swapchain {
 
 test renderer_retire_mesh__moves_live_count {
     var r: Renderer;
-    r.ready_dev      = true;
-    r.frame_index    = 0;
+    r.ready_dev      = false;
     r.vk.live.meshes = 1;
-    var m:       Mesh;
+    var m: Mesh;
+    m.vertices.handle = nil;
+    m.indices.handle  = nil;
+    val refused: err[Error] = renderer_retire_mesh(?r, ?m);
+    if (!sel refused.err)      { ret 1; }
+    if (r.vk.live.meshes != 1) { ret 2; }
+    r.ready_dev = true;
+    r.dev.vk    = ?r.vk;
     val retired: err[Error] = renderer_retire_mesh(?r, ?m);
-    if (!sel retired.ok)                  { ret 1; }
-    if (r.vk.live.meshes != 0)            { ret 2; }
-    if (renderer_retired_meshes(?r) != 1) { ret 3; }
+    if (!sel retired.ok)       { ret 3; }
+    if (r.vk.live.meshes != 0) { ret 4; }
     ret 0;
 }
 
@@ -4058,6 +4078,12 @@ fun frame_command(r: *Renderer) vk.CommandBuffer {
     ret r.frame.frames[r.frame_index].command;
 }
 
+# record storage_barrier and count it
+fun barrier(r: *Renderer, cmd: vk.CommandBuffer, extra_stage: u32, extra_access: u32) {
+    storage_barrier(cmd, extra_stage, extra_access);
+    r.barriers = r.barriers + 1;
+}
+
 # Dispatch a compute stage over x by y by z workgroups.
 #
 # The buffers are bound at STORAGE_SET, the one at index n at binding n. What
@@ -4108,12 +4134,12 @@ fun dispatch(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
     var set:    vk.DescriptorSet = taken.some;
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
     vk.vkCmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.layout, STORAGE_SET, 1, ?set, 0, nil);
     if (args != nil) { vk.vkCmdDispatchIndirect(cmd, args.buffer.handle, offset::u64); }
     or               { vk.vkCmdDispatch(cmd, x, y, z); }
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     outside_end(r, resume);
     ret err[Error].ok{};
 }
@@ -4137,7 +4163,8 @@ val UPDATE_CHUNK: usize = 65536;
 # block written here before a dispatch is what that dispatch reads, and one
 # written after it is not. The bytes are copied into the command buffer as this
 # returns, so src may be reused at once. For a frame's small writes, a step's
-# parameters or a cleared flag list; seeding a large buffer is
+# parameters or a cleared flag list; many regions in one frame is
+# renderer_buffer_update_batch, and seeding a large buffer is
 # storage_buffer_upload.
 # ---
 # r:      the renderer, with a frame open and no pass open
@@ -4154,7 +4181,7 @@ pub fun renderer_buffer_update(r: *Renderer, b: *StorageBuffer, offset: usize, s
 
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     var done: usize = 0;
     for (done < len) {
         var n: usize = len - done;
@@ -4162,7 +4189,65 @@ pub fun renderer_buffer_update(r: *Renderer, b: *StorageBuffer, offset: usize, s
         vk.vkCmdUpdateBuffer(cmd, b.buffer.handle, (offset + done)::u64, n::u64, (?src[done]):~ptr);
         done = done + n;
     }
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
+    outside_end(r, resume);
+    ret err[Error].ok{};
+}
+
+# Write many regions of a storage buffer as part of the frame, with one barrier
+# pair around all of them.
+#
+# Ordered against the dispatches and draws around it exactly as one
+# renderer_buffer_update is: everything recorded before the batch is finished
+# with the buffer before any write lands, and everything recorded after it sees
+# every write. renderer_buffer_update puts a barrier pair around each call, so a
+# frame writing a thousand regions that way records two thousand barriers.
+#
+# The bytes are copied into the frame's staging memory as this returns, so the
+# sources may be reused at once, and one copy carries every region. For a frame's
+# bulk writes, a world's changed chunks; a single small write is
+# renderer_buffer_update, whose bytes ride in the command buffer.
+#
+# Refused whole, with nothing recorded, when any write is refused or two writes
+# cover the same bytes. No writes is nothing to record and not refused.
+# ---
+# r:      the renderer, with a frame open and no pass open
+# b:      the buffer
+# writes: the regions and their bytes, in any order
+# count:  how many
+pub fun renderer_buffer_update_batch(r: *Renderer, b: *StorageBuffer, writes: *BufferWrite,
+    count: usize) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err)         { ret open; }
+    if (b == nil || !b.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    if (count == 0)           { ret err[Error].ok{}; }
+    if (writes == nil)        { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+
+    val scratch: res[*vk.BufferCopy, allo.Error] = staging_regions(?r.staging, count);
+    if (sel scratch.err) { ret err[Error].err{Error.alloc{scratch.err}}; }
+    val regions: *vk.BufferCopy    = scratch.ok;
+    val planned: res[usize, Error] = batch_plan(b.buffer.size::usize, writes, count, regions);
+    if (sel planned.err) { ret err[Error].err{planned.err}; }
+    val taken: res[usize, Error] = staging_take(?r.staging, ?r.vk, r.frame_index, planned.ok);
+    if (sel taken.err) { ret err[Error].err{taken.err}; }
+
+    # the regions carry offsets into the batch's own bytes, which land at base
+    val base: usize = taken.ok;
+    val dst:  *u8   = staging_mapped(?r.staging, r.frame_index);
+    var at:   usize = base;
+    var i:    usize = 0;
+    for (i < count) {
+        mem.raw_copy((?dst[at])::ptr, writes[i].src::ptr, writes[i].len);
+        regions[i].srcOffset = regions[i].srcOffset + base::u64;
+        at                   = at + writes[i].len;
+        i                    = i + 1;
+    }
+
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    barrier(r, cmd, 0, 0);
+    vk.vkCmdCopyBuffer(cmd, staging_buffer(?r.staging, r.frame_index), b.buffer.handle, count::u32, regions);
+    barrier(r, cmd, 0, 0);
     outside_end(r, resume);
     ret err[Error].ok{};
 }
@@ -4188,16 +4273,16 @@ pub fun renderer_readback(r: *Renderer, rb: *Readback, b: *StorageBuffer, offset
     val slot:   usize            = r.frame_index;
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     var region: vk.BufferCopy;
     region.srcOffset = offset::u64;
     region.dstOffset = 0;
     region.size      = rb.len::u64;
     vk.vkCmdCopyBuffer(cmd, b.buffer.handle, rb.slots[slot].handle, 1, ?region);
     # the host reads it once the fence says the frame is done
-    storage_barrier(cmd, vk.PIPELINE_STAGE_HOST_BIT, vk.ACCESS_HOST_READ_BIT);
+    barrier(r, cmd, vk.PIPELINE_STAGE_HOST_BIT, vk.ACCESS_HOST_READ_BIT);
     outside_end(r, resume);
-    rb.serial[slot] = r.serial;
+    rb.serial[slot] = r.vk.retire.latest;
     ret err[Error].ok{};
 }
 
@@ -4214,7 +4299,7 @@ pub fun renderer_readback(r: *Renderer, rb: *Readback, b: *StorageBuffer, offset
 # ret: whether out now holds a newer copy
 pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize) bool {
     if (rb == nil || !rb.ready || out == nil || len < rb.len) { ret false; }
-    val ready: opt[usize] = readback_ready(rb, r.completed);
+    val ready: opt[usize] = readback_ready(rb, r.vk.retire.completed);
     if (sel ready.none) { ret false; }
     val mapped: res[ptr, Error] = buffer_map(?rb.slots[ready.some], ?r.vk);
     if (sel mapped.err) { ret false; }
@@ -4223,6 +4308,82 @@ pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize
     mem.raw_copy(out::ptr, mapped.ok, rb.len);
     rb.taken = rb.serial[ready.some];
     ret true;
+}
+
+# ------------------------------------------------------------------- timers
+#
+# A GpuTimer measures how long a range of recorded work took on the GPU: begin
+# it before the work, end it after, and take the duration a few frames later.
+# Between passes the range is renderer_timer_begin and renderer_timer_end, and
+# inside a pass pass_timer_begin and pass_timer_end; a range may start in one
+# and end in the other. See boom.graphics.timer.
+
+# Take a GPU timer.
+#
+# ret: ok, or no_timestamps when renderer_limits' timestamp_valid_bits is zero,
+#      or full timers when MAX_TIMERS are already held
+pub fun renderer_timer(r: *Renderer, t: *GpuTimer) err[Error] {
+    if (!r.ready_timers) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
+    ret timer_create(?r.timers, t);
+}
+
+# Give a GPU timer back. A range a frame in flight still measures is dropped.
+pub fun renderer_timer_delete(r: *Renderer, t: *GpuTimer) {
+    if (!r.ready_timers) { ret; }
+    timer_delete(?r.timers, t);
+}
+
+# Begin a timer's range here, between passes.
+#
+# Once per frame, and ended in the same frame. A range around several
+# dispatches measures all of them and the barriers between.
+# ---
+# ret: ok, or no_frame, pass_open, or timer_range when it was already begun
+#      this frame
+pub fun renderer_timer_begin(r: *Renderer, t: *GpuTimer) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err) { ret open; }
+    ret timer_write_begin(?r.timers, t, frame_command(r), r.frame_index, r.vk.retire.latest);
+}
+
+# End a timer's range here, between passes.
+#
+# ret: ok, or no_frame, pass_open, or timer_range when it was not begun this
+#      frame
+pub fun renderer_timer_end(r: *Renderer, t: *GpuTimer) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err) { ret open; }
+    ret timer_write_end(?r.timers, t, frame_command(r), r.frame_index, r.vk.retire.latest);
+}
+
+# Begin a timer's range inside a pass, after every draw already issued to it.
+pub fun pass_timer_begin(p: *Pass, t: *GpuTimer) err[Error] {
+    val r: *Renderer = p.renderer;
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    # 2D geometry waits in the batcher, so it is recorded first or the range
+    # would not contain it
+    batch_flush(p);
+    ret timer_write_begin(?r.timers, t, p.cmd, r.frame_index, r.vk.retire.latest);
+}
+
+# End a timer's range inside a pass, after every draw already issued to it.
+pub fun pass_timer_end(p: *Pass, t: *GpuTimer) err[Error] {
+    val r: *Renderer = p.renderer;
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    batch_flush(p);
+    ret timer_write_end(?r.timers, t, p.cmd, r.frame_index, r.vk.retire.latest);
+}
+
+# The GPU time of the newest range that has finished and not been taken.
+#
+# None until the frame that recorded a range has finished, MAX_FRAMES_IN_FLIGHT
+# frames after it, and none again until a newer one has. A game that takes each
+# frame sees every range it records, a few frames late. Never waits.
+# ---
+# ret: the range's duration in nanoseconds, if a new one has landed
+pub fun renderer_timer_take(r: *Renderer, t: *GpuTimer) opt[Duration] {
+    if (!r.ready_timers) { ret opt[Duration].none{}; }
+    ret timer_take(?r.timers, ?r.vk, t, r.vk.retire.completed);
 }
 
 # Draw vertices by instances with a game's shader pulling its geometry from
@@ -4380,7 +4541,7 @@ test storage_bindings__dispatch_and_draw_at_minimum {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l:   Limits = limits_from(?src);
+    var l:   Limits = limits_from(?src, 0);
     var buf: StorageBuffer;
     buf.ready = true;
     var list: [4]*StorageBuffer;

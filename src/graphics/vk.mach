@@ -28,9 +28,19 @@ use boom.graphics.error.vk_failed;
 use boom.graphics.limits.Limits;
 use boom.graphics.limits.limits_from;
 use boom.graphics.live.Live;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
+use boom.graphics.retire.Retire;
+use boom.graphics.retire.doomed_destroy;
+use boom.graphics.retire.retire_collect;
+use boom.graphics.retire.retire_dnit;
+use boom.graphics.retire.retire_idle;
+use boom.graphics.retire.retire_init;
+use boom.graphics.retire.retire_push;
 use glfw;
 use gc: glfw.c;
 use glfw.vulkan.SurfaceError;
+use allo: std.allocator;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -89,6 +99,7 @@ fun requested_api_version() u32 {
 # present_queue:   Queue for presentation; may equal graphics_queue.
 # graphics_family: Family index behind graphics_queue.
 # present_family:  Family index behind present_queue.
+# retire:          The frame clock and the objects waiting on it; see retire.
 # ready:           Whether bring-up completed.
 pub rec Vk {
     instance:        vk.Instance;
@@ -103,6 +114,7 @@ pub rec Vk {
     color_format:    i32;
     color_space:     i32;
     live:            Live;
+    retire:          Retire;
     ready:           bool;
 }
 
@@ -112,7 +124,8 @@ pub rec Vk {
 # a window carrying a GL context cannot back a Vulkan surface.
 pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     v.ready = false;
-    v.live  = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0,
+    retire_init(?v.retire);
+    v.live = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0,
         buffers: 0, computes: 0, uis: 0};
 
     if (!glfw.vulkan_supported()) {
@@ -308,18 +321,41 @@ pub fun format_is_srgb(format: i32) bool {
 
 # Wait until the device has finished everything submitted to it.
 #
-# Destroying a Vulkan object that a submitted command buffer still references is
-# undefined behaviour, and the frame loop runs up to MAX_FRAMES_IN_FLIGHT frames
-# ahead, so a resource deleted "after the last draw" may still be in use. Every
-# public delete waits first.
-#
-# A conservative stall, not the eventual design. The right answer for a resource
-# freed mid-game is a deletion queue retired behind the frame fences, which frees
-# without stalling. This is correct today and costs nothing where deletion
-# happens: loading screens and shutdown.
+# A full stall, for the callers that need the GPU's results now: a blocking
+# read, a swapchain rebuild, a shutdown. Deletion does not come here; see
+# vk_release. Everything submitted has finished afterwards, so the frame clock
+# advances and the objects waiting on it are destroyed.
 pub fun vk_wait_idle(v: *Vk) {
     if (v == nil || !v.ready) { ret; }
     vk.vkDeviceWaitIdle(v.device);
+    retire_idle(?v.retire);
+    retire_collect(?v.retire, v.device);
+}
+
+# Release a device object, now or once every frame that may use it has
+# finished.
+#
+# Retired is what a public delete asks for: the object is queued behind the
+# newest frame begun and destroyed when the frame loop observes that frame's
+# fence, with no wait. Anything already due goes at once, so a delete with no
+# frame in flight frees immediately.
+#
+# A queue that cannot grow drains the device and destroys what is then due.
+# An object still referenced by the frame being recorded cannot be destroyed
+# even then, so it waits in the room that drain freed, or, with none, is
+# destroyed as every delete was before the queue existed.
+pub fun vk_release(v: *Vk, obj: Doomed, how: Release) {
+    if (sel how.now) {
+        doomed_destroy(v.device, obj);
+        ret;
+    }
+    val queued: err[allo.Error] = retire_push(?v.retire, obj);
+    if (sel queued.err) {
+        vk_wait_idle(v);
+        val again: err[allo.Error] = retire_push(?v.retire, obj);
+        if (sel again.err) { doomed_destroy(v.device, obj); }
+    }
+    retire_collect(?v.retire, v.device);
 }
 
 # Choose a physical device that can both draw and present to the surface.
@@ -354,7 +390,7 @@ fun pick_physical(v: *Vk) err[Error] {
                 var props: vk.PhysicalDeviceProperties;
                 vk.vkGetPhysicalDeviceProperties(d, ?props);
                 v.physical        = d;
-                v.limits          = limits_from(?props.limits);
+                v.limits          = limits_from(?props.limits, f.timestamp_bits);
                 v.graphics_family = f.graphics.some;
                 v.present_family  = f.present.some;
                 ret err[Error].ok{};
@@ -367,11 +403,13 @@ fun pick_physical(v: *Vk) err[Error] {
 
 # the queue families a device offers for drawing and for presenting
 # ---
-# graphics: the first family that can both draw and compute, if any
-# present:  the first family that can present to the surface, if any
+# graphics:       the first family that can both draw and compute, if any
+# present:        the first family that can present to the surface, if any
+# timestamp_bits: the graphics family's timestampValidBits, zero without one
 rec Families {
-    graphics: opt[u32];
-    present:  opt[u32];
+    graphics:       opt[u32];
+    present:        opt[u32];
+    timestamp_bits: u32;
 }
 
 # Resolve a graphics-capable and a present-capable family on a device.
@@ -379,7 +417,7 @@ rec Families {
 # They are resolved independently because they are not required to be the same
 # family, even though on most hardware they are.
 fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
-    var f: Families = Families{graphics: opt[u32].none{}, present: opt[u32].none{}};
+    var f: Families = Families{graphics: opt[u32].none{}, present: opt[u32].none{}, timestamp_bits: 0};
 
     var count: u32 = 0;
     vk.vkGetPhysicalDeviceQueueFamilyProperties(d, ?count, nil);
@@ -399,8 +437,9 @@ fun find_families(v: *Vk, d: vk.PhysicalDevice) Families {
         # its results are ordered by one command buffer and its barriers. a
         # device with graphics always has such a family.
         if (!have_graphics && (props[i].queueFlags & want) == want) {
-            f.graphics    = opt[u32].some{i};
-            have_graphics = true;
+            f.graphics       = opt[u32].some{i};
+            f.timestamp_bits = props[i].timestampValidBits;
+            have_graphics    = true;
         }
         if (!have_present) {
             var supported: u32 = 0;
@@ -552,6 +591,8 @@ pub fun enumerated(rc: i32) bool {
 # field order.
 pub fun vk_dnit(v: *Vk) {
     if (!v.ready) { ret; }
+    # whatever still waits on a frame goes before the device it belongs to
+    retire_dnit(?v.retire, v.device);
     vk.vkDestroyDevice(v.device, nil);
     vk.vkDestroySurfaceKHR(v.instance, v.surface, nil);
     vk.vkDestroyInstance(v.instance, nil);

@@ -1,0 +1,325 @@
+# GPU timers: how long a range of recorded work took on the GPU.
+#
+# A timer brackets work recorded in one frame with a timestamp before it and one
+# after it, and hands back the time between them once that frame has finished,
+# MAX_FRAMES_IN_FLIGHT frames later. Nothing waits: the duration is read on the
+# frame clock (see retire), the same way a readback's copy is.
+#
+# ONE QUERY POOL, OWNED BY THE RENDERER. Every timer is a pair of queries in
+# each frame slot's region of one timestamp pool. A query must be reset before
+# it is written again, and a reset cannot be recorded inside a render pass, so
+# the renderer resets the whole region of the slot a frame records into as the
+# frame begins, before any pass. That is what lets a timer begin or end inside a
+# pass as well as between passes, and it costs one command per frame.
+#
+# A RESULT IS READ BEFORE ITS QUERIES ARE RESET. The reset that opens a frame
+# would erase what the slot's previous frame measured, so whatever the clock
+# says has finished is read into the timer first. A game that takes less often
+# than every frame still gets the newest duration, never a stale or a missing
+# one.
+#
+# THE STAGE IS THE BOTTOM OF THE PIPE, AT BOTH ENDS. A timestamp is written once
+# every command before it has finished the named stage, so the first timestamp
+# marks the end of the work before the range and the second the end of the
+# range's own. A dispatch is fenced by storage barriers on both sides anyway, so
+# the range measures that dispatch and nothing that overlapped it.
+
+use boom.graphics.error.Capacity;
+use boom.graphics.error.Error;
+use boom.graphics.error.RendererError;
+use boom.graphics.error.Stage;
+use boom.graphics.error.VkCall;
+use boom.graphics.error.vk_failed;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.vk.Vk;
+use std.chrono.duration.Duration;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.size.usize;
+use vk;
+
+# The most timers one renderer holds at once.
+pub val MAX_TIMERS: usize = 64;
+
+# queries in one frame slot's region: a begin and an end per timer
+val SLOT_QUERIES: u32 = (MAX_TIMERS * 2)::u32;
+
+# A timer a game holds, naming its queries in the renderer's pool.
+# ---
+# index: the timer's place in the renderer's table
+# ready: whether it was created and not yet deleted
+pub rec GpuTimer {
+    index: usize;
+    ready: bool;
+}
+
+# One timer's progress through the frames.
+# ---
+# live:  whether a GpuTimer holds it
+# begun: the frame its begin timestamp was recorded in, zero when none is open
+# ended: per frame slot, the frame that recorded both timestamps there and has
+#        not been read, zero when none
+# done:  the frame of the newest duration read
+# ns:    that duration
+# taken: the frame of the newest duration handed back
+rec TimerState {
+    live:  bool;
+    begun: u64;
+    ended: [MAX_FRAMES_IN_FLIGHT]u64;
+    done:  u64;
+    ns:    Duration;
+    taken: u64;
+}
+
+# The renderer's timers and the pool they write into.
+# ---
+# pool:   MAX_FRAMES_IN_FLIGHT regions of SLOT_QUERIES, nil when the queue
+#         cannot write timestamps
+# bits:   the queue's timestampValidBits
+# period: nanoseconds per tick
+# states: the table GpuTimer indexes
+pub rec Timers {
+    pool:   vk.QueryPool;
+    bits:   u32;
+    period: f32;
+    states: [MAX_TIMERS]TimerState;
+}
+
+# Create the pool, when the device's queue can write timestamps.
+pub fun timers_init(t: *Timers, v: *Vk) err[Error] {
+    t.pool   = nil;
+    t.bits   = v.limits.timestamp_valid_bits;
+    t.period = v.limits.timestamp_period;
+    var i: usize = 0;
+    for (i < MAX_TIMERS) {
+        state_clear(?t.states[i]);
+        t.states[i].live = false;
+        i                = i + 1;
+    }
+    if (t.bits == 0) { ret err[Error].ok{}; }
+
+    var ci: vk.QueryPoolCreateInfo;
+    ci.sType              = vk.STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    ci.pNext              = nil;
+    ci.flags              = 0;
+    ci.queryType          = vk.QUERY_TYPE_TIMESTAMP;
+    ci.queryCount         = SLOT_QUERIES * MAX_FRAMES_IN_FLIGHT::u32;
+    ci.pipelineStatistics = 0;
+    val made: i32 = vk.vkCreateQueryPool(v.device, ?ci, nil, ?t.pool);
+    if (made != vk.SUCCESS) {
+        t.pool = nil;
+        ret err[Error].err{vk_failed(VkCall.create_query_pool{}, made)};
+    }
+    ret err[Error].ok{};
+}
+
+# Destroy the pool. The device must be idle.
+pub fun timers_dnit(t: *Timers, v: *Vk) {
+    if (t.pool != nil) { vk.vkDestroyQueryPool(v.device, t.pool, nil); }
+    t.pool = nil;
+}
+
+# Open a frame slot: read what its previous frame measured, then reset its
+# region. Recorded before any pass.
+# ---
+# cmd:       the frame's command buffer, just begun
+# slot:      the frame slot it belongs to
+# completed: the frame clock's completed serial
+pub fun timers_begin_frame(t: *Timers, v: *Vk, cmd: vk.CommandBuffer, slot: usize, completed: u64) {
+    if (t.pool == nil) { ret; }
+    var i: usize = 0;
+    for (i < MAX_TIMERS) {
+        if (t.states[i].live) {
+            harvest(t, v, i, slot, completed);
+            t.states[i].ended[slot] = 0;
+            t.states[i].begun       = 0;
+        }
+        i = i + 1;
+    }
+    vk.vkCmdResetQueryPool(cmd, t.pool, slot::u32 * SLOT_QUERIES, SLOT_QUERIES);
+}
+
+# Take a free timer.
+#
+# ret: ok, or no_timestamps when the queue cannot write them, or full timers
+pub fun timer_create(t: *Timers, out: *GpuTimer) err[Error] {
+    out.ready = false;
+    if (t.pool == nil) { ret err[Error].err{Error.renderer{RendererError.no_timestamps{}}}; }
+    var i: usize = 0;
+    for (i < MAX_TIMERS) {
+        if (!t.states[i].live) {
+            state_clear(?t.states[i]);
+            t.states[i].live = true;
+            out.index        = i;
+            out.ready        = true;
+            ret err[Error].ok{};
+        }
+        i = i + 1;
+    }
+    ret err[Error].err{Error.full{Capacity.timers{}}};
+}
+
+# Free a timer. Timestamps a frame in flight still writes for it land in queries
+# the slot's next frame resets.
+pub fun timer_delete(t: *Timers, g: *GpuTimer) {
+    if (g == nil || !g.ready || g.index >= MAX_TIMERS) { ret; }
+    t.states[g.index].live = false;
+    g.ready                = false;
+}
+
+# Record a timer's begin timestamp into the frame.
+# ---
+# serial: the frame being recorded
+pub fun timer_write_begin(t: *Timers, g: *GpuTimer, cmd: vk.CommandBuffer, slot: usize, serial: u64) err[Error] {
+    val held: err[Error] = timer_held(t, g);
+    if (sel held.err) { ret held; }
+    if (!state_open(?t.states[g.index], slot, serial)) {
+        ret err[Error].err{Error.renderer{RendererError.timer_range{}}};
+    }
+    vk.vkCmdWriteTimestamp(cmd, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT::i32, t.pool, query(g.index, slot));
+    ret err[Error].ok{};
+}
+
+# Record a timer's end timestamp into the frame.
+pub fun timer_write_end(t: *Timers, g: *GpuTimer, cmd: vk.CommandBuffer, slot: usize, serial: u64) err[Error] {
+    val held: err[Error] = timer_held(t, g);
+    if (sel held.err) { ret held; }
+    if (!state_close(?t.states[g.index], slot, serial)) {
+        ret err[Error].err{Error.renderer{RendererError.timer_range{}}};
+    }
+    vk.vkCmdWriteTimestamp(cmd, vk.PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT::i32, t.pool, query(g.index, slot) + 1);
+    ret err[Error].ok{};
+}
+
+# The newest duration measured and not yet handed back. Never waits.
+pub fun timer_take(t: *Timers, v: *Vk, g: *GpuTimer, completed: u64) opt[Duration] {
+    if (t.pool == nil || g == nil || !g.ready || g.index >= MAX_TIMERS) { ret opt[Duration].none{}; }
+    var slot: usize = 0;
+    for (slot < MAX_FRAMES_IN_FLIGHT) {
+        harvest(t, v, g.index, slot, completed);
+        slot = slot + 1;
+    }
+    val st: *TimerState = ?t.states[g.index];
+    if (st.done <= st.taken) { ret opt[Duration].none{}; }
+    st.taken = st.done;
+    ret opt[Duration].some{st.ns};
+}
+
+fun timer_held(t: *Timers, g: *GpuTimer) err[Error] {
+    if (g == nil || !g.ready || g.index >= MAX_TIMERS || !t.states[g.index].live || t.pool == nil) {
+        ret err[Error].err{Error.uninitialized{Stage.renderer{}}};
+    }
+    ret err[Error].ok{};
+}
+
+# the first of a timer's two queries in a slot's region
+fun query(index: usize, slot: usize) u32 {
+    ret slot::u32 * SLOT_QUERIES + index::u32 * 2;
+}
+
+# Read a slot's measurement into the timer once its frame has finished.
+#
+# A frame that never ran, abandoned before it was submitted, has queries that
+# are not available, and its measurement is dropped.
+fun harvest(t: *Timers, v: *Vk, index: usize, slot: usize, completed: u64) {
+    val st: *TimerState = ?t.states[index];
+    if (!state_due(st, slot, completed)) { ret; }
+    val serial: u64 = st.ended[slot];
+    st.ended[slot] = 0;
+    var ticks: [2]u64;
+    val got:   i32 = vk.vkGetQueryPoolResults(v.device, t.pool, query(index, slot), 2, 16,
+        (?ticks[0]):~ptr, 8, vk.QUERY_RESULT_64_BIT);
+    if (got != vk.SUCCESS) { ret; }
+    st.done = serial;
+    st.ns   = ticks_ns(ticks[0], ticks[1], t.bits, t.period);
+}
+
+fun state_clear(st: *TimerState) {
+    st.begun = 0;
+    st.done  = 0;
+    st.ns    = 0;
+    st.taken = 0;
+    var slot: usize = 0;
+    for (slot < MAX_FRAMES_IN_FLIGHT) {
+        st.ended[slot] = 0;
+        slot           = slot + 1;
+    }
+}
+
+# Whether a begin may be recorded in frame serial: once per frame, and not
+# after the frame's range has already ended, since the queries are not reset
+# between.
+fun state_open(st: *TimerState, slot: usize, serial: u64) bool {
+    if (st.begun == serial || st.ended[slot] == serial) { ret false; }
+    st.begun = serial;
+    ret true;
+}
+
+# Whether an end may be recorded in frame serial: only after a begin in it.
+fun state_close(st: *TimerState, slot: usize, serial: u64) bool {
+    if (st.begun != serial) { ret false; }
+    st.begun       = 0;
+    st.ended[slot] = serial;
+    ret true;
+}
+
+# whether a slot holds a range whose frame has finished and that is newer than
+# the last one read
+fun state_due(st: *TimerState, slot: usize, completed: u64) bool {
+    val s: u64 = st.ended[slot];
+    ret s != 0 && s <= completed && s > st.done;
+}
+
+# The nanoseconds between two timestamps, counting only the bits the queue
+# writes so a counter that wrapped between them still measures forward.
+fun ticks_ns(begin: u64, end: u64, bits: u32, period: f32) Duration {
+    var mask: u64 = 0xffffffffffffffff;
+    if (bits < 64) { mask = (1::u64 << bits::u64) - 1; }
+    val delta: u64 = (end - begin) & mask;
+    ret (delta::f64 * period::f64)::Duration;
+}
+
+# --------------------------------------------------------------------- tests
+#
+# Writing and reading the queries needs a device, which demo/compute exercises.
+# What is pure is when a range may open, close and be read, and the tick
+# arithmetic.
+
+test timer_state__one_range_per_frame_read_once_finished {
+    var st: TimerState;
+    state_clear(?st);
+
+    # frame 1 in slot 0: an end without a begin is refused
+    if (state_close(?st, 0, 1)) { ret 1; }
+    if (!state_open(?st, 0, 1)) { ret 2; }
+    # a second begin in the same frame would write an unreset query
+    if (state_open(?st, 0, 1))   { ret 3; }
+    if (!state_close(?st, 0, 1)) { ret 4; }
+    if (state_open(?st, 0, 1))   { ret 5; }
+    if (state_close(?st, 0, 1))  { ret 6; }
+
+    # frame 2 in slot 1, while frame 1 is still in flight
+    if (state_due(?st, 0, 0))    { ret 7; }
+    if (!state_open(?st, 1, 2))  { ret 8; }
+    if (!state_close(?st, 1, 2)) { ret 9; }
+
+    # frame 1 finishes: its range is due, frame 2's is not
+    if (!state_due(?st, 0, 1)) { ret 10; }
+    if (state_due(?st, 1, 1))  { ret 11; }
+    st.done = 1;
+    if (state_due(?st, 0, 1))  { ret 12; }
+    if (!state_due(?st, 1, 2)) { ret 13; }
+    ret 0;
+}
+
+test ticks_ns__period_and_wrap {
+    if (ticks_ns(100, 350, 64, 1.0) != 250) { ret 1; }
+    if (ticks_ns(100, 350, 64, 2.5) != 625) { ret 2; }
+    # a 36-bit counter that wrapped between the two
+    val top: u64 = (1::u64 << 36) - 10;
+    if (ticks_ns(top, 6, 36, 1.0) != 16) { ret 3; }
+    ret 0;
+}

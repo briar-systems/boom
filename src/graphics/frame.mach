@@ -27,6 +27,29 @@
 # `finished` is reused for image 2 while image 0's present still holds it. That
 # is a real race: the second wait may observe the first signal. Per image, the
 # acquire that returns the image is itself the proof its last present retired.
+#
+# EACH FENCE KNOWS WHICH FRAME IT COVERS. A frame takes the next serial of the
+# device's frame clock when it begins (see retire), and its slot records it.
+# Waiting on a slot's fence before reuse is therefore also the observation that
+# its frame, and every frame before it, has finished on the GPU, and the clock
+# is advanced there and then. That is the one point a frame is known finished,
+# and what runs there is the contract: the device's deletion queue is collected
+# straight after the wait, and anything else holding work until its frame is
+# done tags it with the clock's latest serial and acts once completed reaches
+# it, as a readback does. renderer_begin_frame resets the per-slot rings at the
+# same point, on the same proof.
+#
+# A FENCE THAT TIMES OUT IS NOT A PROOF, SO THE FRAME IS NOT BEGUN. The GPU may
+# still be reading the slot's command buffer, rings, staging and timer queries,
+# so none of them is reset, rewound or recorded into, and the fence is not
+# reset. frame_begin reports FrameBegin.busy, which renderer_begin_frame
+# returns as false, the same as any frame that did not open: the caller skips it
+# and calls again, and the next call waits on the same slot again. It is told
+# apart from a failure because a slow frame is not an error, and from a stale
+# swapchain because nothing is rebuilt for it. A device that is actually lost
+# fails the wait outright and is reported as an error, so a skip never hides it.
+# Every consumer of the proof runs after frame_begin reports begun, which is the
+# one place that decides, and a new per-slot resource follows it by doing so too.
 
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_dnit;
@@ -48,6 +71,10 @@ use boom.graphics.pass.PassOptions;
 use boom.graphics.pass.pass_clearing;
 use boom.graphics.pass.pass_create;
 use boom.graphics.pass.pass_loading;
+use boom.graphics.retire.retire_close;
+use boom.graphics.retire.retire_collect;
+use boom.graphics.retire.retire_open;
+use boom.graphics.retire.retire_through;
 use boom.graphics.swapchain.MAX_IMAGES;
 use boom.graphics.swapchain.Swapchain;
 use boom.graphics.vk.Vk;
@@ -68,6 +95,36 @@ pub val MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 # Nanoseconds to wait on a fence before treating the GPU as hung.
 val FENCE_TIMEOUT: u64 = 1000000000;
+
+# How a wait on a slot's fence ended.
+#
+# retired: the fence passed, so the GPU is done with the slot.
+# busy:    the wait timed out. Nothing is known, and the slot is not reused.
+# failed:  the wait failed, as a lost device does.
+pub tag FenceWait: u8 {
+    retired;
+    busy;
+    failed;
+}
+
+# How frame_begin ended when it did not fail.
+#
+# begun: the frame is open and recording.
+# stale: the swapchain is out of date, so the caller rebuilds it.
+# busy:  the slot's fence timed out, so the frame was not begun and nothing
+#        was rebuilt. The caller skips the frame and tries again.
+pub tag FrameBegin: u8 {
+    begun;
+    stale;
+    busy;
+}
+
+# Classify the result of waiting on a slot's fence.
+pub fun fence_wait(waited: i32) FenceWait {
+    if (waited == vk.SUCCESS) { ret FenceWait.retired{}; }
+    if (waited == vk.TIMEOUT) { ret FenceWait.busy{}; }
+    ret FenceWait.failed{};
+}
 
 # Where the window's render pass is in the frame being recorded.
 #
@@ -122,10 +179,12 @@ pub fun window_suspended(state: WindowPass) WindowPass {
 # command:   Command buffer recorded this frame.
 # available: Signalled when the acquired image is ready to render into.
 # in_flight: Signalled when this frame's command buffer is reusable.
+# serial:    The frame-clock serial in_flight covers, zero before any.
 rec Frame {
     command:   vk.CommandBuffer;
     available: vk.Semaphore;
     in_flight: vk.Fence;
+    serial:    u64;
 }
 
 # A window readback armed for the frame being recorded.
@@ -212,6 +271,7 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
         abi.commandPool        = f.pool;
         abi.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
         abi.commandBufferCount = 1;
+        f.frames[i].serial     = 0;
         val allocated: i32 = vk.vkAllocateCommandBuffers(v.device, ?abi, ?f.frames[i].command);
         if (allocated != vk.SUCCESS) {
             ret err[Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
@@ -338,37 +398,41 @@ fun make_framebuffers(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
 # begins it through frame_begin_pass, and frame_end begins and clears it to
 # black if nothing did, so a frame with no window pass still presents.
 #
-# False when the swapchain is out of date, which is not an error: the caller
+# stale when the swapchain is out of date, which is not an error: the caller
 # rebuilds and tries again next frame. Treating it as a failure would make every
-# window resize look like a crash.
-pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
-    if (!f.ready) { ret res[bool, Error].err{Error.uninitialized{Stage.frame{}}}; }
+# window resize look like a crash. busy when the slot's fence timed out: the slot
+# is left untouched and the caller skips the frame.
+pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[FrameBegin, Error] {
+    if (!f.ready) { ret res[FrameBegin, Error].err{Error.uninitialized{Stage.frame{}}}; }
 
     val i: usize = f.current;
 
     # Bounds the CPU's lead over the GPU. Without it frames queue without limit.
-    # A timeout proceeds as it always has; only a failure such as a lost device
-    # is reported.
-    val waited: i32 = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
-    if (waited < 0) {
-        ret res[bool, Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
+    # A timeout proves nothing, so the slot is not reused: the frame is not begun.
+    val waited:  i32       = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
+    val verdict: FenceWait = fence_wait(waited);
+    if (sel verdict.failed) {
+        ret res[FrameBegin, Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
     }
+    if (sel verdict.busy) { ret res[FrameBegin, Error].ok{FrameBegin.busy{}}; }
+    frame_retired(f, v, i);
 
     var index: u32 = 0;
     val ar:    i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
         f.frames[i].available, nil, ?index);
-    if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret res[bool, Error].ok{false}; }
+    if (ar == vk.ERROR_OUT_OF_DATE_KHR) { ret res[FrameBegin, Error].ok{FrameBegin.stale{}}; }
     if (ar != vk.SUCCESS && ar != vk.SUBOPTIMAL_KHR) {
-        ret res[bool, Error].err{vk_failed(VkCall.acquire_next_image{}, ar)};
+        ret res[FrameBegin, Error].err{vk_failed(VkCall.acquire_next_image{}, ar)};
     }
-    f.image_index = index;
+    f.image_index      = index;
+    f.frames[i].serial = retire_open(?v.retire);
 
     # Reset only after the acquire succeeds. Resetting first would leave the
     # fence unsignalled with no submission to signal it, deadlocking the next
     # wait when the swapchain is out of date.
     val reset: i32 = vk.vkResetFences(v.device, 1, ?f.frames[i].in_flight);
     if (reset != vk.SUCCESS) {
-        ret res[bool, Error].err{vk_failed(VkCall.reset_fences{}, reset)};
+        ret res[FrameBegin, Error].err{vk_failed(VkCall.reset_fences{}, reset)};
     }
     vk.vkResetCommandBuffer(f.frames[i].command, 0);
 
@@ -379,14 +443,14 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     bi.pInheritanceInfo = nil;
     val begun: i32 = vk.vkBeginCommandBuffer(f.frames[i].command, ?bi);
     if (begun != vk.SUCCESS) {
-        ret res[bool, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
+        ret res[FrameBegin, Error].err{vk_failed(VkCall.begin_command_buffer{}, begun)};
     }
 
     # THE WINDOW PASS IS NOT BEGUN HERE. The first window pass of the frame
     # begins it, so the colour that pass clears to is the clear on load rather
     # than a second clear recorded over a black one. window_step decides.
     f.window = WindowPass.idle{};
-    ret res[bool, Error].ok{true};
+    ret res[FrameBegin, Error].ok{FrameBegin.begun{}};
 }
 
 # Begin the window render pass, clearing colour and depth on load.
@@ -543,6 +607,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     si.pSignalSemaphores    = ?f.finished[f.image_index];
 
     val submitted: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight);
+    retire_close(?v.retire);
     if (submitted != vk.SUCCESS) {
         capture_drop(f, v, ?staging, capturing);
         ret res[bool, Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
@@ -583,6 +648,13 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     ret res[bool, Error].ok{true};
 }
 
+# Slot i's fence has been observed passed: its frame and every one before it
+# have finished, so the clock advances and what waited on them is destroyed.
+fun frame_retired(f: *FrameLoop, v: *Vk, i: usize) {
+    retire_through(?v.retire, f.frames[i].serial);
+    retire_collect(?v.retire, v.device);
+}
+
 # Wait for an armed capture's frame to retire and copy its bytes out.
 fun capture_fulfil(f: *FrameLoop, v: *Vk, staging: *Buffer, i: usize, size: usize) err[Error] {
     val waited: i32 = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
@@ -590,6 +662,7 @@ fun capture_fulfil(f: *FrameLoop, v: *Vk, staging: *Buffer, i: usize, size: usiz
         capture_drop(f, v, staging, true);
         ret err[Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
     }
+    frame_retired(f, v, i);
     val mapped: res[ptr, Error] = buffer_map(staging, v);
     if (sel mapped.err) {
         capture_drop(f, v, staging, true);
@@ -661,6 +734,16 @@ pub fun frame_dnit(f: *FrameLoop, v: *Vk) {
 #
 # The loop needs a device, a surface, and a swapchain, so these cover the pure
 # window-pass transitions and the readback request.
+
+test fence_wait__a_timeout_is_not_a_retirement {
+    val done: FenceWait = fence_wait(vk.SUCCESS);
+    val slow: FenceWait = fence_wait(vk.TIMEOUT);
+    val lost: FenceWait = fence_wait(vk.ERROR_DEVICE_LOST);
+    if (!sel done.retired) { ret 1; }
+    if (!sel slow.busy)    { ret 2; }
+    if (!sel lost.failed)  { ret 3; }
+    ret 0;
+}
 
 test window_step__per_state {
     val a: WindowStep = window_step(WindowPass.idle{}, true);

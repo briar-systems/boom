@@ -24,11 +24,11 @@ use boom.graphics.error.Stage;
 use boom.graphics.error.content.TextureError;
 use boom.graphics.image.ColorSpace;
 use boom.graphics.image.Image;
-use boom.graphics.image.image_dnit;
 use boom.graphics.image.image_format;
+use boom.graphics.image.image_release;
 use boom.graphics.image.image_upload;
 use boom.graphics.image.image_upload_region;
-use boom.graphics.vk.vk_wait_idle;
+use boom.graphics.retire.Release;
 use boom.vfs;
 use img: image;
 use image.format.Format;
@@ -359,10 +359,8 @@ pub fun texture_delete(d: *Device, t: *Texture) {
 
 # The same release, uncounted, for a texture made by texture_owned.
 pub fun texture_release_owned(d: *Device, t: *Texture) {
-    # A resource may still be referenced by a command buffer the GPU has not
-    # finished. See vk_wait_idle.
-    vk_wait_idle(d.vk);
-    image_dnit(?t.image, d.vk);
+    # A frame in flight may still sample it; see retire.
+    image_release(?t.image, d.vk, Release.retired{});
     t.width  = 0;
     t.height = 0;
 }

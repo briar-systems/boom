@@ -36,6 +36,7 @@ use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_init_prefer;
 use boom.graphics.buffer.buffer_invalidate;
 use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_release;
 use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.oneshot_begin;
 use boom.graphics.buffer.oneshot_submit;
@@ -53,9 +54,12 @@ use boom.graphics.pipeline.create_set_layout;
 use boom.graphics.pipeline.shader_module;
 use boom.graphics.pipeline.storage_bindings_fit;
 use boom.graphics.pipeline.storage_set_layout;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.spirv.COMPUTE_ENTRY;
 use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_wait_idle;
+use boom.graphics.vk.vk_release;
+use std.collections.sort;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -220,11 +224,11 @@ pub fun storage_buffer_read(d: *Device, b: *StorageBuffer, offset: usize, out: *
 
 # Delete a storage buffer.
 #
-# Waits for the device first, since a frame in flight may still read it.
+# Nothing waits: a frame in flight may still read it, so it is destroyed once
+# that frame has finished; see retire.
 pub fun storage_buffer_delete(d: *Device, b: *StorageBuffer) {
     if (d == nil || !d.ready || !b.ready) { ret; }
-    vk_wait_idle(d.vk);
-    buffer_dnit(?b.buffer, d.vk);
+    buffer_release(?b.buffer, d.vk, Release.retired{});
     b.ready = false;
     if (d.vk.live.buffers > 0) { d.vk.live.buffers = d.vk.live.buffers - 1; }
 }
@@ -251,6 +255,59 @@ pub fun storage_words(size: usize, offset: usize, len: usize) err[Error] {
     if ((offset % 4) != 0) { ret err[Error].err{Error.buffer{BufferError.unaligned{offset::u64}}}; }
     if ((len % 4) != 0)    { ret err[Error].err{Error.buffer{BufferError.unaligned{len::u64}}}; }
     ret storage_fits(size, offset, len);
+}
+
+# One write of a batch, renderer_buffer_update_batch.
+# ---
+# offset: the byte offset in the buffer, a multiple of four
+# src:    the bytes
+# len:    how many, a multiple of four
+pub rec BufferWrite {
+    offset: usize;
+    src:    *u8;
+    len:    usize;
+}
+
+# Lay out a batch of writes into a buffer of size bytes as copy regions.
+#
+# Each write becomes regions[i], its bytes staged at the running total of the
+# writes before it, so the staged bytes are the writes back to back. Refused,
+# with regions left meaningless, when a write is empty, unaligned or past the
+# end, or when two writes cover the same bytes: one copy's regions land in no
+# defined order, so an overlap would leave either write's bytes.
+# ---
+# regions: room for count, and the sort scratch for the overlap check
+# ret:     the bytes to stage
+pub fun batch_plan(size: usize, writes: *BufferWrite, count: usize, regions: *vk.BufferCopy) res[usize, Error] {
+    var total: usize = 0;
+    var i:     usize = 0;
+    for (i < count) {
+        val w: *BufferWrite = ?writes[i];
+        if (w.src == nil || w.len == 0) { ret res[usize, Error].err{Error.buffer{BufferError.empty{}}}; }
+        val fits: err[Error] = storage_words(size, w.offset, w.len);
+        if (sel fits.err) { ret res[usize, Error].err{fits.err}; }
+        regions[i].srcOffset = total::u64;
+        regions[i].dstOffset = w.offset::u64;
+        regions[i].size      = w.len::u64;
+        total                = total + w.len;
+        i                    = i + 1;
+    }
+
+    sort.sort_by[vk.BufferCopy](regions, count, by_destination);
+    i = 1;
+    for (i < count) {
+        if (regions[i - 1].dstOffset + regions[i - 1].size > regions[i].dstOffset) {
+            ret res[usize, Error].err{Error.buffer{BufferError.overlap{regions[i].dstOffset}}};
+        }
+        i = i + 1;
+    }
+    ret res[usize, Error].ok{total};
+}
+
+fun by_destination(a: *vk.BufferCopy, b: *vk.BufferCopy) i64 {
+    if (a.dstOffset < b.dstOffset) { ret -1; }
+    if (a.dstOffset > b.dstOffset) { ret 1; }
+    ret 0;
 }
 
 # Whether a list of storage buffers can be bound: at most allowed, the device's
@@ -318,7 +375,7 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     if (sel er.err) { ret er; }
     val sr: err[Error] = storage_set_layout(v, ?c.storage);
     if (sel sr.err) {
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret sr;
     }
 
@@ -336,14 +393,14 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     val laid: i32 = vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?c.layout);
     if (laid != vk.SUCCESS) {
         c.layout = nil;
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret err[Error].err{vk_failed(VkCall.create_pipeline_layout{}, laid)};
     }
 
     var module: vk.ShaderModule;
     val mr:     err[Error] = shader_module(v, spv, len, ?module);
     if (sel mr.err) {
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret mr;
     }
 
@@ -365,7 +422,7 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     vk.vkDestroyShaderModule(v.device, module, nil);
     if (rc != vk.SUCCESS) {
         c.pipeline = nil;
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret err[Error].err{vk_failed(VkCall.create_compute_pipelines{}, rc)};
     }
 
@@ -374,19 +431,18 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     ret err[Error].ok{};
 }
 
-# Delete a compute pipeline, waiting for the device first.
+# Delete a compute pipeline once the frames that may dispatch it have finished.
 pub fun compute_delete(c: *Compute, d: *Device) {
     if (d == nil || !d.ready || !c.ready) { ret; }
-    vk_wait_idle(d.vk);
-    compute_release(c, d.vk);
+    compute_release(c, d.vk, Release.retired{});
     if (d.vk.live.computes > 0) { d.vk.live.computes = d.vk.live.computes - 1; }
 }
 
-fun compute_release(c: *Compute, v: *Vk) {
-    if (c.pipeline != nil) { vk.vkDestroyPipeline(v.device, c.pipeline, nil); }
-    if (c.layout != nil)   { vk.vkDestroyPipelineLayout(v.device, c.layout, nil); }
-    if (c.storage != nil)  { vk.vkDestroyDescriptorSetLayout(v.device, c.storage, nil); }
-    if (c.empty != nil)    { vk.vkDestroyDescriptorSetLayout(v.device, c.empty, nil); }
+fun compute_release(c: *Compute, v: *Vk, how: Release) {
+    if (c.pipeline != nil) { vk_release(v, Doomed.pipeline{c.pipeline}, how); }
+    if (c.layout != nil)   { vk_release(v, Doomed.pipeline_layout{c.layout}, how); }
+    if (c.storage != nil)  { vk_release(v, Doomed.set_layout{c.storage}, how); }
+    if (c.empty != nil)    { vk_release(v, Doomed.set_layout{c.empty}, how); }
     c.pipeline = nil;
     c.layout   = nil;
     c.storage  = nil;
@@ -451,13 +507,12 @@ pub fun readback_len(rb: *Readback) usize {
     ret rb.len;
 }
 
-# Delete a readback, waiting for the device first.
+# Delete a readback once the frames that may copy into it have finished.
 pub fun readback_delete(rb: *Readback, d: *Device) {
     if (d == nil || !d.ready || !rb.ready) { ret; }
-    vk_wait_idle(d.vk);
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
-        buffer_dnit(?rb.slots[i], d.vk);
+        buffer_release(?rb.slots[i], d.vk, Release.retired{});
         i = i + 1;
     }
     rb.ready = false;
@@ -722,5 +777,33 @@ test readback_ready__newest_completed_once {
     rb.serial[0] = 9;
     rb.serial[1] = 8;
     if (!picked(readback_ready(?rb, 9), 0)) { ret 5; }
+    ret 0;
+}
+
+test batch_plan__staged_back_to_back_and_overlap_refused {
+    var bytes:   [64]u8;
+    var writes:  [3]BufferWrite;
+    var regions: [3]vk.BufferCopy;
+    writes[0] = BufferWrite{offset: 32, src: ?bytes[0], len: 8};
+    writes[1] = BufferWrite{offset: 0, src: ?bytes[0], len: 16};
+    writes[2] = BufferWrite{offset: 16, src: ?bytes[0], len: 16};
+    val planned: res[usize, Error] = batch_plan(64, ?writes[0], 3, ?regions[0]);
+    if (!sel planned.ok)  { ret 1; }
+    if (planned.ok != 40) { ret 1; }
+    # sorted by destination, each carrying where its bytes were staged
+    if (regions[0].dstOffset != 0 || regions[0].srcOffset != 8 || regions[0].size != 16)   { ret 2; }
+    if (regions[1].dstOffset != 16 || regions[1].srcOffset != 24 || regions[1].size != 16) { ret 3; }
+    if (regions[2].dstOffset != 32 || regions[2].srcOffset != 0 || regions[2].size != 8)   { ret 4; }
+
+    writes[2].offset = 12;
+    val crossed: res[usize, Error] = batch_plan(64, ?writes[0], 3, ?regions[0]);
+    if (!(sel crossed.err && (sel crossed.err.buffer && sel crossed.err.buffer.overlap))) { ret 5; }
+    writes[2].offset = 60;
+    val past: res[usize, Error] = batch_plan(64, ?writes[0], 3, ?regions[0]);
+    if (!(sel past.err && (sel past.err.buffer && sel past.err.buffer.overrun))) { ret 6; }
+    writes[2].offset = 16;
+    writes[2].len    = 0;
+    val empty: res[usize, Error] = batch_plan(64, ?writes[0], 3, ?regions[0]);
+    if (!sel empty.err) { ret 7; }
     ret 0;
 }

@@ -23,7 +23,10 @@ use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_release;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -214,10 +217,17 @@ pub fun buffer_write(b: *Buffer, v: *Vk, src: *u8, len: u64) err[Error] {
 
 # Destroy the buffer and free its memory.
 pub fun buffer_dnit(b: *Buffer, v: *Vk) {
+    buffer_release(b, v, Release.now{});
+}
+
+# Release the buffer and its memory, now or once its frames have finished.
+#
+# Unmapping does not wait: memory may be unmapped while the GPU still reads it.
+pub fun buffer_release(b: *Buffer, v: *Vk, how: Release) {
     if (b.handle == nil) { ret; }
     buffer_unmap(b, v);
-    vk.vkDestroyBuffer(v.device, b.handle, nil);
-    if (b.memory != nil) { vk.vkFreeMemory(v.device, b.memory, nil); }
+    vk_release(v, Doomed.buffer{b.handle}, how);
+    if (b.memory != nil) { vk_release(v, Doomed.memory{b.memory}, how); }
     b.handle = nil;
     b.memory = nil;
     b.size   = 0;

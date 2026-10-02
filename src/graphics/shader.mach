@@ -51,15 +51,15 @@ use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.PipelineDesc;
 use boom.graphics.pipeline.SetLayout;
 use boom.graphics.pipeline.pipeline_desc_3d;
-use boom.graphics.pipeline.pipeline_dnit;
 use boom.graphics.pipeline.pipeline_init_sets;
+use boom.graphics.pipeline.pipeline_release;
 use boom.graphics.pipeline.set_layout_full;
+use boom.graphics.retire.Release;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vertex.vertex_format_eq;
 use boom.graphics.vertex.vertex_format_skinned;
 use boom.graphics.vertex.vertex_format_standard;
 use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_wait_idle;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -224,14 +224,13 @@ pub fun shader_delete(s: *Shader, d: *Device) {
     val v: *Vk = d.vk;
     # A pipeline the GPU has not finished with is still referenced by a
     # submitted command buffer, and the frame loop runs several frames ahead, so
-    # "after the last draw" is not after the last use. Every public delete waits
-    # first; see vk_wait_idle.
-    vk_wait_idle(v);
+    # "after the last draw" is not after the last use. The pipelines wait on
+    # the frame clock; see retire.
     if (s.count > 0 && v.live.shaders > 0) { v.live.shaders = v.live.shaders - 1; }
     var i: usize = 0;
     for (i < s.count) {
         if (s.built[i].live) {
-            pipeline_dnit(?s.built[i].pipeline, v);
+            pipeline_release(?s.built[i].pipeline, v, Release.retired{});
             s.built[i].live = false;
         }
         i = i + 1;

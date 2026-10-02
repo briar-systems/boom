@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-02
+
+### Added
+- GPU timestamp queries (#281). `renderer_timer` hands out a `GpuTimer`, `renderer_timer_begin`/`renderer_timer_end` (or `pass_timer_begin`/`pass_timer_end` inside a pass) bracket recorded work, and `renderer_timer_take` returns its `Duration` a few frames later without waiting. `renderer_limits` reports `timestamp_valid_bits` and `timestamp_period`, both zero on a queue that cannot write timestamps.
+- Batched buffer writes (#285). `renderer_buffer_update_batch` writes a list of `BufferWrite` regions through a per-frame staging buffer as one copy, with one barrier before and one after. Overlapping writes in a batch are refused with `BufferError.overlap`. `renderer_barriers` counts the storage barriers the last frame recorded.
+- A frame clock (`src/graphics/retire.mach`, #282): every frame takes a serial, and work that waits on the GPU acts once that serial's fence has passed. Readback, deferred deletion and timers all run on it.
+
+### Changed
+- Deleting a mesh, texture, storage buffer, compute pipeline, readback, shader or render target no longer waits for the device (#282). It is queued and freed once the frames that may use it have finished. `vk_dnit` frees everything left at shutdown.
+- `frame_begin` returns `res[FrameBegin, Error]` (#286): `begun`, `stale` or `busy`. `renderer_begin_frame` still returns `res[bool, Error]`, with a busy slot as `ok{false}`.
+
+### Fixed
+- A fence-wait timeout no longer reuses a frame slot the GPU may still be using (#286). The slot is left untouched and the frame is skipped, and the next frame waits on it again.
+
 ## [0.43.0] - 2026-10-01
 
 ### Changed
