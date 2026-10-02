@@ -1,0 +1,177 @@
+# The per-frame staging arena a batch of buffer writes is copied through.
+#
+# WHY A STAGING COPY AND NOT vkCmdUpdateBuffer. An update carries its bytes
+# inside the command buffer, at most 65536 per call. That is right for a step's
+# parameters and wrong for a frame that rewrites a thousand 16 KiB regions: the
+# command buffer swells by the whole payload and the driver copies it again on
+# submit. A batch instead copies its bytes once, into host-visible memory here,
+# and records one vkCmdCopyBuffer with a region per write.
+#
+# ONE BUFFER PER FRAME IN FLIGHT, rewound as the frame opens. The fence the
+# frame loop waits on before reusing a slot's command buffer has proved the GPU
+# finished every copy that slot recorded, so its bytes are free again. Batches
+# within a frame take consecutive ranges of the same buffer.
+#
+# THE BUFFER GROWS BY REPLACEMENT. A batch that does not fit gets a buffer large
+# enough for everything the frame has staged so far plus itself, so the next
+# time the slot runs the same frame it fits without growing. The buffer it
+# replaces may hold bytes a copy recorded earlier in this frame still reads, so
+# it is released behind the frame clock rather than freed or kept forever.
+#
+# Created on the first batch rather than with the renderer: a game that never
+# batches never pays for it.
+
+use boom.graphics.buffer.Buffer;
+use boom.graphics.buffer.buffer_init;
+use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_release;
+use boom.graphics.error.Error;
+use boom.graphics.frame.MAX_FRAMES_IN_FLIGHT;
+use boom.graphics.retire.Release;
+use boom.graphics.vk.Vk;
+use allo: std.allocator;
+use std.allocator.page;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
+
+# Bytes in a slot's first buffer.
+pub val STAGING_BYTES: usize = 1048576;
+
+# One frame's staging buffer.
+# ---
+# buf:    the buffer, a transfer source
+# mapped: its persistent mapping
+# size:   its capacity in bytes
+# used:   bytes staged so far this frame
+pub rec StagingSlot {
+    buf:    Buffer;
+    mapped: *u8;
+    size:   usize;
+    used:   usize;
+}
+
+# The staging buffers, one per frame in flight, and the copy regions a batch
+# records.
+# ---
+# slots:   the buffers, by frame
+# regions: scratch for one batch's copy regions, reused by every batch
+# cap:     regions the scratch has room for
+pub rec FrameStaging {
+    slots:   [2]StagingSlot;
+    regions: *vk.BufferCopy;
+    cap:     usize;
+}
+
+pub fun staging_init(s: *FrameStaging) {
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        s.slots[f].buf.handle = nil;
+        s.slots[f].buf.memory = nil;
+        s.slots[f].buf.mapped = nil;
+        s.slots[f].mapped     = nil;
+        s.slots[f].size       = 0;
+        s.slots[f].used       = 0;
+        f                     = f + 1;
+    }
+    s.regions = nil;
+    s.cap     = 0;
+}
+
+# The capacity of a buffer that holds need bytes, doubling from current.
+#
+# Pure, so the schedule can be checked without a device.
+pub fun staging_size_for(current: usize, need: usize) usize {
+    var size: usize = STAGING_BYTES;
+    if (current > size) { size = current; }
+    for (size < need) { size = size * 2; }
+    ret size;
+}
+
+# Rewind a frame's buffer. Called once as the frame opens.
+pub fun staging_begin_frame(s: *FrameStaging, frame: usize) {
+    if (frame >= MAX_FRAMES_IN_FLIGHT) { ret; }
+    s.slots[frame].used = 0;
+}
+
+# Scratch for count copy regions, grown from the page allocator.
+pub fun staging_regions(s: *FrameStaging, count: usize) res[*vk.BufferCopy, allo.Error] {
+    if (count > s.cap) {
+        var a:    allo.Allocator;
+        val made: err[allo.Error] = page.make(?a);
+        if (sel made.err) { ret res[*vk.BufferCopy, allo.Error].err{made.err}; }
+        var cap: usize = 256;
+        if (s.cap > cap) { cap = s.cap; }
+        for (cap < count) { cap = cap * 2; }
+        val grown: res[*vk.BufferCopy, allo.Error] = allo.reallocate[vk.BufferCopy](?a, s.regions, s.cap, cap);
+        if (sel grown.err) { ret grown; }
+        s.regions = grown.ok;
+        s.cap     = cap;
+    }
+    ret res[*vk.BufferCopy, allo.Error].ok{s.regions};
+}
+
+# Take len bytes of a frame's buffer, growing it if they do not fit.
+# ---
+# ret: the byte offset of the range in staging_buffer's buffer
+pub fun staging_take(s: *FrameStaging, v: *Vk, frame: usize, len: usize) res[usize, Error] {
+    var slot: *StagingSlot = ?s.slots[frame];
+    if (slot.size - slot.used < len) {
+        val size: usize = staging_size_for(slot.size, slot.used + len);
+        var next: Buffer;
+        # HOST_COHERENT, so the bytes copied in are visible to the transfer
+        # without a flush
+        val made: err[Error] = buffer_init(?next, v, size::u64, vk.BUFFER_USAGE_TRANSFER_SRC_BIT,
+            vk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | vk.MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (sel made.err) { ret res[usize, Error].err{made.err}; }
+        val m: res[ptr, Error] = buffer_map(?next, v);
+        if (sel m.err) {
+            buffer_release(?next, v, Release.now{});
+            ret res[usize, Error].err{m.err};
+        }
+        # copies recorded earlier this frame may still read the old one
+        buffer_release(?slot.buf, v, Release.retired{});
+        slot.buf    = next;
+        slot.mapped = m.ok:~*u8;
+        slot.size   = size;
+        slot.used   = 0;
+    }
+    val at: usize = slot.used;
+    slot.used = slot.used + len;
+    ret res[usize, Error].ok{at};
+}
+
+# Where a frame's staged bytes are written.
+pub fun staging_mapped(s: *FrameStaging, frame: usize) *u8 {
+    ret s.slots[frame].mapped;
+}
+
+# The buffer a frame's batches copy from.
+pub fun staging_buffer(s: *FrameStaging, frame: usize) vk.Buffer {
+    ret s.slots[frame].buf.handle;
+}
+
+# Destroy every buffer and the region scratch, on a drained device.
+pub fun staging_dnit(s: *FrameStaging, v: *Vk) {
+    var f: usize = 0;
+    for (f < MAX_FRAMES_IN_FLIGHT) {
+        buffer_release(?s.slots[f].buf, v, Release.now{});
+        f = f + 1;
+    }
+    if (s.regions != nil) {
+        var a:    allo.Allocator;
+        val made: err[allo.Error] = page.make(?a);
+        if (sel made.ok) { allo.deallocate[vk.BufferCopy](?a, s.regions, s.cap); }
+    }
+    staging_init(s);
+}
+
+test staging_size_for__doubles_to_fit {
+    if (staging_size_for(0, 1) != STAGING_BYTES)                     { ret 1; }
+    if (staging_size_for(0, STAGING_BYTES + 4) != STAGING_BYTES * 2) { ret 2; }
+    # a frame of 1150 16 KiB writes
+    if (staging_size_for(STAGING_BYTES, 1150 * 16384) != STAGING_BYTES * 32) { ret 3; }
+    if (staging_size_for(STAGING_BYTES * 4, 4) != STAGING_BYTES * 4)         { ret 4; }
+    ret 0;
+}

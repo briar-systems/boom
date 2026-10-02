@@ -20,6 +20,11 @@
 # first dispatch and the draw, and their durations are taken once the frame has
 # finished.
 #
+# A third frame writes a world of 1150 one-KiB chunks in two batches, the
+# second in reverse order and large enough to grow the staging memory under the
+# first, and reads the world back: every chunk must hold its own bytes, behind
+# one barrier pair per batch.
+#
 # CI runs it under lavapipe:
 #
 #   mach build . && xvfb-run -a ./out/linux-x86_64/debug/bin/compute
@@ -32,6 +37,8 @@ use boom.window.window_close;
 use boom.window.window_error_message;
 use boom.window.window_open;
 use boom.window.window_poll;
+use allo: std.allocator;
+use std.allocator.page;
 use std.chrono.duration.Duration;
 use p: std.print;
 use std.runtime;
@@ -63,6 +70,10 @@ val FLAGS_AT: usize = 32;
 # the offscreen target the cells are drawn into, 4 pixels to a grid square
 val SIDE:  i32   = 64;
 val BYTES: usize = 16384;
+
+# the world the batches write: chunks of CHUNK_WORDS u32
+val CHUNKS:      usize = 1150;
+val CHUNK_WORDS: usize = 256;
 
 fun fail(step: str, r: err[gfx.Error]) bool {
     if (sel r.ok) { ret false; }
@@ -253,10 +264,20 @@ fun main(argc: i64, argv: **u8) i64 {
         ret 1;
     }
 
-    # generation 2: dispatched from the counts generation 1 wrote, b back to a
+    # generation 2: dispatched from the counts generation 1 wrote, b back to a.
+    # Its parameters arrive as a batch of one-word writes, last word first, which
+    # the dispatch after it must see.
     if (!open_frame(?r)) { ret 1; }
     q = params_for(2);
-    if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?params, 0, (?q[0]):~*u8, 16))) { ret 1; }
+    var words: [4]gfx.BufferWrite;
+    i = 0;
+    for (i < 4) {
+        words[i] = gfx.BufferWrite{offset: (3 - i) * 4, src: (?q[3 - i]):~*u8, len: 4};
+        i        = i + 1;
+    }
+    if (fail("renderer_buffer_update_batch", gfx.renderer_buffer_update_batch(?r, ?params, ?words[0], 4))) {
+        ret 1;
+    }
     var second: [5]*gfx.StorageBuffer;
     second[0] = ?b;
     second[1] = ?a;
@@ -267,8 +288,92 @@ fun main(argc: i64, argv: **u8) i64 {
         ?control, NEXT_AT))) { ret 1; }
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
 
+    # the world: chunk c word j holds c * 1000 + j
+    var heap:      allo.Allocator;
+    val heap_made: err[allo.Error] = page.make(?heap);
+    if (sel heap_made.err) {
+        p.println("FAIL page allocator");
+        ret 1;
+    }
+    val world_words: usize                 = CHUNKS * CHUNK_WORDS;
+    val chunk_bytes: usize                 = CHUNK_WORDS * 4;
+    val src_made:    res[*u32, allo.Error] = allo.allocate[u32](?heap, world_words);
+    if (sel src_made.err) {
+        p.println("FAIL allocate the world");
+        ret 1;
+    }
+    val back_made: res[*u32, allo.Error] = allo.allocate[u32](?heap, world_words);
+    if (sel back_made.err) {
+        p.println("FAIL allocate the world");
+        ret 1;
+    }
+    val list_made: res[*gfx.BufferWrite, allo.Error] = allo.allocate[gfx.BufferWrite](?heap, CHUNKS);
+    if (sel list_made.err) {
+        p.println("FAIL allocate the world");
+        ret 1;
+    }
+    var src:   *u32             = src_made.ok;
+    var back:  *u32             = back_made.ok;
+    var list:  *gfx.BufferWrite = list_made.ok;
+    var world: gfx.StorageBuffer;
+    if (!make(d, world_words * 4, ?world)) { ret 1; }
+    i = 0;
+    for (i < world_words) {
+        src[i] = ((i / CHUNK_WORDS) * 1000 + i % CHUNK_WORDS)::u32;
+        i      = i + 1;
+    }
+    # the first half in order, the second last chunk first
+    val half: usize = CHUNKS / 2;
+    i = 0;
+    for (i < CHUNKS) {
+        var c: usize = i;
+        if (i >= half) { c = CHUNKS - 1 - (i - half); }
+        list[i] = gfx.BufferWrite{offset: c * chunk_bytes, src: (?src[c * CHUNK_WORDS]):~*u8, len: chunk_bytes};
+        i       = i + 1;
+    }
+
+    if (!open_frame(?r)) { ret 1; }
+    if (fail("renderer_buffer_update_batch", gfx.renderer_buffer_update_batch(?r, ?world, ?list[0], half))) {
+        ret 1;
+    }
+    if (fail("renderer_buffer_update_batch", gfx.renderer_buffer_update_batch(?r, ?world, ?list[half],
+        CHUNKS - half))) { ret 1; }
+    # two writes over the same bytes are refused, and record nothing
+    var crossed: [2]gfx.BufferWrite;
+    crossed[0]        = list[0];
+    crossed[1]        = list[0];
+    crossed[1].offset = crossed[1].offset + 4;
+    val overlap: err[gfx.Error] = gfx.renderer_buffer_update_batch(?r, ?world, ?crossed[0], 2);
+    val batched: usize          = gfx.renderer_barriers(?r);
+    if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+
     gfx.renderer_wait_idle(?r);
     var ok: bool = true;
+
+    if (!(sel overlap.err && (sel overlap.err.buffer && sel overlap.err.buffer.overlap))) {
+        p.println("FAIL renderer_buffer_update_batch: overlapping writes were not refused");
+        ok = false;
+    }
+    if (batched != 4) {
+        p.printlnf("FAIL renderer_buffer_update_batch: {} barriers for two batches, not 4", batched);
+        ok = false;
+    }
+    if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?world, 0, back:~*u8, world_words * 4))) { ret 1; }
+    var off: usize = 0;
+    i = 0;
+    for (i < world_words) {
+        if (back[i] != src[i]) { off = off + 1; }
+        i = i + 1;
+    }
+    if (off != 0) {
+        p.printlnf("FAIL renderer_buffer_update_batch: {} of {} world words differ", off, world_words);
+        ok = false;
+    }
+    or { p.println("ok   1150 chunks written in two batches behind four barriers"); }
+    gfx.storage_buffer_delete(d, ?world);
+    allo.deallocate[gfx.BufferWrite](?heap, list, CHUNKS);
+    allo.deallocate[u32](?heap, back, world_words);
+    allo.deallocate[u32](?heap, src, world_words);
 
     var pool: [256]u32;
     if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?a, 0, (?pool[0]):~*u8, CELLS * 4))) { ret 1; }
