@@ -86,7 +86,8 @@ pub val DRAW_ARGS_BYTES: usize = 16;
 # Device-local, so a stage reads it at full speed, and never mapped: the CPU
 # reaches it through storage_buffer_upload and storage_buffer_read, which stall,
 # or through renderer_buffer_update and renderer_readback, which are recorded in
-# the frame and do not. The same buffer may be bound to a dispatch, bound to a
+# the frame and do not. Made by storage_buffer, which stalls, or by
+# renderer_storage_buffer in the frame, which does not. The same buffer may be bound to a dispatch, bound to a
 # draw, and read as indirect arguments, in any order within a frame.
 # ---
 # buffer: the buffer and its memory
@@ -100,12 +101,39 @@ pub rec StorageBuffer {
 #
 # Zeroed rather than left as whatever the allocation held, because a simulation
 # that forgets to seed a buffer should step from nothing rather than from the
-# last program's memory. Waits for the fill, so this belongs at load time.
+# last program's memory. Waits for the fill, and with it for every frame in
+# flight, so this belongs at load time; a buffer made while frames run is
+# renderer_storage_buffer, whose fill is recorded in the frame.
 # ---
 # d:    the device, from renderer_device
 # size: bytes, a whole number of four-byte words
 # ret:  the buffer, or why it could not be made
 pub fun storage_buffer(d: *Device, size: usize) res[StorageBuffer, Error] {
+    val made: res[StorageBuffer, Error] = storage_buffer_alloc(d, size);
+    if (sel made.err) { ret made; }
+    var b: StorageBuffer = made.ok;
+
+    val v:     *Vk                          = d.vk;
+    val begun: res[vk.CommandBuffer, Error] = oneshot_begin(v, d.pool);
+    if (sel begun.err) {
+        storage_buffer_unmade(d, ?b);
+        ret res[StorageBuffer, Error].err{begun.err};
+    }
+    vk.vkCmdFillBuffer(begun.ok, b.buffer.handle, 0, vk.WHOLE_SIZE, 0);
+    buffer_barrier_all(begun.ok);
+    val sr: err[Error] = oneshot_submit(v, d.pool, begun.ok);
+    if (sel sr.err) {
+        storage_buffer_unmade(d, ?b);
+        ret res[StorageBuffer, Error].err{sr.err};
+    }
+    ret res[StorageBuffer, Error].ok{b};
+}
+
+# Allocate a storage buffer of size bytes with nothing written to it.
+#
+# The caller fills it before anything reads it: storage_buffer on a one-shot
+# submit, renderer_storage_buffer in the frame.
+pub fun storage_buffer_alloc(d: *Device, size: usize) res[StorageBuffer, Error] {
     var b: StorageBuffer;
     b.ready = false;
     if (d == nil || !d.ready) { ret res[StorageBuffer, Error].err{Error.uninitialized{Stage.upload{}}}; }
@@ -120,22 +148,16 @@ pub fun storage_buffer(d: *Device, size: usize) res[StorageBuffer, Error] {
         vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (sel ir.err) { ret res[StorageBuffer, Error].err{ir.err}; }
 
-    val begun: res[vk.CommandBuffer, Error] = oneshot_begin(v, d.pool);
-    if (sel begun.err) {
-        buffer_dnit(?b.buffer, v);
-        ret res[StorageBuffer, Error].err{begun.err};
-    }
-    vk.vkCmdFillBuffer(begun.ok, b.buffer.handle, 0, vk.WHOLE_SIZE, 0);
-    buffer_barrier_all(begun.ok);
-    val sr: err[Error] = oneshot_submit(v, d.pool, begun.ok);
-    if (sel sr.err) {
-        buffer_dnit(?b.buffer, v);
-        ret res[StorageBuffer, Error].err{sr.err};
-    }
-
     b.ready        = true;
     v.live.buffers = v.live.buffers + 1;
     ret res[StorageBuffer, Error].ok{b};
+}
+
+# destroy a buffer from storage_buffer_alloc that no command has used
+fun storage_buffer_unmade(d: *Device, b: *StorageBuffer) {
+    buffer_dnit(?b.buffer, d.vk);
+    b.ready = false;
+    if (d.vk.live.buffers > 0) { d.vk.live.buffers = d.vk.live.buffers - 1; }
 }
 
 # The buffer's size in bytes.
