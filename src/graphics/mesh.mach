@@ -17,12 +17,14 @@
 
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_dnit;
+use boom.graphics.buffer.buffer_release;
 use boom.graphics.buffer.buffer_upload;
 use boom.graphics.device.Device;
 use boom.graphics.error.Error;
 use boom.graphics.error.Stage;
 use boom.graphics.error.mesh.Attribute;
 use boom.graphics.error.mesh.MeshError;
+use boom.graphics.retire.Release;
 use boom.graphics.vertex.COMP_F32;
 use boom.graphics.vertex.COMP_U16;
 use boom.graphics.vertex.SEMANTIC_JOINTS_0;
@@ -38,7 +40,6 @@ use boom.graphics.vertex.vertex_format;
 use boom.graphics.vertex.vertex_format_add;
 use boom.graphics.vertex.vertex_format_skinned;
 use boom.graphics.vertex.vertex_format_standard;
-use boom.graphics.vk.vk_wait_idle;
 use boom.math.aabb.Aabb;
 use boom.math.aabb.aabb_add;
 use boom.math.aabb.aabb_empty;
@@ -780,19 +781,12 @@ pub fun mesh_delete(d: *Device, m: *Mesh) {
 }
 
 # The same release, uncounted, for a mesh made by mesh_owned.
+#
+# A frame in flight may still draw it, so its buffers wait on the frame clock;
+# see retire.
 pub fun mesh_release_owned(d: *Device, m: *Mesh) {
-    # A resource may still be referenced by a command buffer the GPU has not
-    # finished. See vk_wait_idle.
-    vk_wait_idle(d.vk);
-    buffer_dnit(?m.vertices, d.vk);
-    buffer_dnit(?m.indices, d.vk);
-    m.index_count = 0;
-}
-
-# release mesh buffers after a renderer frame fence proved they are unused
-pub fun mesh_release_retired(d: *Device, m: *Mesh) {
-    buffer_dnit(?m.vertices, d.vk);
-    buffer_dnit(?m.indices, d.vk);
+    buffer_release(?m.vertices, d.vk, Release.retired{});
+    buffer_release(?m.indices, d.vk, Release.retired{});
     m.index_count = 0;
 }
 

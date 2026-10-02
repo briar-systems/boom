@@ -26,6 +26,8 @@ use boom.graphics.limits.DRAW_STORAGE_BUFFERS;
 use boom.graphics.limits.Limits;
 use boom.graphics.limits.MAX_STORAGE_BINDINGS;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.spirv.FRAGMENT_ENTRY;
 use boom.graphics.spirv.VERTEX_ENTRY;
 use boom.graphics.spirvread.spv_bindings_end;
@@ -40,6 +42,7 @@ use boom.graphics.vertex.Component;
 use boom.graphics.vertex.VertexAttribute;
 use boom.graphics.vertex.VertexFormat;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_release;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -895,20 +898,25 @@ pub fun pipeline_bind_scissored(p: *Pipeline, cmd: vk.CommandBuffer, x: i32, y: 
 
 # Destroy the pipeline and its layouts.
 pub fun pipeline_dnit(p: *Pipeline, v: *Vk) {
+    pipeline_release(p, v, Release.now{});
+}
+
+# Release the pipeline and its layouts, now or once its frames have finished.
+pub fun pipeline_release(p: *Pipeline, v: *Vk, how: Release) {
     if (p.handle != nil) {
-        vk.vkDestroyPipeline(v.device, p.handle, nil);
+        vk_release(v, Doomed.pipeline{p.handle}, how);
         p.handle = nil;
     }
     if (p.layout != nil) {
-        vk.vkDestroyPipelineLayout(v.device, p.layout, nil);
+        vk_release(v, Doomed.pipeline_layout{p.layout}, how);
         p.layout = nil;
     }
     if (p.set_layout != nil) {
-        vk.vkDestroyDescriptorSetLayout(v.device, p.set_layout, nil);
+        vk_release(v, Doomed.set_layout{p.set_layout}, how);
         p.set_layout = nil;
     }
     if (p.storage != nil) {
-        vk.vkDestroyDescriptorSetLayout(v.device, p.storage, nil);
+        vk_release(v, Doomed.set_layout{p.storage}, how);
         p.storage = nil;
     }
     p.ready = false;

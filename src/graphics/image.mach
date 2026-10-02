@@ -29,7 +29,10 @@ use boom.graphics.error.ImageError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.vk.Vk;
+use boom.graphics.vk.vk_release;
 use boom.graphics.vk.vk_wait_idle;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -519,8 +522,7 @@ pub fun image_read(i: *Image, v: *Vk, pool: vk.CommandPool, out: *u8, len: usize
     # The barrier below cannot close that. It names sampling as the image's
     # prior use, because sampling is the only prior use this module can see, so
     # a colour write still in flight is not in its first synchronization scope
-    # at all. Draining the device is what orders the two, and it is the same
-    # conservative wait every public delete performs; see vk_wait_idle.
+    # at all. Draining the device is what orders the two; see vk_wait_idle.
     #
     # A read therefore observes everything SUBMITTED and nothing later. A pass
     # records into the frame's command buffer and renderer_end_frame submits it,
@@ -742,16 +744,22 @@ pub fun image_upload_region(i: *Image, v: *Vk, pool: vk.CommandPool, pixels: *u8
 
 # Destroy the view, the image, and its memory.
 pub fun image_dnit(i: *Image, v: *Vk) {
+    image_release(i, v, Release.now{});
+}
+
+# Release the view, the image, and its memory, now or once their frames have
+# finished.
+pub fun image_release(i: *Image, v: *Vk, how: Release) {
     if (i.view != nil) {
-        vk.vkDestroyImageView(v.device, i.view, nil);
+        vk_release(v, Doomed.view{i.view}, how);
         i.view = nil;
     }
     if (i.handle != nil) {
-        vk.vkDestroyImage(v.device, i.handle, nil);
+        vk_release(v, Doomed.image{i.handle}, how);
         i.handle = nil;
     }
     if (i.memory != nil) {
-        vk.vkFreeMemory(v.device, i.memory, nil);
+        vk_release(v, Doomed.memory{i.memory}, how);
         i.memory = nil;
     }
     i.ready = false;
@@ -1028,16 +1036,21 @@ pub fun depth_attachment_init(d: *DepthAttachment, v: *Vk, width: i32, height: i
 # Safe on a partially created one: each handle is checked, because a failure in
 # depth_attachment_init releases what it made with the later handles still nil.
 pub fun depth_attachment_dnit(d: *DepthAttachment, v: *Vk) {
+    depth_attachment_release(d, v, Release.now{});
+}
+
+# Release a depth attachment, now or once its frames have finished.
+pub fun depth_attachment_release(d: *DepthAttachment, v: *Vk, how: Release) {
     if (d.view != nil) {
-        vk.vkDestroyImageView(v.device, d.view, nil);
+        vk_release(v, Doomed.view{d.view}, how);
         d.view = nil;
     }
     if (d.image != nil) {
-        vk.vkDestroyImage(v.device, d.image, nil);
+        vk_release(v, Doomed.image{d.image}, how);
         d.image = nil;
     }
     if (d.mem != nil) {
-        vk.vkFreeMemory(v.device, d.mem, nil);
+        vk_release(v, Doomed.memory{d.mem}, how);
         d.mem = nil;
     }
 }

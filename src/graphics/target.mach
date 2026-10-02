@@ -28,13 +28,13 @@ use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.image.DepthAttachment;
 use boom.graphics.image.ImageUsage;
-use boom.graphics.image.depth_attachment_dnit;
 use boom.graphics.image.depth_attachment_init;
-use boom.graphics.image.image_dnit;
+use boom.graphics.image.depth_attachment_release;
 use boom.graphics.image.image_format_bytes;
 use boom.graphics.image.image_init;
 use boom.graphics.image.image_raw_bytes;
 use boom.graphics.image.image_read;
+use boom.graphics.image.image_release;
 use boom.graphics.image.image_transition;
 use boom.graphics.pass.MAX_COLOR_ATTACHMENTS;
 use boom.graphics.pass.PassCompatibility;
@@ -43,9 +43,11 @@ use boom.graphics.pass.pass_clearing_mrt;
 use boom.graphics.pass.pass_compatibility;
 use boom.graphics.pass.pass_create;
 use boom.graphics.pass.pass_loading_mrt;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.texture.Texture;
 use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_wait_idle;
+use boom.graphics.vk.vk_release;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -472,23 +474,23 @@ pub fun render_target_bgra(t: *RenderTarget) bool {
 pub fun render_target_delete(d: *Device, t: *RenderTarget) {
     val v: *Vk = d.vk;
     if (t.ready && v.live.targets > 0) { v.live.targets = v.live.targets - 1; }
-    vk_wait_idle(v);
+    # a frame in flight may still render into or sample it; see retire
     if (t.framebuffer != nil) {
-        vk.vkDestroyFramebuffer(v.device, t.framebuffer, nil);
+        vk_release(v, Doomed.framebuffer{t.framebuffer}, Release.retired{});
         t.framebuffer = nil;
     }
     if (t.pass != nil) {
-        vk.vkDestroyRenderPass(v.device, t.pass, nil);
+        vk_release(v, Doomed.render_pass{t.pass}, Release.retired{});
         t.pass = nil;
     }
     if (t.pass_load != nil) {
-        vk.vkDestroyRenderPass(v.device, t.pass_load, nil);
+        vk_release(v, Doomed.render_pass{t.pass_load}, Release.retired{});
         t.pass_load = nil;
     }
-    depth_attachment_dnit(?t.depth, v);
+    depth_attachment_release(?t.depth, v, Release.retired{});
     var di: usize = 0;
     for (di < MAX_COLOR_ATTACHMENTS) {
-        image_dnit(?t.colors[di].image, v);
+        image_release(?t.colors[di].image, v, Release.retired{});
         di = di + 1;
     }
     t.ready = false;
