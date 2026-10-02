@@ -86,9 +86,10 @@ pub val DRAW_ARGS_BYTES: usize = 16;
 # Device-local, so a stage reads it at full speed, and never mapped: the CPU
 # reaches it through storage_buffer_upload and storage_buffer_read, which stall,
 # or through renderer_buffer_update and renderer_readback, which are recorded in
-# the frame and do not. Made by storage_buffer, which stalls, or by
-# renderer_storage_buffer in the frame, which does not. The same buffer may be bound to a dispatch, bound to a
-# draw, and read as indirect arguments, in any order within a frame.
+# the frame and do not. It is made by storage_buffer, which stalls, or by
+# renderer_storage_buffer, which is recorded in the frame and does not. The same
+# buffer may be bound to a dispatch, bound to a draw, and read as indirect
+# arguments, in any order within a frame.
 # ---
 # buffer: the buffer and its memory
 # ready:  whether it was created and not yet deleted
