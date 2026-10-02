@@ -155,12 +155,15 @@ pub tag Capacity: u8 {
 # too_many:  a binding list longer than the device allows for its kind of call,
 #            max_dispatch_bindings or max_draw_bindings; carries the count
 #            asked for
+# overlap:   two writes of one batch covering the same bytes; carries the
+#            offset of the later one
 pub tag BufferError: u8 {
     empty;
     overrun:   u64;
     unaligned: u64;
     bindings:  usize;
     too_many:  usize;
+    overlap:   u64;
 }
 
 # why an image operation was refused
@@ -424,6 +427,7 @@ fun buffer_message(e: BufferError) str {
     if (sel e.unaligned) { ret "a GPU buffer offset or length is not a multiple of four bytes"; }
     if (sel e.bindings)  { ret "a storage buffer in the binding list is missing or deleted"; }
     if (sel e.too_many)  { ret "more storage buffers bound than the device allows (see renderer_limits)"; }
+    if (sel e.overlap)   { ret "two writes of one batch cover the same bytes"; }
     ret "a write or copy exceeds the buffer";
 }
 

@@ -80,12 +80,14 @@ use boom.graphics.camera.camera_view;
 use boom.graphics.camera2d.Camera2D;
 use boom.graphics.camera2d.camera2d_matrix;
 use boom.graphics.camera2d.camera2d_visible;
+use boom.graphics.compute.BufferWrite;
 use boom.graphics.compute.Compute;
 use boom.graphics.compute.DISPATCH_ARGS_BYTES;
 use boom.graphics.compute.DRAW_ARGS_BYTES;
 use boom.graphics.compute.Readback;
 use boom.graphics.compute.StorageBuffer;
 use boom.graphics.compute.StorageSets;
+use boom.graphics.compute.batch_plan;
 use boom.graphics.compute.readback_ready;
 use boom.graphics.compute.storage_barrier;
 use boom.graphics.compute.storage_bindings_valid;
@@ -170,6 +172,14 @@ use boom.graphics.skeleton.pose_matrices;
 use boom.graphics.sprite.Rect;
 use boom.graphics.sprite.rect;
 use boom.graphics.sprite.rect_overlaps;
+use boom.graphics.staging.FrameStaging;
+use boom.graphics.staging.staging_begin_frame;
+use boom.graphics.staging.staging_buffer;
+use boom.graphics.staging.staging_dnit;
+use boom.graphics.staging.staging_init;
+use boom.graphics.staging.staging_mapped;
+use boom.graphics.staging.staging_regions;
+use boom.graphics.staging.staging_take;
 use boom.graphics.storage.FrameStorage;
 use boom.graphics.storage.storage_begin_frame;
 use boom.graphics.storage.storage_buffer;
@@ -251,7 +261,8 @@ use boom.math.vec.vec3;
 use boom.math.vec.vec4;
 use boom.window.Window;
 use glfw;
-use mem: std.memory;
+use allo: std.allocator;
+use mem:  std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -283,6 +294,7 @@ rec PendingMeshUpload {
 # white:       a 1x1 opaque white texture, bound when a draw has no texture of
 #              its own, since every fragment stage samples
 # store:       the frame's storage buffer, the bulk data a game's own shading reads
+# staging:     the per-frame staging a batch of buffer writes is copied through
 # sets:        the per-frame descriptor sets binding a game's storage buffers
 # width:       the target width in pixels
 # height:      the target height in pixels
@@ -295,6 +307,8 @@ rec PendingMeshUpload {
 #              counted separately so the two are told apart
 # culled:      draws skipped this frame because they were outside the view
 # draws:       draw calls recorded this frame, after batching
+# barriers:    storage barriers recorded this frame, two per dispatch, update,
+#              batch and readback
 # srgb:        whether the surface encodes sRGB on write; false means the colour
 #              pipeline is missing its final encode and output is dark
 # present:     the present mode that was asked for, which the surface may not have
@@ -315,6 +329,7 @@ pub rec Renderer {
     white:           Texture;
     stream:          VertexStream;
     store:           FrameStorage;
+    staging:         FrameStaging;
     sets:            StorageSets;
     uploads:         [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
     upload_count:    usize;
@@ -328,6 +343,7 @@ pub rec Renderer {
     refused:         usize;
     culled:          usize;
     draws:           usize;
+    barriers:        usize;
     srgb:            bool;
     present:         PresentMode;
     passes:          usize;
@@ -388,6 +404,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.refused         = 0;
     r.culled          = 0;
     r.draws           = 0;
+    r.barriers        = 0;
     r.present         = present;
     r.passes          = 0;
     r.ready_vk        = false;
@@ -402,6 +419,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.ready_stream    = false;
     r.ready_store     = false;
     r.ready_sets      = false;
+    staging_init(?r.staging);
 
     val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
     if (sel vr.err) { ret vr; }
@@ -1153,10 +1171,11 @@ pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
 # r:   renderer to begin on
 # ret: whether a frame was opened, or the failure that prevented one
 pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
-    r.dropped = 0;
-    r.refused = 0;
-    r.culled  = 0;
-    r.draws   = 0;
+    r.dropped  = 0;
+    r.refused  = 0;
+    r.culled   = 0;
+    r.draws    = 0;
+    r.barriers = 0;
     collect_mesh_uploads(r);
 
     # THE RENDERER KEEPS ITSELF THE SIZE OF ITS SURFACE. The swapchain used to
@@ -1209,6 +1228,7 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
     # the write mark is rewound, so a frame that needed room for forty lights
     # does not allocate for them again.
     storage_begin_frame(?r.store, r.frame_index);
+    staging_begin_frame(?r.staging, r.frame_index);
     storage_sets_begin_frame(?r.sets, ?r.vk, r.frame_index);
     r.passes  = 0;
     r.drawing = true;
@@ -1382,6 +1402,16 @@ pub fun renderer_draws(r: *Renderer) usize {
     ret r.draws;
 }
 
+# Storage barriers recorded in the most recent frame.
+#
+# Two for every dispatch, buffer update, batch and readback. A count that tracks
+# how many regions a frame writes rather than how many calls it makes means the
+# writes are not batched: renderer_buffer_update_batch puts one pair around all
+# of them.
+pub fun renderer_barriers(r: *Renderer) usize {
+    ret r.barriers;
+}
+
 # Draws skipped in the most recent frame for being outside the view.
 #
 # The number that says whether culling is doing anything. Zero in a large scene
@@ -1431,6 +1461,7 @@ fun renderer_rollback(r: *Renderer) {
         r.upload_reserved = 0;
     }
 
+    if (r.ready_dev) { staging_dnit(?r.staging, ?r.vk); }
     if (r.ready_sets) {
         storage_sets_dnit(?r.sets, ?r.vk);
         r.ready_sets = false;
@@ -4013,6 +4044,12 @@ fun frame_command(r: *Renderer) vk.CommandBuffer {
     ret r.frame.frames[r.frame_index].command;
 }
 
+# record storage_barrier and count it
+fun barrier(r: *Renderer, cmd: vk.CommandBuffer, extra_stage: u32, extra_access: u32) {
+    storage_barrier(cmd, extra_stage, extra_access);
+    r.barriers = r.barriers + 1;
+}
+
 # Dispatch a compute stage over x by y by z workgroups.
 #
 # The buffers are bound at STORAGE_SET, the one at index n at binding n. What
@@ -4063,12 +4100,12 @@ fun dispatch(r: *Renderer, c: *Compute, buffers: **StorageBuffer, count: usize,
     var set:    vk.DescriptorSet = taken.some;
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     vk.vkCmdBindPipeline(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.pipeline);
     vk.vkCmdBindDescriptorSets(cmd, vk.PIPELINE_BIND_POINT_COMPUTE, c.layout, STORAGE_SET, 1, ?set, 0, nil);
     if (args != nil) { vk.vkCmdDispatchIndirect(cmd, args.buffer.handle, offset::u64); }
     or               { vk.vkCmdDispatch(cmd, x, y, z); }
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     outside_end(r, resume);
     ret err[Error].ok{};
 }
@@ -4092,7 +4129,8 @@ val UPDATE_CHUNK: usize = 65536;
 # block written here before a dispatch is what that dispatch reads, and one
 # written after it is not. The bytes are copied into the command buffer as this
 # returns, so src may be reused at once. For a frame's small writes, a step's
-# parameters or a cleared flag list; seeding a large buffer is
+# parameters or a cleared flag list; many regions in one frame is
+# renderer_buffer_update_batch, and seeding a large buffer is
 # storage_buffer_upload.
 # ---
 # r:      the renderer, with a frame open and no pass open
@@ -4109,7 +4147,7 @@ pub fun renderer_buffer_update(r: *Renderer, b: *StorageBuffer, offset: usize, s
 
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     var done: usize = 0;
     for (done < len) {
         var n: usize = len - done;
@@ -4117,7 +4155,65 @@ pub fun renderer_buffer_update(r: *Renderer, b: *StorageBuffer, offset: usize, s
         vk.vkCmdUpdateBuffer(cmd, b.buffer.handle, (offset + done)::u64, n::u64, (?src[done]):~ptr);
         done = done + n;
     }
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
+    outside_end(r, resume);
+    ret err[Error].ok{};
+}
+
+# Write many regions of a storage buffer as part of the frame, with one barrier
+# pair around all of them.
+#
+# Ordered against the dispatches and draws around it exactly as one
+# renderer_buffer_update is: everything recorded before the batch is finished
+# with the buffer before any write lands, and everything recorded after it sees
+# every write. renderer_buffer_update puts a barrier pair around each call, so a
+# frame writing a thousand regions that way records two thousand barriers.
+#
+# The bytes are copied into the frame's staging memory as this returns, so the
+# sources may be reused at once, and one copy carries every region. For a frame's
+# bulk writes, a world's changed chunks; a single small write is
+# renderer_buffer_update, whose bytes ride in the command buffer.
+#
+# Refused whole, with nothing recorded, when any write is refused or two writes
+# cover the same bytes. No writes is nothing to record and not refused.
+# ---
+# r:      the renderer, with a frame open and no pass open
+# b:      the buffer
+# writes: the regions and their bytes, in any order
+# count:  how many
+pub fun renderer_buffer_update_batch(r: *Renderer, b: *StorageBuffer, writes: *BufferWrite,
+    count: usize) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err)         { ret open; }
+    if (b == nil || !b.ready) { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+    if (count == 0)           { ret err[Error].ok{}; }
+    if (writes == nil)        { ret err[Error].err{Error.buffer{BufferError.empty{}}}; }
+
+    val scratch: res[*vk.BufferCopy, allo.Error] = staging_regions(?r.staging, count);
+    if (sel scratch.err) { ret err[Error].err{Error.alloc{scratch.err}}; }
+    val regions: *vk.BufferCopy    = scratch.ok;
+    val planned: res[usize, Error] = batch_plan(b.buffer.size::usize, writes, count, regions);
+    if (sel planned.err) { ret err[Error].err{planned.err}; }
+    val taken: res[usize, Error] = staging_take(?r.staging, ?r.vk, r.frame_index, planned.ok);
+    if (sel taken.err) { ret err[Error].err{taken.err}; }
+
+    # the regions carry offsets into the batch's own bytes, which land at base
+    val base: usize = taken.ok;
+    val dst:  *u8   = staging_mapped(?r.staging, r.frame_index);
+    var at:   usize = base;
+    var i:    usize = 0;
+    for (i < count) {
+        mem.raw_copy((?dst[at])::ptr, writes[i].src::ptr, writes[i].len);
+        regions[i].srcOffset = regions[i].srcOffset + base::u64;
+        at                   = at + writes[i].len;
+        i                    = i + 1;
+    }
+
+    val cmd:    vk.CommandBuffer = frame_command(r);
+    val resume: bool             = outside_begin(r);
+    barrier(r, cmd, 0, 0);
+    vk.vkCmdCopyBuffer(cmd, staging_buffer(?r.staging, r.frame_index), b.buffer.handle, count::u32, regions);
+    barrier(r, cmd, 0, 0);
     outside_end(r, resume);
     ret err[Error].ok{};
 }
@@ -4143,14 +4239,14 @@ pub fun renderer_readback(r: *Renderer, rb: *Readback, b: *StorageBuffer, offset
     val slot:   usize            = r.frame_index;
     val cmd:    vk.CommandBuffer = frame_command(r);
     val resume: bool             = outside_begin(r);
-    storage_barrier(cmd, 0, 0);
+    barrier(r, cmd, 0, 0);
     var region: vk.BufferCopy;
     region.srcOffset = offset::u64;
     region.dstOffset = 0;
     region.size      = rb.len::u64;
     vk.vkCmdCopyBuffer(cmd, b.buffer.handle, rb.slots[slot].handle, 1, ?region);
     # the host reads it once the fence says the frame is done
-    storage_barrier(cmd, vk.PIPELINE_STAGE_HOST_BIT, vk.ACCESS_HOST_READ_BIT);
+    barrier(r, cmd, vk.PIPELINE_STAGE_HOST_BIT, vk.ACCESS_HOST_READ_BIT);
     outside_end(r, resume);
     rb.serial[slot] = r.vk.retire.latest;
     ret err[Error].ok{};
