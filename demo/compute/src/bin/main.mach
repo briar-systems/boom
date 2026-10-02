@@ -25,6 +25,11 @@
 # first, and reads the world back: every chunk must hold its own bytes, behind
 # one barrier pair per batch.
 #
+# A fourth frame makes two pools mid-frame, with no wait, as a game growing its
+# pool does: it writes one word of the first, steps the first into the second,
+# and reads both back. The first must be zero but that word, and the second the
+# step of it, so both fills landed before the write and the dispatch.
+#
 # CI runs it under lavapipe:
 #
 #   mach build . && xvfb-run -a ./out/linux-x86_64/debug/bin/compute
@@ -74,6 +79,9 @@ val BYTES: usize = 16384;
 # the world the batches write: chunks of CHUNK_WORDS u32
 val CHUNKS:      usize = 1150;
 val CHUNK_WORDS: usize = 256;
+
+# the one cell of a pool made mid-frame that the frame writes before stepping it
+val SEEDED: usize = 5;
 
 fun fail(step: str, r: err[gfx.Error]) bool {
     if (sel r.ok) { ret false; }
@@ -347,8 +355,58 @@ fun main(argc: i64, argv: **u8) i64 {
     val batched: usize          = gfx.renderer_barriers(?r);
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
 
+    # the grown pools: made, seeded and stepped within one frame
+    if (!open_frame(?r)) { ret 1; }
+    val fresh_made: res[gfx.StorageBuffer, gfx.Error] = gfx.renderer_storage_buffer(?r, CELLS * 4);
+    if (sel fresh_made.err) {
+        p.printlnf("FAIL renderer_storage_buffer: {}", gfx.error_message(fresh_made.err));
+        ret 1;
+    }
+    var fresh:      gfx.StorageBuffer                 = fresh_made.ok;
+    val grown_made: res[gfx.StorageBuffer, gfx.Error] = gfx.renderer_storage_buffer(?r, CELLS * 4);
+    if (sel grown_made.err) {
+        p.printlnf("FAIL renderer_storage_buffer: {}", gfx.error_message(grown_made.err));
+        ret 1;
+    }
+    var grown: gfx.StorageBuffer = grown_made.ok;
+    var seven: u32               = 7;
+    if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?fresh, SEEDED * 4, (?seven):~*u8, 4))) {
+        ret 1;
+    }
+    var grew: [5]*gfx.StorageBuffer;
+    grew[0] = ?fresh;
+    grew[1] = ?grown;
+    grew[2] = ?control;
+    grew[3] = ?params;
+    grew[4] = ?rule;
+    if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?grew[0], 5, GROUPS, 1, 1))) { ret 1; }
+    if (fail("renderer_end_frame", gfx.renderer_end_frame(?r)))                                 { ret 1; }
+
     gfx.renderer_wait_idle(?r);
     var ok: bool = true;
+
+    var zeroes:       [256]u32;
+    var stepped_pool: [256]u32;
+    if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?fresh, 0, (?zeroes[0]):~*u8, CELLS * 4))) { ret 1; }
+    if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?grown, 0, (?stepped_pool[0]):~*u8, CELLS * 4))) {
+        ret 1;
+    }
+    var unfilled: usize = 0;
+    i = 0;
+    for (i < CELLS) {
+        # the step is 2 * src + 2 under the second generation's parameters
+        var want: u32 = 0;
+        if (i == SEEDED)                                          { want = 7; }
+        if (zeroes[i] != want || stepped_pool[i] != want * 2 + 2) { unfilled = unfilled + 1; }
+        i = i + 1;
+    }
+    if (unfilled != 0) {
+        p.printlnf("FAIL renderer_storage_buffer: {} of 256 cells were not zero when the frame used them", unfilled);
+        ok = false;
+    }
+    or { p.println("ok   two pools made mid-frame were zero for the write and the step after them"); }
+    gfx.storage_buffer_delete(d, ?grown);
+    gfx.storage_buffer_delete(d, ?fresh);
 
     if (!(sel overlap.err && (sel overlap.err.buffer && sel overlap.err.buffer.overlap))) {
         p.println("FAIL renderer_buffer_update_batch: overlapping writes were not refused");
