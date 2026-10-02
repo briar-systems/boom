@@ -1,8 +1,8 @@
 [project]
 id = "compute"
 version = "0.1.0"
-# a compute stage needs mach 6.7
-mach = "^6.7"
+# a stage reaching buffers by address needs mach 6.10.1 (mach#4401)
+mach = "^6.10.1"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
