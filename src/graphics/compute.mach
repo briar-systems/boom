@@ -24,8 +24,16 @@
 # a hand-tuned renderer would use, which costs a little overlap between a
 # dispatch and the draws around it and buys never racing.
 #
-# WHAT IS NOT HERE YET. Storage images, workgroup shared memory, barriers inside
-# a stage and atomics need compiler support that does not exist yet
+# BUFFERS BY ADDRESS. Where the device has bufferDeviceAddress, every storage
+# buffer also has a 64-bit address, storage_buffer_address. A game writes
+# addresses into a buffer it binds, and its stage reads them there as pointers
+# and reads, writes and runs atomics through them, so one dispatch reaches as
+# many buffers as the table names, past the bindings and past one binding's
+# range. The barriers around a call cover memory reached that way as well,
+# since they name every shader access rather than particular buffers.
+#
+# WHAT IS NOT HERE YET. Storage images, workgroup shared memory and barriers
+# inside a stage need compiler support that does not exist yet
 # (briar-systems/mach#4252), so a compute stage reads and writes buffers only.
 
 use boom.graphics.buffer.Buffer;
@@ -141,12 +149,14 @@ pub fun storage_buffer_alloc(d: *Device, size: usize) res[StorageBuffer, Error] 
     if (size == 0)            { ret res[StorageBuffer, Error].err{Error.buffer{BufferError.empty{}}}; }
     if ((size % 4) != 0)      { ret res[StorageBuffer, Error].err{Error.buffer{BufferError.unaligned{size::u64}}}; }
 
-    val v:  *Vk        = d.vk;
-    val ir: err[Error] = buffer_init(?b.buffer, v, size::u64,
-        vk.BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.BUFFER_USAGE_INDIRECT_BUFFER_BIT
+    val v:     *Vk = d.vk;
+    var usage: u32 = vk.BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.BUFFER_USAGE_INDIRECT_BUFFER_BIT
         | vk.BUFFER_USAGE_VERTEX_BUFFER_BIT
-        | vk.BUFFER_USAGE_TRANSFER_SRC_BIT | vk.BUFFER_USAGE_TRANSFER_DST_BIT,
-        vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        | vk.BUFFER_USAGE_TRANSFER_SRC_BIT | vk.BUFFER_USAGE_TRANSFER_DST_BIT;
+    # every buffer has an address where the device can give one, so no path
+    # that makes a buffer needs a variant that makes one addressable
+    if (v.limits.buffer_device_address) { usage = usage | vk.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT; }
+    val ir: err[Error] = buffer_init(?b.buffer, v, size::u64, usage, vk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (sel ir.err) { ret res[StorageBuffer, Error].err{ir.err}; }
 
     b.ready        = true;
@@ -165,6 +175,38 @@ fun storage_buffer_unmade(d: *Device, b: *StorageBuffer) {
 pub fun storage_buffer_size(b: *StorageBuffer) usize {
     if (!b.ready) { ret 0; }
     ret b.buffer.size::usize;
+}
+
+# The buffer's device address, which a shader dereferences as a pointer.
+#
+# A shader holds no pointer a descriptor hands it, so the address arrives in
+# memory: written into a buffer the stage binds, as a field of type *T, and read
+# there as a physical pointer (the stage's target selects
+# buffer_device_address). A pool larger than one binding's
+# max_storage_buffer_range is then many buffers and a table of their addresses,
+# each buffer up to max_memory_allocation_size.
+#
+# The address is fixed for the buffer's life and needs no frame, so a buffer
+# made mid-frame by renderer_storage_buffer has one at once, and the frame may
+# write it into a table before anything has run. It names the buffer only while
+# the buffer lives: a shader dereferencing it after storage_buffer_delete, once
+# the frames that used it finish, reads freed memory.
+# ---
+# d:   the device
+# b:   the buffer
+# ret: the address, or no_device_address when renderer_limits'
+#      buffer_device_address is false
+pub fun storage_buffer_address(d: *Device, b: *StorageBuffer) res[u64, Error] {
+    if (d == nil || !d.ready) { ret res[u64, Error].err{Error.uninitialized{Stage.upload{}}}; }
+    if (b == nil || !b.ready) { ret res[u64, Error].err{Error.buffer{BufferError.empty{}}}; }
+    if (!d.vk.limits.buffer_device_address) {
+        ret res[u64, Error].err{Error.buffer{BufferError.no_device_address{}}};
+    }
+    var info: vk.BufferDeviceAddressInfo;
+    info.sType  = vk.STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.pNext  = nil;
+    info.buffer = b.buffer.handle;
+    ret res[u64, Error].ok{vk.vkGetBufferDeviceAddress(d.vk.device, ?info)};
 }
 
 # Write bytes into a storage buffer, waiting until the GPU holds them.

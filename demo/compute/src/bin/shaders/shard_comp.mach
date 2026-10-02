@@ -1,0 +1,41 @@
+# A pool sharded over buffers the stage reaches by address.
+#
+# The stage binds one buffer, a table of the shards' device addresses, and
+# reaches every shard through the pointer it reads there, as a pool larger than
+# one binding is reached. Each invocation writes its cell through the pointer
+# and counts itself into its shard's total with an atomic through the same
+# pointer, so the host can say what every shard must hold.
+#
+# Built for the spirv-address target, which selects buffer_device_address: a
+# pointer read from memory is a physical pointer.
+
+use shader.atomic;
+use shader.sync;
+
+# cells per shard, one workgroup's worth
+rec Shard {
+    total: u32;
+    pad0:  u32;
+    pad1:  u32;
+    pad2:  u32;
+    v:     [64]u32;
+}
+
+rec Table {
+    shards: [4]*Shard;
+}
+
+#[storage(1, 0, "readonly")]
+var table: Table;
+
+#[builtin("global_invocation")]
+var gid: u32x3;
+
+#[stage("compute")]
+#[workgroup(64, 1, 1)]
+fun comp_main() {
+    val i:     u32    = gid[0];
+    val shard: *Shard = table.shards[i / 64];
+    shard.v[i % 64] = i * 3 + 1;
+    atomic.atomic_add_u32(?shard.total, sync.SCOPE_DEVICE, sync.SEMANTICS_RELAXED, 1);
+}

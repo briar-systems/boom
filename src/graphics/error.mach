@@ -151,16 +151,18 @@ pub tag Capacity: u8 {
 
 # why a buffer operation was refused
 # ---
-# empty:     a buffer of zero bytes
-# overrun:   a write or copy larger than a buffer; carries the requested bytes
-# unaligned: an offset or length a GPU copy, update or indirect read needs in
-#            whole four-byte words; carries the offending value
-# bindings:  a nil or deleted storage buffer in a binding list; carries its index
-# too_many:  a binding list longer than the device allows for its kind of call,
-#            max_dispatch_bindings or max_draw_bindings; carries the count
-#            asked for
-# overlap:   two writes of one batch covering the same bytes; carries the
-#            offset of the later one
+# empty:             a buffer of zero bytes
+# overrun:           a write or copy larger than a buffer; carries the requested bytes
+# unaligned:         an offset or length a GPU copy, update or indirect read needs in
+#                    whole four-byte words; carries the offending value
+# bindings:          a nil or deleted storage buffer in a binding list; carries its index
+# too_many:          a binding list longer than the device allows for its kind of call,
+#                    max_dispatch_bindings or max_draw_bindings; carries the count
+#                    asked for
+# overlap:           two writes of one batch covering the same bytes; carries the
+#                    offset of the later one
+# no_device_address: a buffer's address asked of a device without
+#                    bufferDeviceAddress
 pub tag BufferError: u8 {
     empty;
     overrun:   u64;
@@ -168,6 +170,7 @@ pub tag BufferError: u8 {
     bindings:  usize;
     too_many:  usize;
     overlap:   u64;
+    no_device_address;
 }
 
 # why an image operation was refused
@@ -440,6 +443,9 @@ fun buffer_message(e: BufferError) str {
     if (sel e.bindings)  { ret "a storage buffer in the binding list is missing or deleted"; }
     if (sel e.too_many)  { ret "more storage buffers bound than the device allows (see renderer_limits)"; }
     if (sel e.overlap)   { ret "two writes of one batch cover the same bytes"; }
+    if (sel e.no_device_address) {
+        ret "this device gives buffers no device address (see renderer_limits)";
+    }
     ret "a write or copy exceeds the buffer";
 }
 
