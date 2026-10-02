@@ -1,0 +1,322 @@
+# The frame clock, and the deletion queue retired behind it.
+#
+# FRAME SERIALS. Every frame the frame loop begins takes the next serial,
+# starting at 1, and the in-flight slot it records into remembers that serial
+# as the one its fence covers. Frames retire in submission order on one queue,
+# so when a slot's fence is observed to have passed, every frame up to its
+# serial has finished on the GPU. That serial is `completed`, and nothing else
+# advances it: an observed fence, or a device known to be idle.
+#
+# THE CONTRACT, FOR ANYTHING THAT MUST OUTLIVE THE GPU'S USE OF IT. Tag the work
+# with the serial of the newest frame that may use it, which is `latest`, and
+# act on it once `completed` has reached that serial. A readback hands its copy
+# back that way, and a deleted device object is destroyed that way. Neither
+# waits: the frame loop advances the clock as a side effect of the fence waits
+# it already does to bound the CPU's lead, so retiring costs nothing extra.
+#
+# WHY THE NEWEST FRAME AND NOT THE ONE BEING RECORDED. An object deleted
+# between frames was last usable by the frame just submitted, and one deleted
+# mid-frame may already be recorded into the open one. `latest` is the right
+# tag in both cases, so a delete needs no idea where in the frame it is.
+#
+# WHY NOT A DEVICE WAIT. Destroying an object a submitted command buffer still
+# references is undefined behaviour, and waiting for the whole device to go
+# idle before every delete is the conservative answer. It stalls the CPU until
+# every frame in flight has retired and leaves the GPU to refill from empty,
+# which measured 11 to 31 ms per large buffer replaced mid-game.
+
+use allo: std.allocator;
+use std.allocator.page;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use vk;
+
+# A device object waiting for the GPU to finish with it, by kind.
+#
+# One handle per entry, queued in the order it must be destroyed: a view before
+# its image, an image or buffer before its memory. A new kind is one member here
+# and one arm in doomed_destroy.
+pub tag Doomed: u8 {
+    buffer:          vk.Buffer;
+    memory:          vk.DeviceMemory;
+    image:           vk.Image;
+    view:            vk.ImageView;
+    sampler:         vk.Sampler;
+    pipeline:        vk.Pipeline;
+    pipeline_layout: vk.PipelineLayout;
+    set_layout:      vk.DescriptorSetLayout;
+    framebuffer:     vk.Framebuffer;
+    render_pass:     vk.RenderPass;
+}
+
+# When a release destroys what it is handed.
+#
+# now:     at once. For objects no submitted or recorded work can reference:
+#          staging the caller has already waited on, a creation unwinding,
+#          or a shutdown that has drained the device.
+# retired: once every frame that may use it has finished.
+pub tag Release: u8 {
+    now;
+    retired;
+}
+
+# An object and the serial of the newest frame that may use it.
+rec Pending {
+    serial: u64;
+    obj:    Doomed;
+}
+
+# The device's frame clock and its deletion queue.
+# ---
+# latest:    serial of the newest frame begun, zero before the first
+# completed: serial of the newest frame known to have finished on the GPU
+# open:      whether frame `latest` is still being recorded, so not yet submitted
+# items:     the queue, items[head..len) pending, oldest first
+# head:      the oldest pending entry
+# len:       one past the newest pending entry
+# cap:       entries items has room for
+pub rec Retire {
+    latest:    u64;
+    completed: u64;
+    open:      bool;
+    items:     *Pending;
+    head:      usize;
+    len:       usize;
+    cap:       usize;
+}
+
+pub fun retire_init(q: *Retire) {
+    q.latest    = 0;
+    q.completed = 0;
+    q.open      = false;
+    q.items     = nil;
+    q.head      = 0;
+    q.len       = 0;
+    q.cap       = 0;
+}
+
+# Begin a frame: it takes the next serial, which the caller records against the
+# fence its submission will signal.
+pub fun retire_open(q: *Retire) u64 {
+    q.latest = q.latest + 1;
+    q.open   = true;
+    ret q.latest;
+}
+
+# The open frame has been handed to the queue, or abandoned before it was.
+pub fun retire_close(q: *Retire) {
+    q.open = false;
+}
+
+# A fence covering frame `serial` has been observed passed.
+#
+# Never moves the clock back: a slot whose fence covers no frame yet passes 0.
+pub fun retire_through(q: *Retire, serial: u64) {
+    if (serial > q.completed) { q.completed = serial; }
+}
+
+# The device has drained, so everything submitted has finished. A frame still
+# being recorded was never submitted and is not finished.
+pub fun retire_idle(q: *Retire) {
+    var done: u64 = q.latest;
+    if (q.open && done > 0) { done = done - 1; }
+    retire_through(q, done);
+}
+
+# Queue an object behind the newest frame that may use it.
+#
+# Refused only when the queue cannot grow, which leaves it as it was.
+pub fun retire_push(q: *Retire, obj: Doomed) err[allo.Error] {
+    if (q.len == q.cap && q.head > 0) {
+        # slide the pending entries down over the ones already destroyed
+        var i: usize = 0;
+        for (q.head + i < q.len) {
+            q.items[i] = q.items[q.head + i];
+            i          = i + 1;
+        }
+        q.len  = i;
+        q.head = 0;
+    }
+    if (q.len == q.cap) {
+        var a:    allo.Allocator;
+        val made: err[allo.Error] = page.make(?a);
+        if (sel made.err) { ret made; }
+        var cap: usize = 256;
+        if (q.cap != 0) { cap = q.cap * 2; }
+        val grown: res[*Pending, allo.Error] = allo.reallocate[Pending](?a, q.items, q.cap, cap);
+        if (sel grown.err) { ret err[allo.Error].err{grown.err}; }
+        q.items = grown.ok;
+        q.cap   = cap;
+    }
+    q.items[q.len] = Pending{serial: q.latest, obj: obj};
+    q.len          = q.len + 1;
+    ret err[allo.Error].ok{};
+}
+
+# The oldest queued object whose frames have all finished, taken off the queue.
+#
+# Entries are queued with non-decreasing serials, so the first one not yet due
+# ends the search.
+pub fun retire_take(q: *Retire) opt[Doomed] {
+    if (q.head == q.len)                      { ret opt[Doomed].none{}; }
+    if (q.items[q.head].serial > q.completed) { ret opt[Doomed].none{}; }
+    val obj: Doomed = q.items[q.head].obj;
+    q.head = q.head + 1;
+    if (q.head == q.len) {
+        q.head = 0;
+        q.len  = 0;
+    }
+    ret opt[Doomed].some{obj};
+}
+
+# How many objects are waiting on a frame.
+pub fun retire_pending(q: *Retire) usize {
+    ret q.len - q.head;
+}
+
+# Destroy every queued object that is due.
+pub fun retire_collect(q: *Retire, device: vk.Device) {
+    for {
+        val next: opt[Doomed] = retire_take(q);
+        if (!sel next.some) { ret; }
+        doomed_destroy(device, next.some);
+    }
+}
+
+# Destroy everything still queued, due or not, and release the queue.
+#
+# For a device being torn down: drained, or lost, in which case nothing it was
+# running will ever finish and its objects are freed regardless.
+pub fun retire_dnit(q: *Retire, device: vk.Device) {
+    var i: usize = q.head;
+    for (i < q.len) {
+        doomed_destroy(device, q.items[i].obj);
+        i = i + 1;
+    }
+    if (q.items != nil) {
+        var a:    allo.Allocator;
+        val made: err[allo.Error] = page.make(?a);
+        if (sel made.ok) { allo.deallocate[Pending](?a, q.items, q.cap); }
+    }
+    retire_init(q);
+}
+
+# Destroy one object now.
+pub fun doomed_destroy(device: vk.Device, d: Doomed) {
+    if (sel d.buffer)          { vk.vkDestroyBuffer(device, d.buffer, nil); }
+    if (sel d.memory)          { vk.vkFreeMemory(device, d.memory, nil); }
+    if (sel d.image)           { vk.vkDestroyImage(device, d.image, nil); }
+    if (sel d.view)            { vk.vkDestroyImageView(device, d.view, nil); }
+    if (sel d.sampler)         { vk.vkDestroySampler(device, d.sampler, nil); }
+    if (sel d.pipeline)        { vk.vkDestroyPipeline(device, d.pipeline, nil); }
+    if (sel d.pipeline_layout) { vk.vkDestroyPipelineLayout(device, d.pipeline_layout, nil); }
+    if (sel d.set_layout)      { vk.vkDestroyDescriptorSetLayout(device, d.set_layout, nil); }
+    if (sel d.framebuffer)     { vk.vkDestroyFramebuffer(device, d.framebuffer, nil); }
+    if (sel d.render_pass)     { vk.vkDestroyRenderPass(device, d.render_pass, nil); }
+}
+
+# --------------------------------------------------------------------- tests
+#
+# The queue's decisions are device-free, so they are driven here frame by frame
+# the way the frame loop drives them, with MAX_FRAMES_IN_FLIGHT of two.
+
+#[testing]
+fun buffer_of(n: usize) Doomed {
+    ret Doomed.buffer{n::vk.Buffer};
+}
+
+#[testing]
+fun takes(q: *Retire, n: usize) bool {
+    val got: opt[Doomed] = retire_take(q);
+    if (!sel got.some)        { ret false; }
+    if (!sel got.some.buffer) { ret false; }
+    ret got.some.buffer == n::vk.Buffer;
+}
+
+#[testing]
+fun takes_none(q: *Retire) bool {
+    val got: opt[Doomed] = retire_take(q);
+    ret sel got.none;
+}
+
+test retire__buffers_wait_for_every_frame_that_used_them {
+    var q: Retire;
+    retire_init(?q);
+
+    # nothing in flight: due at once
+    val early: err[allo.Error] = retire_push(?q, buffer_of(1));
+    if (!sel early.ok) { ret 1; }
+    if (!takes(?q, 1)) { ret 2; }
+
+    # frame 1 records into slot 0, and deletes 2 mid-frame
+    val s1: u64 = retire_open(?q);
+    retire_push(?q, buffer_of(2));
+    retire_close(?q);
+    # frame 2 into slot 1, whose fence covers nothing yet; 3 is deleted after
+    # it is submitted
+    retire_through(?q, 0);
+    val s2: u64 = retire_open(?q);
+    retire_close(?q);
+    retire_push(?q, buffer_of(3));
+    if (!takes_none(?q)) { ret 3; }
+
+    # frame 3 reuses slot 0, so its wait proves frame 1 and only frame 1
+    retire_through(?q, s1);
+    val s3: u64 = retire_open(?q);
+    if (!takes(?q, 2))   { ret 4; }
+    if (!takes_none(?q)) { ret 5; }
+    retire_push(?q, buffer_of(4));
+    retire_close(?q);
+
+    # frame 4 reuses slot 1, proving frame 2: 3 was last usable by it
+    retire_through(?q, s2);
+    retire_open(?q);
+    if (!takes(?q, 3)) { ret 6; }
+    # 4 was deleted while frame 3 was recording, which is still in flight
+    if (!takes_none(?q))         { ret 7; }
+    if (retire_pending(?q) != 1) { ret 8; }
+
+    # an idle device finishes everything submitted, but not the open frame 4
+    retire_push(?q, buffer_of(5));
+    retire_idle(?q);
+    if (q.completed != s3) { ret 9; }
+    if (!takes(?q, 4))     { ret 10; }
+    if (!takes_none(?q))   { ret 11; }
+    retire_close(?q);
+    retire_idle(?q);
+    if (!takes(?q, 5)) { ret 12; }
+
+    # a fence observed late never moves the clock back
+    retire_through(?q, s1);
+    if (q.completed != s3 + 1) { ret 13; }
+    retire_dnit(?q, nil);
+    ret 0;
+}
+
+test retire__queue_grows_and_keeps_order {
+    var q: Retire;
+    retire_init(?q);
+    retire_open(?q);
+    var i: usize = 1;
+    for (i <= 600) {
+        val pushed: err[allo.Error] = retire_push(?q, buffer_of(i));
+        if (!sel pushed.ok) { ret 1; }
+        i = i + 1;
+    }
+    if (retire_pending(?q) != 600) { ret 2; }
+    retire_close(?q);
+    retire_idle(?q);
+    i = 1;
+    for (i <= 600) {
+        if (!takes(?q, i)) { ret 3; }
+        i = i + 1;
+    }
+    if (retire_pending(?q) != 0) { ret 4; }
+    retire_dnit(?q, nil);
+    ret 0;
+}

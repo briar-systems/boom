@@ -27,6 +27,17 @@
 # `finished` is reused for image 2 while image 0's present still holds it. That
 # is a real race: the second wait may observe the first signal. Per image, the
 # acquire that returns the image is itself the proof its last present retired.
+#
+# EACH FENCE KNOWS WHICH FRAME IT COVERS. A frame takes the next serial of the
+# device's frame clock when it begins (see retire), and its slot records it.
+# Waiting on a slot's fence before reuse is therefore also the observation that
+# its frame, and every frame before it, has finished on the GPU, and the clock
+# is advanced there and then. That is the one point a frame is known finished,
+# and what runs there is the contract: the device's deletion queue is collected
+# straight after the wait, and anything else holding work until its frame is
+# done tags it with the clock's latest serial and acts once completed reaches
+# it, as a readback does. renderer_begin_frame resets the per-slot rings at the
+# same point, on the same proof.
 
 use boom.graphics.buffer.Buffer;
 use boom.graphics.buffer.buffer_dnit;
@@ -48,6 +59,10 @@ use boom.graphics.pass.PassOptions;
 use boom.graphics.pass.pass_clearing;
 use boom.graphics.pass.pass_create;
 use boom.graphics.pass.pass_loading;
+use boom.graphics.retire.retire_close;
+use boom.graphics.retire.retire_collect;
+use boom.graphics.retire.retire_open;
+use boom.graphics.retire.retire_through;
 use boom.graphics.swapchain.MAX_IMAGES;
 use boom.graphics.swapchain.Swapchain;
 use boom.graphics.vk.Vk;
@@ -122,10 +137,12 @@ pub fun window_suspended(state: WindowPass) WindowPass {
 # command:   Command buffer recorded this frame.
 # available: Signalled when the acquired image is ready to render into.
 # in_flight: Signalled when this frame's command buffer is reusable.
+# serial:    The frame-clock serial in_flight covers, zero before any.
 rec Frame {
     command:   vk.CommandBuffer;
     available: vk.Semaphore;
     in_flight: vk.Fence;
+    serial:    u64;
 }
 
 # A window readback armed for the frame being recorded.
@@ -212,6 +229,7 @@ pub fun frame_init(f: *FrameLoop, v: *Vk, s: *Swapchain) err[Error] {
         abi.commandPool        = f.pool;
         abi.level              = vk.COMMAND_BUFFER_LEVEL_PRIMARY;
         abi.commandBufferCount = 1;
+        f.frames[i].serial     = 0;
         val allocated: i32 = vk.vkAllocateCommandBuffers(v.device, ?abi, ?f.frames[i].command);
         if (allocated != vk.SUCCESS) {
             ret err[Error].err{vk_failed(VkCall.allocate_command_buffers{}, allocated)};
@@ -353,6 +371,7 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     if (waited < 0) {
         ret res[bool, Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
     }
+    if (waited == vk.SUCCESS) { frame_retired(f, v, i); }
 
     var index: u32 = 0;
     val ar:    i32 = vk.vkAcquireNextImageKHR(v.device, s.handle, FENCE_TIMEOUT,
@@ -361,7 +380,8 @@ pub fun frame_begin(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     if (ar != vk.SUCCESS && ar != vk.SUBOPTIMAL_KHR) {
         ret res[bool, Error].err{vk_failed(VkCall.acquire_next_image{}, ar)};
     }
-    f.image_index = index;
+    f.image_index      = index;
+    f.frames[i].serial = retire_open(?v.retire);
 
     # Reset only after the acquire succeeds. Resetting first would leave the
     # fence unsignalled with no submission to signal it, deadlocking the next
@@ -543,6 +563,7 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     si.pSignalSemaphores    = ?f.finished[f.image_index];
 
     val submitted: i32 = vk.vkQueueSubmit(v.graphics_queue, 1, ?si, f.frames[i].in_flight);
+    retire_close(?v.retire);
     if (submitted != vk.SUCCESS) {
         capture_drop(f, v, ?staging, capturing);
         ret res[bool, Error].err{vk_failed(VkCall.queue_submit{}, submitted)};
@@ -583,6 +604,13 @@ pub fun frame_end(f: *FrameLoop, v: *Vk, s: *Swapchain) res[bool, Error] {
     ret res[bool, Error].ok{true};
 }
 
+# Slot i's fence has been observed passed: its frame and every one before it
+# have finished, so the clock advances and what waited on them is destroyed.
+fun frame_retired(f: *FrameLoop, v: *Vk, i: usize) {
+    retire_through(?v.retire, f.frames[i].serial);
+    retire_collect(?v.retire, v.device);
+}
+
 # Wait for an armed capture's frame to retire and copy its bytes out.
 fun capture_fulfil(f: *FrameLoop, v: *Vk, staging: *Buffer, i: usize, size: usize) err[Error] {
     val waited: i32 = vk.vkWaitForFences(v.device, 1, ?f.frames[i].in_flight, vk.TRUE, FENCE_TIMEOUT);
@@ -590,6 +618,7 @@ fun capture_fulfil(f: *FrameLoop, v: *Vk, staging: *Buffer, i: usize, size: usiz
         capture_drop(f, v, staging, true);
         ret err[Error].err{vk_failed(VkCall.wait_for_fences{}, waited)};
     }
+    frame_retired(f, v, i);
     val mapped: res[ptr, Error] = buffer_map(staging, v);
     if (sel mapped.err) {
         capture_drop(f, v, staging, true);
