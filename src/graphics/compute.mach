@@ -36,6 +36,7 @@ use boom.graphics.buffer.buffer_init;
 use boom.graphics.buffer.buffer_init_prefer;
 use boom.graphics.buffer.buffer_invalidate;
 use boom.graphics.buffer.buffer_map;
+use boom.graphics.buffer.buffer_release;
 use boom.graphics.buffer.buffer_write;
 use boom.graphics.buffer.oneshot_begin;
 use boom.graphics.buffer.oneshot_submit;
@@ -53,9 +54,11 @@ use boom.graphics.pipeline.create_set_layout;
 use boom.graphics.pipeline.shader_module;
 use boom.graphics.pipeline.storage_bindings_fit;
 use boom.graphics.pipeline.storage_set_layout;
+use boom.graphics.retire.Doomed;
+use boom.graphics.retire.Release;
 use boom.graphics.spirv.COMPUTE_ENTRY;
 use boom.graphics.vk.Vk;
-use boom.graphics.vk.vk_wait_idle;
+use boom.graphics.vk.vk_release;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -220,11 +223,11 @@ pub fun storage_buffer_read(d: *Device, b: *StorageBuffer, offset: usize, out: *
 
 # Delete a storage buffer.
 #
-# Waits for the device first, since a frame in flight may still read it.
+# Nothing waits: a frame in flight may still read it, so it is destroyed once
+# that frame has finished; see retire.
 pub fun storage_buffer_delete(d: *Device, b: *StorageBuffer) {
     if (d == nil || !d.ready || !b.ready) { ret; }
-    vk_wait_idle(d.vk);
-    buffer_dnit(?b.buffer, d.vk);
+    buffer_release(?b.buffer, d.vk, Release.retired{});
     b.ready = false;
     if (d.vk.live.buffers > 0) { d.vk.live.buffers = d.vk.live.buffers - 1; }
 }
@@ -318,7 +321,7 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     if (sel er.err) { ret er; }
     val sr: err[Error] = storage_set_layout(v, ?c.storage);
     if (sel sr.err) {
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret sr;
     }
 
@@ -336,14 +339,14 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     val laid: i32 = vk.vkCreatePipelineLayout(v.device, ?lci, nil, ?c.layout);
     if (laid != vk.SUCCESS) {
         c.layout = nil;
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret err[Error].err{vk_failed(VkCall.create_pipeline_layout{}, laid)};
     }
 
     var module: vk.ShaderModule;
     val mr:     err[Error] = shader_module(v, spv, len, ?module);
     if (sel mr.err) {
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret mr;
     }
 
@@ -365,7 +368,7 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     vk.vkDestroyShaderModule(v.device, module, nil);
     if (rc != vk.SUCCESS) {
         c.pipeline = nil;
-        compute_release(c, v);
+        compute_release(c, v, Release.now{});
         ret err[Error].err{vk_failed(VkCall.create_compute_pipelines{}, rc)};
     }
 
@@ -374,19 +377,18 @@ pub fun compute(c: *Compute, d: *Device, spv: *u8, len: usize) err[Error] {
     ret err[Error].ok{};
 }
 
-# Delete a compute pipeline, waiting for the device first.
+# Delete a compute pipeline once the frames that may dispatch it have finished.
 pub fun compute_delete(c: *Compute, d: *Device) {
     if (d == nil || !d.ready || !c.ready) { ret; }
-    vk_wait_idle(d.vk);
-    compute_release(c, d.vk);
+    compute_release(c, d.vk, Release.retired{});
     if (d.vk.live.computes > 0) { d.vk.live.computes = d.vk.live.computes - 1; }
 }
 
-fun compute_release(c: *Compute, v: *Vk) {
-    if (c.pipeline != nil) { vk.vkDestroyPipeline(v.device, c.pipeline, nil); }
-    if (c.layout != nil)   { vk.vkDestroyPipelineLayout(v.device, c.layout, nil); }
-    if (c.storage != nil)  { vk.vkDestroyDescriptorSetLayout(v.device, c.storage, nil); }
-    if (c.empty != nil)    { vk.vkDestroyDescriptorSetLayout(v.device, c.empty, nil); }
+fun compute_release(c: *Compute, v: *Vk, how: Release) {
+    if (c.pipeline != nil) { vk_release(v, Doomed.pipeline{c.pipeline}, how); }
+    if (c.layout != nil)   { vk_release(v, Doomed.pipeline_layout{c.layout}, how); }
+    if (c.storage != nil)  { vk_release(v, Doomed.set_layout{c.storage}, how); }
+    if (c.empty != nil)    { vk_release(v, Doomed.set_layout{c.empty}, how); }
     c.pipeline = nil;
     c.layout   = nil;
     c.storage  = nil;
@@ -451,13 +453,12 @@ pub fun readback_len(rb: *Readback) usize {
     ret rb.len;
 }
 
-# Delete a readback, waiting for the device first.
+# Delete a readback once the frames that may copy into it have finished.
 pub fun readback_delete(rb: *Readback, d: *Device) {
     if (d == nil || !d.ready || !rb.ready) { ret; }
-    vk_wait_idle(d.vk);
     var i: usize = 0;
     for (i < MAX_FRAMES_IN_FLIGHT) {
-        buffer_dnit(?rb.slots[i], d.vk);
+        buffer_release(?rb.slots[i], d.vk, Release.retired{});
         i = i + 1;
     }
     rb.ready = false;

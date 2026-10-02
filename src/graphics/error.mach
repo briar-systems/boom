@@ -131,7 +131,7 @@ pub tag Stage: u8 {
 # storage:         the per-frame storage buffer chain or its byte ceiling
 # stream:          the per-frame vertex arena blocks
 # mesh_uploads:    the runtime mesh upload queue
-# retired_meshes:  the meshes waiting for a frame fence to release them
+# retired_meshes:  no longer produced: deleted objects wait on a queue that grows
 # glyph_pages:     a face's glyph atlas pages
 pub tag Capacity: u8 {
     pipelines;
