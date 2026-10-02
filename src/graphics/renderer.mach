@@ -214,6 +214,16 @@ use boom.graphics.tilemap.tilemap_all;
 use boom.graphics.tilemap.tilemap_done;
 use boom.graphics.tilemap.tilemap_expand;
 use boom.graphics.tilemap.tilemap_span;
+use boom.graphics.timer.GpuTimer;
+use boom.graphics.timer.Timers;
+use boom.graphics.timer.timer_create;
+use boom.graphics.timer.timer_delete;
+use boom.graphics.timer.timer_take;
+use boom.graphics.timer.timer_write_begin;
+use boom.graphics.timer.timer_write_end;
+use boom.graphics.timer.timers_begin_frame;
+use boom.graphics.timer.timers_dnit;
+use boom.graphics.timer.timers_init;
 use boom.graphics.uniform.MeshUniforms;
 use boom.graphics.uniform.ScreenUniforms;
 use boom.graphics.uniform.SkinnedUniforms;
@@ -251,6 +261,7 @@ use boom.math.vec.vec3;
 use boom.math.vec.vec4;
 use boom.window.Window;
 use glfw;
+use std.chrono.duration.Duration;
 use mem: std.memory;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -316,6 +327,7 @@ pub rec Renderer {
     stream:          VertexStream;
     store:           FrameStorage;
     sets:            StorageSets;
+    timers:          Timers;
     uploads:         [MAX_PENDING_MESH_UPLOADS]PendingMeshUpload;
     upload_count:    usize;
     upload_reserved: usize;
@@ -343,6 +355,7 @@ pub rec Renderer {
     ready_stream:    bool;
     ready_store:     bool;
     ready_sets:      bool;
+    ready_timers:    bool;
 }
 
 # initialize a renderer against a window
@@ -526,6 +539,14 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
         ret sets_r;
     }
     r.ready_sets = true;
+
+    # The timestamp pool GPU timers write into, when the queue writes them.
+    val tim_r: err[Error] = timers_init(?r.timers, ?r.vk);
+    if (sel tim_r.err) {
+        renderer_rollback(r);
+        ret tim_r;
+    }
+    r.ready_timers = true;
 
     ret err[Error].ok{};
 }
@@ -1210,6 +1231,9 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
     # does not allocate for them again.
     storage_begin_frame(?r.store, r.frame_index);
     storage_sets_begin_frame(?r.sets, ?r.vk, r.frame_index);
+    # Timers read what this slot's last frame measured before its queries are
+    # reset, and the reset is recorded here because no pass is open yet.
+    timers_begin_frame(?r.timers, ?r.vk, frame_command(r), r.frame_index, r.vk.retire.completed);
     r.passes  = 0;
     r.drawing = true;
     ret res[bool, Error].ok{true};
@@ -1431,6 +1455,10 @@ fun renderer_rollback(r: *Renderer) {
         r.upload_reserved = 0;
     }
 
+    if (r.ready_timers) {
+        timers_dnit(?r.timers, ?r.vk);
+        r.ready_timers = false;
+    }
     if (r.ready_sets) {
         storage_sets_dnit(?r.sets, ?r.vk);
         r.ready_sets = false;
@@ -4178,6 +4206,82 @@ pub fun renderer_readback_take(r: *Renderer, rb: *Readback, out: *u8, len: usize
     mem.raw_copy(out::ptr, mapped.ok, rb.len);
     rb.taken = rb.serial[ready.some];
     ret true;
+}
+
+# ------------------------------------------------------------------- timers
+#
+# A GpuTimer measures how long a range of recorded work took on the GPU: begin
+# it before the work, end it after, and take the duration a few frames later.
+# Between passes the range is renderer_timer_begin and renderer_timer_end, and
+# inside a pass pass_timer_begin and pass_timer_end; a range may start in one
+# and end in the other. See boom.graphics.timer.
+
+# Take a GPU timer.
+#
+# ret: ok, or no_timestamps when renderer_limits' timestamp_valid_bits is zero,
+#      or full timers when MAX_TIMERS are already held
+pub fun renderer_timer(r: *Renderer, t: *GpuTimer) err[Error] {
+    if (!r.ready_timers) { ret err[Error].err{Error.uninitialized{Stage.renderer{}}}; }
+    ret timer_create(?r.timers, t);
+}
+
+# Give a GPU timer back. A range a frame in flight still measures is dropped.
+pub fun renderer_timer_delete(r: *Renderer, t: *GpuTimer) {
+    if (!r.ready_timers) { ret; }
+    timer_delete(?r.timers, t);
+}
+
+# Begin a timer's range here, between passes.
+#
+# Once per frame, and ended in the same frame. A range around several
+# dispatches measures all of them and the barriers between.
+# ---
+# ret: ok, or no_frame, pass_open, or timer_range when it was already begun
+#      this frame
+pub fun renderer_timer_begin(r: *Renderer, t: *GpuTimer) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err) { ret open; }
+    ret timer_write_begin(?r.timers, t, frame_command(r), r.frame_index, r.vk.retire.latest);
+}
+
+# End a timer's range here, between passes.
+#
+# ret: ok, or no_frame, pass_open, or timer_range when it was not begun this
+#      frame
+pub fun renderer_timer_end(r: *Renderer, t: *GpuTimer) err[Error] {
+    val open: err[Error] = between_passes(r);
+    if (sel open.err) { ret open; }
+    ret timer_write_end(?r.timers, t, frame_command(r), r.frame_index, r.vk.retire.latest);
+}
+
+# Begin a timer's range inside a pass, after every draw already issued to it.
+pub fun pass_timer_begin(p: *Pass, t: *GpuTimer) err[Error] {
+    val r: *Renderer = p.renderer;
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    # 2D geometry waits in the batcher, so it is recorded first or the range
+    # would not contain it
+    batch_flush(p);
+    ret timer_write_begin(?r.timers, t, p.cmd, r.frame_index, r.vk.retire.latest);
+}
+
+# End a timer's range inside a pass, after every draw already issued to it.
+pub fun pass_timer_end(p: *Pass, t: *GpuTimer) err[Error] {
+    val r: *Renderer = p.renderer;
+    if (!r.drawing) { ret err[Error].err{Error.renderer{RendererError.no_frame{}}}; }
+    batch_flush(p);
+    ret timer_write_end(?r.timers, t, p.cmd, r.frame_index, r.vk.retire.latest);
+}
+
+# The GPU time of the newest range that has finished and not been taken.
+#
+# None until the frame that recorded a range has finished, MAX_FRAMES_IN_FLIGHT
+# frames after it, and none again until a newer one has. A game that takes each
+# frame sees every range it records, a few frames late. Never waits.
+# ---
+# ret: the range's duration in nanoseconds, if a new one has landed
+pub fun renderer_timer_take(r: *Renderer, t: *GpuTimer) opt[Duration] {
+    if (!r.ready_timers) { ret opt[Duration].none{}; }
+    ret timer_take(?r.timers, ?r.vk, t, r.vk.retire.completed);
 }
 
 # Draw vertices by instances with a game's shader pulling its geometry from
