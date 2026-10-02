@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-10-02
+
+### Added
+- Buffer device addresses (#297). On a Vulkan 1.2 device that offers `bufferDeviceAddress`, boom enables it and every storage buffer is made addressable, including buffers made inside a frame by `renderer_storage_buffer`. `storage_buffer_address(d, b)` returns a buffer's 64-bit address, so a shader can reach any number of buffers through pointers held in a table. A device without the feature refuses with `BufferError.no_device_address`. `renderer_limits` reports `buffer_device_address` and `max_memory_allocation_size`.
+
+### Changed
+- Requires mach 6.10.1 (`mach = "^6.10.1"`), whose SPIR-V physical pointers need no `int64` (briar-systems/mach#4401).
+
 ## [0.45.1] - 2026-10-02
 
 ### Fixed
