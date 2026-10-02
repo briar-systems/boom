@@ -136,9 +136,17 @@ pub fun buffer_init_prefer(b: *Buffer, v: *Vk, size: u64, usage: u32, want: u32,
     }
     b.coherent = (props.memoryTypes[index.some].propertyFlags & vk.MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
 
+    # a buffer a shader reaches by address needs memory allocated for one
+    var flags: vk.MemoryAllocateFlagsInfo;
+    flags.sType      = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    flags.pNext      = nil;
+    flags.flags      = vk.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    flags.deviceMask = 0;
+
     var ai: vk.MemoryAllocateInfo;
     ai.sType = vk.STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     ai.pNext = nil;
+    if ((usage & vk.BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0) { ai.pNext = (?flags)::ptr; }
     # The requirement's size, not the requested size. The driver may need more
     # for alignment, and binding an allocation smaller than it asked for is
     # invalid.
