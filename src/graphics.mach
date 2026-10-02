@@ -413,8 +413,11 @@ fwd boom.graphics.renderer.renderer_storage_refused;
 # MAX_STORAGE_BINDINGS. A draw binds fewer on a small device because its stages
 # also see set 0's storage buffers. Every dispatch, update and readback, and
 # the fill of a buffer made mid-frame, is recorded between passes and ordered
-# against the draws by the renderer, so a game never states a barrier. See
-# boom.graphics.compute.
+# against the draws by the renderer, so a game never states a barrier. On a
+# device whose renderer_limits report buffer_device_address, every buffer also
+# has an address, storage_buffer_address, which a stage reads from a buffer it
+# binds and dereferences as a pointer, so one call reaches more buffers than it
+# binds. See boom.graphics.compute.
 fwd boom.graphics.pipeline.STORAGE_SET;
 fwd boom.graphics.limits.MAX_STORAGE_BINDINGS;
 fwd boom.graphics.compute.MAX_STORAGE_SETS;
@@ -427,6 +430,7 @@ fwd boom.graphics.compute.storage_buffer_size;
 fwd boom.graphics.compute.storage_buffer_upload;
 fwd boom.graphics.compute.storage_buffer_read;
 fwd boom.graphics.compute.storage_buffer_delete;
+fwd boom.graphics.compute.storage_buffer_address;
 fwd boom.graphics.compute.Compute;
 fwd boom.graphics.compute.compute;
 fwd boom.graphics.compute.compute_delete;

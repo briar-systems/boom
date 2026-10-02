@@ -30,6 +30,14 @@
 # and reads both back. The first must be zero but that word, and the second the
 # step of it, so both fills landed before the write and the dispatch.
 #
+# A fifth frame, on a device with buffer device addresses, shards a pool over
+# four buffers, two made at load and two mid-frame, the way a pool too large
+# for one binding is split. It writes their addresses into a table, and a stage
+# binding only the table writes every cell through its shard's pointer and
+# counts the cells into the shard with an atomic through it. Every shard must
+# hold its cells and a count of 64. A device without the feature must refuse
+# the address instead.
+#
 # CI runs it under lavapipe:
 #
 #   mach build . && xvfb-run -a ./out/linux-x86_64/debug/bin/compute
@@ -62,6 +70,8 @@ val STEP_SPV:       [_]u8;
 val CELLS_VERT_SPV: [_]u8;
 #[embed("{artifact.stage-cells_frag.out}")]
 val CELLS_FRAG_SPV: [_]u8;
+#[embed("{artifact.stage-shard_comp.out}")]
+val SHARD_SPV:      [_]u8;
 
 # cells in the pool, and the workgroups of 64 that step it
 val CELLS:  usize = 256;
@@ -82,6 +92,12 @@ val CHUNK_WORDS: usize = 256;
 
 # the one cell of a pool made mid-frame that the frame writes before stepping it
 val SEEDED: usize = 5;
+
+# the sharded pool: SHARDS buffers of a count, three pad words and SHARD_CELLS
+# cells, one workgroup to a shard
+val SHARDS:      usize = 4;
+val SHARD_CELLS: usize = 64;
+val SHARD_WORDS: usize = 4 + SHARD_CELLS;
 
 fun fail(step: str, r: err[gfx.Error]) bool {
     if (sel r.ok) { ret false; }
@@ -145,13 +161,15 @@ fun main(argc: i64, argv: **u8) i64 {
 
     # the device's limits are at least what the specification guarantees, and
     # it lets a step and a draw bind the five buffers these do, a dispatch never
-    # fewer than a draw
+    # fewer than a draw. A device with addresses is a 1.2 one, which reports
+    # how large one allocation may be
     val lim: gfx.Limits = gfx.renderer_limits(?r);
     if (lim.max_storage_buffer_range < 134217728 || lim.max_compute_work_group_count[0] < 65535
         || lim.max_compute_work_group_invocations < 128
         || lim.max_per_stage_descriptor_storage_buffers < 4
         || lim.max_draw_bindings < 5 || lim.max_dispatch_bindings < lim.max_draw_bindings
-        || lim.max_dispatch_bindings > gfx.MAX_STORAGE_BINDINGS) {
+        || lim.max_dispatch_bindings > gfx.MAX_STORAGE_BINDINGS
+        || (lim.buffer_device_address && lim.max_memory_allocation_size == 0)) {
         p.printlnf("FAIL renderer_limits: range {} groups {} invocations {} bindings {} dispatch {} draw of {}",
             lim.max_storage_buffer_range, lim.max_compute_work_group_count[0],
             lim.max_compute_work_group_invocations, lim.max_dispatch_bindings, lim.max_draw_bindings,
@@ -382,8 +400,92 @@ fun main(argc: i64, argv: **u8) i64 {
     if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?step, ?grew[0], 5, GROUPS, 1, 1))) { ret 1; }
     if (fail("renderer_end_frame", gfx.renderer_end_frame(?r)))                                 { ret 1; }
 
+    # the sharded pool, reached through a table of addresses where the device
+    # gives them
+    var shards:   [4]gfx.StorageBuffer;
+    var table:    gfx.StorageBuffer;
+    var by_index: gfx.Compute;
+    if (lim.buffer_device_address) {
+        if (fail("compute", gfx.compute(?by_index, d, ?SHARD_SPV[0], $length_of(SHARD_SPV)))) { ret 1; }
+        if (!make(d, SHARD_WORDS * 4, ?shards[0]) || !make(d, SHARD_WORDS * 4, ?shards[1]))   { ret 1; }
+        if (!open_frame(?r))                                                                  { ret 1; }
+        i = 2;
+        for (i < SHARDS) {
+            val grew_shard: res[gfx.StorageBuffer, gfx.Error] = gfx.renderer_storage_buffer(?r, SHARD_WORDS * 4);
+            if (sel grew_shard.err) {
+                p.printlnf("FAIL renderer_storage_buffer: {}", gfx.error_message(grew_shard.err));
+                ret 1;
+            }
+            shards[i] = grew_shard.ok;
+            i         = i + 1;
+        }
+        val table_made: res[gfx.StorageBuffer, gfx.Error] = gfx.renderer_storage_buffer(?r, SHARDS * 8);
+        if (sel table_made.err) {
+            p.printlnf("FAIL renderer_storage_buffer: {}", gfx.error_message(table_made.err));
+            ret 1;
+        }
+        table = table_made.ok;
+        var addresses: [4]u64;
+        i = 0;
+        for (i < SHARDS) {
+            val at: res[u64, gfx.Error] = gfx.storage_buffer_address(d, ?shards[i]);
+            if (sel at.err) {
+                p.printlnf("FAIL storage_buffer_address: {}", gfx.error_message(at.err));
+                ret 1;
+            }
+            addresses[i] = at.ok;
+            i            = i + 1;
+        }
+        if (fail("renderer_buffer_update", gfx.renderer_buffer_update(?r, ?table, 0, (?addresses[0]):~*u8,
+            SHARDS * 8))) { ret 1; }
+        var only: [1]*gfx.StorageBuffer;
+        only[0] = ?table;
+        if (fail("renderer_dispatch", gfx.renderer_dispatch(?r, ?by_index, ?only[0], 1, SHARDS::u32, 1, 1))) {
+            ret 1;
+        }
+        if (fail("renderer_end_frame", gfx.renderer_end_frame(?r))) { ret 1; }
+    }
+
     gfx.renderer_wait_idle(?r);
     var ok: bool = true;
+
+    if (lim.buffer_device_address) {
+        var shard_back: [68]u32;
+        var miscounted: usize = 0;
+        var misplaced:  usize = 0;
+        i = 0;
+        for (i < SHARDS) {
+            if (fail("storage_buffer_read", gfx.storage_buffer_read(d, ?shards[i], 0, (?shard_back[0]):~*u8,
+                SHARD_WORDS * 4))) { ret 1; }
+            if (shard_back[0] != SHARD_CELLS::u32) { miscounted = miscounted + 1; }
+            var j: usize = 0;
+            for (j < SHARD_CELLS) {
+                if (shard_back[4 + j] != ((i * SHARD_CELLS + j) * 3 + 1)::u32) { misplaced = misplaced + 1; }
+                j = j + 1;
+            }
+            gfx.storage_buffer_delete(d, ?shards[i]);
+            i = i + 1;
+        }
+        gfx.storage_buffer_delete(d, ?table);
+        gfx.compute_delete(?by_index, d);
+        if (miscounted != 0 || misplaced != 0) {
+            p.printlnf("FAIL storage_buffer_address: {} shards miscounted and {} cells misplaced", miscounted,
+                misplaced);
+            ok = false;
+        }
+        or {
+            p.printlnf("ok   four shards, two made mid-frame, written and counted by address (allocations up to {} bytes)",
+                lim.max_memory_allocation_size);
+        }
+    }
+    or {
+        val none: res[u64, gfx.Error] = gfx.storage_buffer_address(d, ?a);
+        if (!(sel none.err && (sel none.err.buffer && sel none.err.buffer.no_device_address))) {
+            p.println("FAIL storage_buffer_address: a device without addresses did not refuse");
+            ok = false;
+        }
+        or { p.println("ok   the device gives no buffer addresses, and an address was refused"); }
+    }
 
     var zeroes:       [256]u32;
     var stepped_pool: [256]u32;

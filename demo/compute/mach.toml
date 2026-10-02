@@ -1,8 +1,8 @@
 [project]
 id = "compute"
 version = "0.1.0"
-# a compute stage needs mach 6.7
-mach = "^6.7"
+# a stage reaching buffers by address needs mach 6.10.1 (mach#4401)
+mach = "^6.10.1"
 src = "src"
 out = "out/{target.name}/{profile.name}"
 
@@ -32,6 +32,15 @@ isa = "spirv"
 os  = "freestanding"
 abi = "spirv"
 env = "vulkan1.0"
+
+# the stages that reach buffers by address, for a device that gives them one:
+# vulkan 1.2, where boom enables bufferDeviceAddress
+[target.spirv-address]
+isa        = "spirv"
+os         = "freestanding"
+abi        = "spirv"
+env        = "vulkan1.2"
+extensions = ["buffer_device_address"]
 
 [profile.debug]
 default = true
@@ -64,6 +73,14 @@ kind = "bin"
 entry = "bin/shaders/step_comp.mach"
 out = "spv/step_comp{artifact.suffix}"
 targets = ["spirv"]
+link = []
+need = []
+
+[artifact.stage-shard_comp]
+kind = "bin"
+entry = "bin/shaders/shard_comp.mach"
+out = "spv/shard_comp{artifact.suffix}"
+targets = ["spirv-address"]
 link = []
 need = []
 
