@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-10-02
+
+### Added
+- `renderer_storage_buffer(r, size)` makes a storage buffer inside a frame without waiting for the queue or the device (#292). Its zero fill is recorded into the frame's command buffer between passes, behind a storage barrier, so anything recorded after it in the frame sees zeroes. `storage_buffer` is unchanged for callers outside a frame.
+
 ## [0.44.0] - 2026-10-02
 
 ### Added
