@@ -43,9 +43,12 @@ use boom.graphics.text.face.FontRaster;
 use boom.graphics.text.face.GlyphMetrics;
 use boom.graphics.text.face.face_glyph;
 use boom.graphics.text.face.is_layout_control;
+use boom.graphics.text.face.pixel_ceil;
+use boom.graphics.text.face.pixel_floor;
 use boom.graphics.text.face.pixel_round;
 use boom.graphics.text.face.text_next;
 use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.outline_raster;
 use boom.graphics.text.typeface.outline_scratch_sizes;
 use boom.graphics.texture.Texture;
 use boom.graphics.texture.texture_owned;
@@ -102,11 +105,13 @@ val MAX_EDGES: usize = 262144;
 # ---
 # page:     which page holds the cell
 # cell:     index into that page's grid
+# offset_x: horizontal distance from the pen to the cell, in logical pixels
 # offset_y: vertical distance from the line top to the cell, in logical pixels
 # drawn:    whether the glyph has a cell at all; false draws nothing
 rec Cell {
     page:     usize;
     cell:     usize;
+    offset_x: f32;
     offset_y: f32;
     drawn:    bool;
 }
@@ -417,8 +422,10 @@ fun coverage_alpha(coverage: u8, raster: FontRaster) u8 {
     ret coverage;
 }
 
-fun baseline_offset(ascent: f32, cell_height: f32, y_min: i16, scale: f32) f32 {
-    ret ascent - cell_height - y_min::f32 * scale;
+# The distance from the line top to a cell whose bottom edge is `below` logical
+# pixels under the baseline.
+fun baseline_offset(ascent: f32, cell_height: f32, below: f32) f32 {
+    ret ascent + below - cell_height;
 }
 
 # Rasterize one glyph and give it a cell.
@@ -432,9 +439,14 @@ fun cell_raster(g: *GlyphAtlas, m: *GlyphMetrics) Cell {
     if (m.empty) { ret c; }
     val f: *FontFace = g.face;
 
-    # the coverage buffer is not pre-cleared: render_glyph writes every texel
-    val rendered: err[FontError] = finfo.render_glyph(?f.typeface.face, m.glyph, g.glyph_scale,
-        g.pts, g.pts_cap, g.ends, g.ends_cap,
+    # the cell's lower-left corner is a whole raster texel from the pen and the
+    # baseline, so the outline keeps its place relative to both however the
+    # placement is rounded. the coverage buffer is not pre-cleared: the raster
+    # writes every texel
+    val left:     f32            = pixel_floor(m.x_min::f32 * g.glyph_scale);
+    val below:    f32            = pixel_ceil(-(m.y_min::f32) * g.glyph_scale);
+    val rendered: err[FontError] = outline_raster(?f.typeface.face, m.glyph, g.glyph_scale,
+        left, below, g.pts, g.pts_cap, g.ends, g.ends_cap,
         g.edges, g.edges_cap, g.cov, g.cell::u16, g.cell::u16);
     if (sel rendered.err) {
         g.missing = g.missing + 1;
@@ -455,8 +467,8 @@ fun cell_raster(g: *GlyphAtlas, m: *GlyphMetrics) Cell {
         ret c;
     }
     c.drawn    = true;
-    c.offset_y = baseline_offset(f.ascent, g.cell::f32 / g.raster_scale, m.y_min, f.scale);
-    if (f.pixel_snap) { c.offset_y = pixel_round(c.offset_y); }
+    c.offset_x = left / g.raster_scale;
+    c.offset_y = baseline_offset(f.ascent, g.cell::f32 / g.raster_scale, below / g.raster_scale);
     ret c;
 }
 
@@ -529,14 +541,14 @@ fun cell_uv(g: *GlyphAtlas, c: *Cell) Rect {
     ret rect(u, v, g.cell::f32 / side, g.cell::f32 / side);
 }
 
-fun glyph_dest(g: *GlyphAtlas, m: *GlyphMetrics, c: *Cell, x: f32, y: f32) Rect {
+fun glyph_dest(g: *GlyphAtlas, c: *Cell, x: f32, y: f32) Rect {
     var px: f32 = x;
     var py: f32 = y;
     if (g.face.pixel_snap) {
         px = pixel_round(px);
         py = pixel_round(py);
     }
-    ret rect(px + m.bearing_x, py + c.offset_y,
+    ret rect(px + c.offset_x, py + c.offset_y,
         g.cell::f32 / g.raster_scale, g.cell::f32 / g.raster_scale);
 }
 
@@ -587,7 +599,7 @@ pub fun atlas_draw(p: *Pass, g: *GlyphAtlas, s: str, x: f32, y: f32, tint: Vec4)
             var c: Cell         = cell_of(g, ?m);
             if (c.drawn) {
                 pass_draw_sprite_filtered(p, opt[*Texture].some{?g.pages[c.page]},
-                    glyph_dest(g, ?m, ?c, pen, line), cell_uv(g, ?c), tint, filter);
+                    glyph_dest(g, ?c, pen, line), cell_uv(g, ?c), tint, filter);
             }
             pen = pen + m.advance;
         }
@@ -660,9 +672,8 @@ test glyph_dest__oversampled_and_snapped {
     g.face         = ?f;
     g.cell         = logical_cell_size(16.0) * 2;
     g.raster_scale = 2.0;
-    var m: GlyphMetrics;
     var c: Cell;
-    val d: Rect = glyph_dest(?g, ?m, ?c, 3.0, 5.0);
+    val d: Rect = glyph_dest(?g, ?c, 3.0, 5.0);
     if (d.x != 3.0 || d.y != 5.0)   { ret 1; }
     if (d.w != 22.0 || d.h != 22.0) { ret 2; }
 
@@ -671,11 +682,10 @@ test glyph_dest__oversampled_and_snapped {
     pf.pixel_snap = true;
     var pg: GlyphAtlas = grid_atlas();
     pg.face = ?pf;
-    var pm: GlyphMetrics;
-    pm.bearing_x = 2.0;
     var pc: Cell;
+    pc.offset_x = 2.0;
     pc.offset_y = 0.0 - 3.0;
-    val p: Rect = glyph_dest(?pg, ?pm, ?pc, 3.49, 5.51);
+    val p: Rect = glyph_dest(?pg, ?pc, 3.49, 5.51);
     if (p.x != 5.0 || p.y != 3.0) { ret 3; }
     ret 0;
 }
@@ -694,8 +704,8 @@ test atlas_filter__vector_linear_pixel_nearest {
 }
 
 test baseline_offset__shared_baseline {
-    val upper:     f32 = baseline_offset(9.0, 16.0, 0, 1.0);
-    val descender: f32 = baseline_offset(9.0, 16.0, 0 - 3, 1.0);
+    val upper:     f32 = baseline_offset(9.0, 16.0, 0.0);
+    val descender: f32 = baseline_offset(9.0, 16.0, 3.0);
     if (upper != 0.0 - 7.0 || descender != 0.0 - 4.0)   { ret 1; }
     if (upper + 16.0 != 9.0 || descender + 13.0 != 9.0) { ret 2; }
     ret 0;

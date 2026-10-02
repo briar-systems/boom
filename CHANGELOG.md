@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.1] - 2026-10-02
+
+### Fixed
+- Glyphs with a round bottom no longer draw a pixel below their line at fractional scales (#299). The blit glyph source and boom's own text atlas place each glyph's bitmap a whole number of pixels from the pen and the baseline, so every glyph on a line shares one baseline whatever its fractional position.
+
 ## [0.45.0] - 2026-10-02
 
 ### Added

@@ -100,6 +100,7 @@ val NEWLINE: u32 = 10;
 # glyph:     glyph index in the typeface, 0 (.notdef) for a codepoint it lacks
 # advance:   pen movement after the glyph, in logical pixels
 # bearing_x: horizontal distance from the pen to the glyph's left edge
+# x_min:     left of the outline's bounding box, in design units
 # y_min:     bottom of the outline's bounding box, in design units
 # empty:     whether the glyph has no outline to draw, as a space does
 # readable:  false when the typeface could not read this glyph's metrics
@@ -107,6 +108,7 @@ pub rec GlyphMetrics {
     glyph:     u16;
     advance:   f32;
     bearing_x: f32;
+    x_min:     i16;
     y_min:     i16;
     empty:     bool;
     readable:  bool;
@@ -165,6 +167,18 @@ pub fun font_scale(face: *finfo.Font, pixels: f32, mode: FontSizeMode) res[f32, 
 pub fun pixel_round(value: f32) f32 {
     if (value < 0.0) { ret (value - 0.5)::i64::f32; }
     ret (value + 0.5)::i64::f32;
+}
+
+# the largest whole pixel at or below a value
+pub fun pixel_floor(value: f32) f32 {
+    val whole: f32 = value::i64::f32;
+    if (whole > value) { ret whole - 1.0; }
+    ret whole;
+}
+
+# the smallest whole pixel at or above a value
+pub fun pixel_ceil(value: f32) f32 {
+    ret -pixel_floor(-value);
 }
 
 # Size a typeface.
@@ -261,6 +275,7 @@ fun read_glyph(f: *FontFace, cp: u32) GlyphMetrics {
         m.empty = true;
         ret m;
     }
+    m.x_min = info.ok.some.x_min;
     m.y_min = info.ok.some.y_min;
     ret m;
 }
