@@ -285,6 +285,7 @@ fwd boom.graphics.renderer.renderer_present_mode_supported;
 fwd boom.graphics.renderer.renderer_dropped;
 fwd boom.graphics.renderer.renderer_refused;
 fwd boom.graphics.renderer.renderer_draws;
+fwd boom.graphics.renderer.renderer_barriers;
 fwd boom.graphics.renderer.renderer_culled;
 # A full stall of the graphics pipeline, for tooling that coordinates several
 # readbacks or measures what the GPU did. See render_target_read.
@@ -421,6 +422,8 @@ fwd boom.graphics.compute.readback_delete;
 fwd boom.graphics.renderer.renderer_dispatch;
 fwd boom.graphics.renderer.renderer_dispatch_indirect;
 fwd boom.graphics.renderer.renderer_buffer_update;
+fwd boom.graphics.renderer.renderer_buffer_update_batch;
+fwd boom.graphics.compute.BufferWrite;
 fwd boom.graphics.renderer.renderer_readback;
 fwd boom.graphics.renderer.renderer_readback_take;
 fwd boom.graphics.renderer.pass_draw_storage;
