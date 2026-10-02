@@ -17,12 +17,13 @@ use boom.graphics.error.content.TextError;
 use boom.vfs;
 use font.error.FontError;
 use font.error.TableId;
-use fglyf: font.glyf;
-use fhhea: font.hhea;
-use fhmtx: font.hmtx;
-use finfo: font.info;
-use fmaxp: font.maxp;
-use allo:  std.allocator;
+use fglyf:   font.glyf;
+use fhhea:   font.hhea;
+use fhmtx:   font.hmtx;
+use finfo:   font.info;
+use fmaxp:   font.maxp;
+use fraster: font.raster;
+use allo:    std.allocator;
 use std.collections.vector;
 use mem: std.memory;
 use std.types.bool.bool;
@@ -96,6 +97,44 @@ pub fun outline_scratch_sizes(m: opt[fmaxp.Maxima]) [2]usize {
 # ret:   the box, none for a glyph with no outline, or the parser's refusal
 pub fun typeface_glyph_bounds(t: *Typeface, glyph: u16) res[opt[fglyf.Bounds], FontError] {
     ret finfo.glyph_info(?t.face, glyph, t.pts, t.pts_cap, t.ends, t.ends_cap);
+}
+
+# Rasterise a glyph's outline against a whole-pixel origin.
+#
+# The bitmap's lower-left corner sits `left` pixels right of the glyph origin
+# and `bottom` pixels below the baseline, both whole, so a bitmap drawn at those
+# offsets from a pen and baseline keeps the outline exactly where the font puts
+# it. mach-font's render_glyph anchors the bitmap on the outline's own box
+# instead, which leaves the origin a fraction of a pixel into it and drops a
+# glyph that reaches below the baseline a pixel lower than its neighbours once
+# its placement is rounded. Every texel is written, so the bitmap need not be
+# cleared, and a glyph with no outline clears it.
+# ---
+# f:         the parsed face
+# glyph:     glyph index
+# scale:     design units to pixels
+# left:      whole pixels from the origin to the bitmap's left edge, negative to its left
+# bottom:    whole pixels from the baseline down to the bitmap's bottom edge, negative above it
+# pts:       outline point scratch
+# pts_cap:   points pts holds
+# ends:      contour end scratch
+# ends_cap:  contour ends ends holds
+# edges:     flattened edge scratch
+# edges_cap: edges edges holds
+# bitmap:    width * height coverage, row-major, top row first
+# width:     bitmap width in pixels
+# height:    bitmap height in pixels
+# ret:       ok, or any glyph_outline or flatten refusal
+pub fun outline_raster(f: *finfo.Font, glyph: u16, scale: f32, left: f32, bottom: f32,
+    pts: *fglyf.Point, pts_cap: usize, ends: *u16, ends_cap: usize,
+    edges: *fraster.Edge, edges_cap: usize, bitmap: *u8, width: u16, height: u16) err[FontError] {
+    val o: res[fglyf.Outline, FontError] = finfo.glyph_outline(f, glyph, pts, pts_cap, ends, ends_cap);
+    if (sel o.err) { ret err[FontError].err{o.err}; }
+    val count: res[usize, FontError] = fraster.flatten(pts, o.ok.num_points, ends, o.ok.num_contours,
+        scale, -left, bottom, height, edges, edges_cap);
+    if (sel count.err) { ret err[FontError].err{count.err}; }
+    fraster.fill(edges, count.ok, bitmap, width, height);
+    ret err[FontError].ok{};
 }
 
 # the Error for a parser refusal

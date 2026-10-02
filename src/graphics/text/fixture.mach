@@ -32,6 +32,8 @@ use boom.graphics.text.face.face_resolved;
 use boom.graphics.text.face.face_unreadable;
 use boom.graphics.text.face.font_options;
 use boom.graphics.text.face.font_pixel_options;
+use boom.graphics.text.face.pixel_ceil;
+use boom.graphics.text.face.pixel_floor;
 use boom.graphics.text.face.text_next;
 use boom.graphics.text.font_glyph_count;
 use boom.graphics.text.text_height;
@@ -324,5 +326,84 @@ test blit_glyphs__truetype_at_blit_scale {
     if (sel gone.err) { ret 21; }
     val freed: err[Error] = typeface_delete(?t);
     if (sel freed.err) { ret 22; }
+    ret 0;
+}
+
+# the screen row a quad's top edge at y starts on, nearest-sampled: the first
+# row whose centre it covers
+#[testing]
+fun screen_row(y: f32) f32 {
+    ret pixel_ceil(y - 0.5);
+}
+
+# the strongest coverage in one bitmap row
+#[testing]
+fun row_peak(cov: *u8, w: u32, row: u32) u8 {
+    var peak: u8  = 0;
+    var x:    u32 = 0;
+    for (x < w) {
+        val c: u8 = cov[(row * w + x)::usize];
+        if (c > peak) { peak = c; }
+        x = x + 1;
+    }
+    ret peak;
+}
+
+test blit_glyphs__one_baseline_at_fractional_scales {
+    var a: allo.Allocator;
+    if (!pages(?a)) { ret 1; }
+    val made: res[Typeface, Error] = dejavu(?a);
+    if (!sel made.ok) { ret 2; }
+    var t:       Typeface               = made.ok;
+    val sourced: res[BlitGlyphs, Error] = blit_glyphs(?a, ?t, 16.0, FontSizeMode.line_height{},
+        FontRaster.smooth{});
+    if (!sel sourced.ok) { ret 3; }
+    var g: BlitGlyphs = sourced.ok;
+    fin {
+        blit_glyphs_delete(?g);
+        typeface_delete(?t);
+    }
+    val src: gly.GlyphSource = blit_glyphs_source(?g);
+
+    # o a s dip below the baseline, x H z sit on it
+    val cps:       [6]u32 = [6]u32{0x6F, 0x61, 0x73, 0x78, 0x48, 0x7A};
+    val scales:    [4]f32 = [4]f32{1.0, 1.25, 1.5, 1.75};
+    val baselines: [5]f32 = [5]f32{10.1, 10.3, 10.5, 10.7, 10.9};
+    var cov:       [4096]u8;
+    var si:        usize  = 0;
+    for (si < 4) {
+        val scale: f32   = scales[si];
+        var ci:    usize = 0;
+        for (ci < 6) {
+            var gl: gly.Glyph;
+            if (!src.glyph(src.self, cps[ci], scale, ?gl)) { ret 4; }
+            # the bitmap's edges are whole pixels from the pen and the baseline
+            if (gl.x0 != pixel_floor(gl.x0) || gl.y0 != pixel_floor(gl.y0)) { ret 5; }
+            if (gl.y1 - gl.y0 != gl.h::f32 || gl.x1 - gl.x0 != gl.w::f32)   { ret 6; }
+            val round: bool = ci < 3;
+            if (round && gl.y1 != 1.0)  { ret 7; }
+            if (!round && gl.y1 != 0.0) { ret 8; }
+
+            # blit draws the bitmap's top at the baseline plus y0, so the row the
+            # baseline lands on is the same for every glyph on the line
+            var bi: usize = 0;
+            for (bi < 5) {
+                val b: f32 = baselines[bi];
+                if (screen_row(b + gl.y0) - gl.y0 != screen_row(b)) { ret 9; }
+                bi = bi + 1;
+            }
+
+            # the outline is rasterised at that offset: a flat glyph inks the
+            # row above the baseline, a round one only grazes the row below it
+            if (gl.w * gl.h > 4096)                                          { ret 10; }
+            if (!src.raster(src.self, cps[ci], scale, ?cov[0], gl.w::usize)) { ret 11; }
+            val last: u8 = row_peak(?cov[0], gl.w, gl.h - 1);
+            if (round && (last == 0 || last >= 128))              { ret 12; }
+            if (!round && last < 128)                             { ret 13; }
+            if (round && row_peak(?cov[0], gl.w, gl.h - 2) < 128) { ret 14; }
+            ci = ci + 1;
+        }
+        si = si + 1;
+    }
     ret 0;
 }
