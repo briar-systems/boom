@@ -147,7 +147,9 @@ use boom.graphics.image.image_bytes;
 use boom.graphics.image.sampler_dnit;
 use boom.graphics.image.sampler_init;
 use boom.graphics.limits.Limits;
+use boom.graphics.limits.Reported;
 use boom.graphics.limits.limits_from;
+use boom.graphics.limits.reported_none;
 use boom.graphics.live.Live;
 use boom.graphics.live.live_any;
 use boom.graphics.material.Material;
@@ -602,8 +604,9 @@ pub fun renderer_device(r: *Renderer) *Device {
 # What a game sizes compute work by: maxStorageBufferRange bounds one storage
 # buffer, the work group counts bound one dispatch, and max_dispatch_bindings
 # and max_draw_bindings are how many buffers one dispatch or one storage draw
-# binds. Zeroed until
-# renderer_init succeeds.
+# binds, max_memory_allocation_size bounds one buffer of any kind, and
+# buffer_device_address says whether a stage can reach buffers by address.
+# Zeroed until renderer_init succeeds.
 # ---
 # r:   the renderer
 # ret: the limits, by value
@@ -4573,8 +4576,9 @@ test storage_bindings__dispatch_and_draw_at_minimum {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l:   Limits = limits_from(?src, 0);
-    var buf: StorageBuffer;
+    var none: Reported = reported_none();
+    var l:    Limits   = limits_from(?src, ?none);
+    var buf:  StorageBuffer;
     buf.ready = true;
     var list: [4]*StorageBuffer;
     list[0] = ?buf;

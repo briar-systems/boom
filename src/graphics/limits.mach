@@ -5,9 +5,13 @@
 # how large a pool to allocate or how to split a dispatch, rather than
 # assuming the smallest values the specification guarantees.
 #
-# Adding a limit is a field here and a line in limits_from: every reader takes
+# Adding a limit is a field here and a line in limits_from, and a field in
+# Reported when it comes from beyond VkPhysicalDeviceLimits: every reader takes
 # the record whole, so nothing else moves.
 
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
 use std.types.size.usize;
 use vk;
 
@@ -77,6 +81,17 @@ pub val DRAW_STORAGE_BUFFERS: u32 = 2;
 #                                           no_timestamps.
 # timestamp_period:                         Nanoseconds per timestamp tick. Zero
 #                                           when timestamp_valid_bits is.
+# max_memory_allocation_size:               Bytes one allocation, and so one
+#                                           buffer, may hold, from Vulkan 1.1's
+#                                           maintenance3. Zero on a 1.0 device,
+#                                           which reports none.
+# buffer_device_address:                    Whether the device was created with
+#                                           bufferDeviceAddress, core and
+#                                           optional in Vulkan 1.2. When it was,
+#                                           every storage buffer has an address
+#                                           (storage_buffer_address) a shader
+#                                           reaches it through. When not, that
+#                                           call refuses with no_device_address.
 pub rec Limits {
     max_storage_buffer_range:            usize;
     max_compute_work_group_count:        [3]u32;
@@ -92,11 +107,28 @@ pub rec Limits {
 
     timestamp_valid_bits: u32;
     timestamp_period:     f32;
+
+    max_memory_allocation_size: u64;
+    buffer_device_address:      bool;
 }
 
-# the limits a device reported, and the timestampValidBits of the queue family
-# boom records frames on
-pub fun limits_from(src: *vk.PhysicalDeviceLimits, timestamp_bits: u32) Limits {
+# What a device reports beyond VkPhysicalDeviceLimits, gathered when it is
+# picked.
+# ---
+# timestamp_bits:             the timestampValidBits of the queue family boom
+#                             records frames on
+# max_memory_allocation_size: maintenance3's maxMemoryAllocationSize, zero when
+#                             the device does not report it
+# buffer_device_address:      whether bufferDeviceAddress is offered, and so
+#                             enabled
+pub rec Reported {
+    timestamp_bits:             u32;
+    max_memory_allocation_size: u64;
+    buffer_device_address:      bool;
+}
+
+# the limits a device reported
+pub fun limits_from(src: *vk.PhysicalDeviceLimits, more: *Reported) Limits {
     var l: Limits;
     l.max_storage_buffer_range            = src.maxStorageBufferRange::usize;
     l.max_compute_work_group_count[0]     = src.maxComputeWorkGroupCount[0];
@@ -117,10 +149,19 @@ pub fun limits_from(src: *vk.PhysicalDeviceLimits, timestamp_bits: u32) Limits {
         less_draw(src.maxDescriptorSetStorageBuffers));
 
     # a queue that writes no timestamps has no period worth reporting
-    l.timestamp_valid_bits = timestamp_bits;
+    l.timestamp_valid_bits = more.timestamp_bits;
     l.timestamp_period     = 0.0;
-    if (timestamp_bits != 0) { l.timestamp_period = src.timestampPeriod; }
+    if (more.timestamp_bits != 0) { l.timestamp_period = src.timestampPeriod; }
+
+    l.max_memory_allocation_size = more.max_memory_allocation_size;
+    l.buffer_device_address      = more.buffer_device_address;
     ret l;
+}
+
+# what a device reports beyond its limits when it reports nothing: no
+# timestamps, no allocation limit and no device addresses
+pub fun reported_none() Reported {
+    ret Reported{timestamp_bits: 0, max_memory_allocation_size: 0, buffer_device_address: false};
 }
 
 # a device's count less set 0's storage buffers, never wrapping below zero
@@ -151,7 +192,9 @@ test limits_from__carries_each_limit {
     src.maxPerStageDescriptorStorageBuffers = 8;
     src.maxDescriptorSetStorageBuffers      = 24;
     src.timestampPeriod                     = 1.5;
-    val l: Limits = limits_from(?src, 36);
+    var more: Reported = Reported{timestamp_bits: 36, max_memory_allocation_size: 4294967296,
+        buffer_device_address: true};
+    val l: Limits = limits_from(?src, ?more);
     if (l.max_storage_buffer_range != 134217728)         { ret 1; }
     if (l.max_compute_work_group_count[0] != 65535)      { ret 2; }
     if (l.max_compute_work_group_count[2] != 65533)      { ret 3; }
@@ -165,9 +208,14 @@ test limits_from__carries_each_limit {
     if (l.max_draw_bindings != 6)                        { ret 11; }
     if (l.timestamp_valid_bits != 36)                    { ret 12; }
     if (l.timestamp_period != 1.5)                       { ret 13; }
-    # a queue without timestamps reports none, whatever the device's period
-    val none: Limits = limits_from(?src, 0);
-    if (none.timestamp_valid_bits != 0 || none.timestamp_period != 0.0) { ret 14; }
+    if (l.max_memory_allocation_size != 4294967296)      { ret 14; }
+    if (!l.buffer_device_address)                        { ret 15; }
+    # a queue without timestamps reports none, whatever the device's period,
+    # and a device reporting nothing more has no addresses
+    var nothing: Reported = reported_none();
+    val none:    Limits   = limits_from(?src, ?nothing);
+    if (none.timestamp_valid_bits != 0 || none.timestamp_period != 0.0)     { ret 16; }
+    if (none.max_memory_allocation_size != 0 || none.buffer_device_address) { ret 17; }
     ret 0;
 }
 
@@ -177,24 +225,25 @@ test limits_from__dispatch_and_draw_bindings {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l: Limits = limits_from(?src, 0);
+    var none: Reported = reported_none();
+    var l:    Limits   = limits_from(?src, ?none);
     if (l.max_dispatch_bindings != 4) { ret 1; }
     if (l.max_draw_bindings != 2)     { ret 2; }
     # a draw's layout holds set 0 beside the whole STORAGE_SET, so the
     # per-layout count bounds both less set 0's
     src.maxPerStageDescriptorStorageBuffers = 1048576;
     src.maxDescriptorSetStorageBuffers      = 7;
-    l                                       = limits_from(?src, 0);
+    l                                       = limits_from(?src, ?none);
     if (l.max_dispatch_bindings != 5) { ret 3; }
     if (l.max_draw_bindings != 5)     { ret 4; }
     src.maxDescriptorSetStorageBuffers = 1048576;
-    l                                  = limits_from(?src, 0);
+    l                                  = limits_from(?src, ?none);
     if (l.max_dispatch_bindings != MAX_STORAGE_BINDINGS) { ret 5; }
     if (l.max_draw_bindings != MAX_STORAGE_BINDINGS)     { ret 6; }
     # a device that cannot hold set 0's own leaves a draw nothing, not a wrapped count
     src.maxPerStageDescriptorStorageBuffers = 1;
     src.maxDescriptorSetStorageBuffers      = 24;
-    l                                       = limits_from(?src, 0);
+    l                                       = limits_from(?src, ?none);
     if (l.max_dispatch_bindings != 1) { ret 7; }
     if (l.max_draw_bindings != 0)     { ret 8; }
     ret 0;

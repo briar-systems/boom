@@ -928,7 +928,9 @@ pub fun pipeline_release(p: *Pipeline, v: *Vk, how: Release) {
 # vertex input derivation, which are pure and are where a wrong answer reaches
 # the shader as silently wrong values rather than as an error.
 
+use boom.graphics.limits.Reported;
 use boom.graphics.limits.limits_from;
+use boom.graphics.limits.reported_none;
 use boom.graphics.vertex.SEMANTIC_COLOR_0;
 use boom.graphics.vertex.SEMANTIC_POSITION;
 use boom.graphics.vertex.SEMANTIC_TEXCOORD_0;
@@ -1084,9 +1086,10 @@ test storage_set_bindings__each_stage_within_minimum {
     var src: vk.PhysicalDeviceLimits;
     src.maxPerStageDescriptorStorageBuffers = 4;
     src.maxDescriptorSetStorageBuffers      = 24;
-    var l:        Limits = limits_from(?src, 0);
+    var none:     Reported = reported_none();
+    var l:        Limits   = limits_from(?src, ?none);
     var bindings: [MAX_STORAGE_BINDINGS]vk.DescriptorSetLayoutBinding;
-    val n:        usize  = storage_set_bindings(?l, ?bindings[0]);
+    val n:        usize    = storage_set_bindings(?l, ?bindings[0]);
     if (n != 4) { ret 1; }
     var vert: u32   = DRAW_STORAGE_BUFFERS;
     var frag: u32   = DRAW_STORAGE_BUFFERS;

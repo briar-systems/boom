@@ -26,6 +26,7 @@ use boom.graphics.error.LoaderError;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
 use boom.graphics.limits.Limits;
+use boom.graphics.limits.Reported;
 use boom.graphics.limits.limits_from;
 use boom.graphics.live.Live;
 use boom.graphics.retire.Doomed;
@@ -55,6 +56,8 @@ use vk;
 # Defined here because mach-vk generates declarations from the registry and the
 # version macros are not declarations.
 val API_VERSION_1_0: u32 = 0x00400000;
+val API_VERSION_1_1: u32 = 0x00401000;
+val API_VERSION_1_2: u32 = 0x00402000;
 val API_VERSION_1_3: u32 = 0x00403000;
 
 # The portability extensions, and the instance flag that opts into the first.
@@ -94,6 +97,9 @@ fun requested_api_version() u32 {
 #                  as ptr, so the conversion happens once, here.
 # physical:        The selected physical device.
 # limits:          The selected device's limits, read when it was picked.
+# api_version:     The version the device is used at: the lower of the
+#                  instance's and the device's, since a core entry point or
+#                  feature needs both.
 # device:          The logical device.
 # graphics_queue:  Queue for draw submission.
 # present_queue:   Queue for presentation; may equal graphics_queue.
@@ -106,6 +112,7 @@ pub rec Vk {
     surface:         vk.SurfaceKHR;
     physical:        vk.PhysicalDevice;
     limits:          Limits;
+    api_version:     u32;
     device:          vk.Device;
     graphics_queue:  vk.Queue;
     present_queue:   vk.Queue;
@@ -190,6 +197,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     app.pEngineName        = "boom";
     app.engineVersion      = 0;
     app.apiVersion         = requested_api_version();
+    v.api_version          = app.apiVersion;
 
     var ici: vk.InstanceCreateInfo;
     ici.sType                   = vk.STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -389,8 +397,10 @@ fun pick_physical(v: *Vk) err[Error] {
             if (sel f.present.some) {
                 var props: vk.PhysicalDeviceProperties;
                 vk.vkGetPhysicalDeviceProperties(d, ?props);
+                if (props.apiVersion < v.api_version) { v.api_version = props.apiVersion; }
+                var more: Reported = report(v, d, f.timestamp_bits);
                 v.physical        = d;
-                v.limits          = limits_from(?props.limits, f.timestamp_bits);
+                v.limits          = limits_from(?props.limits, ?more);
                 v.graphics_family = f.graphics.some;
                 v.present_family  = f.present.some;
                 ret err[Error].ok{};
@@ -399,6 +409,43 @@ fun pick_physical(v: *Vk) err[Error] {
         i = i + 1;
     }
     ret err[Error].err{Error.device{DeviceError.no_capable_device{}}};
+}
+
+# What a device reports beyond its core limits, read through the 1.1 queries
+# where the version the device is used at has them.
+#
+# maxMemoryAllocationSize is maintenance3's, core in 1.1. bufferDeviceAddress is
+# only asked for at 1.2, where it is core: boom enables it as a 1.2 feature, not
+# through VK_KHR_buffer_device_address, so a 1.1 device offering only the
+# extension reports none.
+fun report(v: *Vk, d: vk.PhysicalDevice, timestamp_bits: u32) Reported {
+    var more: Reported = Reported{timestamp_bits: timestamp_bits, max_memory_allocation_size: 0,
+        buffer_device_address: false};
+    if (v.api_version < API_VERSION_1_1) { ret more; }
+
+    var m3: vk.PhysicalDeviceMaintenance3Properties;
+    m3.sType                   = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+    m3.pNext                   = nil;
+    m3.maxMemoryAllocationSize = 0;
+    var p2: vk.PhysicalDeviceProperties2;
+    p2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p2.pNext = (?m3)::ptr;
+    vk.vkGetPhysicalDeviceProperties2(d, ?p2);
+    more.max_memory_allocation_size = m3.maxMemoryAllocationSize;
+
+    if (v.api_version < API_VERSION_1_2) { ret more; }
+    var bda: vk.PhysicalDeviceBufferDeviceAddressFeatures;
+    bda.sType                            = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    bda.pNext                            = nil;
+    bda.bufferDeviceAddress              = 0;
+    bda.bufferDeviceAddressCaptureReplay = 0;
+    bda.bufferDeviceAddressMultiDevice   = 0;
+    var f2: vk.PhysicalDeviceFeatures2;
+    f2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    f2.pNext = (?bda)::ptr;
+    vk.vkGetPhysicalDeviceFeatures2(d, ?f2);
+    more.buffer_device_address = bda.bufferDeviceAddress != 0;
+    ret more;
 }
 
 # the queue families a device offers for drawing and for presenting
@@ -531,10 +578,22 @@ fun create_device(v: *Vk) err[Error] {
     # checked for support first. Handing back the supported set is legal and
     # wrong: it hides what the engine depends on, so the first device missing
     # something fails far from the reason.
+    #
+    # bufferDeviceAddress is the one boom asks for, and only where the device
+    # offers it: a game's shaders reach storage buffers through their addresses
+    # with it, and renderer_limits says whether they can. boom's own modules
+    # hold no address, so a device without it runs everything boom ships.
+    var bda: vk.PhysicalDeviceBufferDeviceAddressFeatures;
+    bda.sType                            = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    bda.pNext                            = nil;
+    bda.bufferDeviceAddress              = 1;
+    bda.bufferDeviceAddressCaptureReplay = 0;
+    bda.bufferDeviceAddressMultiDevice   = 0;
 
     var dci: vk.DeviceCreateInfo;
-    dci.sType                   = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    dci.pNext                   = nil;
+    dci.sType = vk.STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    dci.pNext = nil;
+    if (v.limits.buffer_device_address) { dci.pNext = (?bda)::ptr; }
     dci.flags                   = 0;
     dci.queueCreateInfoCount    = qcount;
     dci.pQueueCreateInfos       = ?qci[0];
