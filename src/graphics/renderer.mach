@@ -127,6 +127,7 @@ use boom.graphics.error.ShaderError;
 use boom.graphics.error.Stage;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.frame.FrameBegin;
 use boom.graphics.frame.FrameLoop;
 use boom.graphics.frame.WindowStep;
 use boom.graphics.frame.frame_begin;
@@ -1186,8 +1187,11 @@ pub fun renderer_present_mode_supported(r: *Renderer, mode: PresentMode) bool {
 #
 # waits for the frame's fence, acquires a swapchain image, begins the
 # render pass, and resets the uniform ring. false when the swapchain was out
-# of date and was rebuilt, or the window is minimized, in which case the caller
-# should skip drawing and try again next frame; that is a resize, not an error.
+# of date and was rebuilt, the window is minimized, or the frame's fence timed
+# out, in which case the caller should skip drawing and try again next frame;
+# none of those is an error. A timed-out slot is left untouched, so its rings,
+# staging and timer queries are not rewound while the GPU may still use them,
+# and a lost device is an error instead.
 # ---
 # r:   renderer to begin on
 # ret: whether a frame was opened, or the failure that prevented one
@@ -1227,10 +1231,12 @@ pub fun renderer_begin_frame(r: *Renderer) res[bool, Error] {
         if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
     }
 
-    val br: res[bool, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap);
-    if (sel br.err) { ret br; }
+    val br: res[FrameBegin, Error] = frame_begin(?r.frame, ?r.vk, ?r.swap);
+    if (sel br.err) { ret res[bool, Error].err{br.err}; }
 
-    if (!br.ok) {
+    # A slot whose fence timed out is not reused, so nothing below runs for it.
+    if (sel br.ok.busy) { ret res[bool, Error].ok{false}; }
+    if (sel br.ok.stale) {
         val rr: err[Error] = renderer_rebuild(r, fw, fh, true);
         if (sel rr.err) { ret res[bool, Error].err{rr.err}; }
         ret res[bool, Error].ok{false};
