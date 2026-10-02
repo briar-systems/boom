@@ -17,10 +17,13 @@
 # 1.0 and a heading at 2.0, and an interface at 200% is rasterised at twice the
 # size rather than stretched from 100%.
 #
-# THE BITMAP IS THE GLYPH'S OWN BOX. A glyph's rect is its outline's bounding
-# box at the scale, rounded out to whole texels, placed against the pen on the
-# baseline, and raster fills exactly that many texels with mach-font's coverage.
-# Nothing is oversampled: blit samples its atlas one texel per pixel.
+# THE BITMAP IS ON THE PIXEL GRID. A glyph's rect is its outline's bounding box
+# at the scale, rounded out to whole pixels from the pen and the baseline, and
+# raster fills exactly that many texels with the outline at that offset. blit
+# draws every glyph of a line at its baseline plus whole pixels, so the line
+# rounds to the screen as one and a round glyph that dips below the baseline
+# never lands a pixel lower than its flat neighbours. Nothing is oversampled:
+# blit samples its atlas one texel per pixel.
 #
 # LIFETIME. The source borrows its Typeface, which must outlive it: blit_glyphs
 # counts itself on the typeface the way a FontFace does, so typeface_delete
@@ -35,9 +38,12 @@ use boom.graphics.text.atlas.edge_capacity;
 use boom.graphics.text.face.FontRaster;
 use boom.graphics.text.face.FontSizeMode;
 use boom.graphics.text.face.font_scale;
+use boom.graphics.text.face.pixel_ceil;
+use boom.graphics.text.face.pixel_floor;
 use boom.graphics.text.face.pixel_round;
 use boom.graphics.text.typeface.Typeface;
 use boom.graphics.text.typeface.font_failed;
+use boom.graphics.text.typeface.outline_raster;
 use boom.graphics.text.typeface.typeface_glyph_bounds;
 use boom.graphics.text.typeface.typeface_hhea;
 use font.error.FontError;
@@ -179,14 +185,6 @@ fun snap(g: *BlitGlyphs, v: f32) f32 {
     ret v;
 }
 
-# the smallest whole number of texels covering a non-negative extent
-fun texels(v: f32) u32 {
-    if (v <= 0.0) { ret 0; }
-    val whole: u32 = v::u32;
-    if (whole::f32 < v) { ret whole + 1; }
-    ret whole;
-}
-
 # the glyph a codepoint maps to, none when the typeface lacks it
 fun mapped(t: *Typeface, cp: u32) opt[u16] {
     val m: res[u16, FontError] = finfo.glyph_index(?t.face, cp);
@@ -197,9 +195,9 @@ fun mapped(t: *Typeface, cp: u32) opt[u16] {
 
 # Measure a codepoint at a scale.
 #
-# The bitmap is the outline's box rounded out to whole texels, with its bottom
-# edge on the outline's lowest point, which is where mach-font's render_glyph
-# puts the outline in a bitmap of that size.
+# The bitmap is the outline's box rounded out to whole pixels from the pen and
+# the baseline, so its edges are whole offsets and raster draws the outline at
+# the matching fraction inside it.
 fun place(g: *BlitGlyphs, cp: u32, scale: f32) opt[Placement] {
     val t:     *Typeface = g.typeface;
     val glyph: opt[u16]  = mapped(t, cp);
@@ -215,16 +213,21 @@ fun place(g: *BlitGlyphs, cp: u32, scale: f32) opt[Placement] {
     p.g.advance = snap(g, hm.ok.advance::f32 * p.s);
     if (sel bounds.ok.none) { ret opt[Placement].some{p}; }
 
-    val b: fglyf.Bounds = bounds.ok.some;
-    val w: u32          = texels((b.x_max::f32 - b.x_min::f32) * p.s);
-    val h: u32          = texels((b.y_max::f32 - b.y_min::f32) * p.s);
-    if (w == 0 || h == 0 || w > GLYPH_SIDE_MAX || h > GLYPH_SIDE_MAX) { ret opt[Placement].some{p}; }
-    p.g.w  = w;
-    p.g.h  = h;
-    p.g.x0 = snap(g, b.x_min::f32 * p.s);
-    p.g.y1 = snap(g, -(b.y_min::f32) * p.s);
-    p.g.x1 = p.g.x0 + w::f32;
-    p.g.y0 = p.g.y1 - h::f32;
+    val b:      fglyf.Bounds = bounds.ok.some;
+    val left:   f32          = pixel_floor(b.x_min::f32 * p.s);
+    val right:  f32          = pixel_ceil(b.x_max::f32 * p.s);
+    val top:    f32          = pixel_floor(-(b.y_max::f32) * p.s);
+    val bottom: f32          = pixel_ceil(-(b.y_min::f32) * p.s);
+    val side:   f32          = GLYPH_SIDE_MAX::f32;
+    if (right <= left || bottom <= top || right - left > side || bottom - top > side) {
+        ret opt[Placement].some{p};
+    }
+    p.g.w  = (right - left)::u32;
+    p.g.h  = (bottom - top)::u32;
+    p.g.x0 = left;
+    p.g.x1 = right;
+    p.g.y0 = top;
+    p.g.y1 = bottom;
     ret opt[Placement].some{p};
 }
 
@@ -316,8 +319,9 @@ fun glyphs_raster(self: ptr, cp: u32, scale: f32, cov: *u8, stride: usize) bool 
     }
 
     val t:        *Typeface      = g.typeface;
-    val rendered: err[FontError] = finfo.render_glyph(?t.face, p.some.glyph, p.some.s,
-        t.pts, t.pts_cap, t.ends, t.ends_cap, g.edges, g.edges_cap, dst, w::u16, h::u16);
+    val rendered: err[FontError] = outline_raster(?t.face, p.some.glyph, p.some.s,
+        p.some.g.x0, p.some.g.y1, t.pts, t.pts_cap, t.ends, t.ends_cap,
+        g.edges, g.edges_cap, dst, w::u16, h::u16);
     if (sel rendered.err) { ret false; }
 
     var y: usize = 0;
