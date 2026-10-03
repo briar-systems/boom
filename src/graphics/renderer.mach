@@ -168,6 +168,8 @@ use boom.graphics.physical.DeviceInfo;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.STORAGE_SET;
 use boom.graphics.pipeline.pipeline_bind_scissored;
+use boom.graphics.require.Requirements;
+use boom.graphics.require.requirements_none;
 use boom.graphics.retire.retire_pending;
 use boom.graphics.shader.Shader;
 use boom.graphics.shader.shader_pipeline;
@@ -408,6 +410,26 @@ pub fun renderer_init(r: *Renderer, window: *Window) err[Error] {
 # ret:     ok, or the first step that failed
 pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     present: PresentMode) err[Error] {
+    val any: Requirements = requirements_none();
+    ret renderer_init_requiring(r, window, present, any);
+}
+
+# initialize a renderer on a device that has what the app requires
+#
+# requirements are a hard filter on device selection, ahead of its ranking: a
+# device lacking one is never chosen, and BOOM_DEVICE naming one is refused.
+# when no device that can render meets them, init fails with
+# DeviceError.unmet naming what the best of them lacks. start from
+# requirements_none and set what the app needs; see boom.graphics.require.
+# ---
+# r:       renderer to initialize
+# window:  the open window to present to, which must outlive the renderer
+# present: how finished frames should reach the display, as for
+#          renderer_init_with_present
+# require: what the device must offer
+# ret:     ok, or the first step that failed
+pub fun renderer_init_requiring(r: *Renderer, window: *Window, present: PresentMode,
+    require: Requirements) err[Error] {
     if (sel window.handle.none) { ret err[Error].err{Error.uninitialized{Stage.window{}}}; }
     val width:  i32 = window.width;
     val height: i32 = window.height;
@@ -439,7 +461,7 @@ pub fun renderer_init_with_present(r: *Renderer, window: *Window,
     r.ready_sets      = false;
     staging_init(?r.staging);
 
-    val vr: err[Error] = vk_init(?r.vk, r.window, "boom");
+    val vr: err[Error] = vk_init(?r.vk, r.window, "boom", ?require);
     if (sel vr.err) { ret vr; }
     r.ready_vk = true;
     # The surface now exists, and it is created from the window's platform

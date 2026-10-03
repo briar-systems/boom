@@ -1,0 +1,60 @@
+# What an app needs of a device before it can run at all.
+#
+# boom enables optional features where a device offers them, which is enough
+# for an app that can do without them. An app that cannot passes Requirements
+# to renderer_init_requiring, and selection (boom.graphics.physical) treats them
+# as a hard filter beside the capability checks: a device lacking one is never
+# chosen, whatever its type, and BOOM_DEVICE naming such a device is refused.
+# When no device meets them, init fails with DeviceError.unmet naming what the
+# best device that could draw was missing, so the app can say why it will not
+# start rather than failing later on a device that cannot run it.
+#
+# ADDING A REQUIREMENT is a field in Requirements, its case in Requirement and
+# requirement_message, and its check in boom.graphics.physical.unmet against
+# what Candidate says the device offers. A feature that has to be enabled at
+# device creation is enabled there when it is required, never only offered.
+# Apps start from requirements_none and set what they need, so a field added
+# later leaves their code as it was.
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.string.str;
+
+# what an app requires of the device it runs on
+# ---
+# api_version:           the lowest Vulkan version the device must be used
+#                        at, packed as (major << 22) | (minor << 12) | patch;
+#                        zero requires none. a device is used at the lower of
+#                        its own version and the instance's, which boom caps
+#                        at 1.3
+# buffer_device_address: bufferDeviceAddress, core and optional in Vulkan 1.2,
+#                        so storage buffers have addresses a shader reaches
+#                        them through
+# timestamps:            a queue boom records frames on that writes
+#                        timestamps, so renderer_timer can measure
+pub rec Requirements {
+    api_version:           u32;
+    buffer_device_address: bool;
+    timestamps:            bool;
+}
+
+# one requirement a device did not meet, named as its Requirements field is
+pub tag Requirement: u8 {
+    api_version;
+    buffer_device_address;
+    timestamps;
+}
+
+# requirements that every device meets, for an app to set its needs on
+pub fun requirements_none() Requirements {
+    ret Requirements{api_version: 0, buffer_device_address: false, timestamps: false};
+}
+
+# a line saying which requirement no eligible device met
+pub fun requirement_message(r: Requirement) str {
+    if (sel r.api_version) { ret "no eligible Vulkan device runs at the API version this app requires"; }
+    if (sel r.buffer_device_address) {
+        ret "no eligible Vulkan device offers bufferDeviceAddress, which this app requires";
+    }
+    ret "no eligible Vulkan device writes timestamps, which this app requires";
+}
