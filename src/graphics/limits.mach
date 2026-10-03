@@ -9,6 +9,7 @@
 # Reported when it comes from beyond VkPhysicalDeviceLimits: every reader takes
 # the record whole, so nothing else moves.
 
+use boom.graphics.memory.LocalHeap;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
@@ -84,7 +85,22 @@ pub val DRAW_STORAGE_BUFFERS: u32 = 2;
 # max_memory_allocation_size:               Bytes one allocation, and so one
 #                                           buffer, may hold, from Vulkan 1.1's
 #                                           maintenance3. Zero on a 1.0 device,
-#                                           which reports none.
+#                                           which reports none. Not a bound on a
+#                                           pool: NVIDIA reports UINT64_MAX.
+# device_local_heap_size:                   Bytes in the largest device-local
+#                                           heap, which is what a pool of device
+#                                           memory comes from. On an integrated
+#                                           GPU it is the heap shared with the
+#                                           host. renderer_memory_budget reports
+#                                           how much of it this process may use
+#                                           now, where the device can say.
+# unified_memory:                           Whether device-local memory is the
+#                                           host's RAM: an integrated GPU, a
+#                                           software device, or Apple silicon.
+#                                           An app sizing a pool by
+#                                           device_local_heap_size takes a
+#                                           smaller share of it there, since the
+#                                           host lives in the same memory.
 # buffer_device_address:                    Whether the device was created with
 #                                           bufferDeviceAddress, core and
 #                                           optional in Vulkan 1.2. When it was,
@@ -109,6 +125,8 @@ pub rec Limits {
     timestamp_period:     f32;
 
     max_memory_allocation_size: u64;
+    device_local_heap_size:     u64;
+    unified_memory:             bool;
     buffer_device_address:      bool;
 }
 
@@ -119,11 +137,14 @@ pub rec Limits {
 #                             records frames on
 # max_memory_allocation_size: maintenance3's maxMemoryAllocationSize, zero when
 #                             the device does not report it
+# local_heap:                 the largest device-local heap, from the device's
+#                             memory properties
 # buffer_device_address:      whether bufferDeviceAddress is offered, and so
 #                             enabled
 pub rec Reported {
     timestamp_bits:             u32;
     max_memory_allocation_size: u64;
+    local_heap:                 LocalHeap;
     buffer_device_address:      bool;
 }
 
@@ -154,14 +175,17 @@ pub fun limits_from(src: *vk.PhysicalDeviceLimits, more: *Reported) Limits {
     if (more.timestamp_bits != 0) { l.timestamp_period = src.timestampPeriod; }
 
     l.max_memory_allocation_size = more.max_memory_allocation_size;
+    l.device_local_heap_size     = more.local_heap.size;
+    l.unified_memory             = more.local_heap.unified;
     l.buffer_device_address      = more.buffer_device_address;
     ret l;
 }
 
 # what a device reports beyond its limits when it reports nothing: no
-# timestamps, no allocation limit and no device addresses
+# timestamps, no allocation limit, no device-local heap and no device addresses
 pub fun reported_none() Reported {
-    ret Reported{timestamp_bits: 0, max_memory_allocation_size: 0, buffer_device_address: false};
+    ret Reported{timestamp_bits: 0, max_memory_allocation_size: 0,
+        local_heap: LocalHeap{index: 0, size: 0, unified: false}, buffer_device_address: false};
 }
 
 # a device's count less set 0's storage buffers, never wrapping below zero
@@ -193,7 +217,7 @@ test limits_from__carries_each_limit {
     src.maxDescriptorSetStorageBuffers      = 24;
     src.timestampPeriod                     = 1.5;
     var more: Reported = Reported{timestamp_bits: 36, max_memory_allocation_size: 4294967296,
-        buffer_device_address: true};
+        local_heap: LocalHeap{index: 1, size: 8589934592, unified: true}, buffer_device_address: true};
     val l: Limits = limits_from(?src, ?more);
     if (l.max_storage_buffer_range != 134217728)         { ret 1; }
     if (l.max_compute_work_group_count[0] != 65535)      { ret 2; }
@@ -210,12 +234,15 @@ test limits_from__carries_each_limit {
     if (l.timestamp_period != 1.5)                       { ret 13; }
     if (l.max_memory_allocation_size != 4294967296)      { ret 14; }
     if (!l.buffer_device_address)                        { ret 15; }
+    if (l.device_local_heap_size != 8589934592)          { ret 18; }
+    if (!l.unified_memory)                               { ret 19; }
     # a queue without timestamps reports none, whatever the device's period,
     # and a device reporting nothing more has no addresses
     var nothing: Reported = reported_none();
     val none:    Limits   = limits_from(?src, ?nothing);
     if (none.timestamp_valid_bits != 0 || none.timestamp_period != 0.0)     { ret 16; }
     if (none.max_memory_allocation_size != 0 || none.buffer_device_address) { ret 17; }
+    if (none.device_local_heap_size != 0 || none.unified_memory)            { ret 20; }
     ret 0;
 }
 
