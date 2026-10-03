@@ -253,6 +253,12 @@ fwd boom.graphics.renderer.renderer_device;
 # The device's own limits, for sizing compute work. See boom.graphics.limits.
 fwd boom.graphics.limits.Limits;
 fwd boom.graphics.renderer.renderer_limits;
+# The device the renderer runs on, and whether it is a software one. See
+# boom.graphics.physical.
+fwd boom.graphics.physical.DeviceInfo;
+fwd boom.graphics.physical.DeviceType;
+fwd boom.graphics.physical.device_type_name;
+fwd boom.graphics.renderer.renderer_device_info;
 fwd boom.graphics.renderer.renderer_mesh;
 # Two ways past the cost renderer_mesh pays on the caller's behalf. The
 # with-bounds form skips the per-vertex walk for a caller that already knows the

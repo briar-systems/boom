@@ -102,6 +102,9 @@ pub tag LoaderError: u8 {
 # no_memory_type:         no memory type satisfies a resource's required properties
 # no_present_mode:        the surface reported no present modes
 # minimized:              the surface extent is zero, as it is while minimized
+# no_device_match:        BOOM_DEVICE names no device, by index or by name
+# device_incapable:       BOOM_DEVICE names the device at this index, which
+#                         cannot both render and present to the surface
 pub tag DeviceError: u8 {
     no_instance_extensions;
     instance_extensions: u32;
@@ -112,6 +115,8 @@ pub tag DeviceError: u8 {
     no_memory_type;
     no_present_mode;
     minimized;
+    no_device_match;
+    device_incapable: u32;
 }
 
 # the object an operation needs, which was never brought up
@@ -412,6 +417,8 @@ fun device_message(e: DeviceError) str {
     if (sel e.no_capable_device)      { ret "no device can both render and present to this surface"; }
     if (sel e.no_memory_type)         { ret "no memory type satisfies the requested properties"; }
     if (sel e.no_present_mode)        { ret "surface reported no present modes"; }
+    if (sel e.no_device_match)        { ret "BOOM_DEVICE names no Vulkan device"; }
+    if (sel e.device_incapable)       { ret "the device BOOM_DEVICE names cannot both render and present to this surface"; }
     ret "surface extent is zero; window is minimized";
 }
 
