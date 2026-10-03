@@ -1,0 +1,345 @@
+# Which physical device a renderer runs on, and what it says about itself.
+#
+# Selection is a pure function over what each device reported, so the ranking
+# is tested on a fixed list without a device. boom.graphics.vk gathers the
+# reports and creates the device this picks.
+#
+# THE CAPABILITY CHECKS ARE A FILTER, NOT A RANK. A device that cannot draw with
+# compute on one queue family, or cannot present to the surface, is never
+# chosen, whatever its type and whatever an override says. Among the devices
+# that can, the type decides: discrete, integrated, virtual, other, then cpu.
+# A software device (Mesa's lavapipe, SwiftShader) is the worst choice there is
+# for a game and is taken only when nothing else can draw, so a known cpu
+# device ranks below one whose type says nothing.
+#
+# FEATURES BREAK TIES, THEY NEVER OUTRANK THE TYPE. boom requires no optional
+# feature: bufferDeviceAddress is enabled where offered and renderer_limits says
+# whether it was, so a device without it runs everything boom ships. Letting a
+# feature outrank the type would hand a game the cpu device over a discrete GPU
+# whose driver stops at 1.1, which is the failure this ranking exists to stop.
+# So within one type a device offering bufferDeviceAddress is preferred, then
+# the higher API version it is used at, then enumeration order. A feature a game
+# cannot run without belongs in the capability filter, never in this order.
+#
+# An override wins over the ranking but not over the filter. BOOM_DEVICE names a
+# device by its index in enumeration order (as vulkaninfo numbers GPU0, GPU1)
+# or by a case-insensitive part of its name. Without it, a choice made through
+# Mesa's device-select layer (MESA_VK_DEVICE_SELECT or DRI_PRIME), which puts
+# its pick first in the enumeration, is honoured by taking the enumeration as
+# ordered. A BOOM_DEVICE naming nothing, or a device that cannot draw and
+# present, is refused rather than quietly replaced by the ranking's pick.
+
+use boom.graphics.error.DeviceError;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+use vk;
+
+# what kind of device a physical device says it is, from VkPhysicalDeviceType
+# ---
+# discrete:   a GPU of its own
+# integrated: a GPU sharing the host's memory
+# virtual:    a GPU passed through a virtual machine
+# cpu:        a software implementation running on the host processor
+# other:      a type the device does not name
+pub tag DeviceType: u8 {
+    discrete;
+    integrated;
+    virtual;
+    cpu;
+    other;
+}
+
+# the device type a VkPhysicalDeviceType value names
+pub fun device_type_from(t: i32) DeviceType {
+    if (t == vk.PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)   { ret DeviceType.discrete{}; }
+    if (t == vk.PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) { ret DeviceType.integrated{}; }
+    if (t == vk.PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)    { ret DeviceType.virtual{}; }
+    if (t == vk.PHYSICAL_DEVICE_TYPE_CPU)            { ret DeviceType.cpu{}; }
+    ret DeviceType.other{};
+}
+
+# the lowercase name of a device type: discrete, integrated, virtual, cpu or other
+pub fun device_type_name(t: DeviceType) str {
+    if (sel t.discrete)   { ret "discrete"; }
+    if (sel t.integrated) { ret "integrated"; }
+    if (sel t.virtual)    { ret "virtual"; }
+    if (sel t.cpu)        { ret "cpu"; }
+    ret "other";
+}
+
+# where a type sits in the ranking, lower first
+fun type_rank(t: DeviceType) u32 {
+    if (sel t.discrete)   { ret 0; }
+    if (sel t.integrated) { ret 1; }
+    if (sel t.virtual)    { ret 2; }
+    if (sel t.other)      { ret 3; }
+    ret 4;
+}
+
+# The device a renderer runs on, as it described itself when it was picked.
+#
+# The strings are null-terminated in place, so `?info.name[0]` is a str.
+# ---
+# name:           the device's name, as vulkaninfo prints it
+# device_type:    what kind of device it is; cpu is a software implementation
+# vendor_id:      the PCI vendor id, or a Khronos-assigned one
+# device_id:      the vendor's id for the device
+# api_version:    the Vulkan version boom uses it at
+# driver_version: the driver's version, encoded as its vendor chooses
+# driver_id:      the VkDriverId, zero where the device reports no driver
+#                 properties
+# driver_name:    the driver's name, empty where it reports none
+# driver_info:    the driver's own description of itself, often its version,
+#                 empty where it reports none
+pub rec DeviceInfo {
+    name:           [256]u8;
+    device_type:    DeviceType;
+    vendor_id:      u32;
+    device_id:      u32;
+    api_version:    u32;
+    driver_version: u32;
+    driver_id:      i32;
+    driver_name:    [256]u8;
+    driver_info:    [256]u8;
+}
+
+# what selection needs to know about one enumerated device
+# ---
+# name:                  the device's name
+# device_type:           what kind of device it is
+# capable:               whether it can draw with compute and present to the
+#                        surface
+# api_version:           the version it would be used at
+# buffer_device_address: whether it offers bufferDeviceAddress
+pub rec Candidate {
+    name:                  str;
+    device_type:           DeviceType;
+    capable:               bool;
+    api_version:           u32;
+    buffer_device_address: bool;
+}
+
+# what the environment asks of selection
+# ---
+# none:        rank the devices
+# enumeration: take the first capable device in enumeration order, as Mesa's
+#              device-select layer has ordered it
+# index:       the device at this enumeration index (BOOM_DEVICE=1)
+# name:        the first device whose name holds this, ignoring ASCII case
+#              (BOOM_DEVICE=nvidia)
+pub tag Override: u8 {
+    none;
+    enumeration;
+    index: u32;
+    name:  str;
+}
+
+# the override a BOOM_DEVICE value and the device-select layer ask for
+#
+# all digits is an index, anything else non-empty a name. an empty or unset
+# BOOM_DEVICE leaves the device-select layer's choice, if one was made.
+# ---
+# boom_device: BOOM_DEVICE's value, nil when unset
+# mesa_select: whether MESA_VK_DEVICE_SELECT or DRI_PRIME is set
+pub fun override_from(boom_device: str, mesa_select: bool) Override {
+    if (boom_device == nil || boom_device[0] == 0) {
+        if (mesa_select) { ret Override.enumeration{}; }
+        ret Override.none{};
+    }
+    var n: u64   = 0;
+    var i: usize = 0;
+    for (boom_device[i] != 0) {
+        val c: u8 = boom_device[i];
+        if (c < '0' || c > '9' || n > 0xffffffff) { ret Override.name{boom_device}; }
+        n = n * 10 + (c - '0')::u64;
+        i = i + 1;
+    }
+    if (n > 0xffffffff) { ret Override.name{boom_device}; }
+    ret Override.index{n::u32};
+}
+
+# Choose a device from the enumeration.
+# ---
+# c:   the candidates, in enumeration order
+# n:   how many there are
+# o:   the override, if any
+# ret: the chosen candidate's index; no_capable_device when none can draw and
+#      present, no_device_match when BOOM_DEVICE names none of them, or
+#      device_incapable when it names one that cannot draw and present
+pub fun pick_device(c: *Candidate, n: usize, o: Override) res[usize, DeviceError] {
+    if (sel o.index) {
+        if (o.index::usize >= n) { ret res[usize, DeviceError].err{DeviceError.no_device_match{}}; }
+        ret named(c, o.index::usize);
+    }
+    if (sel o.name) {
+        var i: usize = 0;
+        for (i < n) {
+            if (contains_folded(c[i].name, o.name)) { ret named(c, i); }
+            i = i + 1;
+        }
+        ret res[usize, DeviceError].err{DeviceError.no_device_match{}};
+    }
+
+    var best: usize = n;
+    var i:    usize = 0;
+    for (i < n) {
+        if (c[i].capable) {
+            if (best == n) {
+                best = i;
+            }
+            or (!(sel o.enumeration) && better(?c[i], ?c[best])) {
+                best = i;
+            }
+        }
+        i = i + 1;
+    }
+    if (best == n) { ret res[usize, DeviceError].err{DeviceError.no_capable_device{}}; }
+    ret res[usize, DeviceError].ok{best};
+}
+
+# a device an override named, refused when it cannot draw and present
+fun named(c: *Candidate, i: usize) res[usize, DeviceError] {
+    if (!c[i].capable) { ret res[usize, DeviceError].err{DeviceError.device_incapable{i::u32}}; }
+    ret res[usize, DeviceError].ok{i};
+}
+
+# whether a outranks b: type first, then the features it offers, then version.
+# a tie is not better, so the earlier device in the enumeration keeps it
+fun better(a: *Candidate, b: *Candidate) bool {
+    val ra: u32 = type_rank(a.device_type);
+    val rb: u32 = type_rank(b.device_type);
+    if (ra != rb)                                           { ret ra < rb; }
+    if (a.buffer_device_address != b.buffer_device_address) { ret a.buffer_device_address; }
+    ret a.api_version > b.api_version;
+}
+
+# whether hay holds needle, ignoring ASCII case
+fun contains_folded(hay: str, needle: str) bool {
+    if (needle[0] == 0) { ret true; }
+    var i: usize = 0;
+    for (hay[i] != 0) {
+        var j: usize = 0;
+        for (needle[j] != 0 && hay[i + j] != 0 && fold(hay[i + j]) == fold(needle[j])) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) { ret true; }
+        i = i + 1;
+    }
+    ret false;
+}
+
+fun fold(c: u8) u8 {
+    if (c >= 'A' && c <= 'Z') { ret c + 32; }
+    ret c;
+}
+
+fun cand(name: str, t: DeviceType, capable: bool, version: u32, bda: bool) Candidate {
+    ret Candidate{name: name, device_type: t, capable: capable, api_version: version,
+        buffer_device_address: bda};
+}
+
+fun picked(r: res[usize, DeviceError]) i64 {
+    if (sel r.err) { ret -1; }
+    ret r.ok::i64;
+}
+
+test pick_device__ranks_by_type {
+    # lavapipe enumerating first is the case that motivated the ranking
+    var c: [5]Candidate;
+    c[0] = cand("llvmpipe (LLVM 18.1.8, 256 bits)", DeviceType.cpu{}, true, 0x00403000, true);
+    c[1] = cand("odd", DeviceType.other{}, true, 0x00403000, true);
+    c[2] = cand("virtio", DeviceType.virtual{}, true, 0x00403000, true);
+    c[3] = cand("Intel(R) UHD Graphics", DeviceType.integrated{}, true, 0x00403000, true);
+    c[4] = cand("NVIDIA GeForce RTX 2080 SUPER", DeviceType.discrete{}, true, 0x00403000, true);
+    if (picked(pick_device(?c[0], 5, Override.none{})) != 4) { ret 1; }
+    if (picked(pick_device(?c[0], 4, Override.none{})) != 3) { ret 2; }
+    if (picked(pick_device(?c[0], 3, Override.none{})) != 2) { ret 3; }
+    if (picked(pick_device(?c[0], 2, Override.none{})) != 1) { ret 4; }
+    if (picked(pick_device(?c[0], 1, Override.none{})) != 0) { ret 5; }
+    # a device that cannot draw and present is never ranked
+    c[4].capable = false;
+    c[3].capable = false;
+    if (picked(pick_device(?c[0], 5, Override.none{})) != 2) { ret 6; }
+    var none: [1]Candidate;
+    none[0] = cand("headless", DeviceType.discrete{}, false, 0x00403000, true);
+    val r: res[usize, DeviceError] = pick_device(?none[0], 1, Override.none{});
+    if (!(sel r.err && sel r.err.no_capable_device)) { ret 7; }
+    ret 0;
+}
+
+test pick_device__features_break_ties_within_a_type {
+    var c: [4]Candidate;
+    c[0] = cand("lavapipe", DeviceType.cpu{}, true, 0x00403000, true);
+    c[1] = cand("old discrete", DeviceType.discrete{}, true, 0x00401000, false);
+    c[2] = cand("new discrete", DeviceType.discrete{}, true, 0x00402000, false);
+    c[3] = cand("addressing discrete", DeviceType.discrete{}, true, 0x00402000, true);
+    # the feature never lifts the cpu device past a discrete one without it
+    if (picked(pick_device(?c[0], 2, Override.none{})) != 1) { ret 1; }
+    if (picked(pick_device(?c[0], 3, Override.none{})) != 2) { ret 2; }
+    if (picked(pick_device(?c[0], 4, Override.none{})) != 3) { ret 3; }
+    # an exact tie keeps enumeration order
+    c[2] = c[3];
+    if (picked(pick_device(?c[0], 4, Override.none{})) != 2) { ret 4; }
+    ret 0;
+}
+
+test pick_device__overrides {
+    var c: [3]Candidate;
+    c[0] = cand("NVIDIA GeForce RTX 2080 SUPER", DeviceType.discrete{}, true, 0x00403000, true);
+    c[1] = cand("llvmpipe (LLVM 18.1.8, 256 bits)", DeviceType.cpu{}, true, 0x00403000, true);
+    c[2] = cand("AMD Radeon", DeviceType.discrete{}, false, 0x00403000, true);
+    if (picked(pick_device(?c[0], 3, override_from("1", false))) != 1)        { ret 1; }
+    if (picked(pick_device(?c[0], 3, override_from("LLVMpipe", false))) != 1) { ret 2; }
+    if (picked(pick_device(?c[0], 3, override_from("nvidia", true))) != 0)    { ret 3; }
+    # the device-select layer's order is taken as it stands
+    c[0].device_type = DeviceType.cpu{};
+    c[1].device_type = DeviceType.discrete{};
+    if (picked(pick_device(?c[0], 3, override_from("", true))) != 0)   { ret 4; }
+    if (picked(pick_device(?c[0], 3, override_from(nil, false))) != 1) { ret 5; }
+    # an override is refused, not replaced, when it names nothing usable
+    val missing: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("intel", false));
+    if (!(sel missing.err && sel missing.err.no_device_match)) { ret 6; }
+    val past: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("3", false));
+    if (!(sel past.err && sel past.err.no_device_match)) { ret 7; }
+    val dead: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("radeon", false));
+    if (!(sel dead.err))                                                    { ret 8; }
+    if (!(sel dead.err.device_incapable && dead.err.device_incapable == 2)) { ret 9; }
+    ret 0;
+}
+
+test override_from__index_or_name {
+    val i: Override = override_from("12", false);
+    if (!(sel i.index && i.index == 12)) { ret 1; }
+    val mixed: Override = override_from("1a", false);
+    if (!(sel mixed.name)) { ret 2; }
+    val huge: Override = override_from("99999999999", false);
+    if (!(sel huge.name)) { ret 3; }
+    val unset: Override = override_from(nil, false);
+    if (!(sel unset.none)) { ret 4; }
+    val layer: Override = override_from(nil, true);
+    if (!(sel layer.enumeration)) { ret 5; }
+    val first: Override = override_from("0", true);
+    if (!(sel first.index && first.index == 0)) { ret 6; }
+    ret 0;
+}
+
+test device_type_from__names_each_type {
+    val d: DeviceType = device_type_from(vk.PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+    if (!str_equals(device_type_name(d), "discrete")) { ret 1; }
+    val i: DeviceType = device_type_from(vk.PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
+    if (!str_equals(device_type_name(i), "integrated")) { ret 2; }
+    val v: DeviceType = device_type_from(vk.PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU);
+    if (!str_equals(device_type_name(v), "virtual")) { ret 3; }
+    val c: DeviceType = device_type_from(vk.PHYSICAL_DEVICE_TYPE_CPU);
+    if (!str_equals(device_type_name(c), "cpu")) { ret 4; }
+    val o: DeviceType = device_type_from(vk.PHYSICAL_DEVICE_TYPE_OTHER);
+    if (!str_equals(device_type_name(o), "other")) { ret 5; }
+    val u: DeviceType = device_type_from(99);
+    if (!(sel u.other)) { ret 6; }
+    ret 0;
+}

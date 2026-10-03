@@ -29,6 +29,11 @@ use boom.graphics.limits.Limits;
 use boom.graphics.limits.Reported;
 use boom.graphics.limits.limits_from;
 use boom.graphics.live.Live;
+use boom.graphics.physical.Candidate;
+use boom.graphics.physical.DeviceInfo;
+use boom.graphics.physical.device_type_from;
+use boom.graphics.physical.override_from;
+use boom.graphics.physical.pick_device;
 use boom.graphics.retire.Doomed;
 use boom.graphics.retire.Release;
 use boom.graphics.retire.Retire;
@@ -42,12 +47,14 @@ use glfw;
 use gc: glfw.c;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
+use std.process.env;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
+use std.types.size.usize;
 use std.types.string.str;
 use vk;
 
@@ -97,6 +104,7 @@ fun requested_api_version() u32 {
 #                  as ptr, so the conversion happens once, here.
 # physical:        The selected physical device.
 # limits:          The selected device's limits, read when it was picked.
+# info:            What the selected device says about itself.
 # api_version:     The version the device is used at: the lower of the
 #                  instance's and the device's, since a core entry point or
 #                  feature needs both.
@@ -112,6 +120,7 @@ pub rec Vk {
     surface:         vk.SurfaceKHR;
     physical:        vk.PhysicalDevice;
     limits:          Limits;
+    info:            DeviceInfo;
     api_version:     u32;
     device:          vk.Device;
     graphics_queue:  vk.Queue;
@@ -366,11 +375,12 @@ pub fun vk_release(v: *Vk, obj: Doomed, how: Release) {
     retire_collect(?v.retire, v.device);
 }
 
-# Choose a physical device that can both draw and present to the surface.
+# Choose the physical device to run on; see boom.graphics.physical for the
+# ranking and the overrides.
 #
-# The first device satisfying both is taken. Preferring a discrete GPU is a
-# refinement, not a correctness matter, and is deliberately left out until
-# there is a reason to rank devices.
+# Every device is asked what selection needs before any is chosen, at the
+# version each would be used at, so a device is judged by what it offers boom
+# rather than by what its driver claims past the instance.
 fun pick_physical(v: *Vk) err[Error] {
     var count:   u32 = 0;
     val counted: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?count, nil);
@@ -389,39 +399,101 @@ fun pick_physical(v: *Vk) err[Error] {
         ret err[Error].err{vk_failed(VkCall.enumerate_physical_devices{}, listed)};
     }
 
-    var i: u32 = 0;
+    var props:    [16]vk.PhysicalDeviceProperties;
+    var families: [16]Families;
+    var versions: [16]u32;
+    var reported: [16]Reported;
+    var cands:    [16]Candidate;
+    var i:        u32 = 0;
     for (i < cap) {
-        val d: vk.PhysicalDevice = devices[i];
-        val f: Families          = find_families(v, d);
-        if (sel f.graphics.some) {
-            if (sel f.present.some) {
-                var props: vk.PhysicalDeviceProperties;
-                vk.vkGetPhysicalDeviceProperties(d, ?props);
-                if (props.apiVersion < v.api_version) { v.api_version = props.apiVersion; }
-                var more: Reported = report(v, d, f.timestamp_bits);
-                v.physical        = d;
-                v.limits          = limits_from(?props.limits, ?more);
-                v.graphics_family = f.graphics.some;
-                v.present_family  = f.present.some;
-                ret err[Error].ok{};
-            }
-        }
-        i = i + 1;
+        vk.vkGetPhysicalDeviceProperties(devices[i], ?props[i]);
+        families[i] = find_families(v, devices[i]);
+        versions[i] = v.api_version;
+        if (props[i].apiVersion < versions[i]) { versions[i] = props[i].apiVersion; }
+        reported[i] = report(devices[i], versions[i], families[i].timestamp_bits);
+        var c: Candidate;
+        c.name                  = ?props[i].deviceName[0];
+        c.device_type           = device_type_from(props[i].deviceType);
+        c.capable               = sel families[i].graphics.some && sel families[i].present.some;
+        c.api_version           = versions[i];
+        c.buffer_device_address = reported[i].buffer_device_address;
+        cands[i]                = c;
+        i                       = i + 1;
     }
-    ret err[Error].err{Error.device{DeviceError.no_capable_device{}}};
+
+    # a name longer than any device's cannot be part of one
+    var wanted: [256]u8;
+    var named:  str   = nil;
+    val len:    usize = env_read("BOOM_DEVICE", ?wanted[0], 256);
+    if (len >= 256) { ret err[Error].err{Error.device{DeviceError.no_device_match{}}}; }
+    if (len > 0)    { named = ?wanted[0]; }
+    var flag:  [8]u8;
+    var layer: bool = env_read("MESA_VK_DEVICE_SELECT", ?flag[0], 8) > 0;
+    if (env_read("DRI_PRIME", ?flag[0], 8) > 0) { layer = true; }
+    val chosen: res[usize, DeviceError] = pick_device(?cands[0], cap::usize, override_from(named, layer));
+    if (sel chosen.err) { ret err[Error].err{Error.device{chosen.err}}; }
+
+    val k:    usize    = chosen.ok;
+    val f:    Families = families[k];
+    var more: Reported = reported[k];
+    v.physical    = devices[k];
+    v.api_version = versions[k];
+    v.limits      = limits_from(?props[k].limits, ?more);
+    v.info        = describe(devices[k], ?props[k], versions[k]);
+    # a picked device is capable, so both are set
+    if (sel f.graphics.some) { v.graphics_family = f.graphics.some; }
+    if (sel f.present.some)  { v.present_family = f.present.some; }
+    ret err[Error].ok{};
+}
+
+# an environment variable read into buf, and its full length: zero when it is
+# unset, empty or cannot be read, and cap or more when buf could not hold it
+fun env_read(name: str, buf: *u8, cap: usize) usize {
+    val got: res[opt[usize], env.EnvError] = env.get(name, buf, cap);
+    if (sel got.err) { ret 0; }
+    val len: opt[usize] = got.ok;
+    if (sel len.none) { ret 0; }
+    ret len.some;
+}
+
+# What the device says about itself, for renderer_device_info.
+#
+# The driver's name and description come from VkPhysicalDeviceDriverProperties,
+# core in 1.2, so a device used at 1.1 or below reports them empty.
+fun describe(d: vk.PhysicalDevice, props: *vk.PhysicalDeviceProperties, version: u32) DeviceInfo {
+    var info: DeviceInfo;
+    info.name           = props.deviceName;
+    info.device_type    = device_type_from(props.deviceType);
+    info.vendor_id      = props.vendorID;
+    info.device_id      = props.deviceID;
+    info.api_version    = version;
+    info.driver_version = props.driverVersion;
+    if (version < API_VERSION_1_2) { ret info; }
+
+    var dp: vk.PhysicalDeviceDriverProperties;
+    dp.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    dp.pNext = nil;
+    var p2: vk.PhysicalDeviceProperties2;
+    p2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p2.pNext = (?dp)::ptr;
+    vk.vkGetPhysicalDeviceProperties2(d, ?p2);
+    info.driver_id   = dp.driverID;
+    info.driver_name = dp.driverName;
+    info.driver_info = dp.driverInfo;
+    ret info;
 }
 
 # What a device reports beyond its core limits, read through the 1.1 queries
-# where the version the device is used at has them.
+# where the version it would be used at has them.
 #
 # maxMemoryAllocationSize is maintenance3's, core in 1.1. bufferDeviceAddress is
 # only asked for at 1.2, where it is core: boom enables it as a 1.2 feature, not
 # through VK_KHR_buffer_device_address, so a 1.1 device offering only the
 # extension reports none.
-fun report(v: *Vk, d: vk.PhysicalDevice, timestamp_bits: u32) Reported {
+fun report(d: vk.PhysicalDevice, version: u32, timestamp_bits: u32) Reported {
     var more: Reported = Reported{timestamp_bits: timestamp_bits, max_memory_allocation_size: 0,
         buffer_device_address: false};
-    if (v.api_version < API_VERSION_1_1) { ret more; }
+    if (version < API_VERSION_1_1) { ret more; }
 
     var m3: vk.PhysicalDeviceMaintenance3Properties;
     m3.sType                   = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
@@ -433,7 +505,7 @@ fun report(v: *Vk, d: vk.PhysicalDevice, timestamp_bits: u32) Reported {
     vk.vkGetPhysicalDeviceProperties2(d, ?p2);
     more.max_memory_allocation_size = m3.maxMemoryAllocationSize;
 
-    if (v.api_version < API_VERSION_1_2) { ret more; }
+    if (version < API_VERSION_1_2) { ret more; }
     var bda: vk.PhysicalDeviceBufferDeviceAddressFeatures;
     bda.sType                            = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     bda.pNext                            = nil;

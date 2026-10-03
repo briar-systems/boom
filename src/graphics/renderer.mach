@@ -164,6 +164,7 @@ use boom.graphics.mesh.mesh_delete;
 use boom.graphics.mesh.mesh_draw;
 use boom.graphics.pass.PassCompatibility;
 use boom.graphics.pass.pass_compatibility_one;
+use boom.graphics.physical.DeviceInfo;
 use boom.graphics.pipeline.Pipeline;
 use boom.graphics.pipeline.STORAGE_SET;
 use boom.graphics.pipeline.pipeline_bind_scissored;
@@ -612,6 +613,19 @@ pub fun renderer_device(r: *Renderer) *Device {
 # ret: the limits, by value
 pub fun renderer_limits(r: *Renderer) Limits {
     ret r.vk.limits;
+}
+
+# the physical device the renderer runs on, as it described itself when picked
+#
+# What an app shows to say where it runs, and what tells it when that is a
+# software device: a device_type of cpu is the host processor emulating a GPU,
+# and everything runs far slower there. BOOM_DEVICE overrides the choice; see
+# boom.graphics.physical. Zeroed until renderer_init succeeds.
+# ---
+# r:   the renderer
+# ret: the device's name, type, ids and driver, by value
+pub fun renderer_device_info(r: *Renderer) DeviceInfo {
+    ret r.vk.info;
 }
 
 fun release_mesh_upload(r: *Renderer, upload: *PendingMeshUpload) {
