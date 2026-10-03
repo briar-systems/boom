@@ -25,12 +25,23 @@ use boom.graphics.error.Error;
 use boom.graphics.error.LoaderError;
 use boom.graphics.error.VkCall;
 use boom.graphics.error.vk_failed;
+use boom.graphics.extension.EXT_MEMORY_BUDGET_EXTENSION_NAME;
+use boom.graphics.extension.KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+use boom.graphics.extension.Offered;
+use boom.graphics.extension.offered_from;
+use boom.graphics.extension.offered_none;
 use boom.graphics.limits.Limits;
 use boom.graphics.limits.Reported;
 use boom.graphics.limits.limits_from;
 use boom.graphics.live.Live;
+use boom.graphics.memory.MemoryBudget;
+use boom.graphics.memory.MemoryBudgetProperties;
+use boom.graphics.memory.STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+use boom.graphics.memory.budget_from;
+use boom.graphics.memory.local_heap_from;
 use boom.graphics.physical.Candidate;
 use boom.graphics.physical.DeviceInfo;
+use boom.graphics.physical.DeviceType;
 use boom.graphics.physical.device_type_from;
 use boom.graphics.physical.override_from;
 use boom.graphics.physical.pick_device;
@@ -48,6 +59,7 @@ use glfw;
 use gc: glfw.c;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
+use std.allocator.page;
 use std.process.env;
 use std.types.bool.bool;
 use std.types.bool.false;
@@ -68,7 +80,8 @@ val API_VERSION_1_1: u32 = 0x00401000;
 val API_VERSION_1_2: u32 = 0x00402000;
 val API_VERSION_1_3: u32 = 0x00403000;
 
-# The portability extensions, and the instance flag that opts into the first.
+# The portability enumeration extension, and the instance flag that opts into
+# it. The device-level portability subset is boom.graphics.extension's.
 #
 # Defined here because mach-vk emits a curated set of extension names rather
 # than every one the registry lists, and neither of these is among them. Spelled
@@ -76,7 +89,6 @@ val API_VERSION_1_3: u32 = 0x00403000;
 # the VK_ prefix the generator drops.
 val INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: u32 = 0x00000001;
 val KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME:    *u8 = "VK_KHR_portability_enumeration";
-val KHR_PORTABILITY_SUBSET_EXTENSION_NAME:         *u8 = "VK_KHR_portability_subset";
 
 # The version the instance requests.
 #
@@ -109,6 +121,10 @@ fun requested_api_version() u32 {
 # api_version:     The version the device is used at: the lower of the
 #                  instance's and the device's, since a core entry point or
 #                  feature needs both.
+# extensions:      The optional extensions the device was created with: those
+#                  it offers, less any whose queries its version lacks.
+# memory_heap:     The index of the largest device-local heap, whose budget
+#                  vk_memory_budget reads.
 # device:          The logical device.
 # graphics_queue:  Queue for draw submission.
 # present_queue:   Queue for presentation; may equal graphics_queue.
@@ -123,6 +139,8 @@ pub rec Vk {
     limits:          Limits;
     info:            DeviceInfo;
     api_version:     u32;
+    extensions:      Offered;
+    memory_heap:     u32;
     device:          vk.Device;
     graphics_queue:  vk.Queue;
     present_queue:   vk.Queue;
@@ -412,7 +430,8 @@ fun pick_physical(v: *Vk, require: *Requirements) err[Error] {
         families[i] = find_families(v, devices[i]);
         versions[i] = v.api_version;
         if (props[i].apiVersion < versions[i]) { versions[i] = props[i].apiVersion; }
-        reported[i] = report(devices[i], versions[i], families[i].timestamp_bits);
+        reported[i] = report(devices[i], versions[i], families[i].timestamp_bits,
+            device_type_from(props[i].deviceType));
         var c: Candidate;
         c.name                  = ?props[i].deviceName[0];
         c.device_type           = device_type_from(props[i].deviceType);
@@ -444,10 +463,65 @@ fun pick_physical(v: *Vk, require: *Requirements) err[Error] {
     v.api_version = versions[k];
     v.limits      = limits_from(?props[k].limits, ?more);
     v.info        = describe(devices[k], ?props[k], versions[k]);
+    v.memory_heap = more.local_heap.index;
+
+    val offered: res[Offered, Error] = offered_on(devices[k]);
+    if (sel offered.err) { ret err[Error].err{offered.err}; }
+    v.extensions = offered.ok;
+    # the budget is read through vkGetPhysicalDeviceMemoryProperties2, core in 1.1
+    if (v.api_version < API_VERSION_1_1) { v.extensions.memory_budget = false; }
     # a picked device is capable, so both are set
     if (sel f.graphics.some) { v.graphics_family = f.graphics.some; }
     if (sel f.present.some)  { v.present_family = f.present.some; }
     ret err[Error].ok{};
+}
+
+# The optional extensions a device offers.
+#
+# The list is as long as the driver makes it, past two hundred on a desktop
+# GPU, so it is read into an allocation sized by the count rather than a fixed
+# array that could drop the one asked about. A list that grew between the two
+# calls reads as incomplete, and what fit is all a device is judged by.
+fun offered_on(d: vk.PhysicalDevice) res[Offered, Error] {
+    var count:   u32 = 0;
+    val counted: i32 = vk.vkEnumerateDeviceExtensionProperties(d, nil, ?count, nil);
+    if (!enumerated(counted)) {
+        ret res[Offered, Error].err{vk_failed(VkCall.enumerate_device_extensions{}, counted)};
+    }
+    if (count == 0) { ret res[Offered, Error].ok{offered_none()}; }
+
+    var a:    allo.Allocator;
+    val made: err[allo.Error] = page.make(?a);
+    if (sel made.err) { ret res[Offered, Error].err{Error.alloc{made.err}}; }
+    val got: res[*vk.ExtensionProperties, allo.Error] = allo.allocate[vk.ExtensionProperties](?a, count::usize);
+    if (sel got.err) { ret res[Offered, Error].err{Error.alloc{got.err}}; }
+
+    var n:      u32     = count;
+    val listed: i32     = vk.vkEnumerateDeviceExtensionProperties(d, nil, ?n, got.ok);
+    var o:      Offered = offered_none();
+    if (enumerated(listed)) { o = offered_from(got.ok, n::usize); }
+    allo.deallocate[vk.ExtensionProperties](?a, got.ok, count::usize);
+    if (!enumerated(listed)) {
+        ret res[Offered, Error].err{vk_failed(VkCall.enumerate_device_extensions{}, listed)};
+    }
+    ret res[Offered, Error].ok{o};
+}
+
+# The budget and usage of the largest device-local heap, read now.
+#
+# None when the device was not created with VK_EXT_memory_budget, because it
+# does not offer it or is used below 1.1, and then nothing knows the budget: the
+# heap's size is all there is, and a share of it is the app's guess to make.
+pub fun vk_memory_budget(v: *Vk) opt[MemoryBudget] {
+    if (v == nil || !v.ready || !v.extensions.memory_budget) { ret opt[MemoryBudget].none{}; }
+    var b: MemoryBudgetProperties;
+    b.sType = STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    b.pNext = nil;
+    var p2: vk.PhysicalDeviceMemoryProperties2;
+    p2.sType = vk.STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    p2.pNext = (?b)::ptr;
+    vk.vkGetPhysicalDeviceMemoryProperties2(v.physical, ?p2);
+    ret opt[MemoryBudget].some{budget_from(?b, v.memory_heap)};
 }
 
 # an environment variable read into buf, and its full length: zero when it is
@@ -490,13 +564,18 @@ fun describe(d: vk.PhysicalDevice, props: *vk.PhysicalDeviceProperties, version:
 # What a device reports beyond its core limits, read through the 1.1 queries
 # where the version it would be used at has them.
 #
+# Its device-local heap comes from the 1.0 memory properties, so every device
+# reports one.
+#
 # maxMemoryAllocationSize is maintenance3's, core in 1.1. bufferDeviceAddress is
 # only asked for at 1.2, where it is core: boom enables it as a 1.2 feature, not
 # through VK_KHR_buffer_device_address, so a 1.1 device offering only the
 # extension reports none.
-fun report(d: vk.PhysicalDevice, version: u32, timestamp_bits: u32) Reported {
+fun report(d: vk.PhysicalDevice, version: u32, timestamp_bits: u32, t: DeviceType) Reported {
+    var mem: vk.PhysicalDeviceMemoryProperties;
+    vk.vkGetPhysicalDeviceMemoryProperties(d, ?mem);
     var more: Reported = Reported{timestamp_bits: timestamp_bits, max_memory_allocation_size: 0,
-        buffer_device_address: false};
+        local_heap: local_heap_from(?mem, t), buffer_device_address: false};
     if (version < API_VERSION_1_1) { ret more; }
 
     var m3: vk.PhysicalDeviceMaintenance3Properties;
@@ -605,34 +684,33 @@ fun create_device(v: *Vk) err[Error] {
 
     # The device extension list, fixed for the same reason the instance's is.
     # Every entry is decided here rather than reported by anything, so the bound
-    # is not a guess: swapchain always, portability_subset on macOS, and eight
-    # so that the next one to be needed is a line rather than a resize. What
-    # does not go here is an extension boom could do without, for the reason the
+    # is not a guess: swapchain always, then each optional extension in
+    # boom.graphics.extension that the device offers, and eight so that the
+    # next one to be needed is a line rather than a resize. What does not go
+    # here is one boom asks for regardless of the device, for the reason the
     # features paragraph below gives about optional things.
     var enabled:       [8]*u8;
     var enabled_count: u32 = 0;
     enabled[enabled_count] = vk.KHR_SWAPCHAIN_EXTENSION_NAME;
     enabled_count          = enabled_count + 1;
 
-    $if ($mach.build.os == $mach.os.darwin) {
-        # PORTABILITY_SUBSET IS NOT OPTIONAL WHERE IT IS OFFERED. A device
-        # advertising it is saying it does not implement all of Vulkan, and the
-        # spec requires an application creating that device to enable it, since
-        # it is the only way to ask which parts are missing. A device created
-        # without it is invalid usage and vkCreateDevice may refuse outright.
-        # MoltenVK advertises it on everything it exposes, so on macOS it is
-        # never the optional case.
-        #
-        # GATING ON THE OS IS NOT THE PREDICATE THE SPEC NAMES, and that is a
-        # known edge rather than an oversight. The rule is about what the device
-        # advertises, not what the host runs, so a macOS box driving lavapipe or
-        # SwiftShader is handed an extension its device never offered and gets a
-        # bare "vkCreateDevice failed" with nothing to point at. boom does not
-        # enumerate device extensions anywhere yet, and adding that machinery
-        # for one call site would be the wrong order to build it in. When there
-        # is a second caller this becomes a query against
-        # vkEnumerateDeviceExtensionProperties and the $if goes away.
+    # PORTABILITY_SUBSET IS NOT OPTIONAL WHERE IT IS OFFERED. A device
+    # advertising it is saying it does not implement all of Vulkan, and the spec
+    # requires an application creating that device to enable it, since it is
+    # the only way to ask which parts are missing. A device created without it
+    # is invalid usage and vkCreateDevice may refuse outright. MoltenVK
+    # advertises it on everything it exposes. It is asked of the device rather
+    # than assumed from the host, so a macOS box driving lavapipe is not handed
+    # an extension its device never offered.
+    if (v.extensions.portability_subset) {
         enabled[enabled_count] = KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+        enabled_count          = enabled_count + 1;
+    }
+
+    # the memory budget, for renderer_memory_budget. Without it the budget is
+    # reported unknown rather than guessed.
+    if (v.extensions.memory_budget) {
+        enabled[enabled_count] = EXT_MEMORY_BUDGET_EXTENSION_NAME;
         enabled_count          = enabled_count + 1;
     }
 
