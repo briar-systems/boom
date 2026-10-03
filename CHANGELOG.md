@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-10-02
+
+### Added
+- `renderer_device_info(r)` reports the chosen device (#305): its name, type (`discrete`, `integrated`, `virtual`, `cpu`, `other`), vendor and device ids, API and driver versions, and on Vulkan 1.2 the driver's id, name and info. An app can tell when it runs on a software device.
+- `BOOM_DEVICE` picks a device by index (as `vulkaninfo` numbers them) or by part of its name. A value that names no capable device stops `renderer_init` with `DeviceError.no_device_match` or `device_incapable`.
+
+### Fixed
+- Device selection prefers a real GPU (#305). It took the first device that could draw and present, so a software driver such as Mesa's lavapipe could be chosen over a GPU. Devices are now ranked discrete, integrated, virtual, other, then cpu, with buffer device address support and API version breaking ties within a type. Mesa's device-select layer order is honoured when `MESA_VK_DEVICE_SELECT` or `DRI_PRIME` is set.
+
 ## [0.46.0] - 2026-10-02
 
 ### Added
