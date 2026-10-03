@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-10-02
+
+### Added
+- Required device features (#307). `renderer_init_requiring(r, window, present, require)` takes a `Requirements` record (from `requirements_none()`): a minimum API version, buffer device addresses and timestamps. Requirements filter devices before ranking. If no device that can render meets them, or `BOOM_DEVICE` names one that doesn't, init fails with `DeviceError.unmet` naming the missing requirement. Existing init calls require nothing and are unchanged.
+
 ## [0.47.0] - 2026-10-02
 
 ### Added
