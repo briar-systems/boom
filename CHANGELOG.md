@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-10-02
+
+### Added
+- `Limits` reports `device_local_heap_size`, the largest device-local heap, and `unified_memory`, true when device memory is system RAM (integrated and CPU devices, or every heap device-local) (#313). An app can size its memory use from what the device has, since `max_memory_allocation_size` can be UINT64_MAX.
+- `renderer_memory_budget(r)` returns that heap's budget and usage through VK_EXT_memory_budget, enabled where a device offers it, and none where it does not (#313).
+
+### Changed
+- Built on blit 0.13.0, whose overlays, tooltips and toasts pad each side separately. `overlay.Chrome.pad` is now `theme.Edges`.
+- `VK_KHR_portability_subset` is enabled when the device offers it, as the Vulkan spec requires, rather than on every macOS build (#313).
+
 ## [0.48.0] - 2026-10-02
 
 ### Added
