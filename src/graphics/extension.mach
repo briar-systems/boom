@@ -1,0 +1,77 @@
+# The optional device extensions boom enables where a device offers them.
+#
+# A device is asked what it offers once, when it is picked, and each extension
+# here is enabled exactly when it is. Adding one is a name, a field in Offered
+# and a line in offered_from, then its enabling in create_device.
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str_equals;
+use vk;
+
+# Spelled as mach-vk spells KHR_SWAPCHAIN_EXTENSION_NAME, and defined here
+# because mach-vk emits a curated set of extension names without these.
+pub val KHR_PORTABILITY_SUBSET_EXTENSION_NAME: *u8 = "VK_KHR_portability_subset";
+pub val EXT_MEMORY_BUDGET_EXTENSION_NAME:      *u8 = "VK_EXT_memory_budget";
+
+# the optional extensions a device offers
+# ---
+# portability_subset: VK_KHR_portability_subset. A device offering it does not
+#                     implement all of Vulkan, MoltenVK on every device it
+#                     exposes, and must be created with it enabled.
+# memory_budget:      VK_EXT_memory_budget, which reports how much of each heap
+#                     this process may use now
+pub rec Offered {
+    portability_subset: bool;
+    memory_budget:      bool;
+}
+
+# a device that offers none of them
+pub fun offered_none() Offered {
+    ret Offered{portability_subset: false, memory_budget: false};
+}
+
+# which of the optional extensions a device's extension list holds
+pub fun offered_from(exts: *vk.ExtensionProperties, n: usize) Offered {
+    var o: Offered = offered_none();
+    var i: usize   = 0;
+    for (i < n) {
+        val name: *u8 = ?exts[i].extensionName[0];
+        if (str_equals(name, KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) { o.portability_subset = true; }
+        if (str_equals(name, EXT_MEMORY_BUDGET_EXTENSION_NAME))      { o.memory_budget = true; }
+        i = i + 1;
+    }
+    ret o;
+}
+
+# an extension list entry naming the given extension
+fun ext(name: *u8) vk.ExtensionProperties {
+    var e: vk.ExtensionProperties;
+    var i: usize = 0;
+    for (name[i] != 0) {
+        e.extensionName[i] = name[i];
+        i                  = i + 1;
+    }
+    e.extensionName[i] = 0;
+    e.specVersion      = 1;
+    ret e;
+}
+
+test offered_from__finds_each_extension {
+    var exts: [4]vk.ExtensionProperties;
+    exts[0] = ext("VK_KHR_swapchain");
+    exts[1] = ext("VK_EXT_memory_budget");
+    exts[2] = ext("VK_EXT_memory_budget_extended");
+    exts[3] = ext("VK_KHR_portability_subset");
+    val all: Offered = offered_from(?exts[0], 4);
+    if (!all.memory_budget || !all.portability_subset) { ret 1; }
+    # a name that only begins with one is not it
+    exts[1] = ext("VK_KHR_maintenance1");
+    val longer: Offered = offered_from(?exts[0], 3);
+    if (longer.memory_budget || longer.portability_subset) { ret 2; }
+    val empty: Offered = offered_from(?exts[0], 0);
+    if (empty.memory_budget || empty.portability_subset) { ret 3; }
+    ret 0;
+}

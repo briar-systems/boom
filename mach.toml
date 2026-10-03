@@ -1,6 +1,6 @@
 [project]
 id = "boom"
-version = "0.48.0"
+version = "0.49.0"
 mach = "^6.10.1"
 src = "src"
 out = "out/{target.name}/{profile.name}"
@@ -143,4 +143,4 @@ version = "^0.5"
 
 [dep.blit]
 git = "https://github.com/briar-systems/blit"
-version = "^0.12"
+version = "^0.13.0"

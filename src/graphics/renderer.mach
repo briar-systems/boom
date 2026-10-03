@@ -158,6 +158,7 @@ use boom.graphics.material.TextureFilter;
 use boom.graphics.material.material_add_texture;
 use boom.graphics.material.material_add_texture_filtered;
 use boom.graphics.material.material_texture;
+use boom.graphics.memory.MemoryBudget;
 use boom.graphics.mesh.Mesh;
 use boom.graphics.mesh.mesh_bounds_of;
 use boom.graphics.mesh.mesh_delete;
@@ -256,6 +257,7 @@ use boom.graphics.vk.Vk;
 use boom.graphics.vk.format_is_srgb;
 use boom.graphics.vk.vk_dnit;
 use boom.graphics.vk.vk_init;
+use boom.graphics.vk.vk_memory_budget;
 use boom.graphics.vk.vk_wait_idle;
 use boom.math.aabb.Aabb;
 use boom.math.aabb.aabb_empty;
@@ -627,14 +629,31 @@ pub fun renderer_device(r: *Renderer) *Device {
 # What a game sizes compute work by: maxStorageBufferRange bounds one storage
 # buffer, the work group counts bound one dispatch, and max_dispatch_bindings
 # and max_draw_bindings are how many buffers one dispatch or one storage draw
-# binds, max_memory_allocation_size bounds one buffer of any kind, and
-# buffer_device_address says whether a stage can reach buffers by address.
+# binds, max_memory_allocation_size bounds one buffer of any kind,
+# device_local_heap_size and unified_memory say how much device memory a pool
+# can draw on and whether the host shares it, and buffer_device_address says
+# whether a stage can reach buffers by address.
 # Zeroed until renderer_init succeeds.
 # ---
 # r:   the renderer
 # ret: the limits, by value
 pub fun renderer_limits(r: *Renderer) Limits {
     ret r.vk.limits;
+}
+
+# the budget and usage of the device-local heap renderer_limits sizes, read now
+#
+# What a pool sized from device_local_heap_size should also respect: the budget
+# counts what other processes hold in the heap, so it moves as they allocate.
+# Known only where the device offers VK_EXT_memory_budget and is used at 1.1 or
+# later, and none otherwise, since nothing else reports it and the heap's size
+# is no stand-in. None until renderer_init succeeds.
+# ---
+# r:   the renderer
+# ret: the heap's budget and this process's usage in bytes, or none when the
+#      device cannot say
+pub fun renderer_memory_budget(r: *Renderer) opt[MemoryBudget] {
+    ret vk_memory_budget(?r.vk);
 }
 
 # the physical device the renderer runs on, as it described itself when picked

@@ -259,6 +259,10 @@ fwd boom.graphics.renderer.renderer_device;
 # The device's own limits, for sizing compute work. See boom.graphics.limits.
 fwd boom.graphics.limits.Limits;
 fwd boom.graphics.renderer.renderer_limits;
+# How much of the device-local heap Limits reports this process may use now,
+# where the device can say. See boom.graphics.memory.
+fwd boom.graphics.memory.MemoryBudget;
+fwd boom.graphics.renderer.renderer_memory_budget;
 # The device the renderer runs on, and whether it is a software one. See
 # boom.graphics.physical.
 fwd boom.graphics.physical.DeviceInfo;

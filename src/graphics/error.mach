@@ -67,6 +67,7 @@ pub tag VkCall: u8 {
     create_graphics_pipelines;
     create_compute_pipelines;
     create_query_pool;
+    enumerate_device_extensions;
 }
 
 # a Vulkan call that returned a failing VkResult
@@ -403,6 +404,7 @@ fun vk_call_message(call: VkCall) str {
     if (sel call.create_pipeline_layout)       { ret "vkCreatePipelineLayout failed"; }
     if (sel call.create_compute_pipelines)     { ret "vkCreateComputePipelines failed"; }
     if (sel call.create_query_pool)            { ret "vkCreateQueryPool failed"; }
+    if (sel call.enumerate_device_extensions)  { ret "vkEnumerateDeviceExtensionProperties failed"; }
     ret "vkCreateGraphicsPipelines failed";
 }
 

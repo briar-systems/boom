@@ -1,0 +1,160 @@
+# The device memory an app sizes its own pools by.
+#
+# Limits' max_memory_allocation_size bounds one allocation and nothing more:
+# NVIDIA reports it as UINT64_MAX. What bounds a pool is the heap it is carved
+# from, so a device reports its largest device-local heap, whether that heap is
+# the host's own RAM, and, where VK_EXT_memory_budget is offered, how much of
+# it this process may use now.
+#
+# The heap is read once when the device is picked, from the memory properties
+# boom already allocates against. The budget changes as other processes
+# allocate, so it is read each time it is asked for.
+
+use boom.graphics.physical.DeviceType;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use vk;
+
+# VkPhysicalDeviceMemoryBudgetPropertiesEXT and its structure type, defined here
+# because mach-vk emits a curated set of extensions and VK_EXT_memory_budget is
+# not among them.
+pub val STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: i32 = 1000237000;
+
+pub rec MemoryBudgetProperties {
+    sType:      i32;
+    pNext:      ptr;
+    heapBudget: [16]u64;
+    heapUsage:  [16]u64;
+}
+
+# the device-local heap a device's pools come from
+# ---
+# index:   the heap's index in the device's memory properties
+# size:    the heap's size in bytes, zero when no heap is device-local
+# unified: whether device-local memory is the host's RAM: an integrated GPU, a
+#          software device on the CPU, or a device whose every heap is
+#          device-local, which is how a unified memory architecture reports
+#          the one memory both share
+pub rec LocalHeap {
+    index:   u32;
+    size:    u64;
+    unified: bool;
+}
+
+# a device-local heap's budget, as VK_EXT_memory_budget reports it
+# ---
+# budget: bytes this process may hold in the heap before an allocation is
+#         likely to fail or to slow the device, which counts what it already
+#         holds and what other processes use
+# usage:  bytes this process holds in the heap now
+pub rec MemoryBudget {
+    budget: u64;
+    usage:  u64;
+}
+
+# the largest device-local heap among a device's memory properties
+pub fun local_heap_from(props: *vk.PhysicalDeviceMemoryProperties, t: DeviceType) LocalHeap {
+    var h:    LocalHeap = LocalHeap{index: 0, size: 0, unified: false};
+    var host: bool      = false;
+    var n:    u32       = props.memoryHeapCount;
+    if (n > vk.MAX_MEMORY_HEAPS) { n = vk.MAX_MEMORY_HEAPS; }
+    var i: u32 = 0;
+    for (i < n) {
+        val heap: vk.MemoryHeap = props.memoryHeaps[i];
+        if ((heap.flags & vk.MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) {
+            host = true;
+        }
+        or (heap.size > h.size) {
+            h.index = i;
+            h.size  = heap.size;
+        }
+        i = i + 1;
+    }
+    # an AMD APU shows a small device-local carve-out beside a host heap, so
+    # the type says it shares the host's RAM where the heaps alone do not
+    h.unified = sel t.integrated || sel t.cpu || (h.size != 0 && !host);
+    ret h;
+}
+
+# the budget VK_EXT_memory_budget reports for one heap
+pub fun budget_from(props: *MemoryBudgetProperties, heap: u32) MemoryBudget {
+    ret MemoryBudget{budget: props.heapBudget[heap], usage: props.heapUsage[heap]};
+}
+
+# memory properties holding the given heaps, flags and sizes in pairs
+fun heaps(sizes: *u64, flags: *u32, n: u32) vk.PhysicalDeviceMemoryProperties {
+    var props: vk.PhysicalDeviceMemoryProperties;
+    props.memoryTypeCount = 0;
+    props.memoryHeapCount = n;
+    var i: u32 = 0;
+    for (i < n) {
+        props.memoryHeaps[i].size  = sizes[i];
+        props.memoryHeaps[i].flags = flags[i];
+        i                          = i + 1;
+    }
+    ret props;
+}
+
+test local_heap_from__discrete_reports_its_largest_vram_heap {
+    # an NVIDIA card with resizable BAR off: VRAM, the host heap, and the
+    # 256 MiB window the host maps, which is device-local too
+    var sizes: [3]u64                            = [3]u64{8589934592, 16777216000, 268435456};
+    var flags: [3]u32                            = [3]u32{vk.MEMORY_HEAP_DEVICE_LOCAL_BIT, 0, vk.MEMORY_HEAP_DEVICE_LOCAL_BIT};
+    var props: vk.PhysicalDeviceMemoryProperties = heaps(?sizes[0], ?flags[0], 3);
+    val h:     LocalHeap                         = local_heap_from(?props, DeviceType.discrete{});
+    if (h.index != 0 || h.size != 8589934592) { ret 1; }
+    if (h.unified)                            { ret 2; }
+    # the largest device-local heap wins wherever it is listed
+    sizes[0] = 134217728;
+    props    = heaps(?sizes[0], ?flags[0], 3);
+    val later: LocalHeap = local_heap_from(?props, DeviceType.discrete{});
+    if (later.index != 2 || later.size != 268435456) { ret 3; }
+    ret 0;
+}
+
+test local_heap_from__shared_memory_is_unified {
+    # lavapipe: one heap, the host's RAM, on a CPU device
+    var one:   [1]u64                            = [1]u64{33554432000};
+    var local: [1]u32                            = [1]u32{vk.MEMORY_HEAP_DEVICE_LOCAL_BIT};
+    var props: vk.PhysicalDeviceMemoryProperties = heaps(?one[0], ?local[0], 1);
+    val cpu:   LocalHeap                         = local_heap_from(?props, DeviceType.cpu{});
+    if (cpu.index != 0 || cpu.size != 33554432000 || !cpu.unified) { ret 1; }
+    # a Raspberry Pi 5 on v3dv, or Apple silicon through MoltenVK: one shared
+    # heap on an integrated GPU
+    val pi: LocalHeap = local_heap_from(?props, DeviceType.integrated{});
+    if (pi.size != 33554432000 || !pi.unified) { ret 2; }
+    # the same single device-local heap on a device calling itself something
+    # else is still one memory both share
+    val other: LocalHeap = local_heap_from(?props, DeviceType.other{});
+    if (!other.unified) { ret 3; }
+    # an AMD APU: a small carve-out beside the host heap, shared all the same
+    var sizes: [2]u64 = [2]u64{536870912, 16777216000};
+    var flags: [2]u32 = [2]u32{vk.MEMORY_HEAP_DEVICE_LOCAL_BIT, 0};
+    props = heaps(?sizes[0], ?flags[0], 2);
+    val apu: LocalHeap = local_heap_from(?props, DeviceType.integrated{});
+    if (apu.index != 0 || apu.size != 536870912 || !apu.unified) { ret 4; }
+    ret 0;
+}
+
+test local_heap_from__no_device_local_heap {
+    var sizes: [1]u64                            = [1]u64{16777216000};
+    var flags: [1]u32                            = [1]u32{0};
+    var props: vk.PhysicalDeviceMemoryProperties = heaps(?sizes[0], ?flags[0], 1);
+    val h:     LocalHeap                         = local_heap_from(?props, DeviceType.discrete{});
+    if (h.size != 0 || h.unified) { ret 1; }
+    ret 0;
+}
+
+test budget_from__reads_one_heap {
+    var props: MemoryBudgetProperties;
+    props.heapBudget[0] = 7516192768;
+    props.heapUsage[0]  = 402653184;
+    props.heapBudget[1] = 12884901888;
+    props.heapUsage[1]  = 0;
+    val b: MemoryBudget = budget_from(?props, 0);
+    if (b.budget != 7516192768 || b.usage != 402653184) { ret 1; }
+    val host: MemoryBudget = budget_from(?props, 1);
+    if (host.budget != 12884901888 || host.usage != 0) { ret 2; }
+    ret 0;
+}
