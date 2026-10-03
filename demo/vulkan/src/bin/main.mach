@@ -634,6 +634,20 @@ fun main(argc: i64, argv: **u8) i64 {
     if (fail("renderer_init", gfx.renderer_init(?r, ?w))) { ret 1; }
     p.println("ok   renderer: instance, surface, device, swapchain, frame loop, descriptors");
 
+    # which device the ranking or BOOM_DEVICE chose, and whether it is a
+    # software one, which runs everything here but far slower
+    var info: gfx.DeviceInfo = gfx.renderer_device_info(?r);
+    if (info.name[0] == 0) {
+        p.println("FAIL renderer_device_info: the device has no name");
+        ret 1;
+    }
+    p.printlnf("ok   device: {} ({}, vendor {:x}, device {:x}, driver {} {})", ?info.name[0],
+        gfx.device_type_name(info.device_type), info.vendor_id, info.device_id, ?info.driver_name[0],
+        ?info.driver_info[0]);
+    if (sel info.device_type.cpu) {
+        p.println("NOTE the device is a software implementation on the CPU");
+    }
+
     # Not a failure: a surface offering no sRGB format still renders, just
     # darker than authored. Saying so keeps it from being diagnosed as a
     # shader or a texture problem.
