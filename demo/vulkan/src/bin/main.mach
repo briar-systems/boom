@@ -648,6 +648,30 @@ fun main(argc: i64, argv: **u8) i64 {
         p.println("NOTE the device is a software implementation on the CPU");
     }
 
+    # the memory an app sizes its pools by: every device has a device-local
+    # heap, and a budget where the device offers VK_EXT_memory_budget
+    val lim: gfx.Limits = gfx.renderer_limits(?r);
+    if (lim.device_local_heap_size == 0) {
+        p.println("FAIL renderer_limits: no device-local heap");
+        ret 1;
+    }
+    var shared: str = "its own";
+    if (lim.unified_memory) { shared = "the host's RAM"; }
+    p.printlnf("ok   memory: device-local heap {} bytes, {}, one allocation at most {} bytes",
+        lim.device_local_heap_size, shared, lim.max_memory_allocation_size);
+    val budget: opt[gfx.MemoryBudget] = gfx.renderer_memory_budget(?r);
+    if (sel budget.some) {
+        if (budget.some.budget == 0 || budget.some.budget > lim.device_local_heap_size) {
+            p.printlnf("FAIL renderer_memory_budget: budget {} of a {} byte heap", budget.some.budget,
+                lim.device_local_heap_size);
+            ret 1;
+        }
+        p.printlnf("ok   budget: {} bytes, {} in use", budget.some.budget, budget.some.usage);
+    }
+    or {
+        p.println("ok   budget: unknown, the device does not offer VK_EXT_memory_budget");
+    }
+
     # Not a failure: a surface offering no sRGB format still renders, just
     # darker than authored. Saying so keeps it from being diagnosed as a
     # shader or a texture problem.
