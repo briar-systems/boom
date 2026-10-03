@@ -15,6 +15,8 @@ use boom.graphics.error.content.texture_error_message;
 use boom.graphics.error.mesh.mesh_error_message;
 use boom.graphics.error.mesh.model_error_message;
 use boom.graphics.live.Live;
+use boom.graphics.require.Requirement;
+use boom.graphics.require.requirement_message;
 use boom.vfs;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
@@ -105,6 +107,9 @@ pub tag LoaderError: u8 {
 # no_device_match:        BOOM_DEVICE names no device, by index or by name
 # device_incapable:       BOOM_DEVICE names the device at this index, which
 #                         cannot both render and present to the surface
+# unmet:                  the app requires this of its device, and no device
+#                         that can render and present offers it; with
+#                         BOOM_DEVICE set, the device it names does not
 pub tag DeviceError: u8 {
     no_instance_extensions;
     instance_extensions: u32;
@@ -117,6 +122,7 @@ pub tag DeviceError: u8 {
     minimized;
     no_device_match;
     device_incapable: u32;
+    unmet:            Requirement;
 }
 
 # the object an operation needs, which was never brought up
@@ -419,6 +425,7 @@ fun device_message(e: DeviceError) str {
     if (sel e.no_present_mode)        { ret "surface reported no present modes"; }
     if (sel e.no_device_match)        { ret "BOOM_DEVICE names no Vulkan device"; }
     if (sel e.device_incapable)       { ret "the device BOOM_DEVICE names cannot both render and present to this surface"; }
+    if (sel e.unmet)                  { ret requirement_message(e.unmet); }
     ret "surface extent is zero; window is minimized";
 }
 

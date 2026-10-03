@@ -244,6 +244,12 @@ fwd boom.graphics.sprite.rect_overlaps;
 fwd boom.graphics.renderer.Renderer;
 fwd boom.graphics.renderer.renderer_init;
 fwd boom.graphics.renderer.renderer_init_with_present;
+# What an app requires of its device, a filter on selection. See
+# boom.graphics.require.
+fwd boom.graphics.require.Requirements;
+fwd boom.graphics.require.Requirement;
+fwd boom.graphics.require.requirements_none;
+fwd boom.graphics.renderer.renderer_init_requiring;
 fwd boom.graphics.renderer.renderer_resize;
 fwd boom.graphics.renderer.renderer_begin_frame;
 fwd boom.graphics.renderer.renderer_end_frame;

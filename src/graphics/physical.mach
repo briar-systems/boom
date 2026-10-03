@@ -6,8 +6,11 @@
 #
 # THE CAPABILITY CHECKS ARE A FILTER, NOT A RANK. A device that cannot draw with
 # compute on one queue family, or cannot present to the surface, is never
-# chosen, whatever its type and whatever an override says. Among the devices
-# that can, the type decides: discrete, integrated, virtual, other, then cpu.
+# chosen, whatever its type and whatever an override says. Neither is one
+# lacking something the app requires (boom.graphics.require): when every device
+# that can draw lacks something, selection fails naming what the one the
+# ranking would have taken was missing. Among the devices that pass both, the
+# type decides: discrete, integrated, virtual, other, then cpu.
 # A software device (Mesa's lavapipe, SwiftShader) is the worst choice there is
 # for a game and is taken only when nothing else can draw, so a known cpu
 # device ranks below one whose type says nothing.
@@ -19,20 +22,25 @@
 # whose driver stops at 1.1, which is the failure this ranking exists to stop.
 # So within one type a device offering bufferDeviceAddress is preferred, then
 # the higher API version it is used at, then enumeration order. A feature a game
-# cannot run without belongs in the capability filter, never in this order.
+# cannot run without is a requirement it passes, never a place in this order.
 #
-# An override wins over the ranking but not over the filter. BOOM_DEVICE names a
+# An override wins over the ranking but not over the filters. BOOM_DEVICE names a
 # device by its index in enumeration order (as vulkaninfo numbers GPU0, GPU1)
 # or by a case-insensitive part of its name. Without it, a choice made through
 # Mesa's device-select layer (MESA_VK_DEVICE_SELECT or DRI_PRIME), which puts
 # its pick first in the enumeration, is honoured by taking the enumeration as
-# ordered. A BOOM_DEVICE naming nothing, or a device that cannot draw and
-# present, is refused rather than quietly replaced by the ranking's pick.
+# ordered. A BOOM_DEVICE naming nothing, a device that cannot draw and
+# present, or one lacking a requirement, is refused rather than quietly
+# replaced by the ranking's pick.
 
 use boom.graphics.error.DeviceError;
+use boom.graphics.require.Requirement;
+use boom.graphics.require.Requirements;
+use boom.graphics.require.requirements_none;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
+use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
@@ -116,12 +124,25 @@ pub rec DeviceInfo {
 #                        surface
 # api_version:           the version it would be used at
 # buffer_device_address: whether it offers bufferDeviceAddress
+# timestamp_valid_bits:  the timestampValidBits of the queue family boom would
+#                        record frames on, zero when it writes none
 pub rec Candidate {
     name:                  str;
     device_type:           DeviceType;
     capable:               bool;
     api_version:           u32;
     buffer_device_address: bool;
+    timestamp_valid_bits:  u32;
+}
+
+# the first requirement a device does not meet, in Requirements' field order
+pub fun unmet(req: *Requirements, c: *Candidate) opt[Requirement] {
+    if (c.api_version < req.api_version) { ret opt[Requirement].some{Requirement.api_version{}}; }
+    if (req.buffer_device_address && !c.buffer_device_address) {
+        ret opt[Requirement].some{Requirement.buffer_device_address{}};
+    }
+    if (req.timestamps && c.timestamp_valid_bits == 0) { ret opt[Requirement].some{Requirement.timestamps{}}; }
+    ret opt[Requirement].none{};
 }
 
 # what the environment asks of selection
@@ -168,43 +189,58 @@ pub fun override_from(boom_device: str, mesa_select: bool) Override {
 # c:   the candidates, in enumeration order
 # n:   how many there are
 # o:   the override, if any
+# req: what the app requires of the device
 # ret: the chosen candidate's index; no_capable_device when none can draw and
-#      present, no_device_match when BOOM_DEVICE names none of them, or
-#      device_incapable when it names one that cannot draw and present
-pub fun pick_device(c: *Candidate, n: usize, o: Override) res[usize, DeviceError] {
+#      present, unmet naming what the best of those lacks when none of them
+#      meets req, no_device_match when BOOM_DEVICE names none of them,
+#      device_incapable when it names one that cannot draw and present, or
+#      unmet when it names one lacking a requirement
+pub fun pick_device(c: *Candidate, n: usize, o: Override, req: *Requirements) res[usize, DeviceError] {
     if (sel o.index) {
         if (o.index::usize >= n) { ret res[usize, DeviceError].err{DeviceError.no_device_match{}}; }
-        ret named(c, o.index::usize);
+        ret named(c, o.index::usize, req);
     }
     if (sel o.name) {
         var i: usize = 0;
         for (i < n) {
-            if (contains_folded(c[i].name, o.name)) { ret named(c, i); }
+            if (contains_folded(c[i].name, o.name)) { ret named(c, i, req); }
             i = i + 1;
         }
         ret res[usize, DeviceError].err{DeviceError.no_device_match{}};
     }
 
-    var best: usize = n;
-    var i:    usize = 0;
+    # the best device that can draw, and the best that also meets req
+    var capable: usize = n;
+    var best:    usize = n;
+    var i:       usize = 0;
     for (i < n) {
         if (c[i].capable) {
-            if (best == n) {
-                best = i;
-            }
-            or (!(sel o.enumeration) && better(?c[i], ?c[best])) {
-                best = i;
-            }
+            if (outranks(c, i, capable, n, o)) { capable = i; }
+            val missing: opt[Requirement] = unmet(req, ?c[i]);
+            if (sel missing.none && outranks(c, i, best, n, o)) { best = i; }
         }
         i = i + 1;
     }
-    if (best == n) { ret res[usize, DeviceError].err{DeviceError.no_capable_device{}}; }
-    ret res[usize, DeviceError].ok{best};
+    if (best != n)    { ret res[usize, DeviceError].ok{best}; }
+    if (capable == n) { ret res[usize, DeviceError].err{DeviceError.no_capable_device{}}; }
+    # the device the ranking would have taken is the one an app reports on
+    ret named(c, capable, req);
 }
 
-# a device an override named, refused when it cannot draw and present
-fun named(c: *Candidate, i: usize) res[usize, DeviceError] {
+# whether candidate i displaces the best so far, n when there is none yet. the
+# device-select layer's order is taken as it stands, so the first one holds
+fun outranks(c: *Candidate, i: usize, so_far: usize, n: usize, o: Override) bool {
+    if (so_far == n)       { ret true; }
+    if (sel o.enumeration) { ret false; }
+    ret better(?c[i], ?c[so_far]);
+}
+
+# a device an override named, refused when it cannot draw and present or
+# lacks a requirement
+fun named(c: *Candidate, i: usize, req: *Requirements) res[usize, DeviceError] {
     if (!c[i].capable) { ret res[usize, DeviceError].err{DeviceError.device_incapable{i::u32}}; }
+    val missing: opt[Requirement] = unmet(req, ?c[i]);
+    if (sel missing.some) { ret res[usize, DeviceError].err{DeviceError.unmet{missing.some}}; }
     ret res[usize, DeviceError].ok{i};
 }
 
@@ -240,7 +276,7 @@ fun fold(c: u8) u8 {
 
 fun cand(name: str, t: DeviceType, capable: bool, version: u32, bda: bool) Candidate {
     ret Candidate{name: name, device_type: t, capable: capable, api_version: version,
-        buffer_device_address: bda};
+        buffer_device_address: bda, timestamp_valid_bits: 64};
 }
 
 fun picked(r: res[usize, DeviceError]) i64 {
@@ -249,6 +285,7 @@ fun picked(r: res[usize, DeviceError]) i64 {
 }
 
 test pick_device__ranks_by_type {
+    var any: Requirements = requirements_none();
     # lavapipe enumerating first is the case that motivated the ranking
     var c: [5]Candidate;
     c[0] = cand("llvmpipe (LLVM 18.1.8, 256 bits)", DeviceType.cpu{}, true, 0x00403000, true);
@@ -256,59 +293,120 @@ test pick_device__ranks_by_type {
     c[2] = cand("virtio", DeviceType.virtual{}, true, 0x00403000, true);
     c[3] = cand("Intel(R) UHD Graphics", DeviceType.integrated{}, true, 0x00403000, true);
     c[4] = cand("NVIDIA GeForce RTX 2080 SUPER", DeviceType.discrete{}, true, 0x00403000, true);
-    if (picked(pick_device(?c[0], 5, Override.none{})) != 4) { ret 1; }
-    if (picked(pick_device(?c[0], 4, Override.none{})) != 3) { ret 2; }
-    if (picked(pick_device(?c[0], 3, Override.none{})) != 2) { ret 3; }
-    if (picked(pick_device(?c[0], 2, Override.none{})) != 1) { ret 4; }
-    if (picked(pick_device(?c[0], 1, Override.none{})) != 0) { ret 5; }
+    if (picked(pick_device(?c[0], 5, Override.none{}, ?any)) != 4) { ret 1; }
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?any)) != 3) { ret 2; }
+    if (picked(pick_device(?c[0], 3, Override.none{}, ?any)) != 2) { ret 3; }
+    if (picked(pick_device(?c[0], 2, Override.none{}, ?any)) != 1) { ret 4; }
+    if (picked(pick_device(?c[0], 1, Override.none{}, ?any)) != 0) { ret 5; }
     # a device that cannot draw and present is never ranked
     c[4].capable = false;
     c[3].capable = false;
-    if (picked(pick_device(?c[0], 5, Override.none{})) != 2) { ret 6; }
+    if (picked(pick_device(?c[0], 5, Override.none{}, ?any)) != 2) { ret 6; }
     var none: [1]Candidate;
     none[0] = cand("headless", DeviceType.discrete{}, false, 0x00403000, true);
-    val r: res[usize, DeviceError] = pick_device(?none[0], 1, Override.none{});
+    val r: res[usize, DeviceError] = pick_device(?none[0], 1, Override.none{}, ?any);
     if (!(sel r.err && sel r.err.no_capable_device)) { ret 7; }
     ret 0;
 }
 
 test pick_device__features_break_ties_within_a_type {
-    var c: [4]Candidate;
+    var any: Requirements = requirements_none();
+    var c:   [4]Candidate;
     c[0] = cand("lavapipe", DeviceType.cpu{}, true, 0x00403000, true);
     c[1] = cand("old discrete", DeviceType.discrete{}, true, 0x00401000, false);
     c[2] = cand("new discrete", DeviceType.discrete{}, true, 0x00402000, false);
     c[3] = cand("addressing discrete", DeviceType.discrete{}, true, 0x00402000, true);
     # the feature never lifts the cpu device past a discrete one without it
-    if (picked(pick_device(?c[0], 2, Override.none{})) != 1) { ret 1; }
-    if (picked(pick_device(?c[0], 3, Override.none{})) != 2) { ret 2; }
-    if (picked(pick_device(?c[0], 4, Override.none{})) != 3) { ret 3; }
+    if (picked(pick_device(?c[0], 2, Override.none{}, ?any)) != 1) { ret 1; }
+    if (picked(pick_device(?c[0], 3, Override.none{}, ?any)) != 2) { ret 2; }
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?any)) != 3) { ret 3; }
     # an exact tie keeps enumeration order
     c[2] = c[3];
-    if (picked(pick_device(?c[0], 4, Override.none{})) != 2) { ret 4; }
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?any)) != 2) { ret 4; }
     ret 0;
 }
 
 test pick_device__overrides {
-    var c: [3]Candidate;
+    var any: Requirements = requirements_none();
+    var c:   [3]Candidate;
     c[0] = cand("NVIDIA GeForce RTX 2080 SUPER", DeviceType.discrete{}, true, 0x00403000, true);
     c[1] = cand("llvmpipe (LLVM 18.1.8, 256 bits)", DeviceType.cpu{}, true, 0x00403000, true);
     c[2] = cand("AMD Radeon", DeviceType.discrete{}, false, 0x00403000, true);
-    if (picked(pick_device(?c[0], 3, override_from("1", false))) != 1)        { ret 1; }
-    if (picked(pick_device(?c[0], 3, override_from("LLVMpipe", false))) != 1) { ret 2; }
-    if (picked(pick_device(?c[0], 3, override_from("nvidia", true))) != 0)    { ret 3; }
+    if (picked(pick_device(?c[0], 3, override_from("1", false), ?any)) != 1)        { ret 1; }
+    if (picked(pick_device(?c[0], 3, override_from("LLVMpipe", false), ?any)) != 1) { ret 2; }
+    if (picked(pick_device(?c[0], 3, override_from("nvidia", true), ?any)) != 0)    { ret 3; }
     # the device-select layer's order is taken as it stands
     c[0].device_type = DeviceType.cpu{};
     c[1].device_type = DeviceType.discrete{};
-    if (picked(pick_device(?c[0], 3, override_from("", true))) != 0)   { ret 4; }
-    if (picked(pick_device(?c[0], 3, override_from(nil, false))) != 1) { ret 5; }
+    if (picked(pick_device(?c[0], 3, override_from("", true), ?any)) != 0)   { ret 4; }
+    if (picked(pick_device(?c[0], 3, override_from(nil, false), ?any)) != 1) { ret 5; }
     # an override is refused, not replaced, when it names nothing usable
-    val missing: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("intel", false));
+    val missing: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("intel", false), ?any);
     if (!(sel missing.err && sel missing.err.no_device_match)) { ret 6; }
-    val past: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("3", false));
+    val past: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("3", false), ?any);
     if (!(sel past.err && sel past.err.no_device_match)) { ret 7; }
-    val dead: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("radeon", false));
+    val dead: res[usize, DeviceError] = pick_device(?c[0], 3, override_from("radeon", false), ?any);
     if (!(sel dead.err))                                                    { ret 8; }
     if (!(sel dead.err.device_incapable && dead.err.device_incapable == 2)) { ret 9; }
+    ret 0;
+}
+
+# the requirement a pick was refused for, or none when it was not refused for one
+fun refused_for(r: res[usize, DeviceError]) opt[Requirement] {
+    if (sel r.ok)           { ret opt[Requirement].none{}; }
+    if (!(sel r.err.unmet)) { ret opt[Requirement].none{}; }
+    ret opt[Requirement].some{r.err.unmet};
+}
+
+test pick_device__requirements_filter_before_ranking {
+    var c: [4]Candidate;
+    c[0] = cand("NVIDIA GeForce GTX 980", DeviceType.discrete{}, true, 0x00401000, false);
+    c[1] = cand("Intel(R) UHD Graphics", DeviceType.integrated{}, true, 0x00403000, true);
+    c[2] = cand("llvmpipe (LLVM 18.1.8, 256 bits)", DeviceType.cpu{}, true, 0x00403000, true);
+    c[3] = cand("AMD Radeon", DeviceType.discrete{}, false, 0x00403000, true);
+    var req: Requirements = requirements_none();
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?req)) != 0) { ret 1; }
+    # a discrete device without addresses loses to an integrated one with them
+    req.buffer_device_address = true;
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?req)) != 1) { ret 2; }
+    req             = requirements_none();
+    req.api_version = 0x00402000;
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?req)) != 1) { ret 3; }
+    req.api_version = 0x00403000;
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?req)) != 1) { ret 4; }
+    # the device-select layer's order is filtered too
+    req.buffer_device_address = true;
+    if (picked(pick_device(?c[0], 4, Override.enumeration{}, ?req)) != 1) { ret 5; }
+    c[1].timestamp_valid_bits = 0;
+    req.timestamps            = true;
+    if (picked(pick_device(?c[0], 4, Override.none{}, ?req)) != 2) { ret 6; }
+
+    # none meets them: the error names what the ranking's pick lacks, in
+    # Requirements' field order, and an incapable device is never the one named
+    c[0].timestamp_valid_bits = 0;
+    c[2].timestamp_valid_bits = 0;
+    val version: opt[Requirement] = refused_for(pick_device(?c[0], 4, Override.none{}, ?req));
+    if (!(sel version.some))             { ret 7; }
+    if (!(sel version.some.api_version)) { ret 8; }
+    req.api_version = 0;
+    val addr: opt[Requirement] = refused_for(pick_device(?c[0], 4, Override.none{}, ?req));
+    if (!(sel addr.some && sel addr.some.buffer_device_address)) { ret 9; }
+    req.buffer_device_address = false;
+    val time: opt[Requirement] = refused_for(pick_device(?c[0], 4, Override.none{}, ?req));
+    if (!(sel time.some && sel time.some.timestamps)) { ret 10; }
+
+    # BOOM_DEVICE naming a device that lacks one is refused with the same error
+    req                       = requirements_none();
+    req.buffer_device_address = true;
+    val named_bda: opt[Requirement] = refused_for(pick_device(?c[0], 4, override_from("gtx", false), ?req));
+    if (!(sel named_bda.some && sel named_bda.some.buffer_device_address)) { ret 11; }
+    val by_index: opt[Requirement] = refused_for(pick_device(?c[0], 4, override_from("0", false), ?req));
+    if (!(sel by_index.some && sel by_index.some.buffer_device_address))         { ret 12; }
+    if (picked(pick_device(?c[0], 4, override_from("intel", false), ?req)) != 1) { ret 13; }
+    # an incapable device is refused as incapable before its features are asked
+    c[3].buffer_device_address = false;
+    val dead: res[usize, DeviceError] = pick_device(?c[0], 4, override_from("radeon", false), ?req);
+    if (!(sel dead.err && sel dead.err.device_incapable)) { ret 14; }
     ret 0;
 }
 

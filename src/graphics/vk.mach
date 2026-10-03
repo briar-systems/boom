@@ -34,6 +34,7 @@ use boom.graphics.physical.DeviceInfo;
 use boom.graphics.physical.device_type_from;
 use boom.graphics.physical.override_from;
 use boom.graphics.physical.pick_device;
+use boom.graphics.require.Requirements;
 use boom.graphics.retire.Doomed;
 use boom.graphics.retire.Release;
 use boom.graphics.retire.Retire;
@@ -137,8 +138,9 @@ pub rec Vk {
 # Create the instance, surface, device, and queues for a window.
 #
 # The window must have been created with the client API hint set to none;
-# a window carrying a GL context cannot back a Vulkan surface.
-pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
+# a window carrying a GL context cannot back a Vulkan surface. The device is
+# one meeting require; see boom.graphics.require.
+pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str, require: *Requirements) err[Error] {
     v.ready = false;
     retire_init(?v.retire);
     v.live = Live{textures: 0, meshes: 0, models: 0, targets: 0, fonts: 0, shaders: 0,
@@ -244,7 +246,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str) err[Error] {
     }
     v.surface = surface.ok::vk.SurfaceKHR;
 
-    val pr: err[Error] = pick_physical(v);
+    val pr: err[Error] = pick_physical(v, require);
     if (sel pr.err) {
         destroy_surface_and_instance(v);
         ret pr;
@@ -375,13 +377,13 @@ pub fun vk_release(v: *Vk, obj: Doomed, how: Release) {
     retire_collect(?v.retire, v.device);
 }
 
-# Choose the physical device to run on; see boom.graphics.physical for the
-# ranking and the overrides.
+# Choose the physical device to run on, among those meeting require; see
+# boom.graphics.physical for the ranking and the overrides.
 #
 # Every device is asked what selection needs before any is chosen, at the
 # version each would be used at, so a device is judged by what it offers boom
 # rather than by what its driver claims past the instance.
-fun pick_physical(v: *Vk) err[Error] {
+fun pick_physical(v: *Vk, require: *Requirements) err[Error] {
     var count:   u32 = 0;
     val counted: i32 = vk.vkEnumeratePhysicalDevices(v.instance, ?count, nil);
     if (!enumerated(counted)) {
@@ -417,6 +419,7 @@ fun pick_physical(v: *Vk) err[Error] {
         c.capable               = sel families[i].graphics.some && sel families[i].present.some;
         c.api_version           = versions[i];
         c.buffer_device_address = reported[i].buffer_device_address;
+        c.timestamp_valid_bits  = reported[i].timestamp_bits;
         cands[i]                = c;
         i                       = i + 1;
     }
@@ -430,7 +433,8 @@ fun pick_physical(v: *Vk) err[Error] {
     var flag:  [8]u8;
     var layer: bool = env_read("MESA_VK_DEVICE_SELECT", ?flag[0], 8) > 0;
     if (env_read("DRI_PRIME", ?flag[0], 8) > 0) { layer = true; }
-    val chosen: res[usize, DeviceError] = pick_device(?cands[0], cap::usize, override_from(named, layer));
+    val chosen: res[usize, DeviceError] = pick_device(?cands[0], cap::usize, override_from(named, layer),
+        require);
     if (sel chosen.err) { ret err[Error].err{Error.device{chosen.err}}; }
 
     val k:    usize    = chosen.ok;
