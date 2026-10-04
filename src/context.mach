@@ -22,9 +22,11 @@ use boom.window;
 use boom.window.Window;
 use boom.window.WindowError;
 use boom.window.WindowMode;
+use boom.window.WindowPlacement;
+use boom.window.WindowPosition;
 use boom.window.window_close;
 use boom.window.window_error_message;
-use boom.window.window_open_mode;
+use boom.window.window_open_placed;
 use boom.window.window_set_event_sink;
 use std.chrono.duration.Duration;
 use io_error: std.io.error;
@@ -46,6 +48,8 @@ use std.types.string.str;
 # frame_dt:  when non-zero, the delta every frame is told it took, instead of
 #            the wall clock. See below.
 # mode:      initial window presentation mode
+# position:  windowed client origin to restore, none to centre on the primary
+#            monitor. ignored where the platform withholds placement (wayland)
 #
 # WHY A GAME WOULD PIN ITS FRAME DELTA. The loop feeds the wall-clock delta into
 # the fixed-step accumulator, so the number of ticks a run executes depends on
@@ -68,6 +72,7 @@ pub rec Config {
     max_frame: Duration;
     frame_dt:  Duration;
     mode:      WindowMode;
+    position:  opt[WindowPosition];
 }
 
 # whether a configuration can drive the frame loop
@@ -174,7 +179,10 @@ pub fun context_init(ctx: *Context, cfg: Config) err[ContextError] {
 
     ctx.events = queue_new();
     ctx.input  = inp.input_new();
-    val opened: res[Window, WindowError] = window_open_mode(cfg.width, cfg.height, cfg.title, cfg.mode);
+    val placement: WindowPlacement = WindowPlacement{
+        position: cfg.position, width: cfg.width, height: cfg.height,
+    };
+    val opened: res[Window, WindowError] = window_open_placed(placement, cfg.title, cfg.mode);
     if (sel opened.err) { ret err[ContextError].err{ContextError.window{opened.err}}; }
     ctx.window = opened.ok;
     # the sink lives in the Context so it outlives the window, which the

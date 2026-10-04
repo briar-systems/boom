@@ -155,6 +155,31 @@ pub rec WindowBounds {
     height: i32;
 }
 
+# a window's client origin on the virtual desktop, in screen coordinates
+# ---
+# x: horizontal origin
+# y: vertical origin
+pub rec WindowPosition {
+    x: i32;
+    y: i32;
+}
+
+# what a window shows when windowed, as an app saves and restores it
+#
+# The position is none where the platform neither reports nor honours one.
+# Wayland is such a platform: the compositor places every window, so a saved
+# placement there carries its size alone, and a position handed back is
+# ignored rather than guessed at.
+# ---
+# position: client origin, or none where the platform withholds placement
+# width:    client width in screen coordinates
+# height:   client height in screen coordinates
+pub rec WindowPlacement {
+    position: opt[WindowPosition];
+    width:    i32;
+    height:   i32;
+}
+
 # a platform window
 # ---
 # handle:             the underlying GLFW window, none once closed or when never opened
@@ -162,8 +187,10 @@ pub rec WindowBounds {
 # height:             current framebuffer height in pixels
 # mode:               semantic presentation mode, including platform-specific borderless
 # monitor:            output retained when the platform cannot report window placement
-# windowed:           ordinary client bounds retained across fullscreen transitions
+# windowed:           ordinary client bounds, kept current while windowed and
+#                     retained across fullscreen transitions
 # windowed_maximized: whether ordinary mode restores through the compositor
+# positioned:         whether the platform reports and honours window position
 # min_width:          client limit applied when restoring windowed mode
 # min_height:         client limit applied when restoring windowed mode
 # renderers:          how many renderers hold a surface on this window
@@ -179,6 +206,7 @@ pub rec Window {
     monitor:            opt[glfw.Monitor];
     windowed:           WindowBounds;
     windowed_maximized: bool;
+    positioned:         bool;
     min_width:          i32;
     min_height:         i32;
     renderers:          usize;
@@ -480,6 +508,29 @@ pub fun window_open(width: i32, height: i32, title: str) res[Window, WindowError
 # ret:    opened Window sized in framebuffer pixels, or why it could not open
 pub fun window_open_mode(width: i32, height: i32, title: str,
     mode: WindowMode) res[Window, WindowError] {
+    ret window_open_placed(WindowPlacement{
+        position: opt[WindowPosition].none{}, width: width, height: height,
+    }, title, mode);
+}
+
+# open a window at a saved placement, in one explicit presentation mode
+#
+# The window is created in its mode, so an app restoring fullscreen never
+# shows a windowed frame first, and the placement is what leaving that mode
+# returns to. A placement with no position is centred on the primary monitor.
+# One with a position lands on the monitor it shows the most of, clamped into
+# its work area, and is centred on the primary monitor when it shows none of
+# them, as a placement saved on a monitor since disconnected would. A
+# borderless or fullscreen window opens on the monitor its placement landed
+# on. Where the platform withholds placement (wayland) the position is
+# ignored and the size still applies.
+# ---
+# placement: ordinary windowed placement in screen coordinates
+# title:     window title, UTF-8
+# mode:      initial windowed, borderless, or fullscreen policy
+# ret:       opened Window sized in framebuffer pixels, or why it could not open
+pub fun window_open_placed(placement: WindowPlacement, title: str,
+    mode: WindowMode) res[Window, WindowError] {
     # x11 reports the IME's composition only on the spot. over the spot, the
     # input method draws it itself and no compose event ever arrives
     glfw.init_hint(glfw.X11_ONTHESPOT, glfw.TRUE);
@@ -488,7 +539,24 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         ret res[Window, WindowError].err{WindowError.init{started.err}};
     }
 
-    val monitor:     opt[glfw.Monitor] = glfw.get_primary_monitor();
+    val width:      i32                 = placement.width;
+    val height:     i32                 = placement.height;
+    val positioned: bool                = !platform_wayland();
+    var monitor:    opt[glfw.Monitor]   = glfw.get_primary_monitor();
+    var restore:    WindowBounds        = WindowBounds{x: 0, y: 0, width: width, height: height};
+    var at:         opt[WindowPosition] = opt[WindowPosition].none{};
+    if (positioned) { at = placement.position; }
+    if (sel at.some) {
+        restore.x = at.some.x;
+        restore.y = at.some.y;
+        val landed: Landing = land(restore, monitor);
+        monitor = landed.monitor;
+        restore = landed.bounds;
+    }
+    or (sel monitor.some) {
+        restore = centered_bounds(monitor.some, width, height);
+    }
+
     var open_width:  i32               = width;
     var open_height: i32               = height;
     var attached:    opt[glfw.Monitor] = opt[glfw.Monitor].none{};
@@ -509,10 +577,6 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
         attached = monitor;
     }
 
-    var restore: WindowBounds = WindowBounds{x: 0, y: 0, width: width, height: height};
-    if (sel monitor.some) {
-        restore = centered_bounds(monitor.some, width, height);
-    }
     val restore_maximized: bool = sel mode.windowed
         && windowed_should_maximize(restore, monitor);
 
@@ -567,7 +631,7 @@ pub fun window_open_mode(width: i32, height: i32, title: str,
     ret res[Window, WindowError].ok{Window{
         handle:     opt[glfw.Window].some{win}, width: fw, height: fh, mode: mode,
         monitor:    monitor, windowed: restore, windowed_maximized: restore_maximized,
-        min_width:  1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true,
+        positioned: positioned, min_width: 1, min_height: 1, renderers: 0, shape: CURSOR_ARROW, shape_shown: true,
         text_input: opt[bool].none{}
     }};
 }
@@ -600,16 +664,7 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) err[WindowError] {
     val handle: glfw.Window = w.handle.some;
     if (same_mode(w.mode, mode)) { ret err[WindowError].ok{}; }
 
-    if (sel w.mode.windowed) {
-        w.windowed_maximized = glfw.get_window_attrib(
-            handle, glfw.MAXIMIZED) == glfw.TRUE;
-        if (!w.windowed_maximized) {
-            if (!platform_wayland()) {
-                glfw.get_window_pos(handle, ?w.windowed.x, ?w.windowed.y);
-            }
-            glfw.get_window_size(handle, ?w.windowed.width, ?w.windowed.height);
-        }
-    }
+    record_windowed(w);
 
     val found: opt[glfw.Monitor] = monitor_for_window(w, handle);
     if (!sel found.some) { ret err[WindowError].err{mode_refusal(mode, false)}; }
@@ -664,6 +719,121 @@ pub fun window_set_mode(w: *Window, mode: WindowMode) err[WindowError] {
     ret err[WindowError].ok{};
 }
 
+# the placement the window returns to when windowed
+#
+# Live while the window is windowed. While it is maximized, minimized,
+# borderless or fullscreen, or once it is closed, it is the placement it last
+# had as an ordinary window, which is what leaving that state restores, so an
+# app saves this on close whatever mode the window is in. The position is none
+# where the platform withholds placement (wayland).
+# ---
+# w:   window to query
+# ret: windowed placement in screen coordinates
+pub fun window_bounds(w: *Window) WindowPlacement {
+    record_windowed(w);
+    ret placement_of(w.windowed, w.positioned);
+}
+
+# move and resize the window's windowed placement
+#
+# A windowed window is moved and resized now, leaving maximized first. A
+# borderless or fullscreen one keeps its mode and the placement becomes what
+# leaving it returns to. A position lands on the monitor the placement shows
+# the most of, clamped into its work area, or is centred on the window's
+# monitor when it shows none of them. A placement with no position keeps the
+# window where it is, and where the platform withholds placement (wayland) a
+# position is ignored while the size still applies. A size is held to the
+# window's minimum.
+# ---
+# w:         live window to update outside an open render frame
+# placement: windowed placement in screen coordinates
+# ret:       ok, or closed for a window that is not open
+pub fun window_set_bounds(w: *Window, placement: WindowPlacement) err[WindowError] {
+    if (!sel w.handle.some) { ret err[WindowError].err{WindowError.closed{}}; }
+    val handle: glfw.Window = w.handle.some;
+    record_windowed(w);
+
+    val asked: WindowBounds = bounds_with(w.windowed, placement, w.positioned,
+        w.min_width, w.min_height);
+    var monitor: opt[glfw.Monitor] = monitor_for_window(w, handle);
+    var bounds:  WindowBounds      = asked;
+    if (w.positioned && sel placement.position.some) {
+        val landed: Landing = land(asked, monitor);
+        monitor = landed.monitor;
+        bounds  = landed.bounds;
+    }
+
+    if (!sel w.mode.windowed) {
+        w.windowed           = bounds;
+        w.windowed_maximized = false;
+        ret err[WindowError].ok{};
+    }
+
+    if (w.windowed_maximized) { glfw.restore_window(handle); }
+    w.windowed_maximized = false;
+    w.windowed           = bounds;
+    if (windowed_should_maximize(bounds, monitor)) {
+        w.windowed_maximized = true;
+        glfw.maximize_window(handle);
+    }
+    or (sel monitor.some) {
+        w.windowed = fit_windowed(handle, bounds, monitor.some, w.min_width, w.min_height);
+    }
+    or {
+        glfw.set_window_size(handle, bounds.width, bounds.height);
+        if (w.positioned) { glfw.set_window_pos(handle, bounds.x, bounds.y); }
+    }
+    w.monitor = monitor;
+    ret err[WindowError].ok{};
+}
+
+# a placement as an app sees it, the position withheld where the platform does
+fun placement_of(bounds: WindowBounds, positioned: bool) WindowPlacement {
+    var position: opt[WindowPosition] = opt[WindowPosition].none{};
+    if (positioned) {
+        position = opt[WindowPosition].some{WindowPosition{x: bounds.x, y: bounds.y}};
+    }
+    ret WindowPlacement{position: position, width: bounds.width, height: bounds.height};
+}
+
+# the bounds a placement asks for over the ones a window has: its position
+# where it names one the platform honours, its size held to the minimum
+fun bounds_with(prior: WindowBounds, placement: WindowPlacement, positioned: bool,
+    min_width: i32, min_height: i32) WindowBounds {
+    var out: WindowBounds = WindowBounds{
+        x:      prior.x,
+        y:      prior.y,
+        width:  max_value(placement.width, max_value(min_width, 1)),
+        height: max_value(placement.height, max_value(min_height, 1)),
+    };
+    if (!positioned) { ret out; }
+    if (sel placement.position.some) {
+        out.x = placement.position.some.x;
+        out.y = placement.position.some.y;
+    }
+    ret out;
+}
+
+# keep the windowed bookkeeping current from a window that is windowed now
+#
+# A maximized or minimized window is not at its ordinary bounds, so they keep
+# what they last were and only the maximized state is recorded.
+fun record_windowed(w: *Window) {
+    if (!sel w.handle.some)   { ret; }
+    if (!sel w.mode.windowed) { ret; }
+    val handle: glfw.Window = w.handle.some;
+    w.windowed_maximized = glfw.get_window_attrib(handle, glfw.MAXIMIZED) == glfw.TRUE;
+    if (w.windowed_maximized)                                        { ret; }
+    if (glfw.get_window_attrib(handle, glfw.ICONIFIED) == glfw.TRUE) { ret; }
+    var width:  i32 = 0;
+    var height: i32 = 0;
+    glfw.get_window_size(handle, ?width, ?height);
+    if (width <= 0 || height <= 0) { ret; }
+    w.windowed.width  = width;
+    w.windowed.height = height;
+    if (w.positioned) { glfw.get_window_pos(handle, ?w.windowed.x, ?w.windowed.y); }
+}
+
 # whether two modes name the same presentation
 fun same_mode(a: WindowMode, b: WindowMode) bool {
     if (sel a.windowed)   { ret sel b.windowed; }
@@ -681,6 +851,8 @@ fun same_mode(a: WindowMode, b: WindowMode) bool {
 # rebased into that same space here as well. A minimized window reports zero in
 # at least one dimension, which is a legal state and not a failure, so it is
 # recorded as-is; callers that cannot divide by it check.
+#
+# The windowed placement window_bounds reports is kept current here too.
 # ---
 # w: window to update in place
 pub fun window_refresh_size(w: *Window) {
@@ -694,6 +866,7 @@ pub fun window_refresh_size(w: *Window) {
     glfw.get_framebuffer_size(handle, ?fw, ?fh);
     w.width  = fw;
     w.height = fh;
+    record_windowed(w);
 
     # Cursor callbacks carry screen coordinates. Re-read the current position
     # beside the new size so a stationary pointer follows a DPI or resize
@@ -1098,6 +1271,8 @@ fun poll_release() {
 pub fun window_close(w: *Window) err[WindowError] {
     if (w.renderers != 0) { ret err[WindowError].err{WindowError.in_use{w.renderers}}; }
     if (sel w.handle.some) {
+        # the placement outlives the window, so an app can save it after closing
+        record_windowed(w);
         glfw.set_window_user_pointer(w.handle.some, nil);
         unregister_queue(w.handle.some.handle);
         glfw.destroy_window(w.handle.some);
@@ -1120,18 +1295,19 @@ fun forget_cursors() {
 }
 
 fun centered_bounds(monitor: glfw.Monitor, width: i32, height: i32) WindowBounds {
-    var x: i32 = 0;
-    var y: i32 = 0;
-    var w: i32 = width;
-    var h: i32 = height;
-    glfw.get_monitor_workarea(monitor, ?x, ?y, ?w, ?h);
+    var area: WindowBounds = WindowBounds{x: 0, y: 0, width: width, height: height};
+    glfw.get_monitor_workarea(monitor, ?area.x, ?area.y, ?area.width, ?area.height);
+    ret centre_in(area, width, height);
+}
+
+# a size centred in a work area and clamped into it
+fun centre_in(area: WindowBounds, width: i32, height: i32) WindowBounds {
     ret clamp_bounds(WindowBounds{
-        x:      x + (w - width) / 2,
-        y:      y + (h - height) / 2,
+        x:      area.x + (area.width - width) / 2,
+        y:      area.y + (area.height - height) / 2,
         width:  width,
         height: height,
-    }, WindowBounds{x: x, y: y, width: w, height: h},
-        WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
+    }, area, WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
 }
 
 fun fit_windowed(handle: glfw.Window, bounds: WindowBounds,
@@ -1243,26 +1419,86 @@ fun best_overlap(x: i32, y: i32, width: i32, height: i32,
     ret best;
 }
 
+# the connected monitors' work areas, at most MAX_MONITORS of them
+fun monitor_areas(handles: *ptr, count: i32, areas: *WindowBounds) usize {
+    var n: usize = 0;
+    for (handles != nil && n::i32 < count && n < MAX_MONITORS) {
+        val current: glfw.Monitor = glfw.monitor_from_handle(handles[n]);
+        var a:       WindowBounds = WindowBounds{x: 0, y: 0, width: 0, height: 0};
+        glfw.get_monitor_workarea(current, ?a.x, ?a.y, ?a.width, ?a.height);
+        areas[n] = a;
+        n        = n + 1;
+    }
+    ret n;
+}
+
 # the monitor a rectangle in screen coordinates shows the most of, none when
 # it shows none of them or no monitor is connected
 fun monitor_at(x: i32, y: i32, width: i32, height: i32) opt[glfw.Monitor] {
     var count:   i32   = 0;
     val handles: *ptr  = glfw.get_monitors(?count);
     var areas:   [MAX_MONITORS]WindowBounds;
-    var n:       usize = 0;
-    for (handles != nil && n::i32 < count && n < MAX_MONITORS) {
-        val current: glfw.Monitor = glfw.monitor_from_handle(handles[n]);
-        var ax:      i32          = 0;
-        var ay:      i32          = 0;
-        var aw:      i32          = 0;
-        var ah:      i32          = 0;
-        glfw.get_monitor_workarea(current, ?ax, ?ay, ?aw, ?ah);
-        areas[n] = WindowBounds{x: ax, y: ay, width: aw, height: ah};
-        n        = n + 1;
-    }
-    val at: i32 = best_overlap(x, y, width, height, ?areas[0], n);
+    val n:       usize = monitor_areas(handles, count, ?areas[0]);
+    val at:      i32   = best_overlap(x, y, width, height, ?areas[0], n);
     if (at < 0) { ret opt[glfw.Monitor].none{}; }
     ret opt[glfw.Monitor].some{glfw.monitor_from_handle(handles[at::usize])};
+}
+
+# where positioned windowed bounds go, and on which monitor
+# ---
+# monitor: the monitor the bounds landed on, none when none is connected
+# bounds:  the bounds as placed there
+rec Landing {
+    monitor: opt[glfw.Monitor];
+    bounds:  WindowBounds;
+}
+
+# land positioned bounds on a connected monitor
+#
+# Monitors change between runs, so a saved position can lie partly or wholly
+# off every monitor connected now. Bounds land on the monitor they show the
+# most of, clamped into its work area, and are centred on the fallback when
+# they show none of them.
+fun land(bounds: WindowBounds, fallback: opt[glfw.Monitor]) Landing {
+    var count:   i32   = 0;
+    val handles: *ptr  = glfw.get_monitors(?count);
+    var areas:   [MAX_MONITORS]WindowBounds;
+    val n:       usize = monitor_areas(handles, count, ?areas[0]);
+    var fb:      i32   = -1;
+    if (sel fallback.some) {
+        val want: ptr   = fallback.some.handle;
+        var i:    usize = 0;
+        for (i < n) {
+            if (handles[i] == want) { fb = i::i32; }
+            i = i + 1;
+        }
+    }
+    var at:     i32          = -1;
+    val placed: WindowBounds = land_bounds(bounds, ?areas[0], n, fb, ?at);
+    if (at < 0) { ret Landing{monitor: fallback, bounds: placed}; }
+    ret Landing{
+        monitor: opt[glfw.Monitor].some{glfw.monitor_from_handle(handles[at::usize])},
+        bounds:  placed,
+    };
+}
+
+# which work area bounds land in and where: the area they show the most of,
+# clamped into it, else centred in the fallback area, else unchanged. at is
+# the area's index, or -1 when they landed in none
+fun land_bounds(bounds: WindowBounds, areas: *WindowBounds, count: usize,
+    fallback: i32, at: *i32) WindowBounds {
+    val shown: i32 = best_overlap(bounds.x, bounds.y, bounds.width, bounds.height, areas, count);
+    if (shown >= 0) {
+        @at = shown;
+        ret clamp_bounds(bounds, areas[shown::usize],
+            WindowBounds{x: 0, y: 0, width: 0, height: 0}, 1, 1);
+    }
+    if (fallback < 0 || fallback::usize >= count) {
+        @at = -1;
+        ret bounds;
+    }
+    @at = fallback;
+    ret centre_in(areas[fallback::usize], bounds.width, bounds.height);
 }
 
 # the refresh rate of the monitor the window is on now
@@ -1811,5 +2047,131 @@ test window_clipboard__round_trips_utf8 {
     val freed: err[allo.Error] = text.str_free(?a, got.ok);
     if (!sel freed.ok) { ret 4; }
     window_close(?w);
+    ret 0;
+}
+
+test land_bounds__onto_a_connected_monitor {
+    var areas: [2]WindowBounds;
+    areas[0] = WindowBounds{x: 0, y: 0, width: 1920, height: 1080};
+    areas[1] = WindowBounds{x: 1920, y: 0, width: 1280, height: 1024};
+    var at: i32 = -1;
+
+    # inside one monitor stays where it was saved
+    val kept: WindowBounds = land_bounds(WindowBounds{x: 2000, y: 100, width: 800, height: 600}, ?areas[0], 2, 0, ?at);
+    if (at != 1)                         { ret 1; }
+    if (kept.x != 2000 || kept.y != 100) { ret 2; }
+
+    # straddling lands on the monitor it shows the most of, clamped into it
+    val edge: WindowBounds = land_bounds(WindowBounds{x: 2900, y: 900, width: 800, height: 600}, ?areas[0], 2, 0, ?at);
+    if (at != 1)                         { ret 3; }
+    if (edge.x != 2400 || edge.y != 424) { ret 4; }
+
+    # a monitor since disconnected leaves it on none: centred on the fallback
+    val lost: WindowBounds = land_bounds(WindowBounds{x: 5000, y: 0, width: 800, height: 600}, ?areas[0], 2, 0, ?at);
+    if (at != 0)                                 { ret 5; }
+    if (lost.x != 560 || lost.y != 240)          { ret 6; }
+    if (lost.width != 800 || lost.height != 600) { ret 7; }
+
+    # too large for the monitor shrinks into it
+    val big: WindowBounds = land_bounds(WindowBounds{x: 0, y: 0, width: 4000, height: 2000}, ?areas[0], 2, 0, ?at);
+    if (at != 0)                                 { ret 8; }
+    if (big.width != 1920 || big.height != 1080) { ret 9; }
+
+    # no monitor and no fallback leaves it as asked
+    val none: WindowBounds = land_bounds(WindowBounds{x: 5000, y: 7, width: 800, height: 600}, ?areas[0], 0, -1, ?at);
+    if (at != -1)                      { ret 10; }
+    if (none.x != 5000 || none.y != 7) { ret 11; }
+    ret 0;
+}
+
+test window_bounds__remembered_and_withheld_position {
+    # a closed window reports the placement it last had
+    var w: Window;
+    w.handle     = opt[glfw.Window].none{};
+    w.mode       = WindowMode.fullscreen{};
+    w.windowed   = WindowBounds{x: 40, y: 50, width: 800, height: 600};
+    w.positioned = true;
+    val seen: WindowPlacement = window_bounds(?w);
+    if (!sel seen.position.some)                                  { ret 1; }
+    if (seen.position.some.x != 40 || seen.position.some.y != 50) { ret 2; }
+    if (seen.width != 800 || seen.height != 600)                  { ret 3; }
+
+    # where the platform withholds placement the size alone is reported
+    w.positioned = false;
+    val sized: WindowPlacement = window_bounds(?w);
+    if (sel sized.position.some)                   { ret 4; }
+    if (sized.width != 800 || sized.height != 600) { ret 5; }
+
+    val refused: err[WindowError] = window_set_bounds(?w, seen);
+    if (!sel refused.err)        { ret 6; }
+    if (!sel refused.err.closed) { ret 7; }
+    ret 0;
+}
+
+test bounds_with__position_honoured_size_held {
+    val prior: WindowBounds    = WindowBounds{x: 10, y: 20, width: 640, height: 480};
+    val moved: WindowPlacement = WindowPlacement{
+        position: opt[WindowPosition].some{WindowPosition{x: 300, y: 400}}, width: 1024, height: 768,
+    };
+    val placed: WindowBounds = bounds_with(prior, moved, true, 1, 1);
+    if (placed.x != 300 || placed.y != 400)           { ret 1; }
+    if (placed.width != 1024 || placed.height != 768) { ret 2; }
+
+    # a position the platform does not honour keeps the prior one
+    val ignored: WindowBounds = bounds_with(prior, moved, false, 1, 1);
+    if (ignored.x != 10 || ignored.y != 20)             { ret 3; }
+    if (ignored.width != 1024 || ignored.height != 768) { ret 4; }
+
+    # no position keeps the prior one, and a size below the minimum is raised to it
+    val small: WindowBounds = bounds_with(prior, WindowPlacement{
+        position: opt[WindowPosition].none{}, width: 0, height: 100,
+    }, true, 320, 200);
+    if (small.x != 10 || small.y != 20)            { ret 5; }
+    if (small.width != 320 || small.height != 200) { ret 6; }
+    ret 0;
+}
+
+test window_open_placed__restores_size_and_mode {
+    val asked: WindowPlacement = WindowPlacement{
+        position: opt[WindowPosition].some{WindowPosition{x: 40, y: 50}}, width: 320, height: 240,
+    };
+    val opened: res[Window, WindowError] = window_open_placed(asked, "boom bounds test", WindowMode.fullscreen{});
+    if (sel opened.err) {
+        if (window_required()) { ret 1; }
+        print.eprintln("skipped: no window can be opened here");
+        ret 0;
+    }
+    var w: Window = opened.ok;
+    if (!sel w.mode.fullscreen) { ret 2; }
+    # fullscreen opens straight onto the monitor and holds the windowed placement
+    val held: WindowPlacement = window_bounds(?w);
+    if (held.width != 320 || held.height != 240) { ret 3; }
+    if (w.positioned != sel held.position.some)  { ret 4; }
+
+    val set: err[WindowError] = window_set_bounds(?w, WindowPlacement{
+        position: opt[WindowPosition].none{}, width: 400, height: 300,
+    });
+    if (!sel set.ok) { ret 5; }
+    val changed: WindowPlacement = window_bounds(?w);
+    if (changed.width != 400 || changed.height != 300) { ret 6; }
+    if (!sel w.mode.fullscreen)                        { ret 7; }
+
+    val left: err[WindowError] = window_set_mode(?w, WindowMode.windowed{});
+    if (!sel left.ok) { ret 8; }
+    window_wait_timeout(0.2);
+    val back: WindowPlacement = window_bounds(?w);
+    if (back.width != 400 || back.height != 300) { ret 9; }
+
+    val resized: err[WindowError] = window_set_bounds(?w, WindowPlacement{
+        position: opt[WindowPosition].none{}, width: 500, height: 360,
+    });
+    if (!sel resized.ok) { ret 10; }
+    window_wait_timeout(0.2);
+    val live: WindowPlacement = window_bounds(?w);
+    if (live.width != 500 || live.height != 360) { ret 11; }
+    window_close(?w);
+    # the placement outlives the window
+    val after: WindowPlacement = window_bounds(?w);
+    if (after.width != 500 || after.height != 360) { ret 12; }
     ret 0;
 }
