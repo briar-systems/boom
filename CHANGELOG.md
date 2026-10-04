@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-10-04
+
+### Added
+- `window_bounds(w)` returns a window's placement: its size, and its position where the platform reports one (none on Wayland). While the window is maximized, fullscreen or borderless, or after it closes, it returns what leaving that state restores, so an app can save it on close in any mode (#318).
+- `window_set_bounds(w, placement)` moves and resizes a windowed window, or sets what leaving fullscreen or borderless returns to (#318).
+- `window_open_placed(placement, title, mode)` opens a window at a saved placement and straight into its mode, with no windowed frame first. `Config.position` carries a placement through `context_init` (#318).
+
+### Fixed
+- `Window.windowed` held stale bounds while the window was windowed. It is now kept current (#318).
+- A saved position off every monitor is clamped onto the monitor it overlaps most, or centred when it overlaps none (#318).
+
 ## [0.49.0] - 2026-10-02
 
 ### Added
