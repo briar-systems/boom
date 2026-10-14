@@ -55,8 +55,8 @@ use boom.graphics.retire.retire_dnit;
 use boom.graphics.retire.retire_idle;
 use boom.graphics.retire.retire_init;
 use boom.graphics.retire.retire_push;
-use glfw;
 use gc: glfw.c;
+use glfw.lib.glfw;
 use glfw.vulkan.SurfaceError;
 use allo: std.allocator;
 use std.allocator.page;
@@ -69,7 +69,7 @@ use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
-use vk;
+use vk.lib.vk;
 
 # Packed API versions, as (major << 22) | (minor << 12) | patch.
 #

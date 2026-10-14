@@ -34,7 +34,7 @@
 # callback, which is a few milliseconds late rather than wrong. The stream
 # cursor stays the audio thread's alone, so nothing here races it.
 
-use audio;
+use audio.lib.audio;
 use boom.math.sqrtf;
 use boom.vfs;
 use allo: std.allocator;

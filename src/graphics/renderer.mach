@@ -279,7 +279,7 @@ use boom.math.vec.Vec4;
 use boom.math.vec.vec3;
 use boom.math.vec.vec4;
 use boom.window.Window;
-use glfw;
+use glfw.lib.glfw;
 use allo: std.allocator;
 use std.chrono.duration.Duration;
 use mem: std.memory;
@@ -290,7 +290,7 @@ use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 pub val MAX_PENDING_MESH_UPLOADS: usize = 1024;
 
