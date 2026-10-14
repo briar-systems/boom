@@ -39,7 +39,7 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # The most timers one renderer holds at once.
 pub val MAX_TIMERS: usize = 64;

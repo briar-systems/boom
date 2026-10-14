@@ -32,7 +32,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.error.err;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # Most images a swapchain may hold.
 pub val MAX_IMAGES: usize = 8;

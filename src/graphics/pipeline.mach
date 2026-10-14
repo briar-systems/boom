@@ -49,7 +49,7 @@ use std.types.bool.true;
 use std.types.error.err;
 use std.types.option.opt;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # A pipeline and the layouts it was built against.
 # ---

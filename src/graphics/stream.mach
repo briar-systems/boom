@@ -70,7 +70,7 @@ use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # Bytes in a frame's first block.
 #

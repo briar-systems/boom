@@ -9,7 +9,7 @@ use std.types.bool.false;
 use std.types.bool.true;
 use std.types.size.usize;
 use std.types.string.str_equals;
-use vk;
+use vk.lib.vk;
 
 # Spelled as mach-vk spells KHR_SWAPCHAIN_EXTENSION_NAME, and defined here
 # because mach-vk emits a curated set of extension names without these.

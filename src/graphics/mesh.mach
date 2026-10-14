@@ -64,7 +64,7 @@ use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
 use std.types.string.str_len;
-use vk;
+use vk.lib.vk;
 
 # an opaque handle to a drawable mesh
 # ---

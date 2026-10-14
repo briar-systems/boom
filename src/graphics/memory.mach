@@ -14,7 +14,7 @@ use boom.graphics.physical.DeviceType;
 use std.types.bool.bool;
 use std.types.bool.false;
 use std.types.bool.true;
-use vk;
+use vk.lib.vk;
 
 # VkPhysicalDeviceMemoryBudgetPropertiesEXT and its structure type, defined here
 # because mach-vk emits a curated set of extensions and VK_EXT_memory_budget is

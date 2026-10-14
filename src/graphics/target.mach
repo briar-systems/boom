@@ -55,7 +55,7 @@ use std.types.error.err;
 use std.types.option.opt;
 use std.types.result.res;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # The storage format of one offscreen colour attachment.
 #

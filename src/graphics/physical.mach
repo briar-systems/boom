@@ -45,7 +45,7 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.str;
 use std.types.string.str_equals;
-use vk;
+use vk.lib.vk;
 
 # what kind of device a physical device says it is, from VkPhysicalDeviceType
 # ---

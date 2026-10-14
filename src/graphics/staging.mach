@@ -34,7 +34,7 @@ use std.allocator.page;
 use std.types.error.err;
 use std.types.result.res;
 use std.types.size.usize;
-use vk;
+use vk.lib.vk;
 
 # Bytes in a slot's first buffer.
 pub val STAGING_BYTES: usize = 1048576;
