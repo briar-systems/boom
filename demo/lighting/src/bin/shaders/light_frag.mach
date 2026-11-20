@@ -48,15 +48,15 @@ rec Scene {
     counts:  f32x4;
 }
 
-#[sampler(0, 1)]
+#[gpu.sampler(0, 1)]
 var packed: tex.Sampler2D;
-#[uniform(0, 4)]
+#[gpu.uniform(0, 4)]
 var scene:  Scene;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_uv: f32x2;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_light: f32x4;
 
 # Whether the segment ab blocks the straight line from p to l, and by how much.
@@ -174,7 +174,7 @@ fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32,
     ret f32x3{col[0] * diff + s, col[1] * diff + s, col[2] * diff + s};
 }
 
-#[stage("fragment")]
+#[gpu.stage("fragment")]
 fun frag_main() {
     val px: f32 = in_uv[0] * scene.view[0];
     val py: f32 = in_uv[1] * scene.view[1];

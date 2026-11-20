@@ -23,22 +23,22 @@ rec Matrices {
     model_3: f32x4;
 }
 
-#[uniform(0, 0)]
+#[gpu.uniform(0, 0)]
 var matrices: Matrices;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_position: f32x3;
-#[input(1)]
+#[gpu.input(1)]
 var in_normal:   f32x3;
-#[input(2)]
+#[gpu.input(2)]
 var in_uv:       f32x2;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_normal: f32x3;
-#[output(1)]
+#[gpu.output(1)]
 var out_uv:     f32x2;
 
-#[builtin("position")]
+#[gpu.builtin("position")]
 var position: f32x4;
 
 # Transform a point by a 4x4 matrix given as its four columns.
@@ -97,7 +97,7 @@ fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
     ret f32x3{r[0], r[1], r[2]};
 }
 
-#[stage("vertex")]
+#[gpu.stage("vertex")]
 fun vert_main() {
     position = mul_point(matrices.mvp_0, matrices.mvp_1,
         matrices.mvp_2, matrices.mvp_3,

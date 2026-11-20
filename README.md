@@ -31,35 +31,38 @@ use std.runtime;
 use std.chrono.duration.SECOND;
 use std.types.result.res;
 use std.types.error.err;
-use boom;
+use app: boom.app;
+use context: boom.context;
+use engine: boom.engine;
+use window: boom.window;
 
-fun tick(ctx: *boom.context.Context) { }              # fixed-rate update
-fun draw(ctx: *boom.context.Context) { }              # render, uses ctx.alpha
+fun tick(ctx: *context.Context) { }              # fixed-rate update
+fun draw(ctx: *context.Context) { }              # render, uses ctx.alpha
 
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
-    var ctx: boom.context.Context;
-    val cfg: boom.context.Config = boom.context.Config{
+    var ctx: context.Context;
+    val cfg: context.Config = context.Config{
         width:     1280,
         height:    720,
         title:     "example",
         fixed_dt:  SECOND / 60,      # 60 Hz update
         max_frame: SECOND / 4,       # spiral-of-death clamp
         frame_dt:  0,                # wall clock; pin for deterministic probes
-        mode:      boom.window.WindowMode.windowed{},
+        mode:      window.WindowMode.windowed{},
     };
-    val started: err[boom.context.ContextError] = boom.context.context_init(?ctx, cfg);
+    val started: err[context.ContextError] = context.context_init(?ctx, cfg);
     if (sel started.err) { ret 1; }
 
-    var app: boom.app.App = boom.app.App{
-        f_init:     nil::fun(*boom.context.Context),
-        f_tick:     tick,
-        f_draw:     draw,
-        f_dnit: nil::fun(*boom.context.Context),
+    var hooks: app.App = app.App{
+        f_init: nil::fun(*context.Context),
+        f_tick: tick,
+        f_draw: draw,
+        f_dnit: nil::fun(*context.Context),
     };
-    val ran: res[i64, boom.engine.EngineError] = boom.engine.run(?ctx, ?app);
+    val ran: res[i64, engine.EngineError] = engine.run(?ctx, ?hooks);
 
-    val closed: err[boom.context.ContextError] = boom.context.context_shutdown(?ctx);
+    val closed: err[context.ContextError] = context.context_shutdown(?ctx);
     if (sel closed.err) { ret 1; }
     if (sel ran.err) { ret 1; }
     ret ran.ok;
@@ -424,7 +427,7 @@ draws straight from the buffers with `pass_draw_storage` or
 `vertex_index`, `instance_index` and the buffers, with no mesh at all.
 
 Every call takes its buffers as a list, and the buffer at index n arrives at
-`#[storage(1, n)]` in whichever stage reads it: `STORAGE_SET` is set 1 for a
+`#[gpu.storage(1, n)]` in whichever stage reads it: `STORAGE_SET` is set 1 for a
 dispatch and a draw alike. The renderer puts a barrier on each side of every
 dispatch, update and readback, so what a dispatch writes is what the passes
 after it draw, and a game never states a stage or an access mask.
@@ -524,21 +527,22 @@ anything else its own source imports directly, under the project id:
 ```toml
 [dep.boom]
 git = "https://github.com/briar-systems/boom"
-ref = "tag/v0.34.0"
+ref = "branch/dev"
 ```
 
-`mach dep add . boom --git https://github.com/briar-systems/boom --ref tag/v0.34.0`
-writes that stanza (`--version ^0.34` declares boom by range instead) and
-realizes boom's whole closure one level deep under the consumer's `dep/`. boom
-declares each library by version range, pinned by its gitlink, and mach 5.9
-seeds those transitive ranges from boom's pins. The root's declarations win over every pin beneath them, so a
-root that also declares `std` (every `mach init` root does, by range) decides
-the std the whole closure builds against. boom declares `std` by range for
-that reason, and a root pinning `std` to a release older than boom's range is
-how a build fails inside `dep/boom` (#184).
+`mach dep add . boom --git https://github.com/briar-systems/boom --ref branch/dev`
+writes that stanza (`--range ^0.50` declares boom by range instead, once a
+release built on mach 7 exists) and realizes boom's whole closure one level deep
+under the consumer's `dep/`. boom follows the `dev` branch of each library it
+depends on until those libraries release on mach 7, pinned by its gitlinks. A
+root's `ref` or `path` declaration overrides every requirer beneath it, so a
+root that also declares `std` (every `mach init` root does) decides the std the
+whole closure builds against, and a root pinning a `std` older than the one boom
+needs is how a build fails inside `dep/boom` (#184).
 
-boom's library artifact is the default, so `use boom;` binds `boom.lib.boom`,
-and a subsystem is reached directly as `use gfx: boom.graphics;`.
+A module is imported by its source path under the project id, so a subsystem
+is reached as `use gfx: boom.graphics;`. `src/lib/boom.mach` is the library
+artifact's entry, not an import surface.
 
 ## Building
 
@@ -549,7 +553,8 @@ mach test .
 mach test . -a tests
 ```
 
-boom requires mach 6 and builds against std 9. mach tests one artifact's
+boom requires mach 7 and builds against std's `dev` branch until std 10 is
+released. mach tests one artifact's
 closure, so the text fixture, which the library does not reach,
 runs under the test-only `tests` artifact. `test/selections/verify.sh` fails
 when a test declared under `src` is collected by neither run on any target.
@@ -560,8 +565,9 @@ and carries no pin of its own, so it resolves with
 `cd demo/cube && mach dep update . --all` before `mach build .`.
 
 The built-in shaders are the `shader-*` artifacts on the `spirv` target, which
-`mach build .` produces before the library that embeds them. To build or
-validate them on their own:
+`mach build .` produces before the library that embeds them. `mach check .`
+does not build, so on a fresh tree it needs those modules built first. To build
+or validate them on their own:
 
 ```sh
 mach build . --target spirv --profile release

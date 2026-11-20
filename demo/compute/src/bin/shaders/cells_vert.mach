@@ -9,17 +9,17 @@ rec Cells {
     v: [256]u32;
 }
 
-#[storage(1, 0, "readonly")]
+#[gpu.storage(1, 0, "readonly")]
 var cells: Cells;
 
-#[builtin("vertex_index")]
+#[gpu.builtin("vertex_index")]
 var vertex:   u32;
-#[builtin("instance_index")]
+#[gpu.builtin("instance_index")]
 var instance: u32;
-#[builtin("position")]
+#[gpu.builtin("position")]
 var position: f32x4;
 
-#[stage("vertex")]
+#[gpu.stage("vertex")]
 fun vert_main() {
     val k:   u32 = cells.v[instance] / 2;
     val col: u32 = k % 16;

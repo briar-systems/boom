@@ -50,7 +50,7 @@ use std.types.result.res;
 use std.types.size.usize;
 use std.types.string.OwnedString;
 use std.types.string.owned_adopt;
-use std.types.string.owned_release;
+use std.types.string.owned_dnit;
 use std.types.string.str;
 use std.types.string.str_equals;
 use std.types.string.str_len;
@@ -475,7 +475,7 @@ fun root_value(root: *Root) str {
 }
 
 fun release_root(root: *Root) err[allo.Error] {
-    if (sel root.owned) { ret owned_release(?root.owned); }
+    if (sel root.owned) { ret owned_dnit(?root.owned); }
     ret err[allo.Error].ok{};
 }
 
@@ -490,13 +490,13 @@ fun user_root_resolved(a: *allo.Allocator) res[Root, VfsError] {
         ret res[Root, VfsError].ok{Root.borrowed{user_root}};
     }
 
-    $if ($mach.build.os == $mach.os.windows) {
+    $if ($mach.build.sys == $mach.sys.windows) {
         # Roaming application data, the documented home for per-user state
         val r: res[opt[Root], VfsError] = absolute_env(a, "APPDATA", "");
         if (sel r.err)     { ret res[Root, VfsError].err{r.err}; }
         if (sel r.ok.some) { ret res[Root, VfsError].ok{r.ok.some}; }
     }
-    $or ($mach.build.os == $mach.os.darwin) {
+    $or ($mach.build.sys == $mach.sys.darwin) {
         val h: res[opt[Root], VfsError] = absolute_env(a, "HOME", "Library/Application Support");
         if (sel h.err)     { ret res[Root, VfsError].err{h.err}; }
         if (sel h.ok.some) { ret res[Root, VfsError].ok{h.ok.some}; }
@@ -525,7 +525,7 @@ fun absolute_env(a: *allo.Allocator, name: str, suffix: str) res[opt[Root], VfsE
     if (sel read.ok.none) { ret res[opt[Root], VfsError].ok{opt[Root].none{}}; }
     var value: OwnedString = read.ok.some;
     if (!path.is_abs(value.data)) {
-        val dropped: err[allo.Error] = owned_release(?value);
+        val dropped: err[allo.Error] = owned_dnit(?value);
         if (sel dropped.err) { ret res[opt[Root], VfsError].err{VfsError.alloc{dropped.err}}; }
         ret res[opt[Root], VfsError].ok{opt[Root].none{}};
     }
@@ -533,7 +533,7 @@ fun absolute_env(a: *allo.Allocator, name: str, suffix: str) res[opt[Root], VfsE
         ret res[opt[Root], VfsError].ok{opt[Root].some{Root.owned{value}}};
     }
     val joined:   res[path.Path, allo.Error] = path.join(a, value.data, suffix);
-    val released: err[allo.Error]            = owned_release(?value);
+    val released: err[allo.Error]            = owned_dnit(?value);
     if (sel joined.err) { ret res[opt[Root], VfsError].err{VfsError.alloc{joined.err}}; }
     if (sel released.err) {
         text.str_free(a, joined.ok);

@@ -72,7 +72,7 @@ use boom.window.window_open;
 use boom.window.window_poll;
 use boom.window.window_refresh_size;
 use boom.window.window_should_close;
-use img:  image;
+use img:  image.lib.image;
 use allo: std.allocator;
 use std.allocator.page;
 use p: std.print;

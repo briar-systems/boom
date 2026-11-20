@@ -25,14 +25,14 @@ rec Table {
     shards: [4]*Shard;
 }
 
-#[storage(1, 0, "readonly")]
+#[gpu.storage(1, 0, "readonly")]
 var table: Table;
 
-#[builtin("global_invocation")]
+#[gpu.builtin("global_invocation")]
 var gid: u32x3;
 
-#[stage("compute")]
-#[workgroup(64, 1, 1)]
+#[gpu.stage("compute")]
+#[gpu.workgroup(64, 1, 1)]
 fun comp_main() {
     val i:     u32    = gid[0];
     val shard: *Shard = table.shards[i / 64];

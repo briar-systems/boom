@@ -34,17 +34,17 @@ rec Scene {
     counts:  f32x4;
 }
 
-#[sampler(0, 1)]
+#[gpu.sampler(0, 1)]
 var atlas: tex.Sampler2D;
-#[uniform(0, 4)]
+#[gpu.uniform(0, 4)]
 var scene: Scene;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_uv:    f32x2;
-#[input(1)]
+#[gpu.input(1)]
 var in_world: f32x3;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_colour: f32x4;
 
 fun seg_block(px: f32, py: f32, lx: f32, ly: f32,
@@ -147,7 +147,7 @@ fun light_at(px: f32, py: f32, n: f32x3, rough: f32, metal: f32, base: f32x3,
     ret f32x4{col[0] * diff, col[1] * diff, col[2] * diff, s};
 }
 
-#[stage("fragment")]
+#[gpu.stage("fragment")]
 fun frag_main() {
     val h: f32x2 = f32x2{in_uv[0] * 0.5, in_uv[1] * 0.5};
 

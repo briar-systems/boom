@@ -715,7 +715,7 @@ pub fun mesh_from_glb(d: *Device, data: *u8, len: usize) res[Mesh, Error] {
     val ie: err[allo.Error] = arena.init(?ar, ?pa, 65536);
     if (sel ie.err) { ret res[Mesh, Error].err{Error.alloc{ie.err}}; }
     var aa: allo.Allocator;
-    val am: err[allo.Error] = arena.make(?aa, ?ar);
+    val am: err[allo.Error] = arena.allocator(?aa, ?ar);
     if (sel am.err) {
         arena.dnit(?ar);
         ret res[Mesh, Error].err{Error.alloc{am.err}};
@@ -888,7 +888,7 @@ test extract_glb__conforms_position_only {
     var ar: arena.Arena;
     if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
     var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) {
+    if (!ok_alloc(arena.allocator(?aa, ?ar))) {
         arena.dnit(?ar);
         ret 92;
     }
@@ -1059,7 +1059,7 @@ test extract_glb__conforms_skinned {
     var ar: arena.Arena;
     if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
     var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) {
+    if (!ok_alloc(arena.allocator(?aa, ?ar))) {
         arena.dnit(?ar);
         ret 92;
     }

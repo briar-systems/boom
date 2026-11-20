@@ -3,51 +3,49 @@
 [project]
 id = "game"
 version = "0.3.1"
-mach = "^6"
+mach = "^7"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-isa = "x86_64"
-os  = "linux"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "linux"
+env  = "gnu"
+abi  = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os  = "linux"
-abi = "aapcs64"
+arch = "aarch64"
+sys  = "linux"
+env  = "gnu"
+abi  = "aapcs64"
 
 [target.windows]
-isa = "x86_64"
-os  = "windows"
-abi = "win64"
+arch = "x86_64"
+sys  = "windows"
+abi  = "win64"
 
 [target.darwin]
-isa = "x86_64"
-os  = "darwin"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "darwin"
+abi  = "sysv64"
 
 # the game's own shaders, built for the oldest vulkan environment boom runs on
 [target.spirv]
-isa = "spirv"
-os  = "freestanding"
-abi = "spirv"
-env = "vulkan1.0"
+arch = "spirv"
+sys  = "vulkan"
+abi  = "shader"
+env  = "vulkan1.0"
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 # the embeds name the shader artifacts, so requiring them is what builds the
 # modules before the game that carries them
@@ -55,23 +53,23 @@ float_reassoc = false
 default = true
 kind = "bin"
 entry = "bin/main.mach"
-out = "bin/shader{artifact.suffix}"
+out = "{project.work}/bin/shader{artifact.suffix}"
 targets = ["linux-x86_64", "linux-arm64", "windows", "darwin"]
 link = []
 need = ["artifact.shader-*"]
 
 [artifact.shader-game_vert]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/game_vert.mach"
-out = "spv/game_vert{artifact.suffix}"
+out = "{project.work}/spv/game_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-game_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/game_frag.mach"
-out = "spv/game_frag{artifact.suffix}"
+out = "{project.work}/spv/game_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
@@ -81,4 +79,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v9.0.0"
+ref = "branch/dev"

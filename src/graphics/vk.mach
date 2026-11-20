@@ -203,7 +203,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str, require: *Requiremen
         enabled_count          = enabled_count + 1;
     }
 
-    $if ($mach.build.os == $mach.os.darwin) {
+    $if ($mach.build.sys == $mach.sys.darwin) {
         # VULKAN ON MACOS IS A TRANSLATION LAYER, NOT A DRIVER. Apple ships
         # Metal and no Vulkan implementation, so what runs there is MoltenVK: a
         # Vulkan front end that lowers to Metal underneath. Metal cannot express
@@ -237,7 +237,7 @@ pub fun vk_init(v: *Vk, window: glfw.Window, app_name: str, require: *Requiremen
     ici.ppEnabledLayerNames     = nil;
     ici.enabledExtensionCount   = enabled_count;
     ici.ppEnabledExtensionNames = ?enabled[0];
-    $if ($mach.build.os == $mach.os.darwin) {
+    $if ($mach.build.sys == $mach.sys.darwin) {
         # THE FLAG AND THE EXTENSION ABOVE ARE ONE THING WRITTEN IN TWO PLACES.
         # The extension is what makes this bit legal to pass, since a flag
         # belonging to an extension the instance did not enable is invalid

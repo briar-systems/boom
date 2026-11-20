@@ -1,61 +1,58 @@
 [project]
 id = "compute"
 version = "0.1.0"
-# a stage reaching buffers by address needs mach 6.10.1 (mach#4401)
-mach = "^6.10.1"
+mach = "^7"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-isa = "x86_64"
-os  = "linux"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "linux"
+env  = "gnu"
+abi  = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os  = "linux"
-abi = "aapcs64"
+arch = "aarch64"
+sys  = "linux"
+env  = "gnu"
+abi  = "aapcs64"
 
 [target.windows]
-isa = "x86_64"
-os  = "windows"
-abi = "win64"
+arch = "x86_64"
+sys  = "windows"
+abi  = "win64"
 
 [target.darwin]
-isa = "x86_64"
-os  = "darwin"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "darwin"
+abi  = "sysv64"
 
 # the game's own shaders, built for the oldest vulkan environment boom runs on
 [target.spirv]
-isa = "spirv"
-os  = "freestanding"
-abi = "spirv"
-env = "vulkan1.0"
+arch = "spirv"
+sys  = "vulkan"
+abi  = "shader"
+env  = "vulkan1.0"
 
 # the stages that reach buffers by address, for a device that gives them one:
 # vulkan 1.2, where boom enables bufferDeviceAddress
 [target.spirv-address]
-isa        = "spirv"
-os         = "freestanding"
-abi        = "spirv"
+arch       = "spirv"
+sys        = "vulkan"
+abi        = "shader"
 env        = "vulkan1.2"
-extensions = ["buffer_device_address"]
+ext        = ["PhysicalStorageBufferAddresses"]
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 # the embeds name the stage artifacts, so requiring them builds the modules
 # before the program that carries them
@@ -63,39 +60,39 @@ float_reassoc = false
 default = true
 kind = "bin"
 entry = "bin/main.mach"
-out = "bin/compute{artifact.suffix}"
+out = "{project.work}/bin/compute{artifact.suffix}"
 targets = ["linux-x86_64", "linux-arm64", "windows", "darwin"]
 link = []
 need = ["artifact.stage-*"]
 
 [artifact.stage-step_comp]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/step_comp.mach"
-out = "spv/step_comp{artifact.suffix}"
+out = "{project.work}/spv/step_comp{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.stage-shard_comp]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/shard_comp.mach"
-out = "spv/shard_comp{artifact.suffix}"
+out = "{project.work}/spv/shard_comp{artifact.suffix}"
 targets = ["spirv-address"]
 link = []
 need = []
 
 [artifact.stage-cells_vert]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/cells_vert.mach"
-out = "spv/cells_vert{artifact.suffix}"
+out = "{project.work}/spv/cells_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.stage-cells_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/cells_frag.mach"
-out = "spv/cells_frag{artifact.suffix}"
+out = "{project.work}/spv/cells_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
@@ -105,4 +102,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v9.0.0"
+ref = "branch/dev"

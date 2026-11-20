@@ -153,11 +153,11 @@ var atlas_pixels: [4][65536]u8;
 var readback: [518400]u8;
 
 # ---
-# renderer: the window's renderer, which owns the device
-# quad:     a unit quad in XY, drawn for every sprite and every full-target pass
-# gbuf:     albedo, packed normal and material, material, emissive
-# light:    the deferred lighting accumulation
-# scene:    the forward reference picture, which is what reaches the window
+# renderer:   the window's renderer, which owns the device
+# quad:       a unit quad in XY, drawn for every sprite and every full-target pass
+# gbuf:       albedo, packed normal and material, material, emissive
+# light:      the deferred lighting accumulation
+# scene:      the forward reference picture, which is what reaches the window
 # bloom_a/b:  threshold and blur, at half the G-buffer
 # probe1/2/3: copies of G-buffer attachments 1, 2 and 3, so they can be read
 rec Game {

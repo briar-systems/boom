@@ -3,8 +3,8 @@
 # re-exports the engine modules a game consumes: the app hooks, the
 # context and its lifecycle, the run loop, timing and input utilities,
 # shared math, audio, and the graphics renderer.
-# consumers import this as `use boom;`, or reach a subsystem directly,
-# e.g. `use boom.graphics;` or `use boom.math;`.
+# consumers import a subsystem by its source path, e.g. `use boom.graphics;`
+# or `use boom.math;`.
 
 use std.runtime;
 

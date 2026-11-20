@@ -1,29 +1,31 @@
 [project]
 id = "lighting"
 version = "0.1.0"
-mach = "^6"
+mach = "^7"
 src = "src"
-out = "out/{target.name}/{profile.name}"
+work = "out/{target.name}/{profile.name}"
 
 [target.linux-x86_64]
-isa = "x86_64"
-os  = "linux"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "linux"
+env  = "gnu"
+abi  = "sysv64"
 
 [target.linux-arm64]
-isa = "aarch64"
-os  = "linux"
-abi = "aapcs64"
+arch = "aarch64"
+sys  = "linux"
+env  = "gnu"
+abi  = "aapcs64"
 
 [target.windows]
-isa = "x86_64"
-os  = "windows"
-abi = "win64"
+arch = "x86_64"
+sys  = "windows"
+abi  = "win64"
 
 [target.darwin]
-isa = "x86_64"
-os  = "darwin"
-abi = "sysv64"
+arch = "x86_64"
+sys  = "darwin"
+abi  = "sysv64"
 
 # the prototype's own shaders, built as spirv artifacts the example embeds.
 # one vertex stage serves every fragment stage: every pass here draws quads
@@ -31,95 +33,91 @@ abi = "sysv64"
 # modules separately, so the same compiled vertex module is handed to each
 # Shader the example builds.
 [target.spirv]
-isa = "spirv"
-os  = "freestanding"
-abi = "spirv"
-env = "vulkan1.0"
+arch = "spirv"
+sys  = "vulkan"
+abi  = "shader"
+env  = "vulkan1.0"
 
 [profile.debug]
 default = true
-opt = 0
+optimize = false
 debug = true
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [profile.release]
-opt = 2
+optimize = true
 debug = false
 simd = "scalarize"
-vectorize = false
-float_reassoc = false
 
 [artifact.lighting]
 default = true
 kind = "bin"
 entry = "bin/main.mach"
-out = "bin/lighting{artifact.suffix}"
+out = "{project.work}/bin/lighting{artifact.suffix}"
 targets = ["linux-x86_64", "linux-arm64", "windows", "darwin"]
 link = []
 need = ["artifact.shader-*"]
 
 [artifact.shader-quad_vert]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/quad_vert.mach"
-out = "spv/quad_vert{artifact.suffix}"
+out = "{project.work}/spv/quad_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-sprite_vert]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/sprite_vert.mach"
-out = "spv/sprite_vert{artifact.suffix}"
+out = "{project.work}/spv/sprite_vert{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-gbuf_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/gbuf_frag.mach"
-out = "spv/gbuf_frag{artifact.suffix}"
+out = "{project.work}/spv/gbuf_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-light_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/light_frag.mach"
-out = "spv/light_frag{artifact.suffix}"
+out = "{project.work}/spv/light_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-fwd_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/fwd_frag.mach"
-out = "spv/fwd_frag{artifact.suffix}"
+out = "{project.work}/spv/fwd_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-copy_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/copy_frag.mach"
-out = "spv/copy_frag{artifact.suffix}"
+out = "{project.work}/spv/copy_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-bloom_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/bloom_frag.mach"
-out = "spv/bloom_frag{artifact.suffix}"
+out = "{project.work}/spv/bloom_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
 
 [artifact.shader-two_frag]
-kind = "bin"
+kind = "module"
 entry = "bin/shaders/two_frag.mach"
-out = "spv/two_frag{artifact.suffix}"
+out = "{project.work}/spv/two_frag{artifact.suffix}"
 targets = ["spirv"]
 link = []
 need = []
@@ -129,4 +127,4 @@ path = "../.."
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-ref = "tag/v9.0.0"
+ref = "branch/dev"

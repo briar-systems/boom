@@ -18,15 +18,15 @@ rec Args {
     tint: f32x4;
 }
 
-#[sampler(0, 1)]
+#[gpu.sampler(0, 1)]
 var source: tex.Sampler2D;
-#[uniform(0, 4)]
+#[gpu.uniform(0, 4)]
 var args:   Args;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_uv: f32x2;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_colour: f32x4;
 
 # A nine-tap tent along one axis, run once horizontally and once vertically.
@@ -47,7 +47,7 @@ fun blur(uv: f32x2, sx: f32, sy: f32) f32x4 {
     ret acc;
 }
 
-#[stage("fragment")]
+#[gpu.stage("fragment")]
 fun frag_main() {
     val c:    f32x4 = tex.sample_2d(source, in_uv);
     val luma: f32   = c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;

@@ -399,7 +399,7 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
     val tie: err[allo.Error] = arena.init(?tar, ?tpa, 65536);
     if (sel tie.err) { ret res[Model, Error].err{Error.alloc{tie.err}}; }
     var taa: allo.Allocator;
-    val tam: err[allo.Error] = arena.make(?taa, ?tar);
+    val tam: err[allo.Error] = arena.allocator(?taa, ?tar);
     if (sel tam.err) {
         arena.dnit(?tar);
         ret res[Model, Error].err{Error.alloc{tam.err}};
@@ -453,7 +453,7 @@ pub fun model_from_glb(d: *Device, data: *u8, len: usize) res[Model, Error] {
         ret res[Model, Error].err{Error.alloc{pie.err}};
     }
     var paa: allo.Allocator;
-    val pam: err[allo.Error] = arena.make(?paa, ?model.arena);
+    val pam: err[allo.Error] = arena.allocator(?paa, ?model.arena);
     if (sel pam.err) {
         abandon(d, ?model, ?tar, true);
         ret res[Model, Error].err{Error.alloc{pam.err}};
@@ -744,7 +744,7 @@ test build__skeleton_and_animations_from_glb {
     var ar: arena.Arena;
     if (!ok_alloc(arena.init(?ar, ?pa, 65536))) { ret 91; }
     var aa: allo.Allocator;
-    if (!ok_alloc(arena.make(?aa, ?ar))) {
+    if (!ok_alloc(arena.allocator(?aa, ?ar))) {
         arena.dnit(?ar);
         ret 92;
     }
@@ -856,7 +856,7 @@ fun fixture_named_model() res[Model, FixtureError] {
     if (sel pie.err) { ret res[Model, FixtureError].err{FixtureError.alloc{pie.err}}; }
     fin { arena.dnit(?parse_arena); }
     var parse_a: allo.Allocator;
-    val pam:     err[allo.Error] = arena.make(?parse_a, ?parse_arena);
+    val pam:     err[allo.Error] = arena.allocator(?parse_a, ?parse_arena);
     if (sel pam.err) { ret res[Model, FixtureError].err{FixtureError.alloc{pam.err}}; }
     val parsed: res[gp.Loaded, gp.LoadError] = gp.load_glb(?glb[0], n, ?parse_a);
     if (sel parsed.err) { ret res[Model, FixtureError].err{FixtureError.gltf{parsed.err}}; }
@@ -878,7 +878,7 @@ fun fixture_named_model() res[Model, FixtureError] {
         if (!kept) { arena.dnit(?model.arena); }
     }
     var persistent: allo.Allocator;
-    val mam:        err[allo.Error] = arena.make(?persistent, ?model.arena);
+    val mam:        err[allo.Error] = arena.allocator(?persistent, ?model.arena);
     if (sel mam.err) { ret res[Model, FixtureError].err{FixtureError.alloc{mam.err}}; }
     val built: err[Error] = build_skeleton(?loaded, ?parse_a, ?model.skeleton);
     if (sel built.err) { ret res[Model, FixtureError].err{FixtureError.build{built.err}}; }

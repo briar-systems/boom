@@ -49,24 +49,24 @@ rec Lights {
     items: [128]f32x4;
 }
 
-#[sampler(0, 1)]
+#[gpu.sampler(0, 1)]
 var albedo: tex.Sampler2D;
-#[uniform(0, 4)]
+#[gpu.uniform(0, 4)]
 var params: Params;
-#[storage(0, 8)]
+#[gpu.storage(0, 8)]
 var lights: Lights;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_normal: f32x3;
-#[input(1)]
+#[gpu.input(1)]
 var in_uv:     f32x2;
-#[input(2)]
+#[gpu.input(2)]
 var in_world:  f32x3;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_colour: f32x4;
 
-#[stage("fragment")]
+#[gpu.stage("fragment")]
 fun frag_main() {
     # PROBE MODE. With a non-negative index in control.y this writes one entry
     # of the buffer out as a colour and shades nothing. That is what lets the

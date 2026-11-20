@@ -34,28 +34,28 @@ rec Palette {
     columns: [512]f32x4;
 }
 
-#[uniform(0, 0)]
+#[gpu.uniform(0, 0)]
 var matrices: Matrices;
-#[storage(0, 3)]
+#[gpu.storage(0, 3)]
 var palette:  Palette;
 
-#[input(0)]
+#[gpu.input(0)]
 var in_position: f32x3;
-#[input(1)]
+#[gpu.input(1)]
 var in_normal:   f32x3;
-#[input(2)]
+#[gpu.input(2)]
 var in_uv:       f32x2;
-#[input(5)]
+#[gpu.input(5)]
 var in_joints:   u32x4;
-#[input(6)]
+#[gpu.input(6)]
 var in_weights:  f32x4;
 
-#[output(0)]
+#[gpu.output(0)]
 var out_normal: f32x3;
-#[output(1)]
+#[gpu.output(1)]
 var out_uv:     f32x2;
 
-#[builtin("position")]
+#[gpu.builtin("position")]
 var position: f32x4;
 
 # Transform a point by a 4x4 matrix given as its four columns.
@@ -74,7 +74,7 @@ fun mul_dir(c0: f32x4, c1: f32x4, c2: f32x4, v: f32x3) f32x3 {
     ret f32x3{r[0], r[1], r[2]};
 }
 
-#[stage("vertex")]
+#[gpu.stage("vertex")]
 fun vert_main() {
     # Skinning is applied to the point, not to the matrices. Blending the four
     # joint matrices and then transforming once would be the same result, since

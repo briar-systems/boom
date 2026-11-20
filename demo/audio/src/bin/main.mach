@@ -114,7 +114,7 @@ fun build_wav(bytes: *u8, rate: u32, chans: u16, freq: f32, ms: usize) usize {
 
     var f: usize = 0;
     for (f < frames) {
-        val phase: f32 = 6.2831853 * freq * (f::f32 / rate::f32);
+        val phase: f32 = 6.2831855 * freq * (f::f32 / rate::f32);
         # A quarter of full scale, so mixing two voices cannot clip.
         val v: i32   = (gm.sinf(phase) * 8000.0)::i32;
         var c: usize = 0;
