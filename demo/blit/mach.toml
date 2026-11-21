@@ -57,6 +57,12 @@ ref = "branch/dev"
 git = "https://github.com/briar-systems/blit"
 ref = "branch/dev"
 
+# the gallery reaches std and toml through blit's own dep/, which a consumer
+# never realizes, so this root selects both
+[dep.toml]
+git = "https://github.com/briar-systems/mach-toml"
+ref = "branch/dev"
+
 # blit's demo gallery, from the blit checkout boom pins (realized by
 # `mach dep pull .` at boom's root), drawn here by boom's renderer
 [dep.gallery]
