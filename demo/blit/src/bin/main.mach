@@ -426,7 +426,8 @@ fun build_check(g: *Game) {
     bctx.end(ui);
 }
 
-fun measure(shot: *u8) Shot {
+# red: the red channel's byte offset, 2 when the target comes back blue first
+fun measure(shot: *u8, red: usize) Shot {
     var s: Shot;
     s.top    = CHECK_H;
     s.bottom = -1;
@@ -446,7 +447,7 @@ fun measure(shot: *u8) Shot {
         y = y + 1;
     }
     val c: usize = (44::usize * CHECK_W::usize + 460) * 4;
-    s.red = shot[c] > 200 && shot[c + 1] < 60 && shot[c + 2] < 60;
+    s.red = shot[c + red] > 200 && shot[c + 1] < 60 && shot[c + 2 - red] < 60;
     val n: usize = (44::usize * CHECK_W::usize + 496) * 4;
     s.green = shot[n] < 60 && shot[n + 1] > 200 && shot[n + 2] < 60;
     val row:   usize = 80::usize * CHECK_W::usize;
@@ -518,7 +519,9 @@ fun draw_check(ctx: *Context, g: *Game) {
         abort(ctx, "target read error", rr.err);
         ret;
     }
-    g.shots[g.stage] = measure(g.shot);
+    var red: usize = 0;
+    if (gfx.render_target_bgra(?g.target)) { red = 2; }
+    g.shots[g.stage] = measure(g.shot, red);
     g.stage          = g.stage + 1;
     if (g.stage == 2) {
         judge(g);
