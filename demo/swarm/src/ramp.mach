@@ -1,0 +1,116 @@
+# Finding the limit: grow the swarm until frames miss a budget, then hold there.
+#
+# The ramp watches the frame time over short windows. Well under budget it grows
+# the swarm by a quarter, just under it by a twentieth, and over it shrinks by a
+# sixth, so it closes in fast from far away and then hovers at the edge. The
+# largest count whose window held the budget is the answer it keeps.
+#
+# A window in which the renderer dropped draws is judged over budget whatever
+# its frame time, because a frame that skipped part of the swarm is cheap for
+# the wrong reason. That is where the draw call path runs out first.
+#
+# Each change gets a moment to settle before it is judged, because the first
+# frames after a jump pay for buffers growing into their new size and would read
+# as slower than the count really is.
+
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use swarm.world.MAX_ENTITIES;
+
+# the fewest bodies the ramp goes down to
+pub val FLOOR: usize = 256;
+
+# seconds after a change before frames count
+val SETTLE: f32 = 0.25;
+
+# seconds of frames each judgement averages
+val JUDGE: f32 = 0.5;
+
+# one rung of the ramp: below a fraction of the budget, scale the count by a factor
+# ---
+# under: the fraction of the budget the window's average sits below
+# scale: what the count is multiplied by
+rec Rung {
+    under: f32;
+    scale: f32;
+}
+
+val RUNGS: [3]Rung = [3]Rung{
+    Rung{under: 0.7, scale: 1.25},
+    Rung{under: 1.0, scale: 1.05},
+    Rung{under: 1000000.0, scale: 0.85}
+};
+
+# the ramp's state
+# ---
+# on:     whether it drives the count
+# budget: the frame time to hold, in ms
+# held:   seconds since the last change
+# sum:    frame time summed in the judged part of the window
+# n:      frames summed
+# lost:   whether a judged frame dropped draws
+# best:   the largest count whose window held the budget
+# at:     that window's average frame time
+pub rec Ramp {
+    on:     bool;
+    budget: f32;
+    held:   f32;
+    sum:    f64;
+    n:      u32;
+    lost:   bool;
+    best:   usize;
+    at:     f32;
+}
+
+pub fun ramp_new(budget: f32) Ramp {
+    ret Ramp{on: false, budget: budget, held: 0.0, sum: 0.0, n: 0, lost: false, best: 0, at: 0.0};
+}
+
+# start judging afresh, as after the count changed by hand
+pub fun ramp_restart(r: *Ramp) {
+    r.held = 0.0;
+    r.sum  = 0.0;
+    r.n    = 0;
+    r.lost = false;
+}
+
+# forget the best count too, as when what is being measured changed
+pub fun ramp_forget(r: *Ramp) {
+    ramp_restart(r);
+    r.best = 0;
+    r.at   = 0.0;
+}
+
+# fold one frame into the ramp and say what the count should be
+# ---
+# r:       the ramp
+# frame:   the frame time just ended, in ms
+# dropped: whether the renderer dropped draws that frame
+# count:   the count the frame drew
+# ret:     the count to draw next
+pub fun ramp_frame(r: *Ramp, frame: f32, dropped: bool, count: usize) usize {
+    if (!r.on || frame <= 0.0) { ret count; }
+    r.held = r.held + frame / 1000.0;
+    if (r.held < SETTLE) { ret count; }
+    r.sum = r.sum + frame::f64;
+    r.n   = r.n + 1;
+    if (dropped)                 { r.lost = true; }
+    if (r.held < SETTLE + JUDGE) { ret count; }
+
+    var avg:  f32  = (r.sum / r.n::f64)::f32;
+    val lost: bool = r.lost;
+    ramp_restart(r);
+    if (lost) { avg = r.budget * 2.0; }
+    if (avg <= r.budget && count >= r.best) {
+        r.best = count;
+        r.at   = avg;
+    }
+    var k: usize = 0;
+    for (avg >= RUNGS[k].under * r.budget) { k = k + 1; }
+    var next: usize = (count::f32 * RUNGS[k].scale)::usize;
+    if (next < FLOOR)        { next = FLOOR; }
+    if (next > MAX_ENTITIES) { next = MAX_ENTITIES; }
+    ret next;
+}
