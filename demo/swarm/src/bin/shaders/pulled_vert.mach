@@ -1,0 +1,96 @@
+# The instanced vertex stage: every body in one draw, with no vertex input.
+#
+# Instance n is body n, read from the state buffers the step wrote, and its
+# vertices come from the shape buffer, starting at the vertex the pass names.
+# Each shape vertex is two f32x4, position and normal then uv, which is a
+# standard boom mesh vertex read as two vectors, so the draw call path's meshes
+# are built from the very same bytes.
+
+use sh: shader.math;
+use swarm.shade;
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+# the pass's block, swarm.scene.Look on the host
+# eye:    the camera, with the time in w
+# sky:    ambient light from above, with fog density in w
+# ground: ambient light from below, with the light count in w
+# shape:  the shape's first vertex, the size knob, the glow knob, the speed
+#         that reads as half hot
+rec Look {
+    eye:    f32x4;
+    sky:    f32x4;
+    ground: f32x4;
+    shape:  f32x4;
+}
+
+# swarm.shapes.SHAPE_VECS
+rec Shapes {
+    v: [12288]f32x4;
+}
+
+# swarm.world.MAX_ENTITIES
+rec Bodies {
+    v: [4194304]f32x4;
+}
+
+#[gpu.uniform(0, 0)]
+var matrices: Matrices;
+#[gpu.uniform(0, 4)]
+var look:     Look;
+
+#[gpu.storage(1, 0, "readonly")]
+var shapes: Shapes;
+#[gpu.storage(1, 1, "readonly")]
+var pos:    Bodies;
+#[gpu.storage(1, 2, "readonly")]
+var vel:    Bodies;
+
+#[gpu.builtin("vertex_index")]
+var vertex:   u32;
+#[gpu.builtin("instance_index")]
+var instance: u32;
+#[gpu.builtin("position")]
+var position: f32x4;
+
+#[gpu.output(0)]
+var out_world:  f32x3;
+#[gpu.output(1)]
+var out_normal: f32x3;
+#[gpu.output(2)]
+var out_colour: f32x4;
+
+#[gpu.stage("vertex")]
+fun vert_main() {
+    val k: u32   = look.shape[0]::u32 + vertex;
+    val a: f32x4 = shapes.v[k * 2];
+    val b: f32x4 = shapes.v[k * 2 + 1];
+    val p: f32x4 = pos.v[instance];
+    val v: f32x4 = vel.v[instance];
+
+    val axis:  f32x3 = shade.spin_axis(v[3]);
+    val angle: f32   = shade.spin_angle(v[3], look.eye[3]);
+    val c:     f32   = sh.cos(angle);
+    val s:     f32   = sh.sin(angle);
+    val local: f32x3 = shade.rotate(f32x3{a[0], a[1], a[2]}, axis, c, s);
+    val scale: f32   = shade.body_scale(v[3], p[3], look.shape[1]);
+    val world: f32x3 = f32x3{p[0], p[1], p[2]} + shade.times(local, scale);
+
+    out_world  = world;
+    out_normal = shade.rotate(f32x3{a[3], b[0], b[1]}, axis, c, s);
+    val speed: f32   = sh.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    val t:     f32   = shade.heat(speed, look.shape[3]);
+    val hue:   f32x3 = shade.palette(t);
+    out_colour = f32x4{hue[0], hue[1], hue[2], shade.emission(t, look.shape[2])};
+
+    position = matrices.mvp_0 * f32x4{world[0], world[0], world[0], world[0]} + matrices.mvp_1 * f32x4{world[1], world[1], world[1], world[1]} + matrices.mvp_2 * f32x4{world[2], world[2], world[2], world[2]} + matrices.mvp_3;
+}
