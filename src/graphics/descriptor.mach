@@ -60,15 +60,14 @@ use std.types.result.res;
 use std.types.size.usize;
 use vk.lib.vk;
 
-# The most draws one frame may issue.
-#
-# A line of text is one draw per glyph, so this is sized for a screenful of
-# them rather than for a handful of materials.
 # Slots in one block. A block is a descriptor pool, its sets, and one uniform
 # ring per frame in flight.
 pub val SLOTS_PER_BLOCK: usize = 512;
 
 # Blocks a frame may grow to, which is the real ceiling: 8192 draws.
+#
+# A line of text is one draw per glyph, so the ceiling is sized for a screenful
+# of them rather than for a handful of materials.
 pub val MAX_SLOT_BLOCKS: usize = 16;
 
 # Slots available before anything grows.
@@ -485,6 +484,14 @@ pub fun descriptors_used(d: *Descriptors) usize {
 
 pub fun descriptors_blocks(d: *Descriptors) usize {
     ret d.bcount;
+}
+
+# How many more slots this frame may take, growth included, before the block
+# ceiling turns a draw away.
+pub fun descriptors_left(d: *Descriptors) usize {
+    val ceiling: usize = MAX_SLOT_BLOCKS * SLOTS_PER_BLOCK;
+    if (!d.ready || d.used >= ceiling) { ret 0; }
+    ret ceiling - d.used;
 }
 
 # Add one block to a frame's palette ring.
@@ -905,6 +912,33 @@ test take__exhausts_without_wrapping {
 
     descriptors_begin_frame(?d);
     if (!took(descriptors_take(?d, ?v), 0)) { ret 3; }
+    ret 0;
+}
+
+test descriptors__left_counts_down_to_the_ceiling {
+    # a game budgeting its draws against a wrong count either loses its overlay
+    # to the ceiling or holds back draws the frame had room for
+    var d: Descriptors;
+    var v: Vk;
+    v.ready  = false;
+    d.ready  = true;
+    d.used   = 0;
+    d.bcount = 1;
+    val ceiling: usize = MAX_SLOT_BLOCKS * SLOTS_PER_BLOCK;
+    if (descriptors_left(?d) != ceiling) { ret 1; }
+
+    var i: usize = 0;
+    for (i < 3) {
+        if (!took(descriptors_take(?d, ?v), i)) { ret 2; }
+        i = i + 1;
+    }
+    if (descriptors_left(?d) != ceiling - 3) { ret 3; }
+
+    d.used = ceiling;
+    if (descriptors_left(?d) != 0) { ret 4; }
+    d.ready = false;
+    d.used  = 0;
+    if (descriptors_left(?d) != 0) { ret 5; }
     ret 0;
 }
 

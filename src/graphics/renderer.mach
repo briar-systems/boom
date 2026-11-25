@@ -111,6 +111,7 @@ use boom.graphics.descriptor.descriptors_bind_palette;
 use boom.graphics.descriptor.descriptors_bind_slot;
 use boom.graphics.descriptor.descriptors_dnit;
 use boom.graphics.descriptor.descriptors_init;
+use boom.graphics.descriptor.descriptors_left;
 use boom.graphics.descriptor.descriptors_take;
 use boom.graphics.descriptor.descriptors_take_palette;
 use boom.graphics.descriptor.descriptors_write_palette;
@@ -1489,6 +1490,22 @@ pub fun renderer_refused(r: *Renderer) usize {
 # sheets in the submission order.
 pub fun renderer_draws(r: *Renderer) usize {
     ret r.draws;
+}
+
+# Draws the open frame may still issue before the renderer drops them.
+#
+# Every draw takes one of the frame's uniform slots, in every pass: a mesh, a
+# pulled draw, a flush of 2D geometry and so every blit panel. The slots grow on
+# demand up to a fixed ceiling, so a scene that spends them all leaves none for
+# the overlay drawn after it, and the panel is what vanishes. A game issuing
+# draws by the thousand checks this as it goes and keeps back what its later
+# passes need. An upper bound: growing a block can still fail for memory.
+# ---
+# r:   the renderer
+# ret: draws left this frame, zero before the renderer is up
+pub fun renderer_draws_left(r: *Renderer) usize {
+    if (!r.ready_desc) { ret 0; }
+    ret descriptors_left(?r.desc);
 }
 
 # Storage barriers recorded in the most recent frame.

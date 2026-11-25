@@ -1,0 +1,363 @@
+# The swarm on the GPU, and the three ways it can be run and drawn.
+#
+# Each path is a different part of the engine taking the load:
+#
+#   gpu sim     a compute stage steps every body in the state buffers and one
+#               instanced draw pulls them straight back out, so nothing crosses
+#               from the CPU but a step's parameters. Its limit is the GPU's.
+#   cpu sim     the CPU steps the bodies, uploads both columns through boom's
+#               staging batch each frame, and the same instanced draw takes
+#               them. Its limit is the CPU's arithmetic and the upload.
+#   draw calls  the CPU steps the bodies and submits each one as a mesh draw
+#               of its own, spun and placed by a transform, culled and given a
+#               uniform slot by boom. Its limit is boom's per-draw path and the
+#               frame's slot ceiling, which every pass shares: the bodies stop
+#               short of it by what the passes after the scene need, and the
+#               rest are counted as held back rather than drawn.
+#
+# A path owns where the state lives, so switching paths places the swarm
+# afresh rather than carrying it across.
+
+use gfx:  boom.graphics;
+use gm:   boom.math;
+use allo: std.allocator;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use swarm.body;
+use swarm.shapes;
+use swarm.world;
+
+#[embed("{artifact.stage-step_comp.out}")]
+val STEP_SPV:   [_]u8;
+#[embed("{artifact.stage-pulled_vert.out}")]
+val PULLED_SPV: [_]u8;
+#[embed("{artifact.stage-mesh_vert.out}")]
+val MESH_SPV:   [_]u8;
+#[embed("{artifact.stage-lit_frag.out}")]
+val LIT_SPV:    [_]u8;
+
+# the paths, in the order the panel offers them
+pub val PATH_GPU:   usize  = 0;
+pub val PATH_CPU:   usize  = 1;
+pub val PATH_DRAWS: usize  = 2;
+pub val PATHS:      usize  = 3;
+pub val PATH_NAMES: [3]str = [3]str{"gpu sim", "cpu sim", "draw calls"};
+
+# the clear colour, which lit_frag's fog fades toward
+val BACKGROUND: [3]f32 = [3]f32{0.004, 0.005, 0.012};
+
+# steps one frame records at most, so a slow frame does not have to pay for
+# every tick it missed
+pub val MAX_STEPS: usize = 6;
+
+# workgroup size of step_comp
+val GROUP: usize = 128;
+
+# the speed that reads as half hot
+val HOT: f32 = 8.0;
+
+# ambient light from above and from below
+val SKY:    [3]f32 = [3]f32{0.06, 0.07, 0.12};
+val GROUND: [3]f32 = [3]f32{0.015, 0.01, 0.02};
+
+# the lights' markers: their shape, size and glow
+val MARKER:      usize = 2;
+val MARKER_SIZE: f32   = 0.22;
+val MARKER_GLOW: f32   = 4.0;
+
+# The pass's block, binding 4, as the stages read it. See Look in
+# src/bin/shaders/pulled_vert.mach.
+# ---
+# eye:    the camera, with the time in w
+# sky:    ambient light from above, with fog density in w
+# ground: ambient light from below, with the light count in w
+# shape:  the shape's first vertex, the size knob, the glow knob, the speed
+#         that reads as half hot
+pub rec Look {
+    eye:    [4]f32;
+    sky:    [4]f32;
+    ground: [4]f32;
+    shape:  [4]f32;
+}
+
+# what the scene is asked to draw this frame
+# ---
+# path:   which path runs it
+# count:  bodies to draw
+# shape:  which shape they take
+# size:   the size knob, in world units
+# glow:   the glow knob
+# fog:    fog density
+# lights: lights in the scene
+# time:   the time the bodies are drawn at
+# eye:    the camera's place
+# spare:  draws to leave for the passes after the scene
+pub rec View {
+    path:   usize;
+    count:  usize;
+    shape:  usize;
+    size:   f32;
+    glow:   f32;
+    fog:    f32;
+    lights: usize;
+    time:   f32;
+    eye:    gm.Vec3;
+    spare:  usize;
+}
+
+# the scene's resources
+# ---
+# shapes:    every shape's vertices
+# shape_buf: those vertices on the GPU, for the instanced draw
+# pos, vel: the bodies' state on the GPU
+# params:   a step's parameters on the GPU
+# step:     the compute stage
+# pulled:   the instanced draw's program
+# meshed:   the draw call path's program
+# meshes:   every shape as a mesh, for the draw call path
+# material: the one material every draw names
+# bodies:   the bodies' state on the CPU
+# lights:   this frame's lights
+# look:     this frame's block
+# writes:   one upload, reused
+pub rec Scene {
+    shapes:    shapes.Shapes;
+    shape_buf: gfx.StorageBuffer;
+    pos:       gfx.StorageBuffer;
+    vel:       gfx.StorageBuffer;
+    params:    gfx.StorageBuffer;
+    step:      gfx.Compute;
+    pulled:    gfx.Shader;
+    meshed:    gfx.Shader;
+    meshes:    [6]gfx.Mesh;
+    material:  gfx.Material;
+    bodies:    body.Bodies;
+    lights:    [256]world.Light;
+    look:      Look;
+    writes:    gfx.BufferWrite;
+}
+
+# make the scene's resources against the renderer's device
+pub fun scene_make(s: *Scene, a: *allo.Allocator, r: *gfx.Renderer) err[gfx.Error] {
+    val d:     *gfx.Device     = gfx.renderer_device(r);
+    val built: err[allo.Error] = shapes.shapes_make(?s.shapes, a);
+    if (sel built.err) { ret err[gfx.Error].err{gfx.Error.alloc{built.err}}; }
+    val held: err[allo.Error] = body.bodies_make(?s.bodies, a, world.MAX_ENTITIES);
+    if (sel held.err) { ret err[gfx.Error].err{gfx.Error.alloc{held.err}}; }
+
+    val shape_bytes: usize                             = shapes.SHAPE_VECS * 16;
+    val sb:          res[gfx.StorageBuffer, gfx.Error] = gfx.storage_buffer(d, shape_bytes);
+    if (sel sb.err) { ret err[gfx.Error].err{sb.err}; }
+    s.shape_buf = sb.ok;
+    val up: err[gfx.Error] = gfx.storage_buffer_upload(d, ?s.shape_buf, 0, s.shapes.data:~*u8, shape_bytes);
+    if (sel up.err) { ret up; }
+
+    val state_bytes: usize                             = world.MAX_ENTITIES * 16;
+    val pb:          res[gfx.StorageBuffer, gfx.Error] = gfx.storage_buffer(d, state_bytes);
+    if (sel pb.err) { ret err[gfx.Error].err{pb.err}; }
+    s.pos = pb.ok;
+    val vb: res[gfx.StorageBuffer, gfx.Error] = gfx.storage_buffer(d, state_bytes);
+    if (sel vb.err) { ret err[gfx.Error].err{vb.err}; }
+    s.vel = vb.ok;
+    val qb: res[gfx.StorageBuffer, gfx.Error] = gfx.storage_buffer(d, $size_of(world.Params));
+    if (sel qb.err) { ret err[gfx.Error].err{qb.err}; }
+    s.params = qb.ok;
+
+    val cs: err[gfx.Error] = gfx.compute(?s.step, d, ?STEP_SPV[0], $length_of(STEP_SPV));
+    if (sel cs.err) { ret cs; }
+    val ps: err[gfx.Error] = gfx.shader(?s.pulled, ?PULLED_SPV[0], $length_of(PULLED_SPV), ?LIT_SPV[0],
+        $length_of(LIT_SPV));
+    if (sel ps.err) { ret ps; }
+    val ms: err[gfx.Error] = gfx.shader(?s.meshed, ?MESH_SPV[0], $length_of(MESH_SPV), ?LIT_SPV[0],
+        $length_of(LIT_SPV));
+    if (sel ms.err) { ret ms; }
+
+    var format: gfx.VertexFormat = gfx.vertex_format_standard();
+    var k:      usize            = 0;
+    for (k < shapes.SHAPES) {
+        val n:       usize                 = s.shapes.shapes[k].count;
+        val indices: res[*u32, allo.Error] = allo.allocate[u32](a, n);
+        if (sel indices.err) { ret err[gfx.Error].err{gfx.Error.alloc{indices.err}}; }
+        var i: usize = 0;
+        for (i < n) {
+            indices.ok[i] = i::u32;
+            i             = i + 1;
+        }
+        val m: res[gfx.Mesh, gfx.Error] = gfx.mesh(d, shapes.shape_vertices(?s.shapes, k)::ptr, n::i32, ?format,
+            indices.ok, n::i32);
+        val freed: err[allo.Error] = allo.deallocate[u32](a, indices.ok, n);
+        if (sel m.err)     { ret err[gfx.Error].err{m.err}; }
+        if (sel freed.err) { ret err[gfx.Error].err{gfx.Error.alloc{freed.err}}; }
+        s.meshes[k] = m.ok;
+        k           = k + 1;
+    }
+    s.material = gfx.material();
+    ret err[gfx.Error].ok{};
+}
+
+pub fun scene_free(s: *Scene, a: *allo.Allocator, r: *gfx.Renderer) err[allo.Error] {
+    val d: *gfx.Device = gfx.renderer_device(r);
+    var k: usize       = 0;
+    for (k < shapes.SHAPES) {
+        gfx.mesh_delete(d, ?s.meshes[k]);
+        k = k + 1;
+    }
+    gfx.shader_delete(?s.meshed, d);
+    gfx.shader_delete(?s.pulled, d);
+    gfx.compute_delete(?s.step, d);
+    gfx.storage_buffer_delete(d, ?s.params);
+    gfx.storage_buffer_delete(d, ?s.vel);
+    gfx.storage_buffer_delete(d, ?s.pos);
+    gfx.storage_buffer_delete(d, ?s.shape_buf);
+    val bodies: err[allo.Error] = body.bodies_free(?s.bodies, a);
+    val shaped: err[allo.Error] = shapes.shapes_free(?s.shapes, a);
+    if (sel bodies.err) { ret bodies; }
+    ret shaped;
+}
+
+# record steps on the GPU, between passes
+# ---
+# r:     the renderer, with a frame open
+# steps: the steps' parameters, in order
+# n:     how many
+pub fun scene_steps_gpu(s: *Scene, r: *gfx.Renderer, steps: *world.Params, n: usize) err[gfx.Error] {
+    var bound: [3]*gfx.StorageBuffer;
+    bound[0] = ?s.pos;
+    bound[1] = ?s.vel;
+    bound[2] = ?s.params;
+    var i: usize = 0;
+    for (i < n) {
+        val p:      *world.Params  = ?steps[i];
+        val groups: u32            = ((p.count[0]::usize + GROUP - 1) / GROUP)::u32;
+        val wrote:  err[gfx.Error] = gfx.renderer_buffer_update(r, ?s.params, 0, p:~*u8, $size_of(world.Params));
+        if (sel wrote.err) { ret wrote; }
+        if (groups > 0) {
+            val ran: err[gfx.Error] = gfx.renderer_dispatch(r, ?s.step, ?bound[0], 3, groups, 1, 1);
+            if (sel ran.err) { ret ran; }
+        }
+        i = i + 1;
+    }
+    ret err[gfx.Error].ok{};
+}
+
+# run steps on the CPU
+pub fun scene_steps_cpu(s: *Scene, steps: *world.Params, n: usize) {
+    var i: usize = 0;
+    for (i < n) {
+        body.bodies_step(?s.bodies, ?steps[i]);
+        i = i + 1;
+    }
+}
+
+# upload the CPU's first count bodies into the state buffers, between passes
+# ---
+# ret: bytes uploaded, or why the upload was refused
+pub fun scene_upload(s: *Scene, r: *gfx.Renderer, count: usize) res[usize, gfx.Error] {
+    if (count == 0) { ret res[usize, gfx.Error].ok{0}; }
+    val bytes: usize = count * 16;
+    s.writes = gfx.BufferWrite{offset: 0, src: s.bodies.pos:~*u8, len: bytes};
+    val p: err[gfx.Error] = gfx.renderer_buffer_update_batch(r, ?s.pos, ?s.writes, 1);
+    if (sel p.err) { ret res[usize, gfx.Error].err{p.err}; }
+    s.writes = gfx.BufferWrite{offset: 0, src: s.bodies.vel:~*u8, len: bytes};
+    val v: err[gfx.Error] = gfx.renderer_buffer_update_batch(r, ?s.vel, ?s.writes, 1);
+    if (sel v.err) { ret res[usize, gfx.Error].err{v.err}; }
+    ret res[usize, gfx.Error].ok{bytes * 2};
+}
+
+# move the lights to a time and hand them to the frame's storage buffer
+pub fun scene_lights(s: *Scene, r: *gfx.Renderer, v: *View) err[gfx.Error] {
+    if (v.lights == 0) { ret err[gfx.Error].ok{}; }
+    world.lights_at(v.time, v.lights, ?s.lights[0]);
+    ret gfx.renderer_storage_write(r, (?s.lights[0]):~*u8, v.lights * $size_of(world.Light));
+}
+
+fun set_look(s: *Scene, v: *View) {
+    val sh: *shapes.Shape = ?s.shapes.shapes[v.shape];
+    s.look = Look{
+        eye:    [4]f32{v.eye[0], v.eye[1], v.eye[2], v.time},
+        sky:    [4]f32{SKY[0], SKY[1], SKY[2], v.fog},
+        ground: [4]f32{GROUND[0], GROUND[1], GROUND[2], v.lights::f32},
+        shape:  [4]f32{sh.first::f32, v.size, v.glow, HOT},
+    };
+}
+
+# one body as the draw call path submits it
+fun draw_body(s: *Scene, p: *gfx.Pass, mesh: *gfx.Mesh, i: usize, v: *View, t: *gm.Transform) {
+    val k:    usize = i * 4;
+    val pos:  *f32  = s.bodies.pos;
+    val vel:  *f32  = s.bodies.vel;
+    val seed: f32   = vel[k + 3];
+    val sc:   f32   = body.body_scale(seed, pos[k + 3], v.size);
+    t.position = gm.vec3(pos[k], pos[k + 1], pos[k + 2]);
+    t.rotation = gm.quat_from_axis_angle(body.spin_axis(seed), body.spin_angle(seed, v.time));
+    t.scale    = gm.vec3(sc, sc, sc);
+    val h: f32    = body.heat(body.speed(vel[k], vel[k + 1], vel[k + 2]), HOT);
+    val c: [3]f32 = body.palette(h);
+    s.material.base_color = gm.vec4(c[0], c[1], c[2], body.emission(h, v.glow));
+    gfx.pass_draw_shaded(p, mesh, ?s.material, t, ?s.meshed);
+}
+
+# draw the frame's bodies and the lights' markers into an open scene pass
+# ---
+# s:   the scene
+# r:   the renderer the pass is open on
+# p:   the pass
+# v:   what to draw
+# ret: bodies held back at the frame's draw ceiling, or why the pass refused
+#      the block
+pub fun scene_draw(s: *Scene, r: *gfx.Renderer, p: *gfx.Pass, v: *View) res[usize, gfx.Error] {
+    set_look(s, v);
+    val set: err[gfx.Error] = gfx.pass_set_user(p, (?s.look):~*u8, $size_of(Look));
+    if (sel set.err) { ret res[usize, gfx.Error].err{set.err}; }
+
+    # the markers first, so the draw call path's ceiling never takes a light
+    var t: gm.Transform = gm.transform_identity();
+    t.scale = gm.vec3(MARKER_SIZE, MARKER_SIZE, MARKER_SIZE);
+    var i: usize = 0;
+    for (i < v.lights) {
+        val l: *world.Light = ?s.lights[i];
+        t.position            = gm.vec3(l.place[0], l.place[1], l.place[2]);
+        s.material.base_color = gm.vec4(l.tint[0], l.tint[1], l.tint[2], MARKER_GLOW);
+        gfx.pass_draw_shaded(p, ?s.meshes[MARKER], ?s.material, ?t, ?s.meshed);
+        i = i + 1;
+    }
+
+    if (v.count == 0) { ret res[usize, gfx.Error].ok{0}; }
+    if (v.path == PATH_DRAWS) {
+        val mesh: *gfx.Mesh = ?s.meshes[v.shape];
+        i = 0;
+        for (i < v.count && gfx.renderer_draws_left(r) > v.spare) {
+            draw_body(s, p, mesh, i, v, ?t);
+            i = i + 1;
+        }
+        ret res[usize, gfx.Error].ok{v.count - i};
+    }
+    var bound: [3]*gfx.StorageBuffer;
+    bound[0] = ?s.shape_buf;
+    bound[1] = ?s.pos;
+    bound[2] = ?s.vel;
+    var whole: gm.Transform = gm.transform_identity();
+    gfx.pass_draw_storage(p, ?bound[0], 3, s.shapes.shapes[v.shape].count::u32, v.count::u32, ?s.material,
+        ?whole, ?s.pulled);
+    ret res[usize, gfx.Error].ok{0};
+}
+
+# the scene pass seen through a camera, cleared to the colour the fog fades to
+pub fun scene_pass(camera: *gfx.Camera) gfx.PassDesc {
+    var desc: gfx.PassDesc = gfx.pass_scene(camera);
+    desc.clear = opt[gm.Vec4].some{gm.vec4(BACKGROUND[0], BACKGROUND[1], BACKGROUND[2], 1.0)};
+    ret desc;
+}
+
+# triangles one body of a shape draws
+pub fun scene_triangles(s: *Scene, shape: usize) usize {
+    ret s.shapes.shapes[shape].count / 3;
+}
+
+# a shape's name on the panel
+pub fun scene_shape_name(s: *Scene, shape: usize) str {
+    ret s.shapes.shapes[shape].name;
+}

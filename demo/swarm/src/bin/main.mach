@@ -1,0 +1,797 @@
+# How far boom's 3D path goes, as a lit swarm of spinning solids.
+#
+# Up to four million bodies stream around four wandering gravity wells inside a
+# soft spherical wall, each one a small solid that spins on its own axis and
+# heats from blue to white as it speeds up, lit by up to 256 coloured point
+# lights that orbit through the crowd. The camera circles the swarm and can be
+# dragged and zoomed.
+#
+# Three paths run the same swarm through different parts of the engine, and the
+# panel switches between them: a compute stage stepping the swarm on the GPU
+# for one instanced draw, the CPU stepping it and uploading the state for that
+# draw, or the CPU stepping it and submitting every body as a draw call of its
+# own. See swarm.scene for what each one stresses.
+#
+# A blit panel reads out what each frame cost: the frame rate and frame time
+# with a chart, how much geometry went to the renderer and how it took it, what
+# was uploaded, the CPU time in the simulation, the upload, recording the scene
+# and the panel itself, and the GPU time of the simulation and the scene where
+# the device can time them. Every load knob is a control on the panel.
+#
+# The ramp finds the limit: it grows the swarm until frames miss a budget, 60 Hz
+# by default, and keeps the largest count that held it. Measuring a limit needs
+# frames the display does not pace, so the demo asks for mailbox presentation
+# where the surface offers it, immediate otherwise, and the panel switches.
+#
+# The font is the DejaVu subset boom's own tests use, embedded from the copy of
+# boom this root resolves under dep/, so the demo runs from anywhere.
+#
+#   swarm                     the interactive demo
+#   swarm --path P            gpu, cpu or draws, gpu by default
+#   swarm --count N           start with N bodies
+#   swarm --shape T           the triangles a body has: 4, 12, 20, 80, 320, 1280
+#   swarm --lights N          point lights, 0 to 256
+#   swarm --size S            a body's size in world units, 0.12 by default
+#   swarm --ramp              start ramping toward the budget
+#   swarm --budget MS         the ramp's frame time budget, 16.67 by default
+#   swarm --present MODE      vsync, mailbox or immediate
+#   swarm --bench SECONDS     ramp for that long unpaced, print what held, exit
+#   swarm --frames N          draw N frames, print the readings, exit
+
+use bctx: blit.context;
+use boom.app.App;
+use boom.context.Config;
+use boom.context.Context;
+use boom.context.ContextError;
+use boom.context.Wake;
+use boom.context.context_error_message;
+use boom.context.context_fail;
+use boom.context.context_init;
+use boom.context.context_set_user;
+use boom.context.context_shutdown;
+use boom.context.context_stop;
+use boom.context.context_user;
+use boom.context.context_wake;
+use boom.engine.EngineError;
+use boom.engine.engine_error_message;
+use boom.engine.run;
+use gfx: boom.graphics;
+use inp: boom.input;
+use gm:  boom.math;
+use boom.window.WindowMode;
+use allo: std.allocator;
+use std.allocator.page;
+use std.chrono.duration.Duration;
+use std.chrono.duration.MILLISECOND;
+use std.chrono.duration.SECOND;
+use std.chrono.time.InstantClock;
+use std.chrono.time.instant;
+use std.print;
+use std.runtime;
+use tp: std.text.parse;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+use std.types.string.str;
+use std.types.string.str_equals;
+use swarm.hud;
+use swarm.ramp;
+use swarm.scene;
+use swarm.shapes;
+use swarm.stats;
+use swarm.world;
+
+#[embed("../../dep/boom/res/test/fonts/DejaVuSans-subset.ttf")]
+val DEJAVU: [_]u8;
+
+# the face's line height
+val PIXELS: f32 = 16.0;
+
+# how hard a shock throws the swarm outward, in units a second
+val SHOCK: f32 = 16.0;
+
+# the present mode a run asks for when no flag names one
+val PRESENT_ANY: usize = 3;
+
+# draws the scene leaves for the panel's pass; the panel is a few flushes of 2D
+# geometry, so this is ample
+val PANEL_DRAWS: usize = 256;
+
+# the paths as the --path flag names them, in scene's order
+val PATH_FLAGS: [3]str = [3]str{"gpu", "cpu", "draws"};
+
+# the camera: its field of view, how near and far it may be, how far it may
+# tilt, how much a pixel of drag turns it and a notch of the wheel zooms it
+val FOV:       f32 = 0.87266463;
+val DIST_LO:   f32 = 8.0;
+val DIST_HI:   f32 = 90.0;
+val PITCH_MAX: f32 = 1.4;
+val TURN:      f32 = 0.005;
+val ZOOM:      f32 = 0.08;
+
+# the camera circling the swarm
+# ---
+# yaw:      the turn about the vertical, radians
+# pitch:    the tilt above the horizon, radians
+# dist:     how far from the centre
+# dragging: whether a drag that began off the panel is turning it
+rec Orbiter {
+    yaw:      f32;
+    pitch:    f32;
+    dist:     f32;
+    dragging: bool;
+}
+
+# which bodies exist and which of them hold state
+#
+# Bodies below `from` have been placed and stepped. Bodies from `from` to
+# `live` are placed by the next step, so a frame draws only the first `from`.
+# ---
+# path:  the path whose buffers hold the state
+# live:  bodies alive
+# from:  where the next step starts placing
+# seed:  what the next placement is drawn from
+# time:  the simulation's time
+# owed:  ticks not yet stepped
+# shock: whether the next step throws the swarm outward
+rec Flock {
+    path:  usize;
+    live:  usize;
+    from:  usize;
+    seed:  u32;
+    time:  f32;
+    owed:  usize;
+    shock: bool;
+}
+
+rec Game {
+    a:        allo.Allocator;
+    renderer: gfx.Renderer;
+    typeface: gfx.Typeface;
+    glyphs:   gfx.BlitGlyphs;
+    ui:       bctx.Context;
+    input:    gfx.BlitInput;
+    blit:     gfx.BlitRenderer;
+    scene:    scene.Scene;
+    steps:    [6]world.Params;
+    flock:    Flock;
+    orbiter:  Orbiter;
+    camera:   gfx.Camera;
+    view:     scene.View;
+    sim_t:    gfx.GpuTimer;
+    scene_t:  gfx.GpuTimer;
+    timed:    bool;
+    device:   gfx.DeviceInfo;
+    stats:    stats.Stats;
+    ramp:     ramp.Ramp;
+    hud:      hud.Hud;
+    controls: hud.Controls;
+    readout:  hud.Readout;
+    asked:    usize;
+    shape:    usize;
+    elapsed:  f32;
+    shown:    bool;
+    ready:    bool;
+}
+
+var OPT_PATH:    usize = 0;
+var OPT_COUNT:   usize = 131072;
+var OPT_SHAPE:   str   = "20";
+var OPT_LIGHTS:  usize = 24;
+var OPT_SIZE:    f32   = 0.12;
+var OPT_RAMP:    bool  = false;
+var OPT_BUDGET:  f32   = 16.666668;
+var OPT_PRESENT: usize = 3;
+var OPT_BENCH:   f32   = 0.0;
+var OPT_FRAMES:  u64   = 0;
+
+fun abort(ctx: *Context, msg: str, e: gfx.Error) {
+    print.eprintlnf("{}: {}", msg, gfx.error_message(e));
+    context_fail(ctx, 1);
+}
+
+fun clampf(x: f32, lo: f32, hi: f32) f32 {
+    if (x < lo) { ret lo; }
+    if (x > hi) { ret hi; }
+    ret x;
+}
+
+fun present_mode(i: usize) gfx.PresentMode {
+    if (i == 1) { ret gfx.PresentMode.mailbox{}; }
+    if (i == 2) { ret gfx.PresentMode.immediate{}; }
+    ret gfx.PresentMode.vsync{};
+}
+
+fun present_index(m: gfx.PresentMode) usize {
+    if (sel m.mailbox)   { ret 1; }
+    if (sel m.immediate) { ret 2; }
+    ret 0;
+}
+
+# the unpaced mode the surface offers, mailbox first since it does not tear
+fun unpaced(r: *gfx.Renderer) usize {
+    if (gfx.renderer_present_mode_supported(r, gfx.PresentMode.mailbox{}))   { ret 1; }
+    if (gfx.renderer_present_mode_supported(r, gfx.PresentMode.immediate{})) { ret 2; }
+    ret 0;
+}
+
+# ask the renderer for a present mode, keeping the panel on what was asked
+fun ask_present(ctx: *Context, g: *Game, i: usize) {
+    g.asked            = i;
+    g.controls.present = i;
+    val set: err[gfx.Error] = gfx.renderer_set_present_mode(?g.renderer, present_mode(i));
+    if (sel set.err) { abort(ctx, "present mode error", set.err); }
+    g.readout.present = hud.PRESENT_NAMES[present_index(gfx.renderer_present_mode(?g.renderer))];
+}
+
+# grow or shrink the swarm to n bodies; new ones are placed by the next step
+fun flock_resize(f: *Flock, n: usize) {
+    f.live = n;
+    if (f.from > n) { f.from = n; }
+}
+
+# place every body afresh at the next step
+fun flock_respawn(f: *Flock) {
+    f.from = 0;
+    f.seed = f.seed + 1;
+}
+
+# move the swarm to a path, placing it afresh when its state changes sides
+fun flock_switch(f: *Flock, path: usize) {
+    if ((path == scene.PATH_GPU) != (f.path == scene.PATH_GPU)) { flock_respawn(f); }
+    f.path = path;
+}
+
+# the parameters of the steps owed, at most a frame's worth
+# ---
+# ret: how many were written into out
+fun flock_steps(f: *Flock, out: *world.Params) usize {
+    var n: usize = f.owed;
+    if (n > scene.MAX_STEPS) { n = scene.MAX_STEPS; }
+    f.owed = 0;
+    var i: usize = 0;
+    for (i < n) {
+        var shock: f32 = 0.0;
+        if (f.shock) { shock = SHOCK; }
+        f.time  = f.time + world.STEP;
+        out[i]  = world.params_at(f.time, f.live, f.from, f.seed, shock);
+        f.from  = f.live;
+        f.shock = false;
+        i       = i + 1;
+    }
+    ret n;
+}
+
+fun orbiter_eye(o: *Orbiter) gm.Vec3 {
+    val flat: f32 = o.dist * gm.cosf(o.pitch);
+    ret gm.vec3(flat * gm.sinf(o.yaw), o.dist * gm.sinf(o.pitch), flat * gm.cosf(o.yaw));
+}
+
+fun on_init(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    g.ready    = false;
+    g.shown    = true;
+    g.elapsed  = 0.0;
+    g.stats    = stats.stats_new();
+    g.ramp     = ramp.ramp_new(OPT_BUDGET);
+    g.ramp.on  = OPT_RAMP || OPT_BENCH > 0.0;
+    g.flock    = Flock{path: OPT_PATH, live: 0, from: 0, seed: 1, time: 0.0, owed: 1, shock: false};
+    g.orbiter  = Orbiter{yaw: 0.6, pitch: 0.32, dist: 34.0, dragging: false};
+    g.controls = hud.Controls{
+        path:    OPT_PATH,
+        want:    OPT_COUNT,
+        shape:   0,
+        size:    OPT_SIZE,
+        lights:  OPT_LIGHTS,
+        glow:    0.5,
+        fog:     0.012,
+        orbit:   0.12,
+        ramp:    0,
+        present: 0,
+        shock:   false,
+        reset:   false,
+        moved:   false,
+    };
+    if (g.ramp.on) { g.controls.ramp = 1; }
+    val made: err[allo.Error] = page.make(?g.a);
+    if (sel made.err) {
+        print.eprintln("could not make the page allocator");
+        context_fail(ctx, 1);
+        ret;
+    }
+
+    val rr: err[gfx.Error] = gfx.renderer_init(?g.renderer, ?ctx.window);
+    if (sel rr.err) {
+        abort(ctx, "renderer init error", rr.err);
+        ret;
+    }
+    val d: *gfx.Device = gfx.renderer_device(?g.renderer);
+    g.device = gfx.renderer_device_info(?g.renderer);
+
+    val tf: res[gfx.Typeface, gfx.Error] = gfx.typeface_from_static(?g.a, ?DEJAVU[0], $length_of(DEJAVU));
+    if (sel tf.err) {
+        abort(ctx, "typeface error", tf.err);
+        ret;
+    }
+    g.typeface = tf.ok;
+    val gs: res[gfx.BlitGlyphs, gfx.Error] = gfx.blit_glyphs(?g.a, ?g.typeface, PIXELS,
+        gfx.FontSizeMode.line_height{}, gfx.FontRaster.smooth{});
+    if (sel gs.err) {
+        abort(ctx, "glyph source error", gs.err);
+        ret;
+    }
+    g.glyphs = gs.ok;
+    val ui: err[allo.Error] = bctx.init(?g.ui, ?g.a);
+    if (sel ui.err) {
+        print.eprintln("could not make the blit context");
+        context_fail(ctx, 1);
+        ret;
+    }
+    bctx.set_glyph_source(?g.ui, gfx.blit_glyphs_source(?g.glyphs));
+    g.input = gfx.blit_input(?g.a, ctx);
+    val br: res[gfx.BlitRenderer, gfx.Error] = gfx.blit_renderer(d, ?g.ui);
+    if (sel br.err) {
+        abort(ctx, "blit renderer error", br.err);
+        ret;
+    }
+    g.blit = br.ok;
+
+    val sc: err[gfx.Error] = scene.scene_make(?g.scene, ?g.a, ?g.renderer);
+    if (sel sc.err) {
+        abort(ctx, "scene error", sc.err);
+        ret;
+    }
+    var k: usize = 0;
+    for (k < shapes.SHAPES) {
+        g.readout.shapes[k] = scene.scene_shape_name(?g.scene, k);
+        if (str_equals(g.readout.shapes[k], OPT_SHAPE)) { g.controls.shape = k; }
+        k = k + 1;
+    }
+    g.shape = g.controls.shape;
+
+    # a device that cannot write timestamps shows no GPU time rather than failing
+    val ts: err[gfx.Error] = gfx.renderer_timer(?g.renderer, ?g.sim_t);
+    val tc: err[gfx.Error] = gfx.renderer_timer(?g.renderer, ?g.scene_t);
+    g.timed = (sel ts.ok) && (sel tc.ok);
+
+    g.readout.count     = 0;
+    g.readout.triangles = scene.scene_triangles(?g.scene, g.shape);
+    g.readout.draws     = 0;
+    g.readout.dropped   = 0;
+    g.readout.culled    = 0;
+    g.readout.held      = 0;
+    g.readout.uploaded  = 0;
+    g.readout.device    = (?g.device.name[0])::str;
+    g.readout.kind      = gfx.device_type_name(g.device.device_type);
+    g.readout.present   = hud.PRESENT_NAMES[0];
+    g.readout.timed     = g.timed;
+    flock_resize(?g.flock, g.controls.want);
+
+    var want: usize = OPT_PRESENT;
+    if (want == PRESENT_ANY || OPT_BENCH > 0.0) { want = unpaced(?g.renderer); }
+    g.ready = true;
+    ask_present(ctx, g, want);
+}
+
+# turn and zoom the camera from the pointer, where the pointer is off the panel
+fun steer(g: *Game, in: *inp.Input) {
+    val o:    *Orbiter = ?g.orbiter;
+    val free: bool     = in.pointer_in && bctx.widget_at(?g.ui, in.mouse_x::f32, in.mouse_y::f32) == 0;
+    if (inp.button_pressed(in, inp.BUTTON_LEFT) && free) { o.dragging = true; }
+    if (!inp.button_down(in, inp.BUTTON_LEFT))           { o.dragging = false; }
+    if (o.dragging) {
+        o.yaw   = o.yaw - in.mouse_dx::f32 * TURN;
+        o.pitch = clampf(o.pitch + in.mouse_dy::f32 * TURN, -PITCH_MAX, PITCH_MAX);
+    }
+    or { o.yaw = o.yaw + g.controls.orbit * world.STEP; }
+    if (free && in.scroll_y != 0.0) {
+        o.dist = clampf(o.dist * (1.0 - ZOOM * in.scroll_y::f32), DIST_LO, DIST_HI);
+    }
+}
+
+fun on_tick(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) { ret; }
+    val in: *inp.Input    = ?ctx.input;
+    val c:  *hud.Controls = ?g.controls;
+    if (inp.key_pressed(in, inp.KEY_ESCAPE)) {
+        context_stop(ctx);
+        ret;
+    }
+    if (inp.key_pressed(in, inp.KEY_UP)) {
+        c.want  = c.want * 2;
+        c.moved = true;
+    }
+    if (inp.key_pressed(in, inp.KEY_DOWN)) {
+        c.want  = c.want / 2;
+        c.moved = true;
+    }
+    if (inp.key_pressed(in, inp.KEY_SPACE)) { c.ramp = 1 - c.ramp; }
+    if (inp.key_pressed(in, inp.KEY_R))     { c.reset = true; }
+    if (inp.key_pressed(in, inp.KEY_S))     { c.shock = true; }
+    if (inp.key_pressed(in, inp.KEY_TAB))   { g.shown = !g.shown; }
+    steer(g, in);
+    if (g.flock.owed < scene.MAX_STEPS) { g.flock.owed = g.flock.owed + 1; }
+}
+
+# act on what the panel and the keys changed this frame
+fun apply_controls(ctx: *Context, g: *Game) {
+    val c: *hud.Controls = ?g.controls;
+    g.ramp.on = c.ramp != 0;
+    # what the ramp found no longer describes a different path or shape
+    if (c.path != g.flock.path) {
+        flock_switch(?g.flock, c.path);
+        if (c.path != scene.PATH_GPU) { stats.stats_gpu_clear(?g.stats, stats.GPU_SIM); }
+        ramp.ramp_forget(?g.ramp);
+    }
+    if (c.shape != g.shape) {
+        g.shape             = c.shape;
+        g.readout.triangles = scene.scene_triangles(?g.scene, g.shape);
+        ramp.ramp_forget(?g.ramp);
+    }
+    if (c.moved)                     { ramp.ramp_restart(?g.ramp); }
+    if (c.want < ramp.FLOOR)         { c.want = ramp.FLOOR; }
+    if (c.want > world.MAX_ENTITIES) { c.want = world.MAX_ENTITIES; }
+    flock_resize(?g.flock, c.want);
+    if (c.reset) { flock_respawn(?g.flock); }
+    if (c.shock) { g.flock.shock = true; }
+    c.moved = false;
+    c.shock = false;
+    c.reset = false;
+    if (c.present != g.asked) { ask_present(ctx, g, c.present); }
+}
+
+fun build_ui(ctx: *Context, g: *Game, w: f32, h: f32) {
+    bctx.begin(?g.ui, gfx.blit_input_frame(?g.input, ctx), w, h);
+    if (g.shown) { hud.hud_build(?g.hud, ?g.ui, ?g.stats, ?g.readout, ?g.ramp, ?g.controls); }
+    bctx.end(?g.ui);
+    val served: err[allo.Error] = gfx.blit_input_serve(?g.input, ?g.ui, ctx);
+    if (sel served.err) { print.eprintln("could not copy the clipboard for a paste"); }
+    # the swarm never stands still, so every frame is drawn
+    context_wake(ctx, Wake.now{});
+}
+
+fun report(g: *Game, label: str) {
+    val st: *stats.Stats = ?g.stats;
+    val r:  *hud.Readout = ?g.readout;
+    print.printlnf("swarm {}: {} frames on {} ({}), present {}", label, st.frames, r.device, r.kind, r.present);
+    print.printlnf("path            {}, {} triangles a body, {} lights", scene.PATH_NAMES[g.flock.path],
+        r.shapes[g.shape], g.controls.lights);
+    print.printlnf("entities        {} ({} triangles)", r.count, r.count * r.triangles);
+    print.printlnf("last second     {} fps, {} ms avg, {} ms worst", st.fps, st.avg_ms, st.worst);
+    print.printlnf("cpu per frame   sim {} ms, upload {} ms, record {} ms, ui {} ms", st.cpu[stats.CPU_SIM],
+        st.cpu[stats.CPU_UPLOAD], st.cpu[stats.CPU_RECORD], st.cpu[stats.CPU_UI]);
+    if (!g.timed) { print.println("gpu per frame   not timed on this device"); }
+    or {
+        print.printf("gpu per frame  ");
+        var k: usize = 0;
+        for (k < stats.GPU_SECTIONS) {
+            if (st.gpu_on[k]) { print.printf(" {} {} ms", stats.GPU_NAMES[k], st.gpu[k]); }
+            or                { print.printf(" {} -", stats.GPU_NAMES[k]); }
+            k = k + 1;
+        }
+        print.println("");
+    }
+    print.printlnf("renderer        {} draws, {} dropped, {} culled, {} held back, {} bytes uploaded", r.draws,
+        r.dropped, r.culled, r.held, r.uploaded);
+    if (g.ramp.best != 0) {
+        print.printlnf("ramp            {} entities held {} ms (budget {} ms)", g.ramp.best, g.ramp.at,
+            g.ramp.budget);
+    }
+    or (g.ramp.on) { print.printlnf("ramp            nothing held the {} ms budget", g.ramp.budget); }
+}
+
+# end a timed run once it has gone on long enough
+fun finish(ctx: *Context, g: *Game) {
+    if (OPT_BENCH > 0.0 && g.elapsed >= OPT_BENCH) {
+        report(g, "bench");
+        context_stop(ctx);
+    }
+    or (OPT_FRAMES > 0 && g.stats.frames >= OPT_FRAMES) {
+        report(g, "run");
+        context_stop(ctx);
+    }
+}
+
+# step the swarm by the ticks owed, on whichever side holds it
+fun simulate(g: *Game) err[gfx.Error] {
+    val n: usize = flock_steps(?g.flock, ?g.steps[0]);
+    if (n == 0) { ret err[gfx.Error].ok{}; }
+    if (g.flock.path != scene.PATH_GPU) {
+        scene.scene_steps_cpu(?g.scene, ?g.steps[0], n);
+        ret err[gfx.Error].ok{};
+    }
+    if (g.timed) {
+        val began: err[gfx.Error] = gfx.renderer_timer_begin(?g.renderer, ?g.sim_t);
+        if (sel began.err) { ret began; }
+    }
+    val ran: err[gfx.Error] = scene.scene_steps_gpu(?g.scene, ?g.renderer, ?g.steps[0], n);
+    if (sel ran.err) { ret ran; }
+    if (g.timed)     { ret gfx.renderer_timer_end(?g.renderer, ?g.sim_t); }
+    ret err[gfx.Error].ok{};
+}
+
+# hand the frame's state and lights to the GPU
+fun upload(g: *Game) err[gfx.Error] {
+    g.readout.uploaded = 0;
+    if (g.flock.path == scene.PATH_CPU) {
+        val sent: res[usize, gfx.Error] = scene.scene_upload(?g.scene, ?g.renderer, g.flock.from);
+        if (sel sent.err) { ret err[gfx.Error].err{sent.err}; }
+        g.readout.uploaded = sent.ok;
+    }
+    ret scene.scene_lights(?g.scene, ?g.renderer, ?g.view);
+}
+
+# draw the swarm in a scene pass
+fun draw_scene(g: *Game, w: f32, h: f32) err[gfx.Error] {
+    g.camera = gfx.camera_perspective(g.view.eye, gm.vec3(0.0, 0.0, 0.0), FOV, w / h, 0.1, 400.0);
+    var desc: gfx.PassDesc = scene.scene_pass(?g.camera);
+    var pass: gfx.Pass     = gfx.pass_begin(?g.renderer, ?desc);
+    if (g.timed) {
+        val began: err[gfx.Error] = gfx.pass_timer_begin(?pass, ?g.scene_t);
+        if (sel began.err) {
+            gfx.pass_end(?pass);
+            ret began;
+        }
+    }
+    val drew: res[usize, gfx.Error] = scene.scene_draw(?g.scene, ?g.renderer, ?pass, ?g.view);
+    if (g.timed) {
+        val ended: err[gfx.Error] = gfx.pass_timer_end(?pass, ?g.scene_t);
+        if (sel ended.err) {
+            gfx.pass_end(?pass);
+            ret ended;
+        }
+    }
+    gfx.pass_end(?pass);
+    if (sel drew.err) { ret err[gfx.Error].err{drew.err}; }
+    g.readout.held = drew.ok;
+    ret err[gfx.Error].ok{};
+}
+
+fun on_draw(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) { ret; }
+    val w: f32 = ctx.window.width::f32;
+    val h: f32 = ctx.window.height::f32;
+    if (w <= 0.0 || h <= 0.0) { ret; }
+
+    val frame: f32 = stats.stats_frame(?g.stats);
+    g.elapsed = g.elapsed + frame / 1000.0;
+    if (g.ramp.on) {
+        val lost: bool = g.readout.dropped > 0 || g.readout.held > 0;
+        g.controls.want  = ramp.ramp_frame(?g.ramp, frame, lost, g.readout.count);
+        g.controls.moved = false;
+    }
+
+    val t_ui: InstantClock = instant();
+    build_ui(ctx, g, w, h);
+    val ui_ns: Duration = stats.since(t_ui);
+    apply_controls(ctx, g);
+
+    val up: err[gfx.Error] = gfx.blit_upload(?g.blit);
+    if (sel up.err) {
+        abort(ctx, "atlas upload error", up.err);
+        ret;
+    }
+    val br: res[bool, gfx.Error] = gfx.renderer_begin_frame(?g.renderer);
+    if (sel br.err) {
+        abort(ctx, "begin frame error", br.err);
+        ret;
+    }
+    if (!br.ok) { ret; }
+
+    val t_sim:  InstantClock   = instant();
+    val ran:    err[gfx.Error] = simulate(g);
+    val sim_ns: Duration       = stats.since(t_sim);
+    if (sel ran.err) {
+        abort(ctx, "simulation error", ran.err);
+        ret;
+    }
+
+    val c: *hud.Controls = ?g.controls;
+    g.view = scene.View{
+        path:   g.flock.path,
+        count:  g.flock.from,
+        shape:  g.shape,
+        size:   c.size,
+        glow:   c.glow,
+        fog:    c.fog,
+        lights: c.lights,
+        time:   g.flock.time,
+        eye:    orbiter_eye(?g.orbiter),
+        spare:  PANEL_DRAWS,
+    };
+    val t_up:  InstantClock   = instant();
+    val sent:  err[gfx.Error] = upload(g);
+    val up_ns: Duration       = stats.since(t_up);
+    if (sel sent.err) {
+        abort(ctx, "upload error", sent.err);
+        ret;
+    }
+
+    val t_rec:  InstantClock   = instant();
+    val drew:   err[gfx.Error] = draw_scene(g, w, h);
+    val rec_ns: Duration       = stats.since(t_rec);
+    if (sel drew.err) {
+        abort(ctx, "scene error", drew.err);
+        ret;
+    }
+
+    var desc:    gfx.PassDesc   = gfx.pass_overlay();
+    var overlay: gfx.Pass       = gfx.pass_begin(?g.renderer, ?desc);
+    val panel:   err[gfx.Error] = gfx.blit_draw(?g.blit, ?overlay);
+    gfx.pass_end(?overlay);
+    val er: err[gfx.Error] = gfx.renderer_end_frame(?g.renderer);
+    if (sel panel.err) {
+        abort(ctx, "blit draw error", panel.err);
+        ret;
+    }
+    if (sel er.err) {
+        abort(ctx, "end frame error", er.err);
+        ret;
+    }
+
+    g.readout.count   = g.view.count;
+    g.readout.draws   = gfx.renderer_draws(?g.renderer);
+    g.readout.dropped = gfx.renderer_dropped(?g.renderer);
+    g.readout.culled  = gfx.renderer_culled(?g.renderer);
+    if (g.timed) {
+        val took_sim: opt[Duration] = gfx.renderer_timer_take(?g.renderer, ?g.sim_t);
+        if (sel took_sim.some) { stats.stats_gpu(?g.stats, stats.GPU_SIM, stats.ms(took_sim.some)); }
+        val took_scene: opt[Duration] = gfx.renderer_timer_take(?g.renderer, ?g.scene_t);
+        if (sel took_scene.some) { stats.stats_gpu(?g.stats, stats.GPU_SCENE, stats.ms(took_scene.some)); }
+    }
+    stats.stats_cpu(?g.stats, stats.CPU_SIM, stats.ms(sim_ns));
+    stats.stats_cpu(?g.stats, stats.CPU_UPLOAD, stats.ms(up_ns));
+    stats.stats_cpu(?g.stats, stats.CPU_RECORD, stats.ms(rec_ns));
+    stats.stats_cpu(?g.stats, stats.CPU_UI, stats.ms(ui_ns));
+    finish(ctx, g);
+}
+
+fun on_dnit(ctx: *Context) {
+    val g: *Game = context_user(ctx)::*Game;
+    if (!g.ready) {
+        print.eprintln("setup did not finish; its resources are left to the process exit");
+        ret;
+    }
+    if (g.timed) {
+        gfx.renderer_timer_delete(?g.renderer, ?g.scene_t);
+        gfx.renderer_timer_delete(?g.renderer, ?g.sim_t);
+    }
+    val freed_scene: err[allo.Error] = scene.scene_free(?g.scene, ?g.a, ?g.renderer);
+    if (sel freed_scene.err) { print.eprintln("the scene could not be freed"); }
+    # the renderer before the context it draws, the context before its glyph
+    # source, the source before its typeface
+    gfx.blit_renderer_delete(?g.blit);
+    val unbound: err[allo.Error] = gfx.blit_input_delete(?g.input);
+    if (sel unbound.err) { print.eprintln("the blit input could not be freed"); }
+    val freed: err[allo.Error] = bctx.free(?g.ui);
+    if (sel freed.err) { print.eprintln("the blit context could not be freed"); }
+    val gone: err[gfx.Error] = gfx.blit_glyphs_delete(?g.glyphs);
+    if (sel gone.err) { abort(ctx, "glyph source delete error", gone.err); }
+    val tf: err[gfx.Error] = gfx.typeface_delete(?g.typeface);
+    if (sel tf.err) { abort(ctx, "typeface delete error", tf.err); }
+    val down: err[gfx.Error] = gfx.renderer_dnit(?g.renderer);
+    if (sel down.err) { abort(ctx, "renderer refused to shut down", down.err); }
+}
+
+fun usage() {
+    print.println("usage: swarm [--path gpu|cpu|draws] [--count N] [--shape 4|12|20|80|320|1280]");
+    print.println("             [--lights N] [--size S] [--ramp] [--budget MS]");
+    print.println("             [--present vsync|mailbox|immediate] [--bench SECONDS] [--frames N]");
+}
+
+# the index of v in names, n when it is not there
+fun index_of(names: *str, n: usize, v: str) usize {
+    var k: usize = 0;
+    for (k < n && !str_equals(names[k], v)) { k = k + 1; }
+    ret k;
+}
+
+# take a flag's value into the run's options, false when it is not understood
+fun take(flag: str, v: str) bool {
+    if (str_equals(flag, "--count") || str_equals(flag, "--frames") || str_equals(flag, "--lights")) {
+        val n: res[i64, tp.ParseError] = tp.parse_i64(v, 10);
+        if (sel n.err) { ret false; }
+        if (str_equals(flag, "--lights")) {
+            if (n.ok < 0 || n.ok > world.MAX_LIGHTS::i64) { ret false; }
+            OPT_LIGHTS = n.ok::usize;
+            ret true;
+        }
+        if (n.ok <= 0)                   { ret false; }
+        if (str_equals(flag, "--count")) { OPT_COUNT = n.ok::usize; }
+        or                               { OPT_FRAMES = n.ok::u64; }
+        ret true;
+    }
+    if (str_equals(flag, "--budget") || str_equals(flag, "--bench") || str_equals(flag, "--size")) {
+        val f: res[f64, tp.ParseError] = tp.parse_f64(v);
+        if (sel f.err)                    { ret false; }
+        if (f.ok <= 0.0)                  { ret false; }
+        if (str_equals(flag, "--budget")) { OPT_BUDGET = f.ok::f32; }
+        or (str_equals(flag, "--bench"))  { OPT_BENCH = f.ok::f32; }
+        or                                { OPT_SIZE = f.ok::f32; }
+        ret true;
+    }
+    if (str_equals(flag, "--shape")) {
+        OPT_SHAPE = v;
+        ret true;
+    }
+    if (str_equals(flag, "--path")) {
+        var paths: [3]str = PATH_FLAGS;
+        val k:     usize  = index_of(?paths[0], scene.PATHS, v);
+        if (k == scene.PATHS) { ret false; }
+        OPT_PATH = k;
+        ret true;
+    }
+    if (str_equals(flag, "--present")) {
+        var names: [3]str = hud.PRESENT_NAMES;
+        val k:     usize  = index_of(?names[0], 3, v);
+        if (k == 3) { ret false; }
+        OPT_PRESENT = k;
+        ret true;
+    }
+    ret false;
+}
+
+# read the flags into the run's options, false when one is not understood
+fun parse(argc: i64, argv: **u8) bool {
+    var i: i64 = 1;
+    for (i < argc) {
+        val arg: str = argv[i]:~str;
+        if (str_equals(arg, "--ramp")) { OPT_RAMP = true; }
+        or (i + 1 < argc) {
+            if (!take(arg, argv[i + 1]:~str)) { ret false; }
+            i = i + 1;
+        }
+        or { ret false; }
+        i = i + 1;
+    }
+    ret true;
+}
+
+#[symbol("main")]
+fun main(argc: i64, argv: **u8) i64 {
+    if (!parse(argc, argv)) {
+        usage();
+        ret 2;
+    }
+
+    var game: Game;
+    var app:  App;
+    app.f_init = on_init;
+    app.f_tick = on_tick;
+    app.f_draw = on_draw;
+    app.f_dnit = on_dnit;
+
+    var ctx: Context;
+    val cfg: Config = Config{
+        width:     1280,
+        height:    800,
+        title:     "boom: swarm",
+        fixed_dt:  SECOND / 60,
+        max_frame: 100 * MILLISECOND,
+        frame_dt:  0,
+        mode:      WindowMode.windowed{},
+    };
+    val started: err[ContextError] = context_init(?ctx, cfg);
+    if (sel started.err) {
+        print.eprintlnf("could not start: {}", context_error_message(started.err));
+        ret 1;
+    }
+    context_set_user(?ctx, (?game)::ptr);
+    val ran:    res[i64, EngineError] = run(?ctx, ?app);
+    val closed: err[ContextError]     = context_shutdown(?ctx);
+    if (sel closed.err) {
+        print.eprintlnf("shutdown refused: {}", context_error_message(closed.err));
+        ret 1;
+    }
+    if (sel ran.err) {
+        print.eprintlnf("the frame loop stopped: {}", engine_error_message(ran.err));
+        ret 1;
+    }
+    ret ran.ok;
+}

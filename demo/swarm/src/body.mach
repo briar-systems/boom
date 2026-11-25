@@ -1,0 +1,214 @@
+# The swarm's bodies on the CPU, for the paths that simulate there.
+#
+# This is the twin of step_comp and of swarm.shade: the same placement, the
+# same step and the same spin, size and colour, formula for formula, so a path
+# that simulates on the CPU draws the swarm the GPU path draws. A change to one
+# side that is not made to the other shows up as the paths disagreeing.
+#
+# State is laid out as the GPU buffers are, four floats a body: position with
+# age, then velocity with seed, so the instanced CPU path uploads it as it is.
+
+use gm:   boom.math;
+use allo: std.allocator;
+use std.types.error.err;
+use std.types.result.res;
+use std.types.size.usize;
+use swarm.world.Params;
+use swarm.world.hash;
+use swarm.world.unit;
+
+# the bodies' state
+# ---
+# pos: position and age, four floats a body
+# vel: velocity and seed, four floats a body
+# cap: bodies the columns hold
+pub rec Bodies {
+    pos: *f32;
+    vel: *f32;
+    cap: usize;
+}
+
+# allocate the columns, unfilled, for cap bodies
+pub fun bodies_make(b: *Bodies, a: *allo.Allocator, cap: usize) err[allo.Error] {
+    val got: res[*f32, allo.Error] = allo.allocate[f32](a, cap * 8);
+    if (sel got.err) { ret err[allo.Error].err{got.err}; }
+    b.pos = got.ok;
+    b.vel = ?got.ok[cap * 4];
+    b.cap = cap;
+    ret err[allo.Error].ok{};
+}
+
+pub fun bodies_free(b: *Bodies, a: *allo.Allocator) err[allo.Error] {
+    val done: err[allo.Error] = allo.deallocate[f32](a, b.pos, b.cap * 8);
+    b.pos = nil;
+    b.vel = nil;
+    b.cap = 0;
+    ret done;
+}
+
+# 1 / sqrt(x) by the bit trick and two Newton steps, near a part in a million,
+# which is what the GPU's inverse_sqrt promises and a fraction of what std's
+# exact square root costs
+fun rsqrt(x: f32) f32 {
+    var y: f32 = (0x5f375a86 - (x:~u32 >> 1)):~f32;
+    y = y * (1.5 - 0.5 * x * y * y);
+    ret y * (1.5 - 0.5 * x * y * y);
+}
+
+fun larger(a: f32, b: f32) f32 {
+    if (a > b) { ret a; }
+    ret b;
+}
+
+fun smaller(a: f32, b: f32) f32 {
+    if (a < b) { ret a; }
+    ret b;
+}
+
+# place body i, as step_comp's spawn does
+fun spawn(b: *Bodies, i: usize, p: *Params) {
+    val h1: u32 = hash(i::u32 ^ (p.count[2] * 0x9e3779b9));
+    val h2: u32 = hash(h1);
+    val h3: u32 = hash(h2);
+    val h4: u32 = hash(h3);
+    val h5: u32 = hash(h4);
+    val h6: u32 = hash(h5);
+    val dx: f32 = unit(h1) - 0.5;
+    val dy: f32 = unit(h2) - 0.5;
+    val dz: f32 = unit(h3) - 0.5;
+    val r:  f32 = p.bound[3] * larger(unit(h4), larger(unit(h5), unit(h6)))
+        * rsqrt(dx * dx + dy * dy + dz * dz + 0.000001);
+    val x: f32   = dx * r;
+    val y: f32   = dy * r;
+    val z: f32   = dz * r;
+    val k: usize = i * 4;
+    b.pos[k]     = x;
+    b.pos[k + 1] = y;
+    b.pos[k + 2] = z;
+    b.pos[k + 3] = 0.0;
+    b.vel[k]     = z * 0.4;
+    b.vel[k + 1] = 0.0;
+    b.vel[k + 2] = x * -0.4;
+    b.vel[k + 3] = unit(hash(h6));
+}
+
+# one step over the live bodies, placing those from p.count[1] on
+pub fun bodies_step(b: *Bodies, p: *Params) {
+    val live:  usize = p.count[0]::usize;
+    val from:  usize = p.count[1]::usize;
+    val dt:    f32   = p.head[0];
+    val soft:  f32   = p.head[2];
+    val keep:  f32   = p.head[3];
+    val wells: usize = p.count[3]::usize;
+    val w:     *f32  = ?p.wells[0];
+    var i:     usize = 0;
+    for (i < live) {
+        if (i >= from) {
+            spawn(b, i, p);
+            i = i + 1;
+            cnt;
+        }
+        val k:  usize = i * 4;
+        val px: f32   = b.pos[k];
+        val py: f32   = b.pos[k + 1];
+        val pz: f32   = b.pos[k + 2];
+        var ax: f32   = 0.0;
+        var ay: f32   = 0.0;
+        var az: f32   = 0.0;
+        var j:  usize = 0;
+        for (j < wells) {
+            val o:  usize = j * 8;
+            val dx: f32   = w[o] - px;
+            val dy: f32   = w[o + 1] - py;
+            val dz: f32   = w[o + 2] - pz;
+            val q:  f32   = rsqrt(dx * dx + dy * dy + dz * dz + soft);
+            val f:  f32   = w[o + 3] * q * q * q;
+            val s:  f32   = w[o + 7];
+            ax = ax + f * (dx + s * (w[o + 5] * dz - w[o + 6] * dy));
+            ay = ay + f * (dy + s * (w[o + 6] * dx - w[o + 4] * dz));
+            az = az + f * (dz + s * (w[o + 4] * dy - w[o + 5] * dx));
+            j  = j + 1;
+        }
+        val l2:   f32 = px * px + py * py + pz * pz;
+        val len:  f32 = l2 * rsqrt(l2 + 0.00000001);
+        val pull: f32 = p.bound[1] * larger(len - p.bound[0], 0.0) / larger(len, 0.0001);
+        val kick: f32 = p.bound[2] / larger(len, 0.5);
+        val vx:   f32 = (b.vel[k] + (ax - px * pull) * dt) * keep + px * kick;
+        val vy:   f32 = (b.vel[k + 1] + (ay - py * pull) * dt) * keep + py * kick;
+        val vz:   f32 = (b.vel[k + 2] + (az - pz * pull) * dt) * keep + pz * kick;
+        b.vel[k]     = vx;
+        b.vel[k + 1] = vy;
+        b.vel[k + 2] = vz;
+        b.pos[k]     = px + vx * dt;
+        b.pos[k + 1] = py + vy * dt;
+        b.pos[k + 2] = pz + vz * dt;
+        b.pos[k + 3] = b.pos[k + 3] + dt;
+        i            = i + 1;
+    }
+}
+
+fun fract(x: f32) f32 {
+    ret x - x::i64::f32;
+}
+
+fun pick(seed: f32, k: f32, o: f32) f32 {
+    ret fract(seed * k + o);
+}
+
+# the axis a body spins about; swarm.shade's spin_axis
+pub fun spin_axis(seed: f32) gm.Vec3 {
+    val x: f32 = pick(seed, 7.31, 0.13) * 2.0 - 1.0;
+    val y: f32 = pick(seed, 13.7, 0.71) * 2.0 - 1.0;
+    val z: f32 = pick(seed, 29.3, 0.37) * 2.0 - 1.0;
+    val n: f32 = rsqrt(x * x + y * y + z * z + 0.0001);
+    ret gm.vec3(x * n, y * n, z * n);
+}
+
+# how far a body has turned at a time; swarm.shade's spin_angle
+pub fun spin_angle(seed: f32, time: f32) f32 {
+    ret time * (0.5 + 2.5 * pick(seed, 13.7, 0.71)) + seed * 6.2831855;
+}
+
+# a body's scale; swarm.shade's body_scale
+pub fun body_scale(seed: f32, age: f32, size: f32) f32 {
+    ret size * (0.55 + 0.9 * pick(seed, 29.3, 0.37)) * smaller(age * 2.5, 1.0);
+}
+
+# how hot a speed reads; swarm.shade's heat
+pub fun heat(speed: f32, scale: f32) f32 {
+    ret speed / (speed + scale);
+}
+
+rec Stop {
+    at: f32;
+    c:  [3]f32;
+}
+
+val RAMP: [5]Stop = [5]Stop{
+    Stop{at: 0.0, c: [3]f32{0.02, 0.06, 0.45}},
+    Stop{at: 0.3, c: [3]f32{0.0, 0.45, 0.9}},
+    Stop{at: 0.55, c: [3]f32{0.75, 0.08, 0.7}},
+    Stop{at: 0.8, c: [3]f32{1.0, 0.35, 0.05}},
+    Stop{at: 1.0, c: [3]f32{1.0, 0.9, 0.6}}
+};
+
+# the colour ramp in linear light; swarm.shade's palette
+pub fun palette(t: f32) [3]f32 {
+    var k: usize = 1;
+    for (k < 4 && t >= RAMP[k].at) { k = k + 1; }
+    val a: *Stop = ?RAMP[k - 1];
+    val z: *Stop = ?RAMP[k];
+    val u: f32   = smaller((t - a.at) / (z.at - a.at), 1.0);
+    ret [3]f32{a.c[0] + (z.c[0] - a.c[0]) * u, a.c[1] + (z.c[1] - a.c[1]) * u, a.c[2] + (z.c[2] - a.c[2]) * u};
+}
+
+# how much a body glows by its own light; swarm.shade's emission
+pub fun emission(t: f32, glow: f32) f32 {
+    ret glow * t * t * 2.0;
+}
+
+# a velocity's length
+pub fun speed(x: f32, y: f32, z: f32) f32 {
+    val l2: f32 = x * x + y * y + z * z;
+    ret l2 * rsqrt(l2 + 0.00000001);
+}

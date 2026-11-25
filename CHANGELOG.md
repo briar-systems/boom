@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `renderer_draws_left(r)` reports the draws the open frame may still issue before its uniform slots run out. Every pass shares them, so a scene that spends them all used to leave the overlay drawn after it to vanish with only `renderer_dropped` as the sign (#326).
+- `demo/swarm`, a 3D stress test of up to four million lit bodies run through compute and an instanced pull, a CPU upload, or a draw call per body, with a blit panel of frame costs and load controls and a ramp that finds where frames miss a budget (#326).
+
 ## [0.50.0] - 2026-10-04
 
 ### Added
