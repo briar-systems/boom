@@ -1,0 +1,371 @@
+# The stats panel, a blit window over the swarm.
+#
+# The top half reads out what the frame cost and where: the frame rate and
+# frame time with a chart of the last few seconds, how much geometry the swarm
+# is, how the renderer took it, what crossed to the GPU, and the CPU and GPU
+# time behind it. The bottom half is the controls that change those numbers.
+#
+# Every line is formatted into its own buffer for the frame, so no line's text
+# is overwritten while blit may still hold it.
+
+use blit.chart;
+use bctx: blit.context;
+use blay: blit.layout;
+use bw:   blit.widget;
+use std.types.bool.bool;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+use swarm.ramp.Ramp;
+use swarm.scene.PATHS;
+use swarm.scene.PATH_NAMES;
+use swarm.shapes.SHAPES;
+use swarm.stats;
+use swarm.world.MAX_LIGHTS;
+
+# formatted lines per frame
+val LINES: usize = 24;
+
+# bytes per line, the terminator included
+val WIDTH: usize = 96;
+
+# the entity slider's range, as powers of two
+val LOG_LO: f32 = 8.0;
+val LOG_HI: f32 = 22.0;
+
+# the other sliders' ranges
+val SIZE_LO:  f32 = 0.03;
+val SIZE_HI:  f32 = 0.5;
+val FOG_HI:   f32 = 0.05;
+val ORBIT_HI: f32 = 0.6;
+
+# the present modes the panel offers, in the order of their segments
+pub val PRESENT_NAMES: [3]str = [3]str{"vsync", "mailbox", "immediate"};
+
+# what the panel lets the player change
+# ---
+# path:    which path runs the swarm, an index into PATH_NAMES
+# want:    the entity count asked for
+# shape:   which shape the bodies take
+# size:    a body's size, in world units
+# lights:  point lights in the scene
+# glow:    how brightly hot bodies glow
+# fog:     fog density
+# orbit:   the camera's turn, in radians a second
+# ramp:    whether the ramp drives the count, 0 or 1
+# present: the present mode asked for, an index into PRESENT_NAMES
+# shock:   whether shock was pressed, until acted on
+# reset:   whether reset was asked for, until acted on
+# moved:   whether the count was changed by hand, until acted on
+pub rec Controls {
+    path:    usize;
+    want:    usize;
+    shape:   usize;
+    size:    f32;
+    lights:  usize;
+    glow:    f32;
+    fog:     f32;
+    orbit:   f32;
+    ramp:    u8;
+    present: usize;
+    shock:   bool;
+    reset:   bool;
+    moved:   bool;
+}
+
+# what the panel reads out besides the frame times
+# ---
+# count:     bodies drawn
+# triangles: triangles one body draws
+# draws:     draws the renderer took in the last frame
+# dropped:   draws the renderer dropped in the last frame
+# culled:    draws the renderer culled in the last frame
+# held:      bodies the last frame held back at the frame's draw ceiling
+# uploaded:  bytes the last frame copied to the GPU for the swarm
+# shapes:    the shapes' names, in the order of their segments
+# device:    the GPU's name
+# kind:      what sort of device it is
+# present:   the present mode in use
+# timed:     whether the GPU can time ranges
+pub rec Readout {
+    count:     usize;
+    triangles: usize;
+    draws:     usize;
+    dropped:   usize;
+    culled:    usize;
+    held:      usize;
+    uploaded:  usize;
+    shapes:    [6]str;
+    device:    str;
+    kind:      str;
+    present:   str;
+    timed:     bool;
+}
+
+rec Line {
+    buf: [96]u8;
+    len: usize;
+}
+
+# the panel's frame scratch
+# ---
+# lines: this frame's formatted lines
+# used:  lines handed out this frame
+pub rec Hud {
+    lines: [24]Line;
+    used:  usize;
+}
+
+fun line(h: *Hud) *Line {
+    var k: usize = h.used;
+    if (k >= LINES) { k = LINES - 1; }
+    or              { h.used = k + 1; }
+    val l: *Line = ?h.lines[k];
+    l.len    = 0;
+    l.buf[0] = 0;
+    ret l;
+}
+
+fun put(l: *Line, s: str) {
+    var i: usize = 0;
+    for (s[i] != 0 && l.len + 1 < WIDTH) {
+        l.buf[l.len] = s[i];
+        l.len        = l.len + 1;
+        i            = i + 1;
+    }
+    l.buf[l.len] = 0;
+}
+
+fun put_char(l: *Line, c: u8) {
+    if (l.len + 1 >= WIDTH) { ret; }
+    l.buf[l.len] = c;
+    l.len        = l.len + 1;
+    l.buf[l.len] = 0;
+}
+
+# a count with its thousands separated
+fun put_count(l: *Line, n: usize) {
+    var digits: [24]u8;
+    var k:      usize = 0;
+    var v:      usize = n;
+    for (true) {
+        digits[k] = ('0'::usize + v % 10)::u8;
+        k         = k + 1;
+        v         = v / 10;
+        if (v == 0) { brk; }
+    }
+    for (k > 0) {
+        k = k - 1;
+        put_char(l, digits[k]);
+        if (k > 0 && k % 3 == 0) { put_char(l, ','); }
+    }
+}
+
+# a value with a fixed number of decimals
+fun put_fixed(l: *Line, v: f32, places: usize) {
+    var x: f32 = v;
+    if (x < 0.0) {
+        put_char(l, '-');
+        x = -x;
+    }
+    var unit: usize = 1;
+    var p:    usize = 0;
+    for (p < places) {
+        unit = unit * 10;
+        p    = p + 1;
+    }
+    val all:   usize = (x * unit::f32 + 0.5)::usize;
+    val whole: usize = all / unit;
+    put_count(l, whole);
+    if (places == 0) { ret; }
+    put_char(l, '.');
+    var frac: usize = all % unit;
+    var div:  usize = unit / 10;
+    for (div > 0) {
+        put_char(l, ('0'::usize + frac / div)::u8);
+        frac = frac % div;
+        div  = div / 10;
+    }
+}
+
+fun text(ui: *bctx.Context, l: *Line) {
+    bw.text(ui, (?l.buf[0])::str);
+}
+
+fun reading(l: *Line) str {
+    ret (?l.buf[0])::str;
+}
+
+# 2 to the power of e, linear between whole powers so the slider reads evenly
+pub fun exp2(e: f32) usize {
+    val i: usize = e::usize;
+    ret ((1::usize << i)::f32 * (1.0 + (e - i::f32)))::usize;
+}
+
+# the inverse of exp2
+pub fun log2(n: usize) f32 {
+    if (n == 0) { ret 0.0; }
+    var i: usize = 0;
+    for ((n >> (i + 1)) != 0) { i = i + 1; }
+    val base: usize = 1::usize << i;
+    ret i::f32 + (n - base)::f32 / base::f32;
+}
+
+fun readouts(h: *Hud, ui: *bctx.Context, st: *stats.Stats, r: *Readout, ramp: *Ramp) {
+    var l: *Line = line(h);
+    put_fixed(l, st.fps, 0);
+    put(l, " fps   ");
+    put_fixed(l, st.avg_ms, 2);
+    put(l, " ms avg   ");
+    put_fixed(l, st.worst, 2);
+    put(l, " ms worst");
+    text(ui, l);
+
+    val cw:     f32          = bctx.px(ui, 340.0);
+    val ch:     f32          = bctx.px(ui, 80.0);
+    val at:     bctx.Area    = bw.place(ui, blay.fixed(cw), blay.fixed(ch), cw, ch);
+    var series: chart.Series = chart.series(chart.f32s(?st.frame[0]), stats.HISTORY);
+    series.fill = 1;
+    chart.line(ui, "frame ms", at.x0, at.y0, at.x1 - at.x0, at.y1 - at.y0, ?series, 1, chart.options());
+
+    l = line(h);
+    put(l, "entities ");
+    put_count(l, r.count);
+    put(l, "   triangles ");
+    put_count(l, r.count * r.triangles);
+    text(ui, l);
+
+    l = line(h);
+    put(l, "draws ");
+    put_count(l, r.draws);
+    put(l, "   dropped ");
+    put_count(l, r.dropped);
+    put(l, "   culled ");
+    put_count(l, r.culled);
+    put(l, "   held back ");
+    put_count(l, r.held);
+    text(ui, l);
+
+    l = line(h);
+    put(l, "uploaded ");
+    put_fixed(l, r.uploaded::f32 / 1048576.0, 1);
+    put(l, " MiB a frame");
+    text(ui, l);
+
+    l = line(h);
+    put(l, "cpu ms ");
+    var k: usize = 0;
+    for (k < stats.CPU_SECTIONS) {
+        put(l, "  ");
+        put(l, stats.CPU_NAMES[k]);
+        put_char(l, ' ');
+        put_fixed(l, st.cpu[k], 2);
+        k = k + 1;
+    }
+    text(ui, l);
+
+    l = line(h);
+    put(l, "gpu ms ");
+    if (!r.timed) { put(l, "  not timed on this device"); }
+    or {
+        k = 0;
+        for (k < stats.GPU_SECTIONS) {
+            put(l, "  ");
+            put(l, stats.GPU_NAMES[k]);
+            put_char(l, ' ');
+            if (st.gpu_on[k]) { put_fixed(l, st.gpu[k], 2); }
+            or                { put_char(l, '-'); }
+            k = k + 1;
+        }
+    }
+    text(ui, l);
+
+    l = line(h);
+    put(l, r.device);
+    put(l, " (");
+    put(l, r.kind);
+    put(l, "), present ");
+    put(l, r.present);
+    text(ui, l);
+
+    l = line(h);
+    put(l, "ramp best ");
+    if (ramp.best == 0) { put(l, "none yet"); }
+    or {
+        put_count(l, ramp.best);
+        put(l, " at ");
+        put_fixed(l, ramp.at, 2);
+        put(l, " ms");
+    }
+    put(l, " (budget ");
+    put_fixed(l, ramp.budget, 2);
+    put(l, " ms)");
+    text(ui, l);
+}
+
+fun controls(h: *Hud, ui: *bctx.Context, c: *Controls, r: *Readout) {
+    var paths: [3]str = PATH_NAMES;
+    bw.segmented(ui, ?paths[0], PATHS, ?c.path);
+
+    var e: f32   = log2(c.want);
+    var l: *Line = line(h);
+    put_count(l, c.want);
+    if (bw.slider(ui, "entities", reading(l), ?e, LOG_LO, LOG_HI)) {
+        c.want  = exp2(e);
+        c.moved = true;
+    }
+
+    bw.text(ui, "triangles a body");
+    bw.segmented(ui, ?r.shapes[0], SHAPES, ?c.shape);
+
+    l = line(h);
+    put_fixed(l, c.size, 2);
+    bw.slider(ui, "size", reading(l), ?c.size, SIZE_LO, SIZE_HI);
+
+    var n: f32 = c.lights::f32;
+    l = line(h);
+    put_count(l, c.lights);
+    if (bw.slider(ui, "lights", reading(l), ?n, 0.0, MAX_LIGHTS::f32)) { c.lights = (n + 0.5)::usize; }
+
+    l = line(h);
+    put_fixed(l, c.glow, 2);
+    bw.slider(ui, "glow", reading(l), ?c.glow, 0.0, 1.0);
+
+    l = line(h);
+    put_fixed(l, c.fog, 3);
+    bw.slider(ui, "fog", reading(l), ?c.fog, 0.0, FOG_HI);
+
+    l = line(h);
+    put_fixed(l, c.orbit, 2);
+    bw.slider(ui, "orbit", reading(l), ?c.orbit, -ORBIT_HI, ORBIT_HI);
+
+    bw.toggle(ui, "ramp to the budget", ?c.ramp);
+    var names: [3]str = PRESENT_NAMES;
+    bw.segmented(ui, ?names[0], 3, ?c.present);
+    var acts: [2]str = [2]str{"shock", "reset"};
+    val hit:  usize  = bw.buttons(ui, ?acts[0], 2);
+    if (hit == 0) { c.shock = true; }
+    if (hit == 1) { c.reset = true; }
+    bw.text(ui, "up/down double or halve, space ramps, s shocks, r resets");
+    bw.text(ui, "drag to turn, wheel to zoom, tab hides, esc quits");
+}
+
+# build the panel into blit's frame
+# ---
+# h:    the panel's scratch
+# ui:   the blit context, between begin and end
+# st:   the frame readings
+# r:    the rest of the readings
+# ramp: the ramp, for its best count and budget
+# c:    the controls, changed in place
+pub fun hud_build(h: *Hud, ui: *bctx.Context, st: *stats.Stats, r: *Readout, ramp: *Ramp, c: *Controls) {
+    h.used = 0;
+    var win: bw.Window = bw.window("swarm", bctx.px(ui, 16.0), bctx.px(ui, 16.0), 0.0, 0.0);
+    win.flags = bw.WINDOW_AUTO_SIZE;
+    val wa: bw.WindowArea = bw.begin_window(ui, win);
+    if (wa.body != 0) {
+        readouts(h, ui, st, r, ramp);
+        controls(h, ui, c, r);
+    }
+    bw.end_window(ui, wa);
+}
