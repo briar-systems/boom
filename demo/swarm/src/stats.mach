@@ -1,0 +1,183 @@
+# What the frame loop measures about itself, for the panel and the benchmark.
+#
+# Frame time is the wall clock between one frame's start and the next, which is
+# what a player feels. Over each second it is also summed into a frame rate, an
+# average and a worst frame, because a single frame's number flickers too fast
+# to read. The CPU's sections and the GPU's ranges are smoothed the same way.
+#
+# Sections are named by index into the tables below, so a new one is a row in
+# its table and a call where it is measured, and the panel and the report pick
+# it up from the table.
+
+use std.chrono.duration.Duration;
+use std.chrono.time.Instant;
+use std.chrono.time.InstantClock;
+use std.chrono.time.instant;
+use std.chrono.time.instant_sub;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.size.usize;
+use std.types.string.str;
+
+# frames kept for the chart
+pub val HISTORY: usize = 240;
+
+# the CPU's sections of a frame
+pub val CPU_SIM:      usize  = 0;
+pub val CPU_UPLOAD:   usize  = 1;
+pub val CPU_RECORD:   usize  = 2;
+pub val CPU_UI:       usize  = 3;
+pub val CPU_SECTIONS: usize  = 4;
+pub val CPU_NAMES:    [4]str = [4]str{"sim", "upload", "record", "ui"};
+
+# the GPU's timed ranges of a frame
+pub val GPU_SIM:      usize  = 0;
+pub val GPU_SCENE:    usize  = 1;
+pub val GPU_SECTIONS: usize  = 2;
+pub val GPU_NAMES:    [2]str = [2]str{"sim", "scene"};
+
+# how quickly a smoothed reading follows a new sample
+val FOLLOW: f32 = 0.08;
+
+# a second's worth of frames, summed as they come
+# ---
+# ms:    frame time summed
+# worst: the slowest frame
+# n:     frames counted
+# span:  seconds covered
+rec Window {
+    ms:    f64;
+    worst: f32;
+    n:     u32;
+    span:  f64;
+}
+
+# the readings
+# ---
+# frame:   frame times in ms, oldest first
+# last:    when the previous frame started
+# started: whether there was a previous frame
+# open:    the second being summed
+# fps:     frames in the last whole second
+# avg_ms:  their average frame time
+# worst:   their slowest frame
+# cpu:     smoothed CPU time per section, ms
+# gpu:     smoothed GPU time per range, ms
+# gpu_on:  whether each GPU range has a reading
+# frames:  frames counted since the start
+pub rec Stats {
+    frame:   [240]f32;
+    last:    Instant;
+    started: bool;
+    open:    Window;
+    fps:     f32;
+    avg_ms:  f32;
+    worst:   f32;
+    cpu:     [4]f32;
+    gpu:     [2]f32;
+    gpu_on:  [2]bool;
+    frames:  u64;
+}
+
+pub fun stats_new() Stats {
+    var s: Stats;
+    var i: usize = 0;
+    for (i < HISTORY) {
+        s.frame[i] = 0.0;
+        i          = i + 1;
+    }
+    i = 0;
+    for (i < CPU_SECTIONS) {
+        s.cpu[i] = 0.0;
+        i        = i + 1;
+    }
+    i = 0;
+    for (i < GPU_SECTIONS) {
+        s.gpu[i]    = 0.0;
+        s.gpu_on[i] = false;
+        i           = i + 1;
+    }
+    s.started = false;
+    s.open    = Window{ms: 0.0, worst: 0.0, n: 0, span: 0.0};
+    s.fps     = 0.0;
+    s.avg_ms  = 0.0;
+    s.worst   = 0.0;
+    s.frames  = 0;
+    ret s;
+}
+
+# a duration in milliseconds
+pub fun ms(d: Duration) f32 {
+    ret d::f32 / 1000000.0;
+}
+
+# the time since t0, zero when either reading of the clock failed
+pub fun since(t0: InstantClock) Duration {
+    val t1: InstantClock = instant();
+    if (sel t0.ok) {
+        if (sel t1.ok) { ret instant_sub(t1.ok, t0.ok); }
+    }
+    ret 0;
+}
+
+fun follow(v: *f32, x: f32) {
+    @v = @v + (x - @v) * FOLLOW;
+}
+
+# mark the start of a frame
+# ---
+# s:   the readings
+# ret: the frame time just ended in ms, 0 for the first frame
+pub fun stats_frame(s: *Stats) f32 {
+    val now: InstantClock = instant();
+    if (sel now.err) { ret 0.0; }
+    s.frames = s.frames + 1;
+    if (!s.started) {
+        s.started = true;
+        s.last    = now.ok;
+        ret 0.0;
+    }
+    val dt: f32 = ms(instant_sub(now.ok, s.last));
+    s.last = now.ok;
+
+    var i: usize = 1;
+    for (i < HISTORY) {
+        s.frame[i - 1] = s.frame[i];
+        i              = i + 1;
+    }
+    s.frame[HISTORY - 1] = dt;
+
+    s.open.ms   = s.open.ms + dt::f64;
+    s.open.n    = s.open.n + 1;
+    s.open.span = s.open.span + dt::f64 / 1000.0;
+    if (dt > s.open.worst) { s.open.worst = dt; }
+    if (s.open.span >= 1.0) {
+        s.fps    = (s.open.n::f64 / s.open.span)::f32;
+        s.avg_ms = (s.open.ms / s.open.n::f64)::f32;
+        s.worst  = s.open.worst;
+        s.open   = Window{ms: 0.0, worst: 0.0, n: 0, span: 0.0};
+    }
+    ret dt;
+}
+
+# fold one frame's time in a CPU section into the readings, in ms
+pub fun stats_cpu(s: *Stats, section: usize, took: f32) {
+    follow(?s.cpu[section], took);
+}
+
+# fold a GPU range's time that has landed into the readings, in ms
+pub fun stats_gpu(s: *Stats, range: usize, took: f32) {
+    if (!s.gpu_on[range]) {
+        s.gpu[range]    = took;
+        s.gpu_on[range] = true;
+        ret;
+    }
+    follow(?s.gpu[range], took);
+}
+
+# forget a GPU range's reading, as when the frame stops recording it
+pub fun stats_gpu_clear(s: *Stats, range: usize) {
+    s.gpu[range]    = 0.0;
+    s.gpu_on[range] = false;
+}

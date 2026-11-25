@@ -170,7 +170,9 @@ library artifact's requirements travel with the dependency.
 must already hold its values when the command buffer executes, so each draw
 writes its own slot of a per-frame ring. A frame therefore has a bounded number
 of draws, and `renderer_dropped` reports any it refused rather than letting them
-silently not appear.
+silently not appear. Every pass shares that budget, an overlay's included, so a
+game issuing draws by the thousand checks `renderer_draws_left` as it goes and
+keeps back what its later passes need.
 
 **A game's own shading has two budgets, and the difference between them
 matters.** boom ships one lit program as a default and does not intend to grow a
@@ -517,6 +519,21 @@ it, with a window of boom's over it holding both kinds of image and a consumer
 span. Idle, it draws no frames. Its `--check`
 mode reads back text at 100% and at 200%, a span boom filled and a quad cut to
 its scissor.
+
+`demo/swarm` is a 3D stress test meant to be pushed past what the engine
+handles: up to four million lit, spinning solids streaming around wandering
+gravity wells, lit by up to 256 orbiting point lights, under a camera that
+circles and can be dragged and zoomed. Three paths run the same swarm through
+different parts of the engine: a compute stage steps it for one instanced
+`pass_draw_storage` pull, the CPU steps it and uploads the state through
+`renderer_buffer_update_batch` for that draw, or the CPU steps it and submits
+every body as a `pass_draw_shaded` of its own until the frame's draw slots run
+out. A blit panel reads out the frame rate and a frame time chart, triangles,
+draw, drop, cull and held-back counts, bytes uploaded, CPU time per section and
+GPU timer ranges, and carries a control for every load knob: path, count, shape,
+size, lights, glow, fog and camera orbit. `--ramp` grows the swarm until frames
+miss a budget and keeps the largest count that held it, and `--bench SECONDS`
+does that unpaced and prints the result.
 
 ## Consuming boom
 

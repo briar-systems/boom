@@ -1,0 +1,104 @@
+# The swarm's surface: lit by a list of moving point lights.
+#
+# The light count is a knob, and every fragment walks the whole list, so it is
+# the fill rate stress: twice the lights is twice the shading on every pixel a
+# body covers. The list is in the frame's storage buffer at binding 8, two
+# f32x4 per light, and the rest of what shading needs is the pass's block at
+# binding 4.
+#
+# A body is an ambient sky-to-ground term, the lights' diffuse and a tight
+# highlight, its own glow, then fog toward the background with distance, and
+# an exposure curve so a crowd under a hundred lights does not clip to white.
+
+use sh: shader.math;
+
+# swarm.scene.Look, as in the vertex stages
+rec Look {
+    eye:    f32x4;
+    sky:    f32x4;
+    ground: f32x4;
+    shape:  f32x4;
+}
+
+# per light, its place and reach, then its colour and strength; sized to
+# swarm.world.MAX_LIGHTS
+rec Lights {
+    v: [512]f32x4;
+}
+
+#[gpu.uniform(0, 4)]
+var look:   Look;
+#[gpu.storage(0, 8, "readonly")]
+var lights: Lights;
+
+#[gpu.input(0)]
+var in_world:  f32x3;
+#[gpu.input(1)]
+var in_normal: f32x3;
+#[gpu.input(2)]
+var in_colour: f32x4;
+
+#[gpu.output(0)]
+var out_colour: f32x4;
+
+# the clear colour, swarm.scene.BACKGROUND, which fog fades toward
+val FOG_R: f32 = 0.004;
+val FOG_G: f32 = 0.005;
+val FOG_B: f32 = 0.012;
+
+#[gpu.stage("fragment")]
+fun frag_main() {
+    val n:   f32x3 = sh.normalize_3(in_normal);
+    val ex:  f32   = look.eye[0] - in_world[0];
+    val ey:  f32   = look.eye[1] - in_world[1];
+    val ez:  f32   = look.eye[2] - in_world[2];
+    val far: f32   = sh.sqrt(ex * ex + ey * ey + ez * ez);
+    val vx:  f32   = ex / far;
+    val vy:  f32   = ey / far;
+    val vz:  f32   = ez / far;
+
+    val up: f32 = n[1] * 0.5 + 0.5;
+    var r:  f32 = in_colour[0] * sh.mix(look.ground[0], look.sky[0], up);
+    var g:  f32 = in_colour[1] * sh.mix(look.ground[1], look.sky[1], up);
+    var b:  f32 = in_colour[2] * sh.mix(look.ground[2], look.sky[2], up);
+
+    val count: u32 = look.ground[3]::u32;
+    var i:     u32 = 0;
+    for (i < count) {
+        val place: f32x4 = lights.v[i * 2];
+        val tint:  f32x4 = lights.v[i * 2 + 1];
+        val lx:    f32   = place[0] - in_world[0];
+        val ly:    f32   = place[1] - in_world[1];
+        val lz:    f32   = place[2] - in_world[2];
+        val d2:    f32   = lx * lx + ly * ly + lz * lz;
+        if (d2 < place[3] * place[3]) {
+            val inv:  f32 = sh.inverse_sqrt(d2 + 0.000001);
+            val fall: f32 = 1.0 - d2 * inv / place[3];
+            val nx:   f32 = lx * inv;
+            val ny:   f32 = ly * inv;
+            val nz:   f32 = lz * inv;
+            val lam:  f32 = sh.max(n[0] * nx + n[1] * ny + n[2] * nz, 0.0);
+            # the half vector between the light and the eye, for the highlight
+            val hx:   f32 = nx + vx;
+            val hy:   f32 = ny + vy;
+            val hz:   f32 = nz + vz;
+            val hn:   f32 = sh.inverse_sqrt(hx * hx + hy * hy + hz * hz + 0.000001);
+            val spec: f32 = sh.pow(sh.max((n[0] * hx + n[1] * hy + n[2] * hz) * hn, 0.0), 40.0) * 0.6;
+            val k:    f32 = fall * fall * tint[3];
+            r = r + tint[0] * k * (in_colour[0] * lam + spec);
+            g = g + tint[1] * k * (in_colour[1] * lam + spec);
+            b = b + tint[2] * k * (in_colour[2] * lam + spec);
+        }
+        i = i + 1;
+    }
+
+    r = r + in_colour[0] * in_colour[3];
+    g = g + in_colour[1] * in_colour[3];
+    b = b + in_colour[2] * in_colour[3];
+
+    val fog: f32 = sh.exp(-far * look.sky[3]);
+    r          = sh.mix(FOG_R, 1.0 - sh.exp(-r * 1.4), fog);
+    g          = sh.mix(FOG_G, 1.0 - sh.exp(-g * 1.4), fog);
+    b          = sh.mix(FOG_B, 1.0 - sh.exp(-b * 1.4), fog);
+    out_colour = f32x4{r, g, b, 1.0};
+}

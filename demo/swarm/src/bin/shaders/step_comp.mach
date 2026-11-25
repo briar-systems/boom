@@ -1,0 +1,119 @@
+# One step of the swarm, on the GPU.
+#
+# Every body falls toward the wandering wells and is swung around each well's
+# axis, under a Plummer pull that is soft at the core, with drag bleeding off
+# what the swirl puts in and a spring holding the swarm inside a sphere. A body
+# the host has just asked for is placed instead of stepped, from a hash of its
+# index, so growing the swarm costs no upload at all.
+#
+# The arithmetic is swarm.body's step and spawn, which the CPU paths run, and
+# the two are kept formula for formula alike so every path draws the same swarm.
+# The buffers are at set 1, in the order the host lists them.
+
+use sh: shader.math;
+
+# position with age in w, and velocity with the body's seed in w, both sized to
+# swarm.world.MAX_ENTITIES
+rec Bodies {
+    v: [4194304]f32x4;
+}
+
+# head:  step, time, core softening, the drag factor kept per step
+# bound: sphere radius, spring, a radial kick this step, spawn radius
+# count: live bodies, the first one to place this step, the spawn seed, wells
+# wells: per well, its place and pull, then its axis and swirl
+rec Params {
+    head:  f32x4;
+    bound: f32x4;
+    count: u32x4;
+    wells: [8]f32x4;
+}
+
+#[gpu.storage(1, 0)]
+var pos:    Bodies;
+#[gpu.storage(1, 1)]
+var vel:    Bodies;
+#[gpu.storage(1, 2, "readonly")]
+var params: Params;
+
+#[gpu.builtin("global_invocation")]
+var gid: u32x3;
+
+# lowbias32, a well-mixed integer hash
+fun hash(x: u32) u32 {
+    var h: u32 = x;
+    h = h ^ (h >> 16);
+    h = h * 0x7feb352d;
+    h = h ^ (h >> 15);
+    h = h * 0x846ca68b;
+    h = h ^ (h >> 16);
+    ret h;
+}
+
+# a hash as a fraction in [0, 1)
+fun unit(h: u32) f32 {
+    ret (h >> 8)::f32 * 0.000000059604645;
+}
+
+fun spawn(i: u32) {
+    val h1: u32 = hash(i ^ (params.count[2] * 0x9e3779b9));
+    val h2: u32 = hash(h1);
+    val h3: u32 = hash(h2);
+    val h4: u32 = hash(h3);
+    val h5: u32 = hash(h4);
+    val h6: u32 = hash(h5);
+    val dx: f32 = unit(h1) - 0.5;
+    val dy: f32 = unit(h2) - 0.5;
+    val dz: f32 = unit(h3) - 0.5;
+    # the largest of three fractions is spread as a cube root, so the bodies
+    # fill the ball evenly rather than crowding its middle
+    val r: f32 = params.bound[3] * sh.max(unit(h4), sh.max(unit(h5), unit(h6)))
+        * sh.inverse_sqrt(dx * dx + dy * dy + dz * dz + 0.000001);
+    val x: f32 = dx * r;
+    val y: f32 = dy * r;
+    val z: f32 = dz * r;
+    pos.v[i] = f32x4{x, y, z, 0.0};
+    vel.v[i] = f32x4{z * 0.4, 0.0, x * -0.4, unit(hash(h6))};
+}
+
+#[gpu.stage("compute")]
+#[gpu.workgroup(128, 1, 1)]
+fun comp_main() {
+    val i: u32 = gid[0];
+    if (i >= params.count[0]) { ret; }
+    if (i >= params.count[1]) {
+        spawn(i);
+        ret;
+    }
+    val dt:   f32   = params.head[0];
+    val soft: f32   = params.head[2];
+    val p:    f32x4 = pos.v[i];
+    val v:    f32x4 = vel.v[i];
+    var ax:   f32   = 0.0;
+    var ay:   f32   = 0.0;
+    var az:   f32   = 0.0;
+    var j:    u32   = 0;
+    for (j < params.count[3]) {
+        val w:  f32x4 = params.wells[j * 2];
+        val s:  f32x4 = params.wells[j * 2 + 1];
+        val dx: f32   = w[0] - p[0];
+        val dy: f32   = w[1] - p[1];
+        val dz: f32   = w[2] - p[2];
+        val q:  f32   = sh.inverse_sqrt(dx * dx + dy * dy + dz * dz + soft);
+        val f:  f32   = w[3] * q * q * q;
+        # the swirl is the axis crossed with the way to the well
+        ax = ax + f * (dx + s[3] * (s[1] * dz - s[2] * dy));
+        ay = ay + f * (dy + s[3] * (s[2] * dx - s[0] * dz));
+        az = az + f * (dz + s[3] * (s[0] * dy - s[1] * dx));
+        j  = j + 1;
+    }
+    val len:  f32 = sh.sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    val pull: f32 = params.bound[1] * sh.max(len - params.bound[0], 0.0) / sh.max(len, 0.0001);
+    val kick: f32 = params.bound[2] / sh.max(len, 0.5);
+    val keep: f32 = params.head[3];
+    val vx:   f32 = (v[0] + (ax - p[0] * pull) * dt) * keep + p[0] * kick;
+    val vy:   f32 = (v[1] + (ay - p[1] * pull) * dt) * keep + p[1] * kick;
+    val vz:   f32 = (v[2] + (az - p[2] * pull) * dt) * keep + p[2] * kick;
+    pos.v[i] = f32x4{p[0] + vx * dt, p[1] + vy * dt, p[2] + vz * dt, p[3] + dt};
+    vel.v[i] = f32x4{vx, vy, vz, v[3]};
+}

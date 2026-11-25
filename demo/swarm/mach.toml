@@ -1,0 +1,98 @@
+[project]
+id = "swarm"
+version = "0.1.0"
+mach = "^7"
+src = "src"
+work = "out/{target.name}/{profile.name}"
+
+[target.linux-x86_64]
+arch = "x86_64"
+sys  = "linux"
+env  = "gnu"
+abi  = "sysv64"
+
+[target.linux-arm64]
+arch = "aarch64"
+sys  = "linux"
+env  = "gnu"
+abi  = "aapcs64"
+
+[target.windows]
+arch = "x86_64"
+sys  = "windows"
+abi  = "win64"
+
+[target.darwin]
+arch = "x86_64"
+sys  = "darwin"
+abi  = "sysv64"
+
+# the demo's own shaders, built for the oldest vulkan environment boom runs on
+[target.spirv]
+arch = "spirv"
+sys  = "vulkan"
+abi  = "shader"
+env  = "vulkan1.0"
+
+[profile.debug]
+default = true
+optimize = false
+debug = true
+simd = "scalarize"
+
+[profile.release]
+optimize = true
+debug = false
+simd = "scalarize"
+
+[artifact.swarm]
+default = true
+kind = "bin"
+entry = "bin/main.mach"
+out = "{project.work}/bin/swarm{artifact.suffix}"
+targets = ["linux-x86_64", "linux-arm64", "windows", "darwin"]
+link = []
+need = ["artifact.stage-*"]
+
+[artifact.stage-step_comp]
+kind = "module"
+entry = "bin/shaders/step_comp.mach"
+out = "{project.work}/spv/step_comp{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.stage-pulled_vert]
+kind = "module"
+entry = "bin/shaders/pulled_vert.mach"
+out = "{project.work}/spv/pulled_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.stage-mesh_vert]
+kind = "module"
+entry = "bin/shaders/mesh_vert.mach"
+out = "{project.work}/spv/mesh_vert{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[artifact.stage-lit_frag]
+kind = "module"
+entry = "bin/shaders/lit_frag.mach"
+out = "{project.work}/spv/lit_frag{artifact.suffix}"
+targets = ["spirv"]
+link = []
+need = []
+
+[dep.boom]
+path = "../.."
+
+[dep.std]
+git = "https://github.com/briar-systems/mach-std"
+ref = "branch/dev"
+
+[dep.blit]
+git = "https://github.com/briar-systems/blit"
+ref = "branch/dev"

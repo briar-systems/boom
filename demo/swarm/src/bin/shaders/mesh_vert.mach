@@ -1,0 +1,62 @@
+# The draw call path's vertex stage: one mesh per draw, placed by the CPU.
+#
+# The host has already spun, scaled and placed the body into its transform and
+# worked out its colour, so this only applies the matrices boom hands every
+# draw and passes the colour block through. Its outputs are the instanced
+# stage's, so both feed the one fragment stage.
+
+rec Matrices {
+    mvp_0:   f32x4;
+    mvp_1:   f32x4;
+    mvp_2:   f32x4;
+    mvp_3:   f32x4;
+    model_0: f32x4;
+    model_1: f32x4;
+    model_2: f32x4;
+    model_3: f32x4;
+}
+
+# the material's base colour: the body's colour, with its glow in w
+rec Base {
+    colour: f32x4;
+}
+
+#[gpu.uniform(0, 0)]
+var matrices: Matrices;
+#[gpu.uniform(0, 2)]
+var base:     Base;
+
+#[gpu.input(0)]
+var in_position: f32x3;
+#[gpu.input(1)]
+var in_normal:   f32x3;
+#[gpu.input(2)]
+var in_uv:       f32x2;
+
+#[gpu.builtin("position")]
+var position: f32x4;
+
+#[gpu.output(0)]
+var out_world:  f32x3;
+#[gpu.output(1)]
+var out_normal: f32x3;
+#[gpu.output(2)]
+var out_colour: f32x4;
+
+fun column(c0: f32x4, c1: f32x4, c2: f32x4, x: f32, y: f32, z: f32) f32x4 {
+    ret c0 * f32x4{x, x, x, x} + c1 * f32x4{y, y, y, y} + c2 * f32x4{z, z, z, z};
+}
+
+#[gpu.stage("vertex")]
+fun vert_main() {
+    val x: f32 = in_position[0];
+    val y: f32 = in_position[1];
+    val z: f32 = in_position[2];
+    position = column(matrices.mvp_0, matrices.mvp_1, matrices.mvp_2, x, y, z) + matrices.mvp_3;
+    val w: f32x4 = column(matrices.model_0, matrices.model_1, matrices.model_2, x, y, z) + matrices.model_3;
+    out_world = f32x3{w[0], w[1], w[2]};
+    val n: f32x4 = column(matrices.model_0, matrices.model_1, matrices.model_2,
+        in_normal[0], in_normal[1], in_normal[2]);
+    out_normal = f32x3{n[0], n[1], n[2]};
+    out_colour = base.colour;
+}

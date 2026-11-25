@@ -1,0 +1,66 @@
+# What the two vertex stages share about how a body looks.
+#
+# A body's spin, size and colour are worked out from its seed, its age and its
+# speed, so none of them is stored. The instanced stage runs these on the GPU
+# and the draw call path runs the same arithmetic on the CPU in
+# swarm.body, which is why each formula here has a twin there: a change to one
+# that is not made to the other shows up as the paths drawing different swarms.
+
+use sh: shader.math;
+
+# a vector times a scalar
+pub fun times(v: f32x3, k: f32) f32x3 {
+    ret v * f32x3{k, k, k};
+}
+
+# the fractional parts of a seed that pick a body's spin and size
+fun pick(seed: f32, k: f32, o: f32) f32 {
+    ret sh.fract(seed * k + o);
+}
+
+# the axis a body spins about
+pub fun spin_axis(seed: f32) f32x3 {
+    val a: f32x3 = f32x3{pick(seed, 7.31, 0.13) * 2.0 - 1.0,
+        pick(seed, 13.7, 0.71) * 2.0 - 1.0,
+        pick(seed, 29.3, 0.37) * 2.0 - 1.0};
+    ret times(a, sh.inverse_sqrt(sh.dot_3(a, a) + 0.0001));
+}
+
+# how far a body has turned at a time, in radians
+pub fun spin_angle(seed: f32, time: f32) f32 {
+    ret time * (0.5 + 2.5 * pick(seed, 13.7, 0.71)) + seed * 6.2831855;
+}
+
+# a body's scale: its share of the size knob, grown in over its first moments
+pub fun body_scale(seed: f32, age: f32, size: f32) f32 {
+    ret size * (0.55 + 0.9 * pick(seed, 29.3, 0.37)) * sh.min(age * 2.5, 1.0);
+}
+
+# v turned by an angle, given as its cosine and sine, about a unit axis
+pub fun rotate(v: f32x3, axis: f32x3, c: f32, s: f32) f32x3 {
+    val along: f32x3 = times(axis, sh.dot_3(axis, v) * (1.0 - c));
+    ret times(v, c) + times(sh.cross_3(axis, v), s) + along;
+}
+
+# how hot a speed reads, 0 at rest and toward 1 as it climbs past the scale
+pub fun heat(speed: f32, scale: f32) f32 {
+    ret speed / (speed + scale);
+}
+
+fun blend(a: f32x3, b: f32x3, t: f32) f32x3 {
+    ret a + times(b - a, t);
+}
+
+# the swarm's colour ramp, in linear light: deep blue at rest through cyan,
+# magenta and orange to white hot
+pub fun palette(t: f32) f32x3 {
+    if (t < 0.3)  { ret blend(f32x3{0.02, 0.06, 0.45}, f32x3{0.0, 0.45, 0.9}, t / 0.3); }
+    if (t < 0.55) { ret blend(f32x3{0.0, 0.45, 0.9}, f32x3{0.75, 0.08, 0.7}, (t - 0.3) / 0.25); }
+    if (t < 0.8)  { ret blend(f32x3{0.75, 0.08, 0.7}, f32x3{1.0, 0.35, 0.05}, (t - 0.55) / 0.25); }
+    ret blend(f32x3{1.0, 0.35, 0.05}, f32x3{1.0, 0.9, 0.6}, sh.min((t - 0.8) / 0.2, 1.0));
+}
+
+# how much a body glows by its own light, from its heat and the glow knob
+pub fun emission(t: f32, glow: f32) f32 {
+    ret glow * t * t * 2.0;
+}
