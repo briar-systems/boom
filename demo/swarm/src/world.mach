@@ -1,0 +1,179 @@
+# The swarm's world: its limits, the wells it falls around and the lights
+# that move through it.
+#
+# Everything here is a function of time, worked out on the CPU each step and
+# handed to whichever path is simulating, so the GPU and the CPU paths fall
+# around the same wells at the same moment.
+
+use gm: boom.math;
+use std.types.size.usize;
+
+# bodies the state buffers hold, and so the most the swarm reaches: two
+# buffers of an f32x4 per body, 64 MiB each, half the storage range every
+# Vulkan device must allow
+pub val MAX_ENTITIES: usize = 4194304;
+
+# lights the shading walks, which the fragment stage's list is sized to
+pub val MAX_LIGHTS: usize = 256;
+
+# wandering wells, which step_comp's well table is sized to
+pub val WELLS: usize = 4;
+
+# the simulation's step, which Config.fixed_dt matches
+pub val STEP: f32 = 0.016666668;
+
+# the core radius squared, where a well's pull stops climbing
+val SOFT: f32 = 0.6;
+
+# the share of a body's speed drag takes away per second
+val DRAG: f32 = 1.6;
+
+# the sphere the swarm is held in, and how hard its spring pulls back
+val RADIUS: f32 = 11.0;
+val SPRING: f32 = 8.0;
+
+# the ball new bodies are placed in
+val SPAWN: f32 = 8.8;
+
+# how a light reaches and how bright it is
+val REACH:    f32 = 6.0;
+val STRENGTH: f32 = 2.2;
+
+# one well's path and character
+# ---
+# amp:   how far it wanders along each axis
+# freq:  how fast along each, radians per second
+# phase: where on its path it starts
+# pull:  its strength
+# swirl: how hard it swings bodies about its axis, the sign the direction
+# axis:  the axis it swings them about
+rec Orbit {
+    amp:   [3]f32;
+    freq:  [3]f32;
+    phase: f32;
+    pull:  f32;
+    swirl: f32;
+    axis:  [3]f32;
+}
+
+val ORBITS: [4]Orbit = [4]Orbit{
+    Orbit{amp: [3]f32{5.0, 3.0, 4.0}, freq: [3]f32{0.23, 0.31, 0.17}, phase: 0.0, pull: 130.0, swirl: 1.8,
+        axis: [3]f32{0.2, 1.0, 0.1}},
+    Orbit{amp: [3]f32{4.0, 4.0, 5.0}, freq: [3]f32{0.19, 0.13, 0.29}, phase: 2.1, pull: 100.0, swirl: -2.2,
+        axis: [3]f32{1.0, 0.3, 0.0}},
+    Orbit{amp: [3]f32{6.0, 2.5, 3.0}, freq: [3]f32{0.29, 0.37, 0.11}, phase: 4.2, pull: 90.0, swirl: 2.4,
+        axis: [3]f32{0.0, 0.4, 1.0}},
+    Orbit{amp: [3]f32{3.0, 5.0, 4.0}, freq: [3]f32{0.13, 0.23, 0.41}, phase: 1.3, pull: 75.0, swirl: -1.6,
+        axis: [3]f32{0.6, 1.0, 0.6}}
+};
+
+# One step's parameters, laid out as step_comp's Params under std430: four
+# f32x4 rows and the well table, 176 bytes.
+# ---
+# head:  step, time, core softening, the drag factor kept per step
+# bound: sphere radius, spring, a radial kick this step, spawn radius
+# count: live bodies, the first one to place this step, the spawn seed, wells
+# wells: per well, its place and pull, then its axis and swirl
+pub rec Params {
+    head:  [4]f32;
+    bound: [4]f32;
+    count: [4]u32;
+    wells: [32]f32;
+}
+
+# lowbias32, a well-mixed integer hash; step_comp's hash
+pub fun hash(x: u32) u32 {
+    var h: u32 = x;
+    h = h ^ (h >> 16);
+    h = h * 0x7feb352d;
+    h = h ^ (h >> 15);
+    h = h * 0x846ca68b;
+    h = h ^ (h >> 16);
+    ret h;
+}
+
+# a hash as a fraction in [0, 1)
+pub fun unit(h: u32) f32 {
+    ret (h >> 8)::f32 * 0.000000059604645;
+}
+
+# a step's parameters
+# ---
+# t:     the time the step lands on
+# live:  bodies to simulate
+# from:  the first body to place rather than step
+# seed:  what placement hashes with
+# shock: a radial kick to give every body this step, 0 for none
+pub fun params_at(t: f32, live: usize, from: usize, seed: u32, shock: f32) Params {
+    var p: Params;
+    p.head  = [4]f32{STEP, t, SOFT, 1.0 - DRAG * STEP};
+    p.bound = [4]f32{RADIUS, SPRING, shock, SPAWN};
+    p.count = [4]u32{live::u32, from::u32, seed, WELLS::u32};
+    var j: usize = 0;
+    for (j < WELLS) {
+        val o: *Orbit = ?ORBITS[j];
+        val n: f32    = 1.0 / gm.sqrtf(o.axis[0] * o.axis[0] + o.axis[1] * o.axis[1] + o.axis[2] * o.axis[2]);
+        val k: usize  = j * 8;
+        p.wells[k]     = o.amp[0] * gm.sinf(t * o.freq[0] + o.phase);
+        p.wells[k + 1] = o.amp[1] * gm.sinf(t * o.freq[1] + o.phase * 1.7);
+        p.wells[k + 2] = o.amp[2] * gm.cosf(t * o.freq[2] + o.phase);
+        p.wells[k + 3] = o.pull;
+        p.wells[k + 4] = o.axis[0] * n;
+        p.wells[k + 5] = o.axis[1] * n;
+        p.wells[k + 6] = o.axis[2] * n;
+        p.wells[k + 7] = o.swirl;
+        j              = j + 1;
+    }
+    ret p;
+}
+
+# one light as the fragment stage reads it: place and reach, colour and
+# strength
+pub rec Light {
+    place: [4]f32;
+    tint:  [4]f32;
+}
+
+fun fract(x: f32) f32 {
+    ret x - x::i64::f32;
+}
+
+# a fully saturated hue in linear light
+fun hue(h: f32) [3]f32 {
+    var c: [3]f32;
+    var i: usize = 0;
+    for (i < 3) {
+        var x: f32 = fract(h + 1.0 - i::f32 / 3.0) * 6.0 - 3.0;
+        if (x < 0.0) { x = -x; }
+        x = x - 1.0;
+        if (x < 0.0) { x = 0.0; }
+        if (x > 1.0) { x = 1.0; }
+        c[i] = x * x;
+        i    = i + 1;
+    }
+    ret c;
+}
+
+# where the first n lights are at a time, each on a path and in a colour
+# picked from its index
+pub fun lights_at(t: f32, n: usize, out: *Light) {
+    var k: usize = 0;
+    for (k < n) {
+        val h1:   u32 = hash(k::u32 ^ 0x5bd1e995);
+        val h2:   u32 = hash(h1);
+        val h3:   u32 = hash(h2);
+        val h4:   u32 = hash(h3);
+        val h5:   u32 = hash(h4);
+        val r:    f32 = 2.5 + 7.5 * unit(h1);
+        val high: f32 = 1.0 + 4.0 * unit(h2);
+        var spin: f32 = 0.15 + 0.5 * unit(h3);
+        if ((h4 & 1) != 0) { spin = -spin; }
+        val at: f32    = t * spin + 6.2831855 * unit(h5);
+        val c:  [3]f32 = hue(fract(k::f32 * 0.618034 + 0.1));
+        out[k] = Light{
+            place: [4]f32{r * gm.cosf(at), high * gm.sinf(t * (0.3 + 0.6 * unit(h4)) + at), r * gm.sinf(at), REACH},
+            tint:  [4]f32{c[0], c[1], c[2], STRENGTH},
+        };
+        k = k + 1;
+    }
+}
